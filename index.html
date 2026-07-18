@@ -1723,10 +1723,34 @@ function relightChunk(c){
     o.material = c.light3D ? _chunkMat(o.userData.baseMat, c.light3D) : o.userData.baseMat;   // program is cache-keyed → no shader recompile, just fresh uniforms
     if(old && old.userData && old.userData.chunkClone) old.dispose(); } });
 }
+// BULK EDIT MODE — structure builders write thousands of blocks in one frame; paying the per-call
+// bookkeeping (htop scans, light cascades, border remesh math, emitter invalidation) per block made a
+// village build a 50-90ms frame. Inside beginBulk/endBulk, setBlockWorld only writes the block array +
+// records the edit; endBulk then does ONE finish pass per touched chunk (full htop recompute, emitter
+// invalidation, remesh) + relights the surrounding ring. Reads during the build see live writes.
+let _bulk=null;
+function beginBulk(){ if(!_bulk) _bulk={touched:new Map()}; }
+function endBulk(){ const t=_bulk; _bulk=null; if(!t||!t.touched.size) return;
+  for(const c of t.touched.values()){
+    for(let lz=0;lz<CK;lz++)for(let lx=0;lx<CK;lx++){ let top=-1; for(let y=WH-1;y>=0;y--){ if(isOpaque[c.blocks[idx(lx,y,lz)]]){ top=y; break; } } c.htop[lx+lz*CK]=top; }
+    c._emit=null; markRemesh(c.cx,c.cz);
+    for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++){ if(!dx&&!dz)continue; const nc=getChunk(c.cx+dx,c.cz+dz);
+      if(nc && !t.touched.has(key(nc.cx,nc.cz))){ nc._emit=null; markRelight(nc.cx,nc.cz); } }   // any lantern the build placed lights across borders
+  }
+}
+function _bulkRun(fn){ beginBulk(); try{ fn(); } finally { endBulk(); } }   // builders early-return cheaply when done/not-ready → empty endBulk is free
 function setBlockWorld(wx,wy,wz,b,record){
   if (wy<1||wy>=WH) return;
   const c=getChunk(wx>>4,wz>>4); if(!c||!c.generated) return;
   const lx=wx&15, lz=wz&15;
+  if(_bulk){ c.blocks[idx(lx,wy,lz)]=b;
+    if(b===WATER) c.hasWater=true; else if(blockCat[b]==='cross') c.hasCross=true; else if(blockCat[b]==='model') c.hasModel=true;
+    _bulk.touched.set(key(c.cx,c.cz), c);
+    if(lx===0){ const n=getChunk(c.cx-1,c.cz); if(n&&n.generated)_bulk.touched.set(key(n.cx,n.cz),n); } else if(lx===15){ const n=getChunk(c.cx+1,c.cz); if(n&&n.generated)_bulk.touched.set(key(n.cx,n.cz),n); }   // edge writes: neighbor's border faces must re-cull
+    if(lz===0){ const n=getChunk(c.cx,c.cz-1); if(n&&n.generated)_bulk.touched.set(key(n.cx,n.cz),n); } else if(lz===15){ const n=getChunk(c.cx,c.cz+1); if(n&&n.generated)_bulk.touched.set(key(n.cx,n.cz),n); }
+    if(record){ edits[wx+','+wy+','+wz]=b; editIndexPut(wx,wy,wz,b); }
+    return;
+  }
   const _old=c.blocks[idx(lx,wy,lz)];
   c.blocks[idx(lx,wy,lz)]=b;
   if(blockLight[_old]||blockLight[b]){                 // a light block changed → invalidate the baked emitter caches; neighbours get a cheap RELIGHT (texture re-flood), not a geometry rebuild
@@ -2133,9 +2157,16 @@ function streamChunks(genBudget, meshBudget){
   if(relightSet.size){ for(const kk of relightSet){ if(performance.now()-meshT0>meshMS)break; relightSet.delete(kk); const c=world.get(kk); if(c&&c.meshed&&!c.dirty) relightChunk(c); } }
 }
 let unloadTick=0;
+const _unloadQ=[];
 function unloadFar(){
   const pcx=Math.floor(player.pos.x)>>4, pcz=Math.floor(player.pos.z)>>4;
-  world.forEach((c,kk)=>{ if(Math.max(Math.abs(c.cx-pcx),Math.abs(c.cz-pcz))>CFG.RENDER_DIST+2){ disposeChunkMeshes(c); world.delete(kk); } });
+  world.forEach((c,kk)=>{ if(Math.max(Math.abs(c.cx-pcx),Math.abs(c.cz-pcz))>CFG.RENDER_DIST+2) _unloadQ.push(kk); });   // collect only; disposal is amortized below
+}
+function drainUnloads(){ let n=0;
+  while(_unloadQ.length && n<3){ const kk=_unloadQ.pop(); const c=world.get(kk); if(!c) continue;
+    const pcx=Math.floor(player.pos.x)>>4, pcz=Math.floor(player.pos.z)>>4;
+    if(Math.max(Math.abs(c.cx-pcx),Math.abs(c.cz-pcz))<=CFG.RENDER_DIST+2) continue;   // walked back toward it while queued — keep it
+    disposeChunkMeshes(c); world.delete(kk); n++; }
 }
 
 // =====================================================================
@@ -3198,6 +3229,9 @@ let shadowTick=0; let SHADOW_EVERY = CFG.quality==='Ultra'?3:4;   // re-render t
 const _curVP=new THREE.Matrix4(), _prevVP=new THREE.Matrix4(), _mbW=new THREE.Vector3(), _prevMbW=new THREE.Vector3(), _mbV4=new THREE.Vector4(), _mbPV4=new THREE.Vector4();
 const _sunProj=new THREE.Vector3();   // scratch: sun sky-direction projected to NDC for the god-ray origin
 let _godraysOn=true;                   // adaptive quality can shed god rays (then bloom) under heavy load to hold framerate
+// structure builders, polled ONE per frame round-robin (each early-returns until its chunks exist / when done)
+const _BUILDERS=[buildSpawnChest, buildMine, buildVillage, buildTowers, buildGraveyard, buildStandingStones, buildWell, buildCamp, buildFarm, buildApiary, buildBlind, buildShrine, buildWoodcutter, buildLighthouse, buildDock, buildTunnels, buildValley];
+let _builderIdx=0;
 let _mbInit=false;
 const _cq=new THREE.Quaternion(), _ce=new THREE.Euler(0,0,0,'YXZ');
 // =====================================================================
@@ -3389,7 +3423,7 @@ function netMsg(m){
     if(m.nm!==a.nm){ a.nm=m.nm; if(a.tag)a.g.remove(a.tag); a.tag=nameTag(m.nm); a.g.add(a.tag); }                          // nametag (server-set text, rendered locally)
     if(m.held!==a.held){ a.held=m.held; setAvatarHeld(a,m.held); } } }                                                     // held item shown in their hand
   else if(m.t==='b'){ NET.applying=true; try{ setBlockWorld(m.x,m.y,m.z,m.b,true); }catch(e){} NET.applying=false; }                       // remote block edit
-  else if(m.t==='tree'){ NET.applying=true; try{ treeFall(m.x,m.y,m.z,true); }catch(e){} NET.applying=false; }                            // remote tree-fall (no drops — they arrive separately)
+  else if(m.t==='tree'){ NET.applying=true; beginBulk(); try{ treeFall(m.x,m.y,m.z,true); }catch(e){} finally{ endBulk(); } NET.applying=false; }   // remote tree-fall (no drops — they arrive separately); bulk-coalesced like the local path
   else if(m.t==='drop'){ NET.applying=true; try{ spawnDrop(m.i,m.n,m.x,m.y,m.z,m.d,m.did); }catch(e){} NET.applying=false; }             // shared floating item
   else if(m.t==='dpick'){ removeDropById(m.did); }                                                                                        // someone collected it
   else if(m.t==='chest'){ if(m.k&&Array.isArray(m.c)&&!localChests.has(m.k)){ chests[m.k]=m.c; if(openUI==='chest'&&curChestKey===m.k){ curChest=chests[m.k]; renderInvUI(); } } }   // co-op: a teammate updated a PLAYER-PLACED chest (loot chests never sync)
@@ -3542,12 +3576,12 @@ function loop(){
   // more when there's headroom (fills the world faster). meshing is the pricier half so it gets the wider swing.
   const meshB = fpsAvg<_fpsShed?1 : fpsAvg>_fpsRestore?3 : 2, genB = fpsAvg<40?1:2;   // fewer, smaller mesh bites per frame → smoother streaming (relies on the time-slice too); wide bites only with target-relative headroom
   streamChunks(genB, meshB);
-  buildCabin();   // build the cabin even on the menu so the cinematic's cabin shot has something to frame
-  if(started){ buildSpawnChest(); buildMine(); buildVillage(); buildTowers(); buildGraveyard();
-    buildStandingStones(); buildWell(); buildCamp(); buildFarm(); buildApiary(); buildBlind(); buildShrine(); buildWoodcutter(); buildLighthouse(); buildDock(); buildTunnels(); buildValley(); }                  // generate structures once their chunks exist
+  _bulkRun(buildCabin);   // build the cabin even on the menu so the cinematic's cabin shot has something to frame
+  if(started){ const B=_BUILDERS; _builderIdx=(_builderIdx+1)%B.length; _bulkRun(B[_builderIdx]); }   // ONE builder per frame, in bulk-edit mode: a village fires as ~3ms of array writes + a deferred remesh wave instead of a 50-90ms frame; a 16-frame poll rotation delays a structure's appearance imperceptibly
   assignPointLights();
   updateBlockFx(dt); updateCookingFx(dt);
   if((unloadTick=(unloadTick+1)%180)===0) unloadFar();
+  drainUnloads();   // amortized: at most 3 chunk disposals per frame (unloadFar only queues)
   const t1=performance.now();
   if(USE_SKYCUBE){ let da=Math.abs(worldTime-_skyBakeAng); if(da>CFG.DAY_LEN*0.5)da=CFG.DAY_LEN-da; if(!_skyBaked || da>CFG.DAY_LEN*0.0005){ _skyBakeAng=worldTime; _skyBaked=true; bakeSky(); } }   // rebake ~3x/sec → the sky gradient shifts smoothly through dawn/dusk instead of stepping
   else skyDome.position.copy(camera.position);
@@ -3591,7 +3625,9 @@ function loop(){
   if(openUI==='inv' && typeof renderPView==='function') renderPView(dt);   // spin the armor mannequin while the inventory is open
   const t2=performance.now();
   // loading gate
-  if(!initialReady){ const c=getChunk(Math.floor(player.pos.x)>>4,Math.floor(player.pos.z)>>4); if(c&&c.meshed){ initialReady=true; document.getElementById('load').style.display='none'; } }
+  if(!initialReady){ const c=getChunk(Math.floor(player.pos.x)>>4,Math.floor(player.pos.z)>>4); if(c&&c.meshed){ initialReady=true;
+    try{ for(const id in ITEMS) slotIconURL(id); }catch(e){}   // PRE-WARM every item icon behind the load overlay — icon3DURL does a synchronous GPU readback (readRenderTargetPixels) per modelled item, which used to land as a 2-15ms mid-combat hitch on first pickup and a 100ms+ freeze on first creative-menu open
+    document.getElementById('load').style.display='none'; } }
   fpsAvg+=((dt>0?1/dt:60)-fpsAvg)*0.05;
   _retargetFps(dt);
   // ADAPTIVE QUALITY — setpoints derived from the DISPLAY-AWARE target (defend min(70, refresh), see _retargetFps)
@@ -4230,7 +4266,7 @@ function updateWretch(dt){
   const P=wretch.P;
   if(HORROR._firstNight) wretch.hunger=clamp(wretch.hunger-dt*0.14,0,100);   // gentle hunger tick (~8 min from full to the forage threshold) — the old 0.66/s drained it to starving in ~80s, which read as "always starving"
   if(!wretch.lair){ const lx=spawnX+95, lz=spawnZ+70; wretch.lair={x:lx,z:lz,y:groundYAt(lx,lz)}; }   // dungeon ≥100 blocks from spawn (hypot ~118)
-  buildDungeon();
+  _bulkRun(buildDungeon);   // bulk-edit mode: the lair is a huge one-shot carve — write blocks flat, remesh via the sliced queue
   if(wretch._lurk){ lurkTick(dt); return; }                                          // a daytime tree-watch is in progress — it owns the Wretch (never hunts)
   { const dayLike = !HORROR.huntArmed || globalU.uDay.value>0.34;                   // grace (day 1 + night 1) OR any daytime → it must not hunt, only lurk
     if((dayLike || playerRoofed()) && !wretch.active && !wretch.dragging && !wretch.debug && !wretch._summoned){   // …or holed up indoors at night → it lurks/peeks in a window instead of uselessly clawing the walls
@@ -6085,13 +6121,15 @@ function updateParticles(dt){ for(let i=particles.length-1;i>=0;i--){ const p=pa
 const _shellGeo=new THREE.BoxGeometry(0.02,0.02,0.055);
 const _shellMat=new THREE.MeshPhongMaterial({color:0xc9a24a, shininess:120, specular:0x6b5a20});
 const shells=[];
+const _shellFree=[];   // pooled shell meshes — sustained minigun fire was allocating a THREE.Mesh per shot (GC churn exactly during combat)
 function ejectShell(o){ const yaw=player.yaw, rx=Math.cos(yaw), rz=-Math.sin(yaw), fx=-Math.sin(yaw), fz=-Math.cos(yaw);   // camera-relative right + forward (horizontal)
-  const m=new THREE.Mesh(_shellGeo,_shellMat); m.castShadow=true;
-  m.position.set(o.x+rx*0.32+fx*0.4, o.y-0.12, o.z+rz*0.32+fz*0.4); fxGroup.add(m);                        // out the right side of the gun, a touch forward
+  let m=_shellFree.pop(); if(!m){ m=new THREE.Mesh(_shellGeo,_shellMat); m.castShadow=true; fxGroup.add(m); }   // mesh stays in fxGroup for life; visibility gates it
+  m.visible=true; m.rotation.set(0,0,0);
+  m.position.set(o.x+rx*0.32+fx*0.4, o.y-0.12, o.z+rz*0.32+fz*0.4);                                        // out the right side of the gun, a touch forward
   const kick=1.5+Math.random()*0.8;
   shells.push({ mesh:m, vx:rx*kick+(Math.random()-0.5)*0.5, vy:2.0+Math.random()*0.7, vz:rz*kick+(Math.random()-0.5)*0.5,
     ax:(Math.random()-0.5)*20, ay:(Math.random()-0.5)*20, az:(Math.random()-0.5)*20, age:0, landed:false });
-  while(shells.length>24){ const s=shells.shift(); fxGroup.remove(s.mesh); } }
+  while(shells.length>24){ const s=shells.shift(); s.mesh.visible=false; _shellFree.push(s.mesh); } }
 function updateShells(dt){ for(let i=shells.length-1;i>=0;i--){ const s=shells[i]; s.age+=dt; s.vy-=18*dt;
     s.mesh.position.x+=s.vx*dt; s.mesh.position.y+=s.vy*dt; s.mesh.position.z+=s.vz*dt;
     s.mesh.rotation.x+=s.ax*dt; s.mesh.rotation.y+=s.ay*dt; s.mesh.rotation.z+=s.az*dt;
@@ -6100,7 +6138,7 @@ function updateShells(dt){ for(let i=shells.length-1;i>=0;i--){ const s=shells[i
       if(!s.landed && Math.abs(s.vy)>1.1){ s.landed=true; if(AC){ burst(master,0.22,0.02,2500,0.6,-1500); burst(master,0.12,0.05,1650,0.4,-600); } }   // metallic TINK on the first solid bounce
       s.vy*=-0.32; s.vx*=0.55; s.vz*=0.55; s.ax*=0.5; s.ay*=0.5; s.az*=0.5;
       if(Math.abs(s.vy)<0.4){ s.vy=0; s.vx*=0.7; s.vz*=0.7; } }
-    if(s.age>5.5){ fxGroup.remove(s.mesh); shells.splice(i,1); } } }
+    if(s.age>5.5){ s.mesh.visible=false; _shellFree.push(s.mesh); shells.splice(i,1); } } }   // back to the pool (mesh stays in fxGroup, hidden)
 
 // ---- TIMED MINING + crack overlay (breaking now TAKES TIME, tool-tier scaled) ----
 const crackMesh=new THREE.Mesh(new THREE.BoxGeometry(1.02,1.02,1.02), new THREE.MeshBasicMaterial({color:0x000000,transparent:true,opacity:0,depthWrite:false})); crackMesh.visible=false; scene.add(crackMesh);
@@ -6139,7 +6177,7 @@ function breakBlock(h){
   if(!player.creative){ if(drop) spawnDrop(drop,1,h.x+0.5,h.y+0.5,h.z+0.5); if(h.b===BID.leaves&&Math.random()<0.06) spawnDrop('sapling',1,h.x+0.5,h.y+0.5,h.z+0.5); }
   spawnParticles(h.x+0.5,h.y+0.5,h.z+0.5,blockColor(h.b),10,2.0,1.4);
   if(h.b===BID.bed){ for(const [dx,dz] of [[1,0],[-1,0],[0,1],[0,-1]]){ if(getBlock(h.x+dx,h.y,h.z+dz)===BID.bed){ setBlockWorld(h.x+dx,h.y,h.z+dz,AIR,true); break; } } }   // remove the paired bed half (drops only one bed)
-  if(h.b===BID.log){ treeFall(h.x,h.y,h.z); netTree(h.x,h.y,h.z); }                              // toppling tree → sync the whole fall
+  if(h.b===BID.log){ beginBulk(); try{ treeFall(h.x,h.y,h.z); }finally{ endBulk(); } netTree(h.x,h.y,h.z); }   // toppling tree → sync the whole fall; bulk mode coalesces its ~340 block writes into one remesh wave
   else { setBlockWorld(h.x,h.y,h.z,AIR,true); netEdit(h.x,h.y,h.z,AIR); }                         // single break → sync it
   dislodgePlant(h.x,h.y+1,h.z);                                                                   // anything growing on top can't float
   sfxBreak&&sfxBreak(h.b,h.x,h.y,h.z); emitNoise(h.x,h.y,h.z,0.9);
