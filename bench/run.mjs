@@ -114,6 +114,7 @@ const INIT_SCRIPT = `(() => {
 async function openGame(context, base, query, errors) {
   const page = await context.newPage();
   page.on('pageerror', e => errors.push(String(e.message || e).slice(0, 200)));
+  page.on('crash', () => errors.push('PAGE CRASHED (renderer/GPU process died)'));
   await page.goto(base + '/index.html?' + query, { waitUntil: 'load', timeout: 90000 });
   await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started === true; } catch (e) { return false; } })()`, { timeout: 90000 });
   await page.waitForFunction(`(() => { try { return __hc.probe().chunkHere === true; } catch (e) { return false; } })()`, { timeout: 90000 });
@@ -358,20 +359,25 @@ function summaryMd(results, meta) {
   const base = 'http://127.0.0.1:' + port;
   try {
     await waitHttp(base + '/index.html');
-    const { browser, meta } = await launchVerified();
+    let { browser, meta } = await launchVerified();
     console.log('browser: ' + meta.browser + ' | mode: ' + meta.headlessMode + ' | GPU: ' + meta.gpuRenderer);
     const results = [];
     const runners = { 'solo-static': scnSoloStatic, 'solo-night-wretch': scnSoloNightWretch, 'solo-roam': scnSoloRoam, 'mp-2p': scnMp2p };
     for (const name of RUN) {
       console.log('\n=== ' + name + ' (settle ' + SETTLE_S + 's + measure ' + MEASURE_S + 's) ===');
-      try {
-        const out = await runners[name](browser, base, meta);
-        for (const r of out) { results.push(r); saveResult(r, ts); }
-      } catch (e) {
-        console.error('  SCENARIO FAILED: ' + (e.message || e));
-        const r = { scenario: name, error: String(e.message || e), when: new Date().toISOString(), ...meta };
-        results.push(r); saveResult(r, ts);
+      let done = false;
+      for (let attempt = 0; attempt < 2 && !done; attempt++) {   // one auto-retry with a FRESH BROWSER: intermittent GPU-process death under sustained uncapped load (this box has a known failing GPU fan — thermal device-loss kills the whole browser's GPU process)
+        try {
+          if (attempt) { console.log('  relaunching browser after crash + 20s cooldown...'); try { await browser.close(); } catch (e) {} await sleep(20000); ({ browser, meta } = await launchVerified()); }
+          const out = await runners[name](browser, base, meta);
+          for (const r of out) { results.push(r); saveResult(r, ts); }
+          done = true;
+        } catch (e) {
+          console.error('  SCENARIO ' + (attempt ? 'FAILED' : 'attempt failed') + ': ' + (e.message || e));
+          if (attempt) { const r = { scenario: name, error: String(e.message || e), when: new Date().toISOString(), ...meta }; results.push(r); saveResult(r, ts); }
+        }
       }
+      await sleep(5000);   // inter-scenario cooldown
     }
     await browser.close();
     const ok = results.filter(r => !r.error);
