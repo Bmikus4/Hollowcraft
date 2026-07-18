@@ -2049,31 +2049,50 @@ function disposeChunkMeshes(c){
   chunkRoot.remove(c.group); c.group=null; c.meshed=false;
   if(c.light3D){ c.light3D.dispose(); c.light3D=null; }   // free the per-chunk block-light volume
 }
-function buildChunkMeshes(c){
-  if(c.group) disposeChunkMeshes(c);
-  buildLightTexture(c);                // flood-fill this chunk's baked block-light into its 3D texture (null if no light near) — must precede material selection
-  snapshotChunk(c);                    // one linear copy; all greedy/water/foliage passes below read the flat snapshot, not the world Map
-  const g=new THREE.Group(); g.position.set(c.cx*CK,0,c.cz*CK);
-  // LIT chunks get per-chunk material clones bound to their light volume; unlit chunks reuse the shared templates (zero overhead).
-  // userData.baseMat tags each mesh's template so relightChunk() can rebind on lit<->unlit transitions without a geometry rebuild.
-  const L=c.light3D;
-  const _om = L? _chunkMat(opaqueMat,L) : opaqueMat;
+// STAGED CHUNK BUILD — the build is split into two roughly-equal halves with a frame boundary
+// allowed between them, so the time-slice check actually bounds worst-case frame cost (the old
+// monolithic build could only be tested AFTER an indivisible 3-9ms unit — the last hitch source).
+// Single-flight: the padded snapshot is shared scratch, so an in-flight chunk MUST finish stage B
+// before any other chunk may start stage A (streamChunks resumes it first). The OLD group stays
+// visible until the swap in stage B — no one-frame hole in the world.
+let _stagedC=null, _stagedG=null;
+function _abandonStaged(){ if(_stagedG){ _stagedG.traverse(o=>{ if(o.isMesh){ o.geometry.dispose(); if(o.material&&o.material.userData&&o.material.userData.chunkClone) o.material.dispose(); } }); }
+  const c=_stagedC; if(c&&c._oldL!==undefined&&c._oldL!==null){ if(c.light3D&&c.light3D!==c._oldL) c.light3D.dispose(); c.light3D=c._oldL; c._oldL=null; }   // restore the old (still-bound) light volume; free the orphaned stage-A bake
+  _stagedC=null; _stagedG=null; }
+function buildChunkStaged(c){
+  if(_stagedC!==c){                                    // ---- STAGE A: light bake + snapshot + opaque pass (the heavy half)
+    if(_stagedC) _abandonStaged();                     // shouldn't happen (resume-first discipline), but never leak a partial build
+    _stagedC=c;
+    c._oldL=c.light3D; c.light3D=null;                 // stash the old light volume: the OLD group's materials still sample it until the swap — bake must not dispose or mutate it
+    buildLightTexture(c);
+    snapshotChunk(c);                                  // one linear copy; all passes read the flat snapshot, not the world Map
+    _stagedG=new THREE.Group(); _stagedG.position.set(c.cx*CK,0,c.cz*CK);
+    const L=c.light3D, _om=L? _chunkMat(opaqueMat,L) : opaqueMat;
+    const og=greedyMesh(c,'opaque'); if(og){ og.computeBoundingSphere(); const m=new THREE.Mesh(og,_om); m.castShadow=true; m.receiveShadow=true; m.userData.baseMat=opaqueMat; _stagedG.add(m); }
+    return false;                                      // resume with stage B (same frame if the slice allows, else next)
+  }
+  // ---- STAGE B: cutout + leaf + foliage + water + models + visgraph, then swap
+  const g=_stagedG, L=c.light3D;
   const _cm = L? _chunkMat(cutoutMat,L) : cutoutMat;
   const _lm = L? _chunkMat(leafMat,L)   : leafMat;
   const _fm = L? _chunkMat(foliageMat,L): foliageMat;
-  const og=greedyMesh(c,'opaque'); if(og){ og.computeBoundingSphere(); const m=new THREE.Mesh(og,_om); m.castShadow=true; m.receiveShadow=true; m.userData.baseMat=opaqueMat; g.add(m); }
   const cg=greedyMesh(c,'cutout'); if(cg){ cg.computeBoundingSphere(); const m=new THREE.Mesh(cg,_cm); m.castShadow=false; m.receiveShadow=true; m.userData.baseMat=cutoutMat; g.add(m); }   // glass — see-through, no solid shadow
   const lg=greedyMesh(c,'leaf'); if(lg){ lg.computeBoundingSphere(); const m=new THREE.Mesh(lg,_lm); m.castShadow=true; m.receiveShadow=true; m.customDepthMaterial=leafDepthMat; m.userData.baseMat=leafMat; g.userData.leaf=m; g.add(m); }   // leaves cast ALPHA-TESTED shadows → dappled light shafts ("god rays") through the canopy gaps
   if(c.hasCross){ const fg=foliageMesh(c); if(fg){ fg.computeBoundingSphere(); const m=new THREE.Mesh(fg,_fm); m.castShadow=false; m.receiveShadow=true; m.userData.detail=1; m.userData.baseMat=foliageMat; g.userData.foliage=m; g.add(m); } }   // detail=1: suppressible in the fogged far rings
   if(c.hasWater){ const wg=waterMesh(c); if(wg){ wg.computeBoundingSphere(); const m=new THREE.Mesh(wg,waterMat); m.castShadow=false; m.receiveShadow=false; m.renderOrder=3; m.userData.detail=1; g.userData.water=m; g.add(m); } }
   if(c.hasModel) buildModelBlocks(c,g); else c.emitters=[];
+  if(c.group){ c.group.traverse(o=>{ if(o.isMesh||o.isInstancedMesh){ o.geometry.dispose(); if(o.userData.modelMat) o.userData.modelMat.dispose(); if(o.material&&o.material.userData&&o.material.userData.chunkClone) o.material.dispose(); } }); chunkRoot.remove(c.group); }   // dispose the OLD group only now (it stayed visible through the stage gap); light3D deliberately NOT touched here
+  if(c._oldL){ c._oldL.dispose(); c._oldL=null; }      // now nothing samples the old volume — safe to free
   chunkRoot.add(g); c.group=g; c.meshed=true; c.dirty=false;
+  _stagedC=null; _stagedG=null;
   computeVisGraph(c);                  // 6-face connectivity for occlusion culling (see cullChunks)
   // NOTE: do NOT force sunLight.shadow.needsUpdate here. autoUpdate is off and the SHADOW_EVERY cadence
   // (loop, ~1-in-2/3 frames) already re-bakes the map — which picks up this new geometry within a couple
   // frames anyway. Forcing it per-meshed-chunk re-rendered the ENTIRE shadow pass EVERY frame while
   // streaming (worst in forests, where chunks mesh constantly), silently defeating the cadence gate. Huge stutter.
+  return true;
 }
+function buildChunkMeshes(c){ let n=0; while(!buildChunkStaged(c) && ++n<4){} }   // synchronous wrapper for one-shot callers (both stages in one call)
 // =====================================================================
 //  OCCLUSION CULLING  — chunk visibility graph + frustum BFS ("render only what we can see")
 //  Build: flood-fill the non-opaque cells of a chunk; two of the 6 faces are "connected" if one
@@ -2169,9 +2188,18 @@ function streamChunks(genBudget, meshBudget){
   // of them entering the ring at once used to stack into one big frame spike (the "walking into the woods"
   // stutter). Keep the slice well under a 60fps frame (16.6ms) so meshing + render + shadow never blow a frame.
   const meshT0=performance.now(), meshMS=fpsAvg<38?1.5:fpsAvg<52?2.5:3.5;   // smaller per-frame mesh budget → the CHUNK-STREAM HITCH (a 5ms mesh build spiking one frame as you walk) is cut; slightly more pop-in, far smoother motion
-  for(let i=0;i<RING.length && meshBudget>0;i++){ const o=RING[i]; if(Math.abs(o[0])>CFG.RENDER_DIST||Math.abs(o[1])>CFG.RENDER_DIST) continue; const c=getChunk(pcx+o[0],pcz+o[1]); if(c && c.dirty && neighbors8(c)){ buildChunkMeshes(c); _streamMeshed=true; remeshSet.delete(key(c.cx,c.cz)); meshBudget--; if(performance.now()-meshT0>meshMS) return; } }
+  // RESUME-FIRST: an in-flight staged build must complete its stage B before any new stage A may run (shared snapshot scratch)
+  if(_stagedC){ const cc=_stagedC;
+    if(world.get(key(cc.cx,cc.cz))===cc && cc.generated){ if(buildChunkStaged(cc)){ remeshSet.delete(key(cc.cx,cc.cz)); _streamMeshed=true; meshBudget--; } if(performance.now()-meshT0>meshMS) return; }
+    else _abandonStaged(); }   // its chunk unloaded mid-build → drop the partial
+  for(let i=0;i<RING.length && meshBudget>0;i++){ const o=RING[i]; if(Math.abs(o[0])>CFG.RENDER_DIST||Math.abs(o[1])>CFG.RENDER_DIST) continue; const c=getChunk(pcx+o[0],pcz+o[1]);
+    if(c && c.dirty && neighbors8(c)){ _streamMeshed=true;
+      if(!buildChunkStaged(c)){ if(performance.now()-meshT0>meshMS) return; if(!buildChunkStaged(c)) return; }   // stage A ran; finish B in-slice or resume next frame
+      remeshSet.delete(key(c.cx,c.cz)); meshBudget--; if(performance.now()-meshT0>meshMS) return; } }
   // explicit edit-driven remeshes — same time slice (a big edit/explosion can't hitch the frame either)
-  if(remeshSet.size){ for(const kk of Array.from(remeshSet)){ if(performance.now()-meshT0>meshMS)break; const c=world.get(kk); remeshSet.delete(kk); if(c&&neighbors8(c)){ buildChunkMeshes(c); _streamMeshed=true; } } }
+  if(remeshSet.size){ for(const kk of Array.from(remeshSet)){ if(performance.now()-meshT0>meshMS)break; const c=world.get(kk); if(c&&c.dirty&&neighbors8(c)){ _streamMeshed=true;
+      if(!buildChunkStaged(c)){ if(performance.now()-meshT0>meshMS) break; if(!buildChunkStaged(c)) break; }   // as above: bounded units, resume next frame if the slice is spent
+      remeshSet.delete(kk); } else remeshSet.delete(kk); } }
   // light-only refloods (torch place/break neighbors) — far cheaper than a remesh; same slice, drained after
   if(relightSet.size){ for(const kk of relightSet){ if(performance.now()-meshT0>meshMS)break; relightSet.delete(kk); const c=world.get(kk); if(c&&c.meshed&&!c.dirty) relightChunk(c); } }
 }
