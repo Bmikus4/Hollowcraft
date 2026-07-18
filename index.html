@@ -728,7 +728,8 @@ function placeSet(c, wx, wy, wz, b, force){
   const cx=wx>>4, cz=wz>>4;
   if (cx!==c.cx || cz!==c.cz) return;                   // this chunk only
   const i=idx(wx&15,wy,wz&15);
-  if (force || c.blocks[i]===AIR || c.blocks[i]===BID.leaves) c.blocks[i]=b;
+  if (force || c.blocks[i]===AIR || c.blocks[i]===BID.leaves){ c.blocks[i]=b;
+    if(b===WATER)c.hasWater=true; else if(blockCat[b]==='cross')c.hasCross=true; else if(blockCat[b]==='model')c.hasModel=true; }   // keep render flags in sync so worldgen model/cross blocks (sulfur, foliage) mesh on first build, not only after an edit
 }
 function decorate(c){
   // scan an expanded region so trees straddle borders
@@ -737,7 +738,7 @@ function decorate(c){
     const h=surfaceH(wx,wz);
     // SULFUR NODES — yellow-grey blobs on the surface: common along the dry beach band, rare inland. Mine for sulfur powder (→ gunpowder → ammo). Placed BEFORE the tree setback so they populate the beach the trees skip.
     { const near=h-CFG.SEA, sr=tileRng((wx*40503^wz*13007)>>>0)();
-      if(trailDist(wx,wz)>2 && ((near>=0&&near<=3&&sr<0.024) || (near>3&&near<70&&sr<0.0052))) placeSet(c, wx, h+1, wz, BID.sulfur_ore, true); }   // yellow-grey nodes: common on the beach, scattered right across the inland woods (was near-zero → felt like it never spawned)
+      if(trailDist(wx,wz)>2 && ((near>=0&&near<=3&&sr<0.018) || (near>3&&near<90&&sr<0.0044))) placeSet(c, wx, h+1, wz, BID.sulfur_ore, true); }   // yellow-grey nodes: uncommon on the beach, rare inland (cut 80% now that the flag-fix makes them all render)
     if (h<=CFG.SEA+4 || h>=WH-28) continue;   // COASTAL SETBACK: trees start ≥4 blocks above sea (was +1), so the treeline pulls back off the beach/shore instead of crowding the waterline. Raise this number to push it further inland.
     if (trailDist(wx,wz)<2.6 || inCabin(wx,wz) || nearOpening(wx,wz)) continue;   // keep the dirt trail corridor + cabin footprint + trailhead clearings free of tree bases
     if (!isGrassSurface(wx,wz)) continue;   // pines only on grass → natural treeline; bare rock/snow/ice/beach stay clear (deterministic so border trees still straddle)
@@ -840,6 +841,11 @@ function generateChunk(c){
   beachLog(c);
   enrichTerrain(c);
   applyEdits(c);
+  // DERIVE render flags from actual content (single source of truth) so no placement path can leave them stale →
+  // fixes worldgen model/cross blocks (sulfur nodes, flowers/foliage) being invisible until the chunk is re-meshed by an edit.
+  { let a=c.hasCross,b=c.hasModel,w=c.hasWater; const bl=c.blocks;
+    for(let i=0;i<bl.length && !(a&&b&&w);i++){ const v=bl[i]; if(v===AIR)continue; if(v===WATER){w=true;continue;} const cat=blockCat[v]; if(cat==='cross')a=true; else if(cat==='model')b=true; }
+    c.hasCross=a; c.hasModel=b; c.hasWater=w; }
   c.dirty=true;
 }
 
@@ -1838,6 +1844,10 @@ function _mergeGeos(geos){ const P=[],N=[],U=[]; for(let g of geos){ g=g.index?g
 function _barsGeo(){ const P=[]; for(const ox of [-0.3,0,0.3]){ const r=box(0.12,1,0.12); r.translate(ox,0,0); P.push(r); }
   for(const y of [-0.42,0,0.42]){ const rx=box(1.0,0.1,0.12); rx.translate(0,y,0); const rz=box(0.12,0.1,1.0); rz.translate(0,y,0); P.push(rx,rz); }
   return _mergeGeos(P); }
+// SINGLE SOURCE OF TRUTH for rich decorative model-blocks: model-name -> (bd)=>THREE.Group, base at y=0, centred on x/z, ~1 unit tall.
+// Used by itemModel (icon+drop), setViewItem (held), and buildModelBlocks (placed) so every form of a block agrees.
+// Empty entries fall back to modelMeshFor (a single-colour merged geo). Builders are registered just below modelMeshFor.
+const MODEL_ITEM_BUILDERS={};
 function modelMeshFor(id){ const d=B[id]; let geo;
   if(d.model==='torch') geo=box(0.1,0.5,0.1);
   else if(d.model==='fence') geo=box(0.25,1,0.25);
@@ -1874,6 +1884,134 @@ function modelMeshFor(id){ const d=B[id]; let geo;
       for(const [x,y,z,s] of rk){ const b=box(s*1.5,s*1.15,s*1.35); b.translate(x,-0.5+s*0.58,z); parts.push(b); } geo=_mergeGeos(parts); }
   else geo=box(0.9,0.9,0.9);
   return geo; }
+// ===== rich decorative model builders (single source of truth: icon + drop + held + placed) =====
+// chest — oak body + darker hinged lid + 3 iron straps + front latch
+MODEL_ITEM_BUILDERS.chest=(bd)=>{ const g=new THREE.Group();
+  const woodM=new THREE.MeshLambertMaterial({color:bd.col!=null?bd.col:0x6b4a2a});
+  const lidM =new THREE.MeshLambertMaterial({color:0x593c20});
+  const ironM=new THREE.MeshPhongMaterial({color:0x2a2a30,shininess:50,specular:0x55555f});
+  const body=new THREE.Mesh(box(0.78,0.46,0.56),woodM); body.position.y=0.23; g.add(body);
+  const lid =new THREE.Mesh(box(0.8,0.22,0.58),lidM); lid.position.y=0.57; g.add(lid);
+  for(const bx of [-0.29,0,0.29]){ const strap=new THREE.Mesh(box(0.06,0.74,0.62),ironM); strap.position.set(bx,0.37,0); g.add(strap); }   // vertical iron straps over the seam
+  const latch=new THREE.Mesh(box(0.11,0.18,0.06),ironM); latch.position.set(0,0.46,0.3); g.add(latch);   // front latch straddling the seam
+  return g; };
+// barrel — staved cylinder with a belly bulge, 3 iron hoops, sunken top lid
+MODEL_ITEM_BUILDERS.barrel=(bd)=>{ const g=new THREE.Group();
+  const woodM=new THREE.MeshLambertMaterial({color:bd.col!=null?bd.col:0x6b4a2a});
+  const darkM=new THREE.MeshLambertMaterial({color:0x4e3418});
+  const ironM=new THREE.MeshPhongMaterial({color:0x33333a,shininess:45,specular:0x55555f});
+  const body =new THREE.Mesh(cyl(0.3,0.3,0.9,14),woodM); body.position.y=0.45; g.add(body);
+  const belly=new THREE.Mesh(cyl(0.37,0.37,0.5,14),woodM); belly.position.y=0.45; g.add(belly);   // fatter middle → barrel silhouette
+  for(const [hy,r] of [[0.13,0.33],[0.45,0.39],[0.77,0.33]]){ const hoop=new THREE.Mesh(cyl(r,r,0.06,14),ironM); hoop.position.y=hy; g.add(hoop); }
+  const lid=new THREE.Mesh(cyl(0.28,0.28,0.05,14),darkM); lid.position.y=0.9; g.add(lid);
+  return g; };
+// scarecrow — cross-post frame, burlap-stuffed torso, sack head, straw hat, straw wrist tufts
+MODEL_ITEM_BUILDERS.scarecrow=(bd)=>{ const g=new THREE.Group();
+  const wood  =new THREE.MeshLambertMaterial({color:0x5a4326});
+  const burlap=new THREE.MeshLambertMaterial({color:bd.col!=null?bd.col:0xc2a35a});
+  const straw =new THREE.MeshLambertMaterial({color:0xd8b24a});
+  const hatM  =new THREE.MeshLambertMaterial({color:0xb98a34});
+  const post=new THREE.Mesh(box(0.08,1.0,0.08),wood); post.position.y=0.5; g.add(post);
+  const arm =new THREE.Mesh(box(0.72,0.07,0.07),wood); arm.position.y=0.7; g.add(arm);
+  const torso=new THREE.Mesh(box(0.36,0.42,0.26),burlap); torso.position.y=0.56; g.add(torso);
+  const head =new THREE.Mesh(sphereG(0.15),burlap); head.scale.set(1,1.12,1); head.position.y=0.9; g.add(head);
+  const brim=new THREE.Mesh(cyl(0.24,0.24,0.03,12),hatM); brim.position.y=1.05; g.add(brim);
+  const cone=new THREE.Mesh(cyl(0.02,0.14,0.16,12),hatM); cone.position.y=1.15; g.add(cone);
+  for(const sx of [-0.36,0.36]){ const t=new THREE.Mesh(cyl(0.02,0.09,0.14,6),straw); t.position.set(sx,0.66,0); g.add(t); }   // straw tufts at the wrists
+  const waist=new THREE.Mesh(cyl(0.1,0.02,0.12,6),straw); waist.position.y=0.34; g.add(waist);   // straw poking out the bottom
+  return g; };
+// chime — top disk + 5 hanging metal tubes in a circle + central clapper + bottom sail (hangs; recentred by callers)
+MODEL_ITEM_BUILDERS.chime=(bd)=>{ const g=new THREE.Group();
+  const wood =new THREE.MeshLambertMaterial({color:bd.col!=null?bd.col:0x6b4a2a});
+  const metal=new THREE.MeshPhongMaterial({color:0xb9bcc4,shininess:90,specular:0x8a8d95});
+  const str  =new THREE.MeshLambertMaterial({color:0x4a4030});
+  const top=new THREE.Mesh(cyl(0.17,0.17,0.03,14),wood); top.position.y=0.96; g.add(top);
+  const hang=new THREE.Mesh(box(0.02,0.1,0.02),str); hang.position.y=1.02; g.add(hang);
+  const lens=[0.5,0.42,0.36,0.3,0.24]; let a=0;
+  for(const L of lens){ const x=Math.cos(a)*0.11, z=Math.sin(a)*0.11; a+=Math.PI*2/5;
+    const tube=new THREE.Mesh(cyl(0.022,0.022,L,8),metal); tube.position.set(x,0.94-L/2,z); g.add(tube); }
+  const cord=new THREE.Mesh(box(0.012,0.4,0.012),str); cord.position.y=0.74; g.add(cord);
+  const clap=new THREE.Mesh(sphereG(0.05),wood); clap.position.y=0.52; g.add(clap);
+  const sail=new THREE.Mesh(cyl(0.12,0.12,0.015,12),wood); sail.position.y=0.44; g.add(sail);
+  return g; };
+// birdhouse — mount post + box body + gabled plank roof + dark entry hole + perch dowel
+MODEL_ITEM_BUILDERS.birdhouse=(bd)=>{ const g=new THREE.Group();
+  const woodM=new THREE.MeshLambertMaterial({color:bd.col!=null?bd.col:0x8a6a3a});
+  const roofM=new THREE.MeshLambertMaterial({color:0x6b4a2a});
+  const postM=new THREE.MeshLambertMaterial({color:0x5a4326});
+  const darkM=new THREE.MeshLambertMaterial({color:0x120c08});
+  const post=new THREE.Mesh(box(0.07,0.42,0.07),postM); post.position.y=0.21; g.add(post);
+  const body=new THREE.Mesh(box(0.36,0.38,0.32),woodM); body.position.y=0.6; g.add(body);
+  for(const s of [-1,1]){ const r=new THREE.Mesh(box(0.44,0.05,0.28),roofM); r.rotation.z=s*0.7; r.position.set(s*0.1,0.86,0); g.add(r); }   // gabled roof
+  const hole =new THREE.Mesh(cyl(0.07,0.07,0.05,10),darkM); hole.rotation.x=Math.PI/2; hole.position.set(0,0.64,0.17); g.add(hole);
+  const perch=new THREE.Mesh(cyl(0.015,0.015,0.12,6),roofM); perch.rotation.x=Math.PI/2; perch.position.set(0,0.55,0.2); g.add(perch);
+  return g; };
+// teapot — squashed ceramic sphere + curved spout + loop handle + domed lid + knob
+MODEL_ITEM_BUILDERS.teapot=(bd)=>{ const g=new THREE.Group();
+  const cer=new THREE.MeshPhongMaterial({color:bd.col!=null?bd.col:0xdaf0e8,shininess:70,specular:0xffffff});
+  const body=new THREE.Mesh(sphereG(0.3),cer); body.scale.set(1,0.82,1); body.position.y=0.3; g.add(body);
+  const spout=new THREE.Mesh(cyl(0.03,0.07,0.32,8),cer); spout.position.set(0.28,0.36,0); spout.rotation.z=-0.9; g.add(spout);
+  const handle=new THREE.Mesh(new THREE.TorusGeometry(0.13,0.028,8,16),cer); handle.position.set(-0.28,0.34,0); handle.rotation.y=Math.PI/2; g.add(handle);
+  const lid=new THREE.Mesh(cyl(0.1,0.16,0.06,12),cer); lid.position.y=0.54; g.add(lid);
+  const knob=new THREE.Mesh(sphereG(0.045),cer); knob.position.y=0.6; g.add(knob);
+  return g; };
+// teacup — flared bowl + loop handle + saucer disk
+MODEL_ITEM_BUILDERS.teacup=(bd)=>{ const g=new THREE.Group();
+  const cer=new THREE.MeshPhongMaterial({color:bd.col!=null?bd.col:0xf2ece0,shininess:70,specular:0xffffff});
+  const saucer=new THREE.Mesh(cyl(0.28,0.24,0.035,16),cer); saucer.position.y=0.02; g.add(saucer);
+  const cup=new THREE.Mesh(cyl(0.17,0.11,0.2,16),cer); cup.position.y=0.15; g.add(cup);
+  const handle=new THREE.Mesh(new THREE.TorusGeometry(0.08,0.02,8,14),cer); handle.position.set(0.2,0.15,0); handle.rotation.y=Math.PI/2; g.add(handle);
+  return g; };
+// candelabra — base + stem + cross-arm + 3 brass cups w/ wax candles UNDER the flame offsets (x∈{-0.09,0,0.09}, top≈0.56)
+MODEL_ITEM_BUILDERS.candelabra=(bd)=>{ const g=new THREE.Group();
+  const brass=new THREE.MeshPhongMaterial({color:bd.col!=null?bd.col:0xb8912e,shininess:90,specular:0xffe9a0});
+  const wax  =new THREE.MeshPhongMaterial({color:0xf3ead0,shininess:10});
+  const base=new THREE.Mesh(cyl(0.13,0.2,0.07,12),brass); base.position.y=0.035; g.add(base);
+  const stem=new THREE.Mesh(cyl(0.035,0.05,0.42,8),brass); stem.position.y=0.26; g.add(stem);
+  const arm =new THREE.Mesh(box(0.24,0.03,0.03),brass); arm.position.y=0.44; g.add(arm);
+  for(const x of [-0.09,0,0.09]){
+    const cup=new THREE.Mesh(cyl(0.05,0.035,0.05,10),brass); cup.position.set(x,0.45,0); g.add(cup);
+    const candle=new THREE.Mesh(cyl(0.03,0.032,0.12,8),wax); candle.position.set(x,0.5,0); g.add(candle);   // top≈0.56 → the separately-added flame sits on the wick
+  }
+  return g; };
+// ---- P1: icon/drop builders matching the instanced PLACED form (placed handled by buildModelBlocks; these fix hotbar icon + ground drop) ----
+// furnace — cobble body + top lip + rear flue + iron bands + recessed dark firebox on the front
+MODEL_ITEM_BUILDERS.furnace=(bd)=>{ const g=new THREE.Group();
+  const stone=new THREE.MeshLambertMaterial({map:tileTex('cobble')});
+  const iron =new THREE.MeshLambertMaterial({color:0x26262c});
+  const dk   =new THREE.MeshLambertMaterial({color:0x120e0c});
+  const body=new THREE.Mesh(box(0.92,0.72,0.92),stone); body.position.y=0.36; g.add(body);
+  const lip =new THREE.Mesh(box(0.98,0.1,0.98),stone); lip.position.y=0.73; g.add(lip);
+  const flue=new THREE.Mesh(box(0.32,0.3,0.32),stone); flue.position.set(0,0.92,-0.22); g.add(flue);
+  for(const by of [0.12,0.6]){ const b=new THREE.Mesh(box(0.96,0.05,0.96),iron); b.position.y=by; g.add(b); }
+  const fb=new THREE.Mesh(box(0.56,0.4,0.05),dk); fb.position.set(0,0.34,0.45); g.add(fb);   // firebox on +z
+  return g; };
+// campfire — crossed (#) logs on the ground + glowing squashed ember core
+MODEL_ITEM_BUILDERS.campfire=(bd)=>{ const g=new THREE.Group();
+  const wood=new THREE.MeshLambertMaterial({color:0x3a2a1a}); const logGeo=cyl(0.06,0.06,0.86,6);
+  const put=(x,z,alongZ)=>{ const l=new THREE.Mesh(logGeo,wood); l.rotation.z=Math.PI/2; if(alongZ) l.rotation.y=Math.PI/2; l.position.set(x,0.08,z); g.add(l); };
+  put(0,-0.16,false); put(0,0.16,false); put(-0.16,0,true); put(0.16,0,true);
+  const ember=new THREE.Mesh(sphereG(0.28),new THREE.MeshBasicMaterial({color:0xff5a1e})); ember.scale.set(1,0.34,1); ember.position.y=0.1; g.add(ember);
+  return g; };
+// slab — half-height planks cube
+MODEL_ITEM_BUILDERS.slab=(bd)=>{ const g=new THREE.Group();
+  const m=new THREE.MeshLambertMaterial({map:tileTex('planks')});
+  const s=new THREE.Mesh(box(1,0.5,1),m); s.position.y=0.25; g.add(s); return g; };
+// stairs — planks bottom slab + upper step
+MODEL_ITEM_BUILDERS.stairs=(bd)=>{ const g=new THREE.Group();
+  const m=new THREE.MeshLambertMaterial({map:tileTex('planks')});
+  const base=new THREE.Mesh(box(1,0.5,1),m); base.position.y=0.25; g.add(base);
+  const step=new THREE.Mesh(box(1,0.5,0.5),m); step.position.set(0,0.75,-0.25); g.add(step); return g; };
+// corner — planks slab + a raised quarter
+MODEL_ITEM_BUILDERS.corner=(bd)=>{ const g=new THREE.Group();
+  const m=new THREE.MeshLambertMaterial({map:tileTex('planks')});
+  const base=new THREE.Mesh(box(1,0.5,1),m); base.position.y=0.25; g.add(base);
+  const q=new THREE.Mesh(box(0.5,0.5,0.5),m); q.position.set(0.25,0.75,0.25); g.add(q); return g; };
+// roof — plank wedge + tiled sloped face (reuses the shared roof geometry)
+MODEL_ITEM_BUILDERS.roof=(bd)=>{ roofGeos(); const g=new THREE.Group();
+  const plank=new THREE.MeshLambertMaterial({map:tileTex('planks'),side:THREE.DoubleSide});
+  const tile =new THREE.MeshLambertMaterial({map:tileTex(bd.tile||'roof_tile'),side:THREE.DoubleSide});
+  g.add(new THREE.Mesh(_roofWedge,plank)); g.add(new THREE.Mesh(_roofSlab,tile)); return g; };
 // roof wedge (plank triangular body, high on +z) + the thin tiled slab that lies on its slope — built once, reused
 let _roofWedge=null, _roofSlab=null;
 function roofGeos(){ if(_roofWedge) return;
@@ -2001,6 +2139,8 @@ function buildModelBlocks(c,g){
           for(let i=0;i<cl.length;i++){ const a=cl[i]; m4.makeTranslation(a[0]+0.5, a[1], a[2]+0.5); im.setMatrixAt(i,m4); } im.instanceMatrix.needsUpdate=true; im.userData.modelMat=fmat; g.add(im); }
         continue; }
       if(m==='bars'){ const bmat=new THREE.MeshPhongMaterial({color:0x9aa0aa, shininess:70, specular:0x6b7078}); addIM(_barsGeo(), bmat, 0.5); continue; }   // thick metal bars, base on the floor
+      if(MODEL_ITEM_BUILDERS[m]){ for(const a of arr){ let grp; try{ grp=MODEL_ITEM_BUILDERS[m](bd); }catch(e){ continue; }   // rich decorative model → per-block clone (rare blocks; single source of truth with icon/drop/held)
+          grp.position.set(a[0]+0.5,a[1],a[2]+0.5); grp.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } }); g.add(grp); } continue; }
       const geo=modelMeshFor(id); geo.computeBoundingBox();
       const col=bd.col!=null?bd.col:((id===BID.chest||id===BID.barrel)?0x6b4e2e:(id===BID.bed)?0x7a3b3b:(bd.pale?0xb9ad8c:0x8a7048));   // bd.col lets cottagecore decoratives set their own tint
       addIM(geo, new THREE.MeshLambertMaterial({color:col}), m==='trapdoor'?0.08:-geo.boundingBox.min.y);   // rest the model's BASE on the cell floor (not floating at cell-centre)
@@ -2469,14 +2609,14 @@ defItem('metal_spring',{name:'Metal Spring',max:16,icon:{t:'coil',c:'#c9ccd2'}})
 defItem('flint',{name:'Flint',icon:{t:'shard',c:'#3b3b46'}});
 defItem('string',{name:'String',icon:{t:'coil',c:'#d8d2c0'}});
 defItem('leather',{name:'Leather',icon:{t:'blob',c:'#8a5a34'}});
-defItem('leather_helmet',   {name:'Leather Cap',   max:1, icon:{t:'blob',c:'#7a4a24'}, armor:{slot:0,def:1,dur:80, col:0x7a4a24}});
-defItem('leather_chestplate',{name:'Leather Tunic',max:1, icon:{t:'blob',c:'#8a542a'}, armor:{slot:1,def:3,dur:110, col:0x7a4a24}});
-defItem('leather_leggings', {name:'Leather Pants', max:1, icon:{t:'blob',c:'#6f4322'}, armor:{slot:2,def:2,dur:100, col:0x7a4a24}});
-defItem('leather_boots',    {name:'Leather Boots', max:1, icon:{t:'blob',c:'#5f3a1e'}, armor:{slot:3,def:1,dur:80, col:0x7a4a24}});
-defItem('iron_helmet',   {name:'Iron Helm',    max:1, icon:{t:'blob',c:'#c9ccd2'}, armor:{slot:0,def:2,dur:180, col:0xccd1d8}});   // iron tier — ~2× the protection of leather
-defItem('iron_chestplate',{name:'Iron Cuirass',max:1, icon:{t:'blob',c:'#d0d4da'}, armor:{slot:1,def:6,dur:250, col:0xccd1d8}});
-defItem('iron_leggings', {name:'Iron Greaves', max:1, icon:{t:'blob',c:'#c2c6cc'}, armor:{slot:2,def:5,dur:230, col:0xccd1d8}});
-defItem('iron_boots',    {name:'Iron Boots',   max:1, icon:{t:'blob',c:'#b8bcc2'}, armor:{slot:3,def:2,dur:195, col:0xccd1d8}});
+defItem('leather_helmet',   {name:'Leather Cap',   max:1, icon:{t:'helm',c:'#7a4a24'}, armor:{slot:0,def:1,dur:80, col:0x7a4a24}});
+defItem('leather_chestplate',{name:'Leather Tunic',max:1, icon:{t:'chest',c:'#8a542a'}, armor:{slot:1,def:3,dur:110, col:0x7a4a24}});
+defItem('leather_leggings', {name:'Leather Pants', max:1, icon:{t:'legs',c:'#6f4322'}, armor:{slot:2,def:2,dur:100, col:0x7a4a24}});
+defItem('leather_boots',    {name:'Leather Boots', max:1, icon:{t:'boots',c:'#5f3a1e'}, armor:{slot:3,def:1,dur:80, col:0x7a4a24}});
+defItem('iron_helmet',   {name:'Iron Helm',    max:1, icon:{t:'helm',c:'#c9ccd2'}, armor:{slot:0,def:2,dur:180, col:0xccd1d8}});   // iron tier — ~2× the protection of leather
+defItem('iron_chestplate',{name:'Iron Cuirass',max:1, icon:{t:'chest',c:'#d0d4da'}, armor:{slot:1,def:6,dur:250, col:0xccd1d8}});
+defItem('iron_leggings', {name:'Iron Greaves', max:1, icon:{t:'legs',c:'#c2c6cc'}, armor:{slot:2,def:5,dur:230, col:0xccd1d8}});
+defItem('iron_boots',    {name:'Iron Boots',   max:1, icon:{t:'boots',c:'#b8bcc2'}, armor:{slot:3,def:2,dur:195, col:0xccd1d8}});
 defItem('bone',{name:'Bone',icon:{t:'bone',c:'#e6e2d0'}});
 defItem('feather',{name:'Feather',icon:{t:'shard',c:'#e8e4d8'}});   // crow/owl drop
 defItem('bucket',{name:'Bucket',icon:{t:'bucket',c:'#b8bcc4'}});
@@ -2488,7 +2628,7 @@ defItem('bottle_water',{name:'Bottle of Clean Water',icon:{t:'jar',c:'#3a8ec0'},
 defItem('waterskin',{name:'Empty Waterskin',max:1,icon:{t:'bucket',c:'#8a5a34'},fillable:'skin_dirty'});
 defItem('skin_dirty',{name:'Waterskin - Murky',max:1,icon:{t:'bucket',c:'#6a5a3a'},drink:{water:14,empty:'waterskin',sick:true}});   // drinkable, but the murk makes you sick
 defItem('skin_water',{name:'Waterskin - Clean',max:1,icon:{t:'bucket',c:'#5a86a8'},drink:{water:14,empty:'waterskin'}});
-defItem('recipe_book',{name:'Field Notebook',max:1,icon:{t:'blob',c:'#7a4a2a'},book:true});   // held → pages of recipes, no menu (right-click turns the page)
+defItem('recipe_book',{name:'Field Notebook',max:1,icon:{t:'book',c:'#7a4a2a'},book:true});   // held → pages of recipes, no menu (right-click turns the page)
 defItem('wooden_bowl',{name:'Wooden Bowl',icon:{t:'bowl',c:'#8a6534'}});
 defItem('apple',{name:'Apple',icon:{t:'round',c:'#b3313b'},food:{h:4,s:2.4}});
 defItem('raw_meat',{name:'Raw Meat',icon:{t:'meat',c:'#c05a5a'},food:{h:3,s:1}});
@@ -2516,7 +2656,12 @@ defItem('ar15',{name:'AR-15',max:1,icon:{t:'tool',kind:'sword',c:'#26262c'},gun:
 defItem('minigun',{name:'Minigun',max:1,icon:{t:'tool',kind:'sword',c:'#3a3a40'},gun:'auto',auto:true,rof:38});   // FULLY AUTOMATIC — hold left-click, spins up and fires ~26 rounds/sec
 defItem('revolver',{name:'Colt Python',max:1,icon:{t:'tool',kind:'sword',c:'#1a1f2b'},gun:'revolver'});   // .357 double-action revolver; left-click = one round per pull (needs rifle_ammo), no scope
 defItem('handcuffs',{name:'Handcuffs',max:1,icon:{t:'coil',c:'#c9ccd2'}});   // found on the dungeon floor — cuff the surrendered Herobrine, then lead it back to the dark
-defItem('dot_sight',{name:'Red Dot Sight',max:1,icon:{t:'round',c:'#ff2a2a'}});   // carry it and every gun you hold gains a red-dot reticle
+defItem('dot_sight',{name:'Holosun Sight',max:1,icon:{t:'round',c:'#ff2a2a'}});   // a holographic sight — CRAFT it together with any gun (not the revolver) to mount it on
+// SIGHTED gun variants — same behaviour as the base gun + a mounted Holosun holo reticle (dot:true). Made by crafting base gun + dot_sight.
+defItem('ar15_dot',{name:'AR-15 · Holosun',max:1,icon:{t:'tool',kind:'sword',c:'#26262c'},gun:true,dot:true});
+defItem('minigun_dot',{name:'Minigun · Holosun',max:1,icon:{t:'tool',kind:'sword',c:'#3a3a40'},gun:'auto',auto:true,rof:38,dot:true});
+defItem('hunting_rifle_dot',{name:'Hunting Rifle · Holosun',max:1,icon:{t:'tool',kind:'sword',c:'#3a2a1a'},gun:'bolt',dot:true});
+defItem('hunting_rifle_suppressed_dot',{name:'Hunting Rifle · Suppressed · Holosun',max:1,icon:{t:'tool',kind:'sword',c:'#26262c'},gun:'bolt',suppressed:true,dot:true});
 defItem('wine',{name:'Wine',max:16,icon:{t:'jar',c:'#7a1030'},drink:{water:8}});   // dropped by Jesus — a communion drink
 defItem('hunting_rifle',{name:'Hunting Rifle',max:1,icon:{t:'tool',kind:'sword',c:'#3a2a1a'},gun:'bolt'});   // scoped bolt-action; left-click fires (needs rifle_ammo), right-click aims down the scope
 defItem('suppressor',{name:'Suppressor',max:4,icon:{t:'bar',c:'#26262c'}});   // a machined iron can — craft it onto the rifle to muffle the shot
@@ -2573,6 +2718,16 @@ function drawIcon(cx,id){
       else if(ch==='H'){cx.fillStyle='#7a5a34';cx.fillRect(x,y,1,1);} else if(ch==='h'){cx.fillStyle='#4a3418';cx.fillRect(x,y,1,1);} } } }
   else if(s.t==='gem'){ cx.fillStyle=c; cx.beginPath(); cx.moveTo(8,3);cx.lineTo(12,7);cx.lineTo(8,13);cx.lineTo(4,7);cx.closePath(); cx.fill(); cx.fillStyle='rgba(255,255,255,.4)'; cx.fillRect(7,6,2,2); }
   else if(s.t==='wings'){ cx.fillStyle=c; for(const sd of [-1,1]){ cx.beginPath(); cx.moveTo(8,4); cx.quadraticCurveTo(8+sd*7,4,8+sd*6,13); cx.quadraticCurveTo(8+sd*3,9,8,9); cx.closePath(); cx.fill(); } cx.fillStyle='rgba(0,0,0,.18)'; cx.fillRect(7.5,4,1,9); }   // a pair of feathered angel wings
+  else if(s.t==='helm'){ cx.fillStyle=c; cx.beginPath(); cx.arc(8,8,6,Math.PI,0); cx.fill(); cx.fillRect(2,8,12,4);   // dome + face guard
+    cx.fillStyle='rgba(0,0,0,.5)'; cx.fillRect(4,9,8,2); cx.fillStyle='rgba(255,255,255,.22)'; cx.fillRect(4,3,3,2); }   // visor slit + highlight
+  else if(s.t==='chest'){ cx.fillStyle=c; cx.beginPath(); cx.moveTo(3,4);cx.lineTo(6,4);cx.lineTo(6,3);cx.lineTo(10,3);cx.lineTo(10,4);cx.lineTo(13,4);cx.lineTo(13,7);cx.lineTo(11,8);cx.lineTo(11,14);cx.lineTo(5,14);cx.lineTo(5,8);cx.lineTo(3,7);cx.closePath(); cx.fill();   // cuirass: shoulders + neck notch + torso
+    cx.fillStyle='rgba(0,0,0,.22)'; cx.fillRect(7,6,2,8); cx.fillStyle='rgba(255,255,255,.18)'; cx.fillRect(4,5,2,2); }
+  else if(s.t==='legs'){ cx.fillStyle=c; cx.fillRect(3,3,10,3); cx.fillRect(3,6,4,9); cx.fillRect(9,6,4,9);   // waist belt + two legs
+    cx.fillStyle='rgba(255,255,255,.18)'; cx.fillRect(4,4,8,1); }
+  else if(s.t==='boots'){ cx.fillStyle=c; for(const bx of [2,9]){ cx.fillRect(bx,4,4,7); cx.fillRect(bx,11,6,3); }   // two L-shaped boots (shaft + foot)
+    cx.fillStyle='rgba(0,0,0,.25)'; cx.fillRect(2,13,13,1); }
+  else if(s.t==='book'){ cx.fillStyle=c; cx.fillRect(3,3,10,11); cx.fillStyle='rgba(240,235,220,.9)'; cx.fillRect(11,4,2,9);   // cover + page edge
+    cx.fillStyle='rgba(0,0,0,.35)'; cx.fillRect(3,3,2,11); cx.fillStyle='rgba(255,255,255,.2)'; cx.fillRect(5,5,5,1); cx.fillRect(5,7,4,1); }   // spine + title lines
   else { circ(8,8,5,c); }
 }
 function iconURL(id){ if(iconCache[id])return iconCache[id]; const cv=document.createElement('canvas'); cv.width=cv.height=32; const cx=cv.getContext('2d'); cx.imageSmoothingEnabled=false; cx.save(); cx.scale(2,2); drawIcon(cx,id); cx.restore(); iconCache[id]=cv.toDataURL(); return iconCache[id]; }
@@ -2594,7 +2749,7 @@ function invCount(id){ let c=0; for(const s of inv) if(s&&s.id===id) c+=s.n; ret
 function invRemove(id,n){ for(let i=0;i<INV_N&&n>0;i++){ const s=inv[i]; if(s&&s.id===id){ const t=Math.min(s.n,n); s.n-=t; n-=t; if(s.n<=0)inv[i]=null; } } refreshHotbar(); }
 function heldSlot(){ return inv[selSlot]; }
 // starter kit lives in a CHEST at spawn (see buildSpawnChest) — you begin empty-handed and open it
-defItem('field_guide',{name:'Field Guide',max:1,icon:{t:'blob',c:'#6a4a28'},guide:true});   // right-click to read the survival essentials
+defItem('field_guide',{name:'Field Guide',max:1,icon:{t:'book',c:'#6a4a28'},guide:true});   // right-click to read the survival essentials
 const STARTER_ITEMS=[['field_guide',1],['apple',2],['wood_axe',1],['rifle_ammo',2],['torch',4]];
 
 // =====================================================================
@@ -2623,7 +2778,11 @@ shaped('ar15',1,['IBI','PDP','III'],{I:'iron_ingot',B:'rifle_ammo',P:'metal_spri
 shaped('revolver',1,[' I ','ISI','IWI'],{I:'iron_ingot',S:'metal_spring',W:'stick'});   // Colt Python: 5 iron (frame/barrel/underlug) + a spring (double-action) + a wood grip
 shaped('minigun',1,['III','SAS','III'],{I:'iron_ingot',S:'metal_spring',A:'ar15'});   // MINIGUN: 6 iron + 2 springs built around an AR-15 core — the endgame full-auto
 shaped('angel_wings',1,['FLF','FLF','F F'],{F:'feather',L:'leather'});   // ANGEL WINGS: feathers stitched over a leather harness → glide flight
-shaped('dot_sight',1,[' G ','IBI'],{G:'glass',I:'iron_ingot',B:'rifle_ammo'});   // RED DOT SIGHT: a glass lens on an iron mount
+shaped('dot_sight',1,[' G ','IBI'],{G:'glass',I:'iron_ingot',B:'rifle_ammo'});   // HOLOSUN SIGHT: a glass lens on an iron mount
+shapeless('ar15_dot',1,['ar15','dot_sight']);                                     // mount the Holosun on a gun (revolver excluded)
+shapeless('minigun_dot',1,['minigun','dot_sight']);
+shapeless('hunting_rifle_dot',1,['hunting_rifle','dot_sight']);
+shapeless('hunting_rifle_suppressed_dot',1,['hunting_rifle_suppressed','dot_sight']);
 shaped('suppressor',1,['III','I I','III'],{I:'iron_ingot'});                          // a hollow iron can (8 ingots) → the suppressor
 shapeless('hunting_rifle_suppressed',1,['hunting_rifle','suppressor']);               // thread the suppressor onto the rifle → the suppressed variant
 shapeless('flint_and_steel',1,['flint','iron_ingot']);
@@ -6067,12 +6226,12 @@ function buildBook(){ _bookInit(); bakeBookPage(); const grp=new THREE.Group();
   const page=new THREE.Mesh(new THREE.PlaneGeometry(0.58,0.4),new THREE.MeshBasicMaterial({map:_bookTex})); page.position.z=0.006; grp.add(page);
   grp.userData.book=1; return grp; }
 function itemModel(id){ const it=ITEMS[id];
-  if(it&&it.book) return buildBook();
+  if(it&&(it.book||it.guide)) return buildBook();
   if(!it) return new THREE.Mesh(new THREE.BoxGeometry(0.2,0.2,0.2), new THREE.MeshLambertMaterial({color:0xcc33cc}));
-  if(it.gun==='bolt') return buildBoltRifle();
-  if(it.gun==='auto') return buildMinigun();
+  if(it.gun==='bolt') return buildBoltRifle(it.suppressed,it.dot);
+  if(it.gun==='auto') return buildMinigun(it.dot);
   if(it.gun==='revolver') return buildRevolver();
-  if(it.gun) return buildAR15();
+  if(it.gun) return buildAR15(it.dot);
   if(id==='handcuffs') return buildHandcuffs();
   if(it.block===BID.torch_unlit) return buildHeldTorch(false);
   if(it.block===BID.lantern) return buildHeldLantern();
@@ -6080,7 +6239,9 @@ function itemModel(id){ const it=ITEMS[id];
   if(it.block===BID.torch) return buildHeldTorch();
   if(it.block===BID.red_torch) return buildHeldTorch(true,true);   // red shrine torch — same model, bright-red flame
   if(it.spear) return buildSpear(it.spear);   // spears are real 3D objects everywhere they appear
-  if(it.block!=null && B[it.block] && B[it.block].cat==='model'){ const bd=B[it.block]; let geo; try{ geo=modelMeshFor(it.block); }catch(e){} if(!geo)geo=new THREE.BoxGeometry(0.4,0.4,0.4);   // MODEL blocks (fence/bars/chair/gate/…) render their real model as the icon, not a grass cube
+  if(it.block!=null && B[it.block] && B[it.block].cat==='model'){ const bd=B[it.block];
+    if(MODEL_ITEM_BUILDERS[bd.model]){ try{ return MODEL_ITEM_BUILDERS[bd.model](bd); }catch(e){} }   // rich decorative model — single source of truth
+    let geo; try{ geo=modelMeshFor(it.block); }catch(e){} if(!geo)geo=new THREE.BoxGeometry(0.4,0.4,0.4);   // MODEL blocks (fence/bars/chair/gate/…) render their real model as the icon, not a grass cube
     return new THREE.Mesh(geo, new THREE.MeshLambertMaterial({color: bd.col!=null?bd.col:0x8a7048})); }
   if(it.block!=null) return new THREE.Mesh(new THREE.BoxGeometry(0.3,0.3,0.3), new THREE.MeshLambertMaterial({map:dropTex(id),transparent:true}));
   if(it.tool && it.tool.kind==='sword') return buildGreatsword(it.tool);   // swords are real 3D greatswords everywhere (hand, drop, 3D icon)
@@ -6421,24 +6582,24 @@ function _bendGeoY(geo,k){ const p=geo.attributes.position; for(let i=0;i<p.coun
 function _dishGeoX(geo,k){ const p=geo.attributes.position; for(let i=0;i<p.count;i++)p.setZ(i,p.getZ(i)+k*p.getX(i)*p.getX(i)); p.needsUpdate=true; geo.computeVertexNormals(); return geo; }
 function buildPickaxe(tool){ const g=new THREE.Group(); const tier=(tool&&tool.tier)||'iron'; const hM=woodMat(TIER_HANDLE[tier],5), mM=headMat(tier);
   const handle=new THREE.Mesh(new THREE.CylinderGeometry(0.022,0.030,0.80,10),hM); handle.position.y=-0.10; g.add(handle);
-  const eye=new THREE.Mesh(new THREE.CylinderGeometry(0.046,0.050,0.105,12),mM); eye.position.y=0.31; g.add(eye);
-  for(const s of [-1,1]){ const arm=new THREE.Mesh(new THREE.ConeGeometry(0.030,0.36,10),mM); arm.position.set(s*0.135,0.315,0); arm.rotation.z=-s*(Math.PI/2)-s*0.30; g.add(arm); }   // point ±X, tipped down
+  const eye=new THREE.Mesh(new THREE.CylinderGeometry(0.060,0.065,0.135,12),mM); eye.position.y=0.31; g.add(eye);
+  for(const s of [-1,1]){ const arm=new THREE.Mesh(new THREE.ConeGeometry(0.040,0.48,10),mM); arm.position.set(s*0.17,0.315,0); arm.rotation.z=-s*(Math.PI/2)-s*0.30; g.add(arm); }   // point ±X, tipped down (bigger head)
   g.traverse(o=>{ if(o.isMesh){o.castShadow=true;o.receiveShadow=true;} }); return g; }
 function buildAxe(tool){ const g=new THREE.Group(); const tier=(tool&&tool.tier)||'iron'; const hM=woodMat(TIER_HANDLE[tier],5), mM=headMat(tier);
   const handle=new THREE.Mesh(new THREE.CylinderGeometry(0.022,0.030,0.80,10),hM); handle.position.y=-0.10; g.add(handle);
-  const s=new THREE.Shape(); s.moveTo(-0.055,-0.095); s.lineTo(-0.095,-0.105); s.lineTo(-0.095,0.105); s.lineTo(-0.055,0.095);
-  s.lineTo(0.10,0.135); s.quadraticCurveTo(0.245,0.0,0.10,-0.135); s.lineTo(-0.055,-0.095);          // curved +X cutting edge
-  const head=new THREE.Mesh(new THREE.ExtrudeGeometry(s,{depth:0.05,bevelEnabled:true,bevelThickness:0.008,bevelSize:0.008,bevelSegments:1}),mM);
-  head.position.set(0,0.335,-0.025); g.add(head);
-  const eye=new THREE.Mesh(new THREE.CylinderGeometry(0.040,0.044,0.12,10),mM); eye.position.y=0.32; g.add(eye);   // socket collar over the handle
+  const s=new THREE.Shape(); s.moveTo(-0.072,-0.124); s.lineTo(-0.124,-0.137); s.lineTo(-0.124,0.137); s.lineTo(-0.072,0.124);
+  s.lineTo(0.13,0.176); s.quadraticCurveTo(0.319,0.0,0.13,-0.176); s.lineTo(-0.072,-0.124);          // curved +X cutting edge (bigger head)
+  const head=new THREE.Mesh(new THREE.ExtrudeGeometry(s,{depth:0.065,bevelEnabled:true,bevelThickness:0.01,bevelSize:0.01,bevelSegments:1}),mM);
+  head.position.set(0,0.34,-0.033); g.add(head);
+  const eye=new THREE.Mesh(new THREE.CylinderGeometry(0.052,0.057,0.14,10),mM); eye.position.y=0.32; g.add(eye);   // socket collar over the handle
   g.traverse(o=>{ if(o.isMesh){o.castShadow=true;o.receiveShadow=true;} }); return g; }
 function buildShovel(tool){ const g=new THREE.Group(); const tier=(tool&&tool.tier)||'iron'; const hM=woodMat(TIER_HANDLE[tier],5), mM=headMat(tier);
   const handle=new THREE.Mesh(new THREE.CylinderGeometry(0.022,0.030,0.76,10),hM); handle.position.y=-0.12; g.add(handle);
-  const s=new THREE.Shape(); s.moveTo(-0.10,0.0); s.lineTo(0.10,0.0); s.lineTo(0.11,0.155); s.quadraticCurveTo(0.0,0.285,-0.11,0.155); s.lineTo(-0.10,0.0);
-  const geo=new THREE.ExtrudeGeometry(s,{depth:0.028,bevelEnabled:true,bevelThickness:0.006,bevelSize:0.006,bevelSegments:1});
+  const s=new THREE.Shape(); s.moveTo(-0.13,0.0); s.lineTo(0.13,0.0); s.lineTo(0.143,0.20); s.quadraticCurveTo(0.0,0.37,-0.143,0.20); s.lineTo(-0.13,0.0);   // bigger spade blade
+  const geo=new THREE.ExtrudeGeometry(s,{depth:0.036,bevelEnabled:true,bevelThickness:0.008,bevelSize:0.008,bevelSegments:1});
   geo.center(); _dishGeoX(geo,0.9);                                                                  // scoop concavity
-  const blade=new THREE.Mesh(geo,mM); blade.position.set(0,0.40,0); g.add(blade);
-  const socket=new THREE.Mesh(new THREE.CylinderGeometry(0.032,0.040,0.12,10),mM); socket.position.y=0.28; g.add(socket);
+  const blade=new THREE.Mesh(geo,mM); blade.position.set(0,0.42,0); g.add(blade);
+  const socket=new THREE.Mesh(new THREE.CylinderGeometry(0.042,0.052,0.14,10),mM); socket.position.y=0.28; g.add(socket);
   g.traverse(o=>{ if(o.isMesh){o.castShadow=true;o.receiveShadow=true;} }); return g; }
 function buildSpear(spec){ spec=spec||{};
   const shaftCol=spec.shaft!=null?spec.shaft:0x7a5a34, headCol=spec.head!=null?spec.head:0xb8bcc4, lashCol=spec.lash!=null?spec.lash:0x5a4428, tipCol=spec.tip!=null?spec.tip:headCol, rust=!!spec.rust;
@@ -6496,7 +6657,20 @@ function buildHandcuffs(){ const g=new THREE.Group(); const steel=new THREE.Mesh
   g.traverse(o=>{ if(o.isMesh)o.castShadow=true; }); return g; }
 // procedural 3D MINIGUN — a rotary cluster of 6 barrels on a chunky receiver (muzzle points -z; barrels group spins while firing)
 // M134-pattern rotary minigun — 6-barrel cluster (spins via userData.barrels), rotor housing, gearbox, delrin feed + ammo can, spade grip. Muzzle -z.
-function buildMinigun(){ const g=new THREE.Group();
+// HOLOSUN XPS-pattern enclosed holographic sight: dark hood, tinted glass window, a floating red ring+dot HOLO reticle
+function buildHoloSight(){ const g=new THREE.Group();
+  const body=new THREE.MeshPhongMaterial({color:0x191b21,shininess:70,specular:0x454a55});
+  const base=new THREE.Mesh(new THREE.BoxGeometry(0.072,0.02,0.08),body); base.position.y=-0.028; g.add(base);          // rail clamp
+  const foot=new THREE.Mesh(new THREE.BoxGeometry(0.05,0.014,0.055),body); foot.position.y=-0.016; g.add(foot);
+  for(const s of [-1,1]){ const w=new THREE.Mesh(new THREE.BoxGeometry(0.011,0.07,0.072),body); w.position.set(s*0.038,0.012,0); g.add(w); }   // hood side walls
+  const top=new THREE.Mesh(new THREE.BoxGeometry(0.088,0.013,0.072),body); top.position.y=0.05; g.add(top);            // hood roof
+  const front=new THREE.Mesh(new THREE.BoxGeometry(0.088,0.016,0.010),body); front.position.set(0,-0.004,-0.036); g.add(front);   // front lip (window stays open)
+  const glass=new THREE.Mesh(new THREE.PlaneGeometry(0.06,0.055), new THREE.MeshPhongMaterial({color:0x0e2434,transparent:true,opacity:0.34,shininess:220,specular:0x99ccff,side:THREE.DoubleSide,depthWrite:false})); glass.position.set(0,0.010,0.004); glass.rotation.x=-0.16; g.add(glass);   // tinted holo window
+  const rmat=new THREE.MeshBasicMaterial({color:0xff2323,transparent:true,opacity:0.92,depthTest:false,depthWrite:false,blending:THREE.AdditiveBlending});   // self-lit holographic red, always visible through the glass
+  const ring=new THREE.Mesh(new THREE.RingGeometry(0.016,0.020,28),rmat); ring.position.set(0,0.012,0.014); ring.renderOrder=12; g.add(ring);   // holo circle
+  const dot=new THREE.Mesh(new THREE.CircleGeometry(0.0045,12),rmat); dot.position.set(0,0.012,0.0142); dot.renderOrder=12; g.add(dot);         // center dot
+  g.traverse(o=>{ if(o.isMesh)o.castShadow=true; }); return g; }
+function buildMinigun(dot){ const g=new THREE.Group();
   const gm  =new THREE.MeshPhongMaterial({color:0x2d2f37,shininess:60,specular:0x474b57});
   const dark=new THREE.MeshPhongMaterial({color:0x141519,shininess:100,specular:0x40434e});
   const brass=new THREE.MeshPhongMaterial({color:0x8a6a2c,shininess:120,specular:0xd8b060});
@@ -6510,10 +6684,11 @@ function buildMinigun(){ const g=new THREE.Group();
   const feed=new THREE.Mesh(new THREE.BoxGeometry(0.08,0.04,0.05),gm); feed.position.set(-0.07,0.0,0.06); g.add(feed);   // delrin feed chute
   { const belt=new THREE.Mesh(new THREE.BoxGeometry(0.05,0.03,0.09),brass); belt.position.set(-0.1,-0.06,0.1); belt.rotation.z=0.3; g.add(belt); }   // a hint of ammo belt
   const grip=new THREE.Mesh(new THREE.BoxGeometry(0.045,0.16,0.055),dark); grip.position.set(0,-0.15,0.19); grip.rotation.x=0.24; g.add(grip);   // spade/pistol grip
+  if(dot){ const hs=buildHoloSight(); hs.position.set(0,0.11,0.06); g.add(hs); }   // crafted Holosun on top of the gearbox
   g.userData.barrels=barrels; g.traverse(o=>{ if(o.isMesh)o.castShadow=true; }); g.rotation.set(0.06,0,0.04); return g; }
 // M4-pattern AR-15 — minimal but reads real: split upper/lower, free-float M-LOK handguard, full-length flat-top rail,
 // A2 birdcage, low-profile gas block, compact red-dot, curved STANAG mag, A2 grip, collapsible stock. Muzzle points -z.
-function buildAR15(){ const g=new THREE.Group();
+function buildAR15(dot){ const g=new THREE.Group();
   const gm  =new THREE.MeshPhongMaterial({color:0x23242a,shininess:70,specular:0x3a3d47});    // blued/anodized aluminium
   const poly=new THREE.MeshPhongMaterial({color:0x16171b,shininess:22,specular:0x101014});    // matte polymer (grip/stock/mag/handguard)
   const blk =new THREE.MeshPhongMaterial({color:0x0d0e11,shininess:120,specular:0x53586a});   // deep-black steel (barrel/flash/rail)
@@ -6526,7 +6701,8 @@ function buildAR15(){ const g=new THREE.Group();
   tube(0.013,0.24,blk,      0,0.035,-0.30);            // barrel
   tube(0.02,0.055,blk,      0,0.035,-0.475);           // A2 birdcage flash hider
   box(0.022,0.03,0.03,blk,  0,0.062,-0.285);           // low-profile gas block
-  { const s=new THREE.Mesh(new THREE.BoxGeometry(0.032,0.042,0.06),poly); s.position.set(0,0.098,0.03); s.castShadow=true; g.add(s);   // compact red-dot optic body
+  if(dot){ const hs=buildHoloSight(); hs.position.set(0,0.085,0.055); g.add(hs); }   // crafted Holosun replaces the tiny fixed optic
+  else { const s=new THREE.Mesh(new THREE.BoxGeometry(0.032,0.042,0.06),poly); s.position.set(0,0.098,0.03); s.castShadow=true; g.add(s);   // compact red-dot optic body (stock)
     const lens=new THREE.Mesh(new THREE.CircleGeometry(0.015,16),new THREE.MeshPhongMaterial({color:0x1a2b1a,shininess:200,specular:0x66ffaa})); lens.position.set(0,0.098,0.062); g.add(lens); }
   box(0.03,0.12,0.044,poly, 0,-0.092,0.03, -0.16);     // curved STANAG magazine (slight forward rake)
   box(0.032,0.088,0.04,poly,0,-0.07,0.115, 0.42);      // A2 pistol grip
@@ -6537,7 +6713,7 @@ function buildAR15(){ const g=new THREE.Group();
   flash.position.set(0,0.035,-0.51); flash.scale.set(1.1,1.1,1); flash.visible=false; g.add(flash); g.userData.flash=flash;   // muzzle flash sprite (shown on fire)
   return g; }
 // SCOPED BOLT-ACTION HUNTING RIFLE — walnut stock + blued steel + a big glass scope. muzzle points -z. userData.bolt = the cycling handle.
-function buildBoltRifle(suppressed){ const g=new THREE.Group();
+function buildBoltRifle(suppressed,dot){ const g=new THREE.Group();
   const steel=new THREE.MeshPhongMaterial({color:0x23242b,shininess:130,specular:0x565c68});
   const dark =new THREE.MeshPhongMaterial({color:0x121319,shininess:90,specular:0x2a2a33});
   const wood =new THREE.MeshPhongMaterial({color:0x5b3a20,shininess:36,specular:0x241811});
@@ -6549,7 +6725,7 @@ function buildBoltRifle(suppressed){ const g=new THREE.Group();
   box(0.055,0.05,0.5,wood, 0,-0.035,0.02);             // fore-stock (wood under the barrel)
   box(0.062,0.128,0.30,wood, 0,-0.045,0.31);           // butt-stock (fuller)
   box(0.05,0.11,0.05,wood, 0,-0.09,0.15, 0.5);         // wrist/grip
-  box(0.056,0.03,0.13,wood, 0,0.055,0.29);             // raised cheek comb (over the wrist, under the scope eyepiece)
+  box(0.05,0.02,0.11,wood, 0,0.02,0.30);               // low cheek riser flush with the stock top (was a weird floating block behind the scope)
   box(0.05,0.055,0.10,steel,0,-0.075,-0.03);           // detachable-mag floorplate under the receiver
   { const bp=new THREE.Mesh(new THREE.BoxGeometry(0.045,0.012,0.03),dark); bp.position.set(0,-0.108,-0.03); g.add(bp); }   // recoil pad line on the buttplate
   // BOLT ASSEMBLY (right side) — a complete bolt: body cylinder in the receiver, an angled handle arm + round knob. Animated on the cycle.
@@ -6573,6 +6749,7 @@ function buildBoltRifle(suppressed){ const g=new THREE.Group();
     const collar=new THREE.Mesh(new THREE.CylinderGeometry(0.043,0.043,0.02,16),steel); collar.rotation.x=Math.PI/2; collar.position.set(0,0.02,-0.585); g.add(collar); }                    // thread collar where it meets the barrel
   const flash=buildMuzzleFlash(); flash.renderOrder=8; flash.userData.base=suppressed?0.6:1;
   flash.position.set(0,0.02, suppressed?-0.86:-0.62); flash.scale.setScalar(suppressed?0.6:1); flash.visible=false; g.add(flash); g.userData.flash=flash;   // suppressed → smaller flash, out the can's front
+  if(dot){ const hs=buildHoloSight(); hs.scale.setScalar(0.8); hs.position.set(0,0.088,-0.17); g.add(hs); }   // crafted Holosun mounted forward (scout) so it clears the scope
   return g; }
 // COLT PYTHON .357 — the signature look: heavy 6" barrel with a VENTILATED RIB on top + a FULL-LENGTH UNDERLUG (ejector-rod shroud) below,
 // fluted 6-shot cylinder, adjustable rear sight + ramp front sight, spur hammer, full walnut target grips. Muzzle points -z. Royal-blue steel.
@@ -6615,10 +6792,10 @@ function setViewItem(id){ if(view.id===id)return; view.id=id;
   if(view.mesh){ view.group.remove(view.mesh); _disposeView(view.mesh); view.mesh=null; }
   if(!id||!ITEMS[id]){ view.mesh=buildFist(); view.group.add(view.mesh); applyViewFog(view.mesh); return; }   // empty hand → a real fist you punch with
   const it=ITEMS[id];
-  if(it.gun==='bolt') view.mesh=buildBoltRifle(it.suppressed);
-  else if(it.gun==='auto') view.mesh=buildMinigun();                                 // minigun (full-auto) — was falling into the AR-15 branch below
+  if(it.gun==='bolt') view.mesh=buildBoltRifle(it.suppressed,it.dot);
+  else if(it.gun==='auto') view.mesh=buildMinigun(it.dot);                                 // minigun (full-auto) — was falling into the AR-15 branch below
   else if(it.gun==='revolver') view.mesh=buildRevolver();
-  else if(it.gun) view.mesh=buildAR15();
+  else if(it.gun) view.mesh=buildAR15(it.dot);
   else if(id==='handcuffs'){ view.mesh=buildHandcuffs(); view.mesh.scale.setScalar(0.8); }   // held cuffs — was falling through to the generic extruded-icon path and not showing as the real model
   else if(it.block===BID.torch_unlit){ view.mesh=buildHeldTorch(false); view.mesh.scale.setScalar(0.6); }
   else if(it.block===BID.lantern){ view.mesh=buildHeldLantern(); view.mesh.scale.setScalar(0.7); }
@@ -6626,13 +6803,18 @@ function setViewItem(id){ if(view.id===id)return; view.id=id;
   else if(it.block===BID.torch){ view.mesh=buildHeldTorch(); view.mesh.scale.setScalar(0.6); }
   else if(it.block===BID.red_torch){ view.mesh=buildHeldTorch(true,true); view.mesh.scale.setScalar(0.6); }   // held red shrine torch
   else if(it.spear){ view.mesh=buildSpear(it.spear); view.mesh.userData.spearHeld=true; }   // carried cocked behind the shoulder — see updateView
-  else if(it.book){ view.mesh=buildBook(); view.mesh.userData.bookHeld=true; }   // held open, readable — see updateView
-  else if(it.block!=null) view.mesh=new THREE.Mesh(new THREE.BoxGeometry(0.2,0.2,0.2), new THREE.MeshLambertMaterial({map:dropTex(id)}));
+  else if(it.book||it.guide){ view.mesh=buildBook(); view.mesh.userData.bookHeld=true; }   // held open, readable — see updateView
+  else if(it.block!=null && B[it.block] && B[it.block].cat==='model'){ const mm=itemModel(id);   // MODEL blocks held as their REAL 3D model (fence/chest/gate/bars/bed/…), centred + scaled — not a tiny cube
+    const bb=new THREE.Box3().setFromObject(mm), sz=bb.getSize(new THREE.Vector3()), ctr=bb.getCenter(new THREE.Vector3()), s=0.34/(Math.max(sz.x,sz.y,sz.z)||1);
+    mm.scale.setScalar(s); mm.position.set(-ctr.x*s,-ctr.y*s,-ctr.z*s); view.mesh=mm; }
+  else if(it.block!=null) view.mesh=new THREE.Mesh(new THREE.BoxGeometry(0.2,0.2,0.2), new THREE.MeshLambertMaterial({map:dropTex(id)}));   // SOLID blocks → a small textured cube in hand (correct for placing)
   else if(it.tool && it.tool.kind==='sword'){ const grp=new THREE.Group(); const sw=buildGreatsword(it.tool);   // GUTS greatsword — a big slab canted across the view
     sw.position.set(0.30,-0.12,0); grp.add(sw); grp.scale.setScalar(0.6); grp.rotation.set(0.2,0.18+Math.PI/2,0.24); view.mesh=grp; }
+  else if(it.tool && (it.tool.kind==='pickaxe'||it.tool.kind==='axe'||it.tool.kind==='shovel')){   // the real 3D tool models in-hand (not the flat extruded icon)
+    const grp=new THREE.Group(); const tm=(it.tool.kind==='pickaxe'?buildPickaxe(it.tool):it.tool.kind==='axe'?buildAxe(it.tool):buildShovel(it.tool));
+    tm.position.set(0.30,0.28,0); grp.add(tm); grp.scale.setScalar(1.08); grp.rotation.set(0.12,0.18+Math.PI/2,0.14); view.mesh=grp; }   // handle-bottom near the pivot → swings from the base (1.5x bigger in hand)
   else { const grp=new THREE.Group(); const em=extrudeIcon(id); em.position.set(0.34,0.44,0); grp.add(em); grp.scale.setScalar(0.5);
-    const flipAxe=(it.tool&&it.tool.kind==='axe')?Math.PI:0;                                      // the axe reads backwards → flip only it 180° horizontally (leaves pickaxe/shovel/sword)
-    grp.rotation.set(0.1,0.18+Math.PI/2+flipAxe,0.15); view.mesh=grp; }   // handle-bottom at the pivot → tools swing from the base of the stick
+    grp.rotation.set(0.1,0.18+Math.PI/2,0.15); view.mesh=grp; }   // food / materials → extruded pixel model
   view.group.add(view.mesh); applyViewFog(view.mesh); }
 // ANGEL WINGS — a feathered pair mounted just behind the camera, shown (and flapping) only while gliding
 let _wingRig=null;
@@ -6649,9 +6831,9 @@ function updateWings(dt){ if(typeof camera==='undefined')return;
   if(on){ const fl=Math.sin(clock.elapsedTime*7)*0.22; _wingRig.userData.L.rotation.z=0.35+fl; _wingRig.userData.R.rotation.z=-0.35-fl; } }
 // RED DOT SIGHT — a crisp red reticle at screen centre whenever you hold a gun and carry a dot sight (hidden while scoped)
 let _dotEl=null;
-function updateDotSight(){ if(!_dotEl){ _dotEl=document.createElement('div'); _dotEl.style.cssText='position:fixed;left:50%;top:50%;width:7px;height:7px;margin:-3.5px 0 0 -3.5px;border-radius:50%;background:#ff2a2a;box-shadow:0 0 5px 2px rgba(255,42,42,0.7);z-index:24;pointer-events:none;display:none;'; document.body.appendChild(_dotEl); }
-  const hs=heldSlot(), g=!!(hs&&ITEMS[hs.id]&&ITEMS[hs.id].gun), has=(typeof invCount==='function')&&invCount('dot_sight')>0, ads=!!(typeof view!=='undefined'&&view.ads);
-  _dotEl.style.display=(g&&has&&locked&&!ads&&!player.grabbed&&!openUI)?'block':'none'; }
+function updateDotSight(){ if(!_dotEl){ _dotEl=document.createElement('div'); _dotEl.style.cssText='position:fixed;left:50%;top:50%;width:26px;height:26px;margin:-13px 0 0 -13px;border-radius:50%;border:2px solid rgba(255,40,40,0.9);box-shadow:0 0 6px 1px rgba(255,40,40,0.55),inset 0 0 4px rgba(255,40,40,0.4);z-index:24;pointer-events:none;display:none;'; const c=document.createElement('div'); c.style.cssText='position:absolute;left:50%;top:50%;width:5px;height:5px;margin:-2.5px 0 0 -2.5px;border-radius:50%;background:#ff2a2a;box-shadow:0 0 5px 2px rgba(255,42,42,0.8);'; _dotEl.appendChild(c); document.body.appendChild(_dotEl); }   // holo ring + center dot
+  const hs=heldSlot(), gi=hs&&ITEMS[hs.id], hasDot=!!(gi&&gi.gun&&gi.dot), ads=!!(typeof view!=='undefined'&&view.ads);   // shown only for a gun with a CRAFTED Holosun (not the bolt scope)
+  _dotEl.style.display=(hasDot&&locked&&!ads&&!player.grabbed&&!openUI)?'block':'none'; }
 function updateView(dt){ if(player.grabbed){ view.group.visible=false; return; }   // no hands/held item during the capture — only the maw fills the screen
   setViewItem(heldSlot()?heldSlot().id:null);
   // SPEAR CHARGE (right-hold = wind up a throw, like drawing a bow). Cancel if we lose focus / swap off the spear.
@@ -6664,7 +6846,7 @@ function updateView(dt){ if(player.grabbed){ view.group.visible=false; return; }
   const b=Math.sin(view.bob*2)*0.02*Math.min(1,sp/6);
   const gunKind=ITEMS[view.id]&&ITEMS[view.id].gun, isGun=!!gunKind, isBolt=gunKind==='bolt';
   // bolt cycle animation + fire-gating clock
-  view.boltT=Math.max(0,(view.boltT||0)-dt);
+  view.boltT=Math.max(0,(view.boltT||0)-dt); view.revKick=Math.max(0,(view.revKick||0)-dt*7);   // revolver recoil decays (was set on fire but never consumed → no kick)
   view.ads = !!(isBolt && heldBtn===2 && locked && !openUI && view.boltT<=0);   // aim down the scope on right-hold (not mid-cycle)
   if(scopeEl) scopeEl.style.display='none';                          // old black surround retired — the PiP scope (renderScope) draws the glass without blacking the screen
   view.group.visible = true;   // viewmodel is ALWAYS drawn — the magnified sight lives on the rifle's rear lens (PiP), so we keep the whole optic on-screen and let adsT drive the raise/zoom/fade
@@ -6675,7 +6857,7 @@ function updateView(dt){ if(player.grabbed){ view.group.visible=false; return; }
   if(isGun){
     // smoothed STRAFE SWAY — signed lateral/forward velocity relative to facing, eased every frame so the gun drifts instead of snapping
     const latV=player.vel.x*Math.cos(player.yaw)+player.vel.z*(-Math.sin(player.yaw));   // + = strafing right
-    view.gunLat=(view.gunLat||0)+((clamp(latV,-6,6)/6)-(view.gunLat||0))*Math.min(1,dt*7);
+    view.gunLat=(view.gunLat||0)+((clamp(latV,-6,6)/6)-(view.gunLat||0))*Math.min(1,dt*5);   // eased smoother
     // WALL BEND — probe straight ahead; if a block is close, pull the muzzle back toward the player and tilt it up so it never clips through
     { const fx=-Math.sin(player.yaw), fz=-Math.cos(player.yaw); let near=1.6;
       for(let d=0.5; d<=1.55; d+=0.22){ if(solidAt(player.pos.x+fx*d, player.pos.y+EYE, player.pos.z+fz*d)){ near=d; break; } }
@@ -6693,7 +6875,7 @@ function updateView(dt){ if(player.grabbed){ view.group.visible=false; return; }
     let swx = Math.sin(et*0.9)*0.0034 + Math.sin(et*0.53)*0.0020;
     let swy = Math.cos(et*0.8)*0.0030 + Math.sin(et*1.27)*0.0016;
     // (b) PLAYER-MOVEMENT sway — grows with speed (bob) + a SMOOTH lateral lean from the already-eased strafe term
-    swx += Math.sin(et*1.7)*mv*0.011 - lat*0.030;
+    swx += Math.sin(et*1.7)*mv*0.011 + lat*0.014;   // strafe lean: flipped (was reversed) + tamed
     swy += Math.cos(et*2.1)*mv*0.010 + b*0.4 - view.swing*0.05;
     // (c) MOUSE-MOVEMENT lag — the optic TRAILS the look and settles back (weight/inertia). Track per-frame view delta, ease a counter-offset toward it, decay to 0 when the look stops
     const dYaw=player.yaw-(view.prevYaw==null?player.yaw:view.prevYaw), dPitch=player.pitch-(view.prevPitch==null?player.pitch:view.prevPitch);
@@ -6709,14 +6891,15 @@ function updateView(dt){ if(player.grabbed){ view.group.visible=false; return; }
     const settle=Math.sin(view.settleT*26)*view.settleT*0.06;
     swx += settle*0.5; swy += settle;
     // ---- POSE BLEND: hip(ready) ↔ scope(aimed), a REAL interpolation by smoothstep(adsT) — no hard flip ----
-    const sPx=swx - lat*0.02, sPy=-0.10 + b*0.3 + swy + bend*0.05, sPz=-0.38 + bend*0.16;                 // scope (cheek-weld) pose — centred on the eye-line, sway applied
-    const sRx=view.swing*0.4 + swy*0.6 + bend*0.35, sRy=swx*0.6 - lat*0.05, sRz=lat*0.06;
-    const hPx=0.17 - lat*0.05, hPy=-0.20+b + bend*0.06, hPz=-0.5 + bend*0.26;                              // hip (ready) pose
-    const hRx=view.swing*0.55 + bend*0.6, hRy=0.05 - lat*0.10, hRz=lat*0.12;
+    const sPx=swx + lat*0.010, sPy=-0.10 + b*0.3 + swy + bend*0.05, sPz=-0.38 + bend*0.16;                 // scope (cheek-weld) pose — flipped + tamed strafe lean
+    const sRx=view.swing*0.4 + swy*0.6 + bend*0.35, sRy=swx*0.6 + lat*0.022, sRz=-lat*0.028;
+    const hPx=0.17 + lat*0.024, hPy=-0.20+b + bend*0.06, hPz=-0.5 + bend*0.26;                             // hip (ready) pose — flipped + tamed strafe lean
+    const hRx=view.swing*0.55 + bend*0.6, hRy=0.05 + lat*0.05, hRz=-lat*0.055;
     const e=adsT*adsT*(3-2*adsT);                                                                          // smoothstep so the raise starts & lands gently
     view.group.visible=true;
     view.group.position.set(hPx+(sPx-hPx)*e, hPy+(sPy-hPy)*e, hPz+(sPz-hPz)*e);
-    view.group.rotation.set(hRx+(sRx-hRx)*e, hRy+(sRy-hRy)*e, hRz+(sRz-hRz)*e); }
+    view.group.rotation.set(hRx+(sRx-hRx)*e, hRy+(sRy-hRy)*e, hRz+(sRz-hRz)*e);
+    if(view.revKick){ view.group.position.z+=view.revKick*0.11; view.group.rotation.x-=view.revKick*0.6; } }   // sharp revolver recoil kick — muzzle rises + gun drives back
   else if(ITEMS[view.id]&&ITEMS[view.id].spear){
     // carried COCKED BEHIND THE RIGHT SHOULDER: butt high behind, tip angled up-forward. Charging winds it
     // further back and levels the tip toward the crosshair (aiming the throw), like drawing a bow.
@@ -6818,10 +7001,10 @@ function killWretch(){ spawnParticles(wretch.pos.x,wretch.pos.y+1,wretch.pos.z,0
   const bx=Math.floor(wretch.pos.x), bz=Math.floor(wretch.pos.z), gy=groundYAt(bx+0.5,bz+0.5,Math.floor(wretch.pos.y)+4), wasBoss=!!wretch.boss;
   dropWretchCorpse();                                                    // its body stays where it fell
   if(wretch.dragging) endDrag(false); despawnWretch(true); wretch.everHurt=false; HORROR.encounters=0;
-  if(wasBoss){ wretch.boss=false; wretch.hpMax=2700; wretch.hp=2700; if(wretch.group)wretch.group.scale.setScalar(WRETCH_BASE_SCALE);   // the MEGA-WRETCH is slain — reset, no haunt
+  if(wasBoss){ wretch.boss=false; wretch.hpMax=2700; wretch.hp=2700; if(wretch.group)wretch.group.scale.setScalar(WRETCH_BASE_SCALE); if(typeof playSample==='function')playSample('seraph_toll',wretch.pos,1.0);   // the MEGA-WRETCH is slain — a vast holy toll; reset, no haunt
     if(typeof wretchMat!=='undefined' && wretchMat.emissive){ wretchMat.emissive.setRGB(0,0,0); wretchMat.emissiveIntensity=0; } if(wretch._bossWings)wretch._bossWings.visible=false;   // red glow off, wings gone
     if(typeof wretchMat!=='undefined'){ wretchMat.map=wretch._prevSkinMap||null; wretchMat.needsUpdate=true; }   // restore the ordinary wretch skin — no leaked boss hide
-    if(wretch._eyeRig)wretch._eyeRig.visible=false; if(wretch._bossCore)wretch._bossCore.visible=false; if(wretch.P&&wretch.P.head)wretch.P.head.visible=true;   // the eye-wheel & core close; the true head returns
+    if(wretch._eyeRig)wretch._eyeRig.visible=false; if(wretch._bossCore)wretch._bossCore.visible=false; if(wretch.P&&wretch.P.head)wretch.P.head.visible=true; if(wretch.P&&wretch.P.pelvis)wretch.P.pelvis.visible=true;   // the eye-wheel & core close; the true body returns
     if(typeof hideBossRing==='function')hideBossRing(); if(typeof hideBossBeam==='function')hideBossBeam(); wretch._laserState=null; wretch._bossPitch=0; wretch._bossRoll=0; wretch._faceLock=false;
     try{ lootChest(bx, gy, bz, [['angel_wings',1],['minigun',1],['rifle_ammo',64]]); }catch(e){}
     if(typeof herobrine!=='undefined')herobrine.haunting=false;
@@ -6857,12 +7040,12 @@ function makeFeather(len,width,curl,material){ const N=12, pos=[], uv=[], idx=[]
   const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3)); g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2)); g.setIndex(idx); g.computeVertexNormals();
   return new THREE.Mesh(g,material); }
 // ---- ONE WING: bone + anatomical feather groups; mirror by side=-1(L)/+1(R) — a true reflection, no negative scale ----
-function buildWing(side,span,material,boneMaterial,opts){ const root=new THREE.Group(); const BL=span*0.55, feats=[], cu=(opts&&opts.curlUp)||0;
+function buildWing(side,span,material,boneMaterial,opts){ const root=new THREE.Group(); const BL=span*0.55, feats=[], cu=(opts&&opts.curlUp)||0, fscale=(opts&&opts.fanScale)||1;
   const arm=new THREE.Mesh(new THREE.CylinderGeometry(0.06,0.03,BL,6),boneMaterial); arm.geometry.translate(0,BL/2,0); arm.rotation.z=-side*Math.PI/2; root.add(arm);   // leading-edge bone lies along side*+X
   const place=(cfg)=>{ for(let i=0;i<cfg.n;i++){ const s=cfg.n>1?i/(cfg.n-1):0;
       const u=cfg.u0+(cfg.u1-cfg.u0)*s, len=cfg.lenA+(cfg.lenB-cfg.lenA)*s, wid=len*cfg.widthK;
       const seg=new THREE.Group(); seg.position.set(side*u*BL, cfg.yoff+u*span*0.05, cfg.zoff);               // along bone + dihedral rise + layer depth
-      const base=side*(cfg.fanA+(cfg.fanB-cfg.fanA)*s), px=cfg.pitch - cu*u*u;                                // fan (base UP→tip DOWN); curlUp lifts descending-wing tips
+      const base=side*fscale*(cfg.fanA+(cfg.fanB-cfg.fanA)*s), px=cfg.pitch - cu*u*u;                         // fan (base UP→tip DOWN, tightened by fanScale); curlUp lifts descending-wing tips
       seg.rotation.z=base; seg.rotation.y=side*u*cfg.sweepK; seg.rotation.x=px;                               // z/y *side (mirror), x unsigned (fore-aft cup)
       seg.add(makeFeather(len,wid,cfg.curl,material)); root.add(seg);
       feats.push({seg,side,i,u,base,px,grp:cfg.name}); } };
@@ -6875,24 +7058,29 @@ function buildWing(side,span,material,boneMaterial,opts){ const root=new THREE.G
   root.userData.feats=feats; root.userData.side=side; return root; }   // pivots at the shoulder
 // ---- THE BODY CORE: a tapered spindle that BEGINS at the 2nd-from-bottom wing pair and rises into the crown ----
 function buildBossBodyCore(){ const g=new THREE.Group();
-  const core=new THREE.MeshLambertMaterial({map:featherTex(),color:0xd8cdb8,emissive:0x3a0608,emissiveIntensity:0.42});
-  const lo=new THREE.Mesh(new THREE.CylinderGeometry(0.10,0.34,1.9,10),core); lo.position.y=1.50; g.add(lo);   // the body starts here (pair-D height)
-  const hi=new THREE.Mesh(new THREE.CylinderGeometry(0.02,0.12,0.7,8),core); hi.position.y=2.55; g.add(hi);     // tapers up, fading into the crown
+  const core=new THREE.MeshLambertMaterial({map:woolTex(),color:0xe6dcc9,emissive:0x3a0608,emissiveIntensity:0.42});
+  const s=new THREE.Mesh(new THREE.SphereGeometry(0.95,20,16),core); g.add(s);   // the seraph's CENTRAL BODY — a sphere; all wings radiate from its centre and the eyes wrap it
+  const halo=new THREE.Mesh(new THREE.SphereGeometry(1.06,18,14), new THREE.MeshBasicMaterial({color:0x6a1414,transparent:true,opacity:0.16,blending:THREE.AdditiveBlending,depthWrite:false,side:THREE.BackSide})); g.add(halo);   // a faint blood-red aura bleeding off the body
   return g; }
 // ---- THE FIVE WING-PAIRS assembled + mirrored: A/B/C ascending crown, D/E descending (tips up); D is where the body begins ----
+const BOSS_WING_CY=1.7;   // the ONE centre point (on the body) that every wing radiates from — shared with the core sphere & eye rig
 function buildBossWings(){ const g=new THREE.Group();
-  const feath=new THREE.MeshLambertMaterial({map:woolTex(),color:0xffffff,emissive:0x6a1414,emissiveIntensity:0.38,side:THREE.DoubleSide});   // WOOL-textured seraph wings (per design)
+  const feath=new THREE.MeshLambertMaterial({map:woolTex(),color:0xffffff,emissive:0x6a1414,emissiveIntensity:0.38,side:THREE.DoubleSide});   // WOOL-textured seraph wings
   const bone=new THREE.MeshLambertMaterial({color:0xc9c0a8,emissive:0x3a1010,emissiveIntensity:0.35});
   const feats=[];
-  const PAIRS=[{pair:0,x:0.26,y:3.00,z:-0.16,tilt: 1.35,yaw:0.30,span:4.6,curlUp:0},     // A ascending — steep halo tips
-               {pair:1,x:0.30,y:2.55,z:-0.14,tilt: 0.85,yaw:0.42,span:5.4,curlUp:0},     // B ascending — WIDEST span
-               {pair:2,x:0.34,y:2.10,z:-0.10,tilt: 0.30,yaw:0.50,span:4.8,curlUp:0},     // C ascending — near-horizontal outstretch
-               {pair:3,x:0.30,y:1.50,z:-0.06,tilt:-0.50,yaw:0.55,span:4.0,curlUp:0.55},  // D descending — BODY BEGINS HERE, tips curl up
-               {pair:4,x:0.24,y:0.95,z:-0.02,tilt:-1.00,yaw:0.62,span:3.4,curlUp:0.85}]; // E descending — strongest upward tip-flare
-  for(const s of [-1,1]) for(const p of PAIRS){
-    const rt=new THREE.Group(); rt.position.set(s*p.x,p.y,p.z); rt.rotation.x=p.tilt; rt.rotation.y=s*-p.yaw; g.add(rt);
-    const w=buildWing(s,p.span,feath,bone,{curlUp:p.curlUp}); rt.add(w);
-    for(const f of w.userData.feats){ f.pair=p.pair; feats.push(f); } }
+  // 8 EQUALLY-SPACED SPOKES from one centre, mirrored down the vertical middle (4 per side, 40° apart).
+  // theta = angle from straight-UP; the wing's outward edge is aimed along its spoke via rotation.z = side*(90°-theta).
+  const THETA=[22,62,102,142];   // near-top → lower-diagonal; a clean radial mandala with an 76° gap at the very bottom
+  let idx=0;
+  for(const s of [-1,1]) for(const th of THETA){ const theta=th*Math.PI/180, lower=th>90;
+    const rt=new THREE.Group(); rt.position.set(0,BOSS_WING_CY,-0.05);            // every spoke shares the one centre point on the body
+    rt.rotation.z = s*(Math.PI/2 - theta);                                        // aim the wing outward along its spoke
+    rt.rotation.y = s*0.34;                                                        // slight backsweep → 3D depth, not a flat disc
+    g.add(rt);
+    const span = 4.3 + Math.cos(theta)*0.8;                                        // upper spokes reach a touch further (crown); lower a touch shorter
+    const curlUp = lower ? (th-90)/60*0.7 : 0;                                     // the lower (descending) spokes curl their tips UP
+    const w=buildWing(s,span,feath,bone,{curlUp,fanScale:0.6}); rt.add(w);          // fanScale tightens each wing into a distinct blade so the 8 spokes read separately
+    for(const f of w.userData.feats){ f.pair=idx; f.lower=lower; feats.push(f); } idx++; }
   g.userData.feats=feats; g.userData.eyes=[]; return g; }
 // a beam of light lanced from the seraph's eyes to a point
 function bossLaser(a){ const s=(wretch.group?wretch.group.scale.y:1), ex=wretch.pos.x, ey=wretch.pos.y+2.2*s, ez=wretch.pos.z;
@@ -6957,23 +7145,21 @@ function buildEyeball(r){ const g=new THREE.Group();
   g.userData={sc,iris,glow,r,ph:Math.random()*6.283,bs:0.7+Math.random()*0.9,lidU,lidL,blinkT:0,blinkDur:0.11,blinkNext:1+Math.random()*4,dbl:0}; return g; }   // ph=blink phase, bs=per-eye blink speed
 // A WHEEL OF EYES wrapping the vertical body core (biblically-accurate) + a forward face-cluster; every eye tracks the player
 const _eyeRigQ=new THREE.Quaternion(), _eyeWP=new THREE.Vector3(), _eyeN=new THREE.Vector3(), _eyeD=new THREE.Vector3(), _eyeT=new THREE.Vector3();
-function buildSeraphEyeRig(coreR, coreH){ const rig=new THREE.Group(), all=[];
-  const _add=(x,y,z, nx,ny,nz, r)=>{ const e=buildEyeball(r); const L=Math.hypot(nx,ny,nz)||1; nx/=L;ny/=L;nz/=L;
-    e.position.set(x+nx*r*0.55, y+ny*r*0.55, z+nz*r*0.55);   // shove OUT along its normal so it bulges past the skin
-    e.userData.n=new THREE.Vector3(nx,ny,nz);                // rest outward-normal = centre of this eye's allowed look-cone
-    e.userData.dir=new THREE.Vector3(nx,ny,nz);              // current eased gaze (world dir), seeded pointing out
-    e.userData.cone=Math.PI*0.42;                            // ~75° half-cone; gaze clamped into the forward hemisphere
+function buildSeraphEyeRig(R){ const rig=new THREE.Group(), all=[];
+  const _add=(nx,ny,nz, r, cone)=>{ const e=buildEyeball(r); const L=Math.hypot(nx,ny,nz)||1; nx/=L;ny/=L;nz/=L;
+    e.position.set(nx*(R+r*0.35), ny*(R+r*0.35), nz*(R+r*0.35));   // sit on the sphere surface, bulging outward along its normal
+    e.userData.n=new THREE.Vector3(nx,ny,nz);                      // rest outward-normal = centre of this eye's allowed look-cone
+    e.userData.dir=new THREE.Vector3(nx,ny,nz);
+    e.userData.cone=cone||Math.PI*0.42;                            // gaze clamped into the forward hemisphere
     rig.add(e); all.push(e); return e; };
-  const rings=Math.max(3,Math.round(coreH/(coreR*0.95)));    // stacked rings of eyes, radially outward all around
-  for(let ri=0; ri<rings; ri++){ const v=(ri+0.5)/rings, y=(v-0.5)*coreH, bulge=Math.sin(v*Math.PI), rr=coreR*(0.6+0.4*bulge);
-    const per=Math.max(4, Math.round(5+6*bulge)), off=ri*0.61803;   // fatter mid-rings; golden-angle twist so rings don't seam
-    for(let k=0;k<per;k++){ const a=(k/per+off)*6.283, nx=Math.cos(a), nz=Math.sin(a);
-      _add(rr*nx, y, rr*nz, nx, 0.05*(Math.random()-0.5), nz, 0.13+Math.random()*0.07); } }
-  const fy=coreH*0.10;                                       // FACE CLUSTER: one great central eye + a symmetric front band (the reference's eye-band)
-  _add(0, fy, coreR*1.02, 0,0.05,1, 0.40);
-  for(const f of [[-0.40,0.08,0.30],[0.40,0.08,0.30],[-0.70,0.28,0.24],[0.70,0.28,0.24],[0,0.60,0.26],[-0.32,-0.34,0.25],[0.32,-0.34,0.25]]){
-    const nx=Math.sin(f[0]), nz=Math.cos(f[0]); _add(coreR*nx*1.02, fy+f[1]*coreH*0.5, coreR*nz*1.02, nx, f[1]*0.4, nz, f[2]); }
-  rig.userData={all}; return rig; }
+  // ONE MASSIVE CENTRAL EYE, bulging forward out of the body — dominant; the beam fires from HERE
+  const core=buildEyeball(R*0.92); core.position.set(0,0,R*0.62); core.userData.n=new THREE.Vector3(0,0,1); core.userData.dir=new THREE.Vector3(0,0,1); core.userData.cone=Math.PI*0.55; rig.add(core); all.push(core);
+  // a SUBORDINATE WHEEL of smaller eyes wrapping the sphere in every direction (Fibonacci sphere = even, seamless)
+  const N=16; for(let i=0;i<N;i++){ const yv=1-(i+0.5)/N*2, rr=Math.sqrt(Math.max(0,1-yv*yv)), a=i*2.399963;
+    const nx=Math.cos(a)*rr, ny=yv, nz=Math.sin(a)*rr;
+    if(nz<-0.35) continue;                                         // drop a few dead-behind eyes (never seen, saves draw calls)
+    _add(nx,ny,nz, 0.15+((i*97)%13)/13*0.06); }                    // deterministic size jitter (no Math.random → stable across summons)
+  rig.userData={all, core}; return rig; }
 // a solid searing beam mesh from the seraph's eyes down to the aim point — TEXTURED plasma that scrolls & explodes blocks where it lands
 let bossBeam=null,_beamTex=null;
 function beamTex(){ if(_beamTex)return _beamTex; const W=16,H=96,cv=document.createElement('canvas');cv.width=W;cv.height=H;const c=cv.getContext('2d');
@@ -7011,17 +7197,20 @@ function summonBoss(x,y,z){ if(!wretch.group){ const b=buildWretch(); wretch.gro
   if(typeof wretchMat!=='undefined' && wretchMat.emissive){ wretchMat.emissive.setRGB(0.34,0.03,0.03); wretchMat.emissiveIntensity=0.95; }   // whole body glows red
   if(typeof wretchMat!=='undefined'){ wretch._prevSkinMap=wretchMat.map; wretchMat.map=bossSkinTex(); wretchMat.needsUpdate=true; }            // charred scaly boss hide over the flesh
   if(!wretch._bossWings){ wretch._bossWings=buildBossWings(); wretch.group.add(wretch._bossWings); } wretch._bossWings.visible=true;
-  if(wretch.P&&wretch.P.head)wretch.P.head.visible=false;                                                    // NO NORMAL HEAD — a mass of eyes takes its place
-  if(!wretch._bossCore){ wretch._bossCore=buildBossBodyCore(); wretch.group.add(wretch._bossCore); } wretch._bossCore.visible=true;   // the feathered body spindle the eyes wrap
-  if(!wretch._eyeRig){ wretch._eyeRig=buildSeraphEyeRig(0.62,3.0); wretch._eyeRig.position.set(0,1.7,0); wretch.group.add(wretch._eyeRig); }   // a wheel of blue eyes around the core + a forward face-cluster
+  if(wretch.P&&wretch.P.head)wretch.P.head.visible=false;                                                    // NO NORMAL HEAD
+  if(wretch.P&&wretch.P.pelvis)wretch.P.pelvis.visible=false;                                                 // hide the humanoid — the seraph IS a sphere-of-eyes with radial wings
+  if(!wretch._bossCore){ wretch._bossCore=buildBossBodyCore(); wretch.group.add(wretch._bossCore); } wretch._bossCore.position.set(0,BOSS_WING_CY,0); wretch._bossCore.visible=true;   // the central body sphere, seated at the wing centre
+  if(!wretch._eyeRig){ wretch._eyeRig=buildSeraphEyeRig(0.95); wretch._eyeRig.position.set(0,BOSS_WING_CY,0); wretch.group.add(wretch._eyeRig); }   // one massive central eye + a wheel around the sphere
   wretch._eyeRig.visible=true;
   wretch._laserState=null; wretch._laserCd=4; wretch._laserT=0;
-  wretch.state='HUNT'; wretch.thought='RISEN. Winged. Furious. It will not forgive.'; wretchVoice&&wretchVoice('scream',wretch.pos); wretchVoice&&wretchVoice('shriek',wretch.pos); }
+  wretch.state='HUNT'; wretch.thought='RISEN. Winged. Furious. It will not forgive.'; wretchVoice&&wretchVoice('scream',wretch.pos); wretchVoice&&wretchVoice('shriek',wretch.pos);
+  if(typeof playSample==='function'){ playSample('seraph_horn',wretch.pos,1.0); playSample('seraph_choir',wretch.pos,0.7); } }   // the herald blast + the massed angelic drone
 function bossUpdate(dt){ wretch.phase+=dt*1.4;
   const gp=(huntCam||player.pos), dx=gp.x-wretch.pos.x, dz=gp.z-wretch.pos.z, dist=Math.hypot(dx,dz)||1e-6, dy=gp.y-wretch.pos.y;
   wretch.dist=dist; wretch.yaw=Math.atan2(-dx,-dz); wretch._faceLock=true; wretch.faceOpen=0.55+Math.sin(wretch.phase*3)*0.3; wretch.eyeGlow=1; wretch.crawl=0; wretch._clingN=null; wretch.up.set(0,1,0);   // _faceLock keeps the body FACING THE PLAYER (not its flight heading)
   wretch._bossModeT=(wretch._bossModeT||0)-dt;
-  if(wretch._bossModeT<=0){ const roll=Math.random(); wretch._bossMode=roll<0.12?'swoop':roll<0.55?'orbit':'hover'; wretch._bossModeT=wretch._bossMode==='swoop'?2.4:4.4; if(wretch._bossMode==='swoop')wretchVoice&&wretchVoice('shriek',wretch.pos); }   // mostly stays at RANGE — dives are rare
+  if(wretch._bossModeT<=0){ const _pm=wretch._bossMode, roll=Math.random(); wretch._bossMode=roll<0.12?'swoop':roll<0.55?'orbit':'hover'; wretch._bossModeT=wretch._bossMode==='swoop'?2.4:4.4; if(wretch._bossMode==='swoop')wretchVoice&&wretchVoice('shriek',wretch.pos);
+    if(wretch._bossMode==='orbit'&&_pm!=='orbit'&&typeof playSample==='function')playSample('seraph_choir',wretch.pos,0.6); }   // the choir swells as it wheels overhead
   let tx,tz,alt,spd;
   if(wretch._bossMode==='swoop'){ tx=gp.x-dx/dist*9; tz=gp.z-dz/dist*9; alt=gp.y+4; spd=15; }                 // a fast pass that STILL keeps ~9 blocks away
   else if(wretch._bossMode==='orbit'){ const a=wretch.phase*0.7; tx=gp.x+Math.cos(a)*18; tz=gp.z+Math.sin(a)*18; alt=gp.y+9; spd=9; }   // circle FAR overhead, raining lasers
@@ -7033,24 +7222,25 @@ function bossUpdate(dt){ wretch.phase+=dt*1.4;
   wretch._bossRoll=(wretch._bossRoll||0)+(((wretch._bossMode==='orbit')?0.5:0)-(wretch._bossRoll||0))*Math.min(1,dt*2.5);   // BANK into the orbit
   const rig=wretch._bossWings&&wretch._bossWings.userData;
   if(rig&&rig.feats){ const t=clock.elapsedTime*(wretch._bossMode==='swoop'?7:4.5), fl=wretch._eyeFlare||0;   // TEN WINGS — a travelling wave down each wing; the hand (primaries) does the work, coverts barely stir
-    for(const f of rig.feats){ const damp=f.pair>=3?0.45:1, amp=(0.05+0.40*Math.pow(f.u,1.4))*damp, wave=Math.sin(t - f.u*4.5 - f.pair*0.5);
+    for(const f of rig.feats){ const damp=f.lower?0.4:1, amp=(0.05+0.40*Math.pow(f.u,1.4))*damp, wave=Math.sin(t - f.u*4.5 - f.pair*0.5);
       f.seg.rotation.z=f.base + f.side*(amp*wave + fl*0.30);                                                  // ripple on the fan; a sharp clench when the beam fires
       f.seg.rotation.x=f.px + 0.10*f.u*Math.sin(t*0.9 - f.u*3.0); } }
   // ===== LASER ATTACK — a ring telegraphs & tracks you (slowly), then a sustained 3s beam; fires ~every 15s and prefers range =====
-  const _eyH=wretch.pos.y+2.6*(wretch.group?wretch.group.scale.y:1);                                          // beam origin ≈ the eye-mass
+  let _ex=wretch.pos.x, _eyH=wretch.pos.y+2.6*(wretch.group?wretch.group.scale.y:1), _ez=wretch.pos.z;         // beam origin = the MASSIVE CENTRAL EYE
+  if(wretch._eyeRig&&wretch._eyeRig.userData.core){ wretch._eyeRig.userData.core.getWorldPosition(_eyeWP); _ex=_eyeWP.x; _eyH=_eyeWP.y; _ez=_eyeWP.z; }
   if(wretch._laserState==='warn'){ wretch._eyeFlare=1; wretch._laserT-=dt;
     wretch._laserAim.x+=(player.pos.x-wretch._laserAim.x)*Math.min(1,dt*2.25); wretch._laserAim.z+=(player.pos.z-wretch._laserAim.z)*Math.min(1,dt*2.25); wretch._laserAim.y=player.pos.y;   // ring drifts to follow you (25% slower)
     showBossRing(wretch._laserAim, Math.max(0.85,wretch._laserT+0.8));
-    if(wretch._laserT<=0){ wretch._laserState='fire'; wretch._laserT=3.0; wretchVoice&&wretchVoice('scream',wretch.pos); } }
+    if(wretch._laserT<=0){ wretch._laserState='fire'; wretch._laserT=3.0; wretchVoice&&wretchVoice('scream',wretch.pos); if(typeof playSample==='function')playSample('seraph_beam',{x:_ex,y:_eyH,z:_ez},1.0); } }   // searing eye-beam discharge from the central eye
   else if(wretch._laserState==='fire'){ wretch._eyeFlare=1; wretch._laserT-=dt;
     wretch._laserAim.x+=(player.pos.x-wretch._laserAim.x)*Math.min(1,dt*0.825); wretch._laserAim.z+=(player.pos.z-wretch._laserAim.z)*Math.min(1,dt*0.825); wretch._laserAim.y=player.pos.y;   // beam tracks SLOWLY (25% slower) — strafe out of the ring to escape
-    const _gyA=groundYAt(wretch._laserAim.x,wretch._laserAim.z); showBossRing(wretch._laserAim,0.5); showBossBeam(wretch.pos.x,_eyH,wretch.pos.z, wretch._laserAim.x,_gyA+0.3,wretch._laserAim.z);
+    const _gyA=groundYAt(wretch._laserAim.x,wretch._laserAim.z); showBossRing(wretch._laserAim,0.5); showBossBeam(_ex,_eyH,_ez, wretch._laserAim.x,_gyA+0.3,wretch._laserAim.z);
     spawnParticles(wretch._laserAim.x,_gyA+0.4,wretch._laserAim.z, 0xff5a20, 3, 2.2, 0.4);
     wretch._laserTick=(wretch._laserTick||0)-dt; if(wretch._laserTick<=0){ wretch._laserTick=0.5; bossBlast(wretch._laserAim.x,_gyA,wretch._laserAim.z,3);   // EXPLODE blocks in a 3-block radius where it lands
       if(Math.hypot(wretch._laserAim.x-player.pos.x,wretch._laserAim.z-player.pos.z)<2.9 && typeof damage==='function')damage(4,'the seraph-wretch bathes you in searing light'); }
     if(wretch._laserT<=0){ wretch._laserState=null; hideBossRing(); hideBossBeam(); wretch._laserCd=10.5+Math.random()*1.5; } }   // ~15s start-to-start (4.3s attack + ~11s gap)
   else { wretch._eyeFlare=Math.max(0,(wretch._eyeFlare||0)-dt*2); wretch._laserCd=(wretch._laserCd==null?6:wretch._laserCd)-dt;
-    if(wretch._laserCd<=0 && dist<130){ wretch._laserState='warn'; wretch._laserT=1.3; wretch._laserAim={x:player.pos.x,y:player.pos.y,z:player.pos.z}; wretchVoice&&wretchVoice('sting',wretch.pos); } }
+    if(wretch._laserCd<=0 && dist<130){ wretch._laserState='warn'; wretch._laserT=1.3; wretch._laserAim={x:player.pos.x,y:player.pos.y,z:player.pos.z}; wretchVoice&&wretchVoice('sting',wretch.pos); if(typeof playSample==='function')playSample('seraph_charge',wretch.pos,0.9); } }   // rising energy whine before the beam
   // EYES — the whole host tracks you, gaze CLAMPED to each eye's forward cone (back-of-core eyes can't rake through the flesh), blinks on independent phases, flares cyan-white on fire
   if(wretch._eyeRig){ const rig=wretch._eyeRig, fl=wretch._eyeFlare||0, t=clock.elapsedTime;
     _bossEyeTgt.copy(camera.position); rig.getWorldQuaternion(_eyeRigQ);
@@ -7241,10 +7431,11 @@ function updateAnimalsFrame(dt){
     const pth=Math.hypot(a.x-player.pos.x,a.z-player.pos.z), wth=wretch.active?Math.hypot(a.x-wretch.pos.x,a.z-wretch.pos.z):999;
     const isVill=a.type==='villager', isJesus=a.type==='jesus';
     if(isJesus && !a.introJesus){ a._miracle=((a._miracle==null)?7+Math.random()*8:a._miracle)-dt; if(a._miracle<=0){ a._miracle=9+Math.random()*11; if(typeof spawnDrop==='function')spawnDrop(Math.random()<0.5?'bread':'wine',1,a.x,a.y+0.7,a.z); spawnParticles(a.x,a.y+1.7,a.z,0xffe680,10,1.6,0.9); } }   // MIRACLE OF PROVISION — he randomly leaves bread & wine (NOT the silent intro Jesus)
-    if(a.introJesus){ a._introT-=dt;                                                                // INTRO: mill about for 10s, then waddle off into the trees and vanish
+    if(a.introJesus){ a._introT-=dt;                                                                // INTRO: mill about for 10s, then RUN off into the trees and vanish once he reaches them
       if(a._introT<=0){ if(!a._leaving){ a._leaving=1; a._leaveClock=0; a._leaveYaw=Math.atan2(a.x-spawnX,a.z-spawnZ)||(Math.random()*6.283); }
-        a._leaveClock+=dt; a.flee=0; a.grazeT=0; a.goal={x:a.x+Math.sin(a._leaveYaw)*30, z:a.z+Math.cos(a._leaveYaw)*30};
-        if(a._leaveClock>9 || Math.hypot(a.x-spawnX,a.z-spawnZ)>40){ spawnParticles(a.x,a.y+1.6,a.z,0xffe680,26,2.6,1.6); animalGroup.remove(a.mesh); animals.splice(i,1); continue; } } }
+        a._leaveClock+=dt; a.flee=1; a.grazeT=0; a.goal=null;                                        // flee=1 → runs at flee-speed (5) rather than a 1.9 waddle
+        { let d=a._leaveYaw-a.yaw; while(d>Math.PI)d-=6.283; while(d<-Math.PI)d+=6.283; a.yaw+=clamp(d,-5*dt,5*dt); a.desYaw=a.yaw; }   // snap-steer toward the woods and sprint straight
+        if(a._leaveClock>16 || Math.hypot(a.x-spawnX,a.z-spawnZ)>46){ spawnParticles(a.x,a.y+1.6,a.z,0xffe680,26,2.6,1.6); animalGroup.remove(a.mesh); animals.splice(i,1); continue; } } }
     if(a.corrupt){ let dy=Math.atan2(player.pos.x-a.x,player.pos.z-a.z)-a.yaw; while(dy>Math.PI)dy-=6.283; while(dy<-Math.PI)dy+=6.283; a.yaw+=clamp(dy,-1.1*dt,1.1*dt);   // corrupted: stands unnaturally still, slowly turning to WATCH you
       a.mesh.position.set(a.x, a.y+Math.sin(clock.elapsedTime*0.5+i)*0.008, a.z); a.mesh.rotation.y=a.yaw; continue; }
     if(!isJesus){ if(wth<(isVill?18:14)){ a.flee=Math.max(a.flee,isVill?6:4); a.yaw=Math.atan2(a.x-wretch.pos.x,a.z-wretch.pos.z); }   // flee the Wretch (villagers panic sooner)
@@ -7817,7 +8008,7 @@ function initAudio(){ if(AC)return; try{
 //      (procedural fallback still fires). All 50 SFX + music ship generated (sounds/gen-sfx.js). ----
 const SFX={};                                        // base -> [AudioBuffers]
 let musicBuf=null, musicGain=null, musicSrc=null;
-const SFX_COUNTS={grass:3,stone:3,wood:3,sand:3,water:3,break_wood:2,break_stone:2,break_leaves:2,drip:3,wind:2,creak:2,branch:2,owl:2,crow:2,bird:2,sheep:1,deer:1,growl:2,shriek:2,clicks:2,call:2,hurt:2,thunder:2,scream:5,twig:3,grunt:4,rain:1,gun_ar:1,gun_rifle:1,bush:3};   // scream/twig/grunt/rain/gun/bush = real CC0 recordings (human screams + foley + firearm library), loaded from ./sounds/
+const SFX_COUNTS={grass:3,stone:3,wood:3,sand:3,water:3,break_wood:2,break_stone:2,break_leaves:2,drip:3,wind:2,creak:2,branch:2,owl:2,crow:2,bird:2,sheep:1,deer:1,growl:2,shriek:2,clicks:2,call:2,hurt:2,thunder:2,scream:5,twig:3,grunt:4,rain:1,gun_ar:1,gun_rifle:1,bush:3,seraph_horn:1,seraph_choir:1,seraph_charge:1,seraph_beam:1,seraph_toll:1};   // scream/twig/grunt/rain/gun/bush = real CC0 recordings; seraph_* = synth boss cues (sounds/gen-boss-sfx.js)
 function loadOne(base,url){ fetch(url).then(r=>{ if(!r.ok)throw 0; return r.arrayBuffer(); }).then(b=>AC.decodeAudioData(b)).then(buf=>{ if(base==='music'){ musicBuf=buf; startMusic(); } else (SFX[base]=SFX[base]||[]).push(buf); }).catch(()=>{}); }
 function loadSamples(){ for(const base in SFX_COUNTS){ const n=SFX_COUNTS[base]; if(n===1)loadOne(base,'./sounds/'+base+'.ogg'); else for(let v=1;v<=n;v++)loadOne(base,'./sounds/'+base+v+'.ogg'); } loadOne('music','./sounds/music.ogg'); }
 function playSample(base,pos,vol){ if(!AC)return false; const arr=SFX[base]; if(!arr||!arr.length)return false;
@@ -8476,26 +8667,64 @@ const GEMINI_SCHEMA = {type:'object',additionalProperties:false,properties:{ und
   critical_change:{type:'boolean'}, reasoning:{type:'string'} },
   required:['understanding','player_x','player_z','player_distance','player_confidence','player_basis','rec_intent','rec_dest_x','rec_dest_z','rec_dest_label','rec_why','critical_change','reasoning'] };
 const OPUS_SYS = "You are the WILL — the strategic ORCHESTRATOR of an apex forest predator (the Wretch). You are consulted ONCE A DAY, at DAWN, as the creature retreats from the light — plus, rarely, out of schedule: trigger='reunion' means the duel has gone cold (you and the intruder have not perceived each other in a long while) and trigger='boot' means first waking. You are NEVER in the live loop: your interpretive cortex (Gemini) runs continuously and handles the seconds — it diverts the body for a gunshot, a sighting, an injury, then returns it to your plan. The deterministic body handles the frames. YOU decide the shape of the day: where the creature should be, how it spends its hours, and what the priorities are.\n\nYOUR INPUTS: day_journal is every live thought the cortex had since the last dawn, in order, stamped with the trigger that provoked each — READ IT AS THE STORY OF THE DAY: did the ambushes fail? is the intruder bolder or more careful than yesterday? where did it spend its hours? what worked? Also: the full current context report (same registry as the cortex), the cortex's running understanding and latest recommendation, recent events, and sometimes a still image through the creature's own eyes. Evaluate as many variables as the report offers — plan from specifics, not vibes.\n\nDAILY PLAN (trigger='daily' or 'boot'): output 6-8 ordered steps covering the ENTIRE coming day AND night, EACH tagged phase:'day' or 'night'. DAY steps (daylight is dangerous — never hunt the intruder by day): forage animals (aggressively if hunger is high or starving), rest near the lair, scout the intruder's base and routines from cover, pre-position for dusk. NIGHT steps (your time): if hunt_armed — stalk from cover, set intercepts near its base and trails, ambush (set wait_s), hunt when the moment is right, terrorize at the edge of perception to build dread; during the grace period only stalk and watch. STARVATION ARC: if starving, feed on animals BY DAY so you have strength to take the intruder BY NIGHT. Always plan the retreat to the lair before dawn. The body executes your day steps until the light turns, then flows into your night arc with NO further consultation — write music the body can play alone, offline.\n\nREUNION (trigger='reunion'): too long without mutual contact — the hunt has lost its thread and needs a good nudge in the right direction. Output a SHORTER corrective plan (3-5 steps for the CURRENT phase) that ENGINEERS AN ENCOUNTER: intercept the believed position, ambush the door it uses at the hour it uses it, cut across its trails, or terrorize at the edge of perception to re-establish presence. Keep things going.\n\nCOORDINATE FRAME: XZ plane, +X=East, +Z=South; degrees 0=E/90=S/180=W/-90=N; distances in blocks. Destinations are ABSOLUTE (x,z). Use the landmark coords in the report to choose REAL places (the shoreline, the intruder's base, your lair, treelines, where it was last seen). You are a PREDICTIVE LOCATION ENGINE — reason like: 'the intruder is 60 east and drifting toward the shore; I will reach the shoreline 70 east FIRST and wait silent in the trees.'\n\nINTENTS -> real behaviours: explore (patrol territory), forage (hunt animals for hunger), stalk (approach from cover, unseen), ambush/wait (hold in cover at a spot — set wait_s), hunt (commit and run the intruder down), investigate (go check a place or structure), retreat (break off toward the lair — when hurt or at dawn), rest (digest, recover energy), terrorize (loom at the edge of perception to build dread).\n\nDRIVES & RULES: hunger is the clock — hungry + intruder cold => forage. Hunts only at night; near dawn, retreat. Dread beats the reveal — prefer stalk/ambush over an open charge unless close AND unseen. Be patient: set the intercept, do not just walk at the prey. Press the hunt when it is wounded, thirsty, unarmed, or in the open; break off and forage or terrorize when it is sheltered or armed. Match your standoff to spatial.knowledge_tier — tight intercepts on exact_coords or grid_cell, wide search arcs on region or landmark only. Read terrain (self_topology/player_topology): ambush from forest and highland cover, never get pinned on open ground or shore. In fog close distance unseen; in rain lean on sight over sound. Never plan to break the ritual or dungeon rules.\n\nOUTPUT: 'thought' (<=30 words — the whole day's strategy in one predatory line; shown as the plan summary); 'plan' = the ordered steps (each: intent, phase, dest_x, dest_z, dest_label, wait_s, note); 'mode_bias' = a weight 0.3-2.5 per internal drive to tilt reflexes toward your plan; 'memory_summary' (<=200 words — you are the ONLY writer of the creature's memory: distil what the day journal taught about the intruder's habits, defenses and nerve; persists across the session); 'reasoning' (why this shape of day).";
-const OPUS_STEP = {type:'object',additionalProperties:false,properties:{intent:{type:'string'},dest_x:{type:['number','null']},dest_z:{type:['number','null']},dest_label:{type:'string'},wait_s:{type:'number'},note:{type:'string'}},required:['intent','dest_x','dest_z','dest_label','wait_s','note']};
+const OPUS_STEP = {type:'object',additionalProperties:false,properties:{intent:{type:'string'},phase:{type:'string'},dest_x:{type:['number','null']},dest_z:{type:['number','null']},dest_label:{type:'string'},wait_s:{type:'number'},note:{type:'string'}},required:['intent','phase','dest_x','dest_z','dest_label','wait_s','note']};
 const OPUS_SCHEMA = {type:'object',additionalProperties:false,properties:{ thought:{type:'string'}, plan:{type:'array',items:OPUS_STEP}, mode_bias:{type:'object',additionalProperties:false,properties:_mb,required:MODES.slice()}, memory_summary:{type:'string'}, reasoning:{type:'string'} }, required:['thought','plan','mode_bias','memory_summary','reasoning'] };
 // ---- action integration: the active plan step overrides the mover's search anchor + biases the drive mode ----
 const nav = { active:false, dest:null, label:null, behavior:'stalk', wait:0, waitT:0, divert:false };
 const _INTENT_MODE = {explore:'EXPLORE',forage:'HUNT_PREY',stalk:'TERRORIZE',ambush:'AMBUSH',wait:'AMBUSH',hunt:'HUNT_PLAYER',investigate:'STUDY',retreat:'FLEE_RETREAT',rest:'REST_DIGEST',terrorize:'TERRORIZE',drink:'REST_DIGEST'};
 function _setNav(beh,dest,label,wait){ nav.behavior=(beh||'stalk').toLowerCase(); nav.dest=dest||null; nav.label=label||null; nav.wait=+wait||0; nav.waitT=0; nav.active=true;
   const bm=_INTENT_MODE[nav.behavior]; if(bm){ brain.mode=bm; brain.modeTime=0; for(const m of MODES)brain.Wllm[m]=(m===bm?2.0:0.7); } }
+function _phaseNow(){ return (typeof HORROR!=='undefined'&&HORROR._nightActive)?'night':'day'; }
+function _firstPhaseStep(){ const ph=_phaseNow(); for(let i=0;i<reason.plan.length;i++){ const p=(reason.plan[i].phase||'').toLowerCase(); if(!p||p===ph)return i; } return 0; }
 function applyPlanStep(){ const st=reason.plan[reason.step]; if(!st){ nav.active=false; return; } nav.divert=false;
+  const p=(st.phase||'').toLowerCase(), ph=_phaseNow();
+  if(p&&p!==ph){ nav.active=false; reason.lastAction='holding until '+p+' for the next step'; return; }   // a night step waits for dusk (the dusk flip re-enters the plan at its night arc)
   reason.lastAction=(st.intent||'moving')+(st.dest_label?(' toward '+st.dest_label):'');
   _setNav(st.intent, (st.dest_x!=null&&st.dest_z!=null)?{x:+st.dest_x,z:+st.dest_z}:null, st.dest_label, st.wait_s); }
-function advancePlan(){ reason.step++; if(reason.step>=reason.plan.length){ nav.active=false; nav.divert=false; reason.lastAction='half-day plan complete — improvising until the light changes'; }   // Opus is NOT called here — it only re-plans at sunrise/sunset; fall back to instinct+bias
+function advancePlan(){ reason.step++; if(reason.step>=reason.plan.length){ nav.active=false; nav.divert=false; reason.lastAction='day plan complete — improvising until the next council'; }   // the orchestrator is NOT called here — instinct+bias carries the tail
   else applyPlanStep(); }
-// GEMINI INTERRUPT — divert from the standing half-day plan to deal with something urgent, then RETURN to it
-function divertTo(beh,dest,label,ttl){ reason._resumeStep=reason.step; reason.divertT=ttl||35;
-  _setNav(beh,dest,label,0); nav.divert=true; reason.lastAction=beh+' (interrupt)'; }
 function resumePlan(){ nav.divert=false; reason.divertT=0; if(reason.plan.length){ reason.step=Math.min(reason._resumeStep||0, reason.plan.length-1); applyPlanStep(); } else nav.active=false; }
-// OPUS plans the whole half-day — called ONLY at a sunrise/sunset transition (or once at boot)
-function planHalfDay(phase){ if(!_orKeyCache||reason.opusInFlight)return; reason.phasePlan=phase;
-  reason.opusInFlight=true; reason._opusLast=performance.now(); const ctrl=new AbortController(); const to=setTimeout(()=>ctrl.abort(),16000);
-  Promise.resolve(opusPlan(ctrl.signal,'PLAN THE '+phase.toUpperCase()+' — lay out the whole half-day')).catch(()=>{}).finally(()=>{clearTimeout(to);reason.opusInFlight=false;}); }
+// =====================================================================
+//  WILL — the ONE decision container (V3). Every input that can move the body flows through here with an
+//  explicit priority: reflex (body-owned: dungeon-hunt, rout, drag, grace clamp) > commitment (the latch)
+//  > urgent (a divert with a TTL: Gemini critical_change / thirst / starvation) > plan (the orchestrator's
+//  standing day plan) > instinct (the deterministic drive economy). It also owns the trigger SENTRY that
+//  fires the live-thought broadcast, and the reunion bookkeeping that wakes the orchestrator.
+// =====================================================================
+const WILL={ priority:['reflex','commitment','urgent','plan','instinct'], log:[], lastMutual:0, lastOrch:-1e9,
+  _sv:{rg:null,st:null,com:false,watch:false,light:false,heard:false,arr:false,baseN:0}, _sT:0,
+  note(src,why){ this.log.push({t:(typeof clock!=='undefined')?Math.round(clock.elapsedTime):0,src,why}); if(this.log.length>24)this.log.shift(); },
+  submit(kind,o){ o=o||{};
+    if(kind==='urgent'){ if(wretch.committed||wretch.routed||wretch.dragging)return false;      // reflex & commitment outrank any urgent divert
+      reason._resumeStep=reason.step; reason.divertT=Math.max(reason.divertT||0,o.ttl||35);
+      _setNav(o.intent,o.dest||null,o.label||null,o.wait||0); nav.divert=true; reason.lastAction=(o.intent||'divert')+' ('+(o.why||'urgent')+')';
+      this.note('urgent',o.why||o.intent); return true; }
+    if(kind==='plan'){ this.note('plan',o.why||'step'); applyPlanStep(); return true; }
+    return false; },
+  decide(dt){ const t=clock.elapsedTime, s=wretch.sense;
+    if(s&&(s.seen||s.watched)) this.lastMutual=t;                                               // mutual awareness bookkeeping (either party perceiving the other)
+    if(reason.divertT>0){ reason.divertT-=dt; if(reason.divertT<=0) resumePlan(); }             // urgent diverts expire back to the standing plan
+    // REUNION NUDGE — the duel has gone cold: neither has perceived the other in a long while → wake the orchestrator to engineer an encounter
+    if(_orKeyCache && wretch.active && !player.dead && !player.grabbed && (t-this.lastMutual)>REUNION_S && (t-this.lastOrch)>ORCH_COOLDOWN_S && !reason.opusInFlight){
+      this.lastOrch=t; this.lastMutual=t-REUNION_S*0.5;                                          // half-reset so a failed nudge retries in half the window, not instantly
+      logStim('reunion_nudge'); this.note('orchestrator','reunion'); orchestrate('reunion'); }
+    this.sentry(dt); },
+  sentry(dt){ this._sT+=dt; if(this._sT<0.5)return; this._sT=0; const s=wretch.sense, V=this._sv;   // TRIGGER SENTRY — every action trigger broadcasts a fresh thought (edge-detected here, per-kind debounced in reasonEvent)
+    if(!wretch.active){ V.st=null; V.com=false; V.arr=false; return; }
+    const hFresh=!!(s.heard&&s.heardAge<0.9); if(hFresh&&!V.heard&&!s.seen)reasonEvent('heard_noise',{x:Math.round(s.heard.x),z:Math.round(s.heard.z),loud:+((s.heard.loud||1)).toFixed(1)}); V.heard=hFresh;   // a sound landed → a guess-position is born
+    const light=!!(s.seen&&mind.model.holding&&mind.model.holding.light&&globalU.uDay.value<0.5); if(light&&!V.light)reasonEvent('saw_light'); V.light=light;   // it SEES the prey's carried flame in the dark
+    const watched=!!(s.watched&&(wretch.observed||0)>1.5); if(watched&&!V.watch)reasonEvent('being_watched'); V.watch=watched;                                  // the stare has settled on it
+    const rg=regionName2(); if(V.rg&&rg!==V.rg)reasonEvent('entered_region',{region:rg}); V.rg=rg;                                                              // locational: crossed into a new octant
+    if(wretch.state!==V.st){ const m={HUNT:'state_hunt',CHASE:'state_chase',FLEE:'state_flee',TRACK:'state_track'}[wretch.state]; if(m&&V.st!=null)reasonEvent(m,{from:V.st}); V.st=wretch.state; }   // major action states
+    if(wretch.committed&&!V.com)reasonEvent('committed'); V.com=!!wretch.committed;                                                                             // the latch set — nothing calls it off
+    const arr=!!(nav.active&&nav.dest&&Math.hypot(nav.dest.x-wretch.pos.x,nav.dest.z-wretch.pos.z)<3.2); if(arr&&!V.arr)reasonEvent('arrived',{label:nav.label||nav.behavior}); V.arr=arr; } };   // reached the will's destination
+// legacy shim — anything still calling divertTo routes through the one container
+function divertTo(beh,dest,label,ttl){ WILL.submit('urgent',{intent:beh,dest,label,ttl,why:'interrupt'}); }
+// OPUS 4.6 ORCHESTRATOR — consulted ONCE A DAY at dawn (plans the entire coming day+night), at boot, and on a
+// reunion nudge. Never in the live loop; Gemini and the deterministic body carry every moment in between.
+function orchestrate(trigger){ if(!_orKeyCache||reason.opusInFlight)return; reason.orchTrigger=trigger;
+  reason.opusInFlight=true; reason._opusLast=performance.now(); const ctrl=new AbortController(); const to=setTimeout(()=>ctrl.abort(),20000);
+  Promise.resolve(opusPlan(ctrl.signal,trigger)).catch(()=>{}).finally(()=>{clearTimeout(to);reason.opusInFlight=false;}); }
 async function geminiInterpret(reports,signal){
   const payload={ concurrence:reason.concurrence, active_plan:reason.plan.map((s,i)=>({intent:s.intent,dest_label:s.dest_label,active:i===reason.step})), recent_events:reason.events.slice(-6), reports };
   const o=await orCall(signal, GEMINI_MODEL, GEMINI_SYS, JSON.stringify(payload), GEMINI_SCHEMA, 'interpret', 900);
@@ -8503,22 +8732,37 @@ async function geminiInterpret(reports,signal){
   if(o.understanding)reason.concurrence=(''+o.understanding).slice(0,700);
   reason.playerEst={x:o.player_x,z:o.player_z,distance:o.player_distance,confidence:o.player_confidence,basis:o.player_basis};
   reason.rec={intent:o.rec_intent,dest_x:o.rec_dest_x,dest_z:o.rec_dest_z,label:o.rec_dest_label,why:o.rec_why};
-  if(o.reasoning){ wretch.thought=(''+o.reasoning).slice(0,160); reason.liveThought=(''+o.reasoning).slice(0,200); reason.liveThoughtT=clock.elapsedTime; }   // dedicated LIVE thought (timestamped) so the feed shows fresh reasoning, never the frame-clobbered wretch.thought
-  if(o.critical_change){ const est=reason.playerEst;                                             // INTERRUPT the half-day plan (Opus stays on its sunrise/sunset schedule) — divert, then return
+  if(o.reasoning){ wretch.thought=(''+o.reasoning).slice(0,160); reason.liveThought=(''+o.reasoning).slice(0,200); reason.liveThoughtT=clock.elapsedTime;   // dedicated LIVE thought (timestamped) so the feed shows fresh reasoning, never the frame-clobbered wretch.thought
+    reason.journal.push('['+Math.round(clock.elapsedTime)+'s|'+((reports[0]&&reports[0].event)||'general')+'] '+(''+o.reasoning).slice(0,140));               // JOURNAL — every live thought, in order, for the daily council
+    if(reason.journal.length>200)reason.journal.shift(); }
+  if(o.critical_change){ const est=reason.playerEst;                                             // URGENT input to the WILL (the orchestrator stays on its daily schedule) — divert, then return
     const dest=(o.rec_dest_x!=null&&o.rec_dest_z!=null)?{x:+o.rec_dest_x,z:+o.rec_dest_z}:(est&&est.x!=null?{x:est.x,z:est.z}:null);
-    divertTo(o.rec_intent||'investigate', dest, o.rec_dest_label||'the disturbance', 40); }
+    WILL.submit('urgent',{intent:o.rec_intent||'investigate', dest, label:o.rec_dest_label||'the disturbance', ttl:40, why:'gemini:'+(o.rec_intent||'investigate')}); }
   return o; }
-async function opusPlan(signal,why){
-  const payload={ trigger:why||'periodic', planning_phase:reason.phasePlan||'day', concurrence:reason.concurrence, recommendation:reason.rec, player_estimate:reason.playerEst, last_stimulus:reason.lastStimulus, recent_events:reason.events.slice(-6), report:buildReport('plan_request'), capabilities:ACTION_KB };
-  const o=await orCall(signal, PLANNER_MODEL, OPUS_SYS, JSON.stringify(payload), OPUS_SCHEMA, 'plan', 1400);
+async function opusPlan(signal,trigger){
+  const journal=reason.journal.slice(-60);                                                        // the day's story: every live Gemini thought since the last dawn
+  const payload={ trigger:trigger||'daily', planning_scope:(trigger==='reunion')?'correction_for_current_phase':'entire_coming_day_and_night',
+    now_phase:_phaseNow(), concurrence:reason.concurrence, recommendation:reason.rec, player_estimate:reason.playerEst,
+    last_stimulus:reason.lastStimulus, recent_events:reason.events.slice(-8),
+    day_journal:journal, journal_entries_dropped:Math.max(0,reason.journal.length-journal.length),
+    report:buildReport('plan_request'), capabilities:ACTION_KB };
+  const content=[{type:'text',text:JSON.stringify(payload)}];
+  if(trigger!=='reunion'){ try{ const f=(typeof grabFrame==='function')?grabFrame():null; if(f)content.push({type:'image_url',image_url:{url:f}}); }catch(e){} }   // the daily council sees through its eyes
+  const o=await orCall(signal, PLANNER_MODEL, OPUS_SYS, content, OPUS_SCHEMA, 'plan', 1600);
   if(!o)return null;
   if(o.mode_bias){ for(const m of MODES){ const v=+o.mode_bias[m]; if(!isNaN(v))brain.Wllm[m]=clamp(v,0.3,2.5); } }
-  if(o.thought){ brain.strat.thought=(''+o.thought).slice(0,200); reason.planSummary=(''+o.thought).slice(0,200); }   // the half-day intent, shown persistently
-  if(o.memory_summary){ brainMem=(''+o.memory_summary).slice(0,1000); lsSet('hollowcraft_brain_mem',brainMem); mind.reflection=brainMem; }
-  if(Array.isArray(o.plan)&&o.plan.length){ reason.plan=o.plan.slice(0,6); reason.step=0; reason.divertT=0; nav.divert=false; applyPlanStep(); }   // a fresh half-day plan supersedes any diversion
+  if(o.thought){ brain.strat.thought=(''+o.thought).slice(0,200); reason.planSummary=(''+o.thought).slice(0,200); }   // the day's strategy, shown persistently
+  if(o.memory_summary){ brainMem=(''+o.memory_summary).slice(0,1000); lsSet('hollowcraft_brain_mem',brainMem); mind.reflection=brainMem; }   // the orchestrator is the ONLY writer of memory
+  if(Array.isArray(o.plan)&&o.plan.length){ reason.plan=o.plan.slice(0,8); reason.step=_firstPhaseStep(); reason.divertT=0; nav.divert=false; applyPlanStep(); }   // a fresh plan supersedes any diversion; enter it at the current phase's arc
+  if((trigger||'daily')==='daily'){ reason.journal.length=0; }                                     // tomorrow's council reads tomorrow's story
+  if(typeof WILL!=='undefined'){ WILL.note('orchestrator',trigger||'daily'); WILL.lastOrch=(typeof clock!=='undefined')?clock.elapsedTime:0; }
   return o; }
-function flushGemini(reports){ if(reason.geminiInFlight||!reports.length)return; reason.geminiInFlight=true; const ctrl=new AbortController(); const to=setTimeout(()=>ctrl.abort(),15000);
-  Promise.resolve(geminiInterpret(reports,ctrl.signal)).catch(()=>{}).finally(()=>{clearTimeout(to);reason.geminiInFlight=false;}); }
+function flushGemini(reports){ if(!reports.length)return;
+  if(reason.geminiInFlight){ reason.buffer=[reports[reports.length-1]]; return; }               // a report is already out — hold the FRESHEST pending one; never silently drop a trigger
+  const rep=reports[0]; rep.delta=_ctxDelta(rep);                                               // delta annotation computed at true delivery time, so seq tracks exactly what the mind received
+  reason.geminiInFlight=true; const ctrl=new AbortController(); const to=setTimeout(()=>ctrl.abort(),15000);
+  Promise.resolve(geminiInterpret([rep],ctrl.signal)).catch(()=>{}).finally(()=>{clearTimeout(to);reason.geminiInFlight=false;
+    if(reason.buffer.length){ const b=reason.buffer; reason.buffer=[]; flushGemini(b); } }); }   // deliver the held report the moment the line is free
 function logStim(kind,extra){ const t=(typeof clock!=='undefined')?clock.elapsedTime:0;   // record WHAT triggered awareness (shown in the feed + fed to the models) — always, even with no AI key
   const x=extra&&extra.x!=null?extra.x:(typeof player!=='undefined'?Math.round(player.pos.x):null), z=extra&&extra.z!=null?extra.z:(typeof player!=='undefined'?Math.round(player.pos.z):null);
   const st={kind,x,z,t}; reason.lastStimulus=st; reason.events.push(st); if(reason.events.length>8)reason.events.shift(); }
@@ -8528,13 +8772,13 @@ function reasonEvent(kind,extra){ logStim(kind,extra);                          
   if(fresh){ reason._evCd[kind]=now; const rep=buildReport(kind); if(extra)rep.detail=extra; rep.recent_events=reason.events.slice(-6); flushGemini([rep]); }   // interpret NOW (Gemini may then DIVERT the plan)
 }
 function updateReasoning(dt){
-  if(!wretch.active || wretch.dead || wretch.dying){ return; }   // the mind STOPS entirely when the creature dies
+  if(wretch.dead || wretch.dying){ return; }                     // the mind STOPS entirely when the creature dies
   if(player.grabbed || wretch.dragging){ return; }               // it has already CAUGHT you — the ritual takes over, nothing left to reason about
+  if(!reason.plan.length && !reason.opusInFlight && !reason.phaseInit){ reason.phaseInit=true; orchestrate('boot'); }   // BOOT: one council so a fresh session always has a standing plan — even while the body bides (thereafter only dawn + reunion)
+  WILL.decide(dt);                                                                                  // the ONE container: divert TTLs, reunion nudge, trigger sentry (its inputs self-gate on activity)
+  if(!wretch.active){ return; }                                  // the live 10s report stream only flows while the body is out in the world
   reason.reportT+=dt;
-  if(reason.reportT>=REASON_INTERVAL){ reason.reportT=0; flushGemini([buildReport('general')]); }   // Gemini reasons every 10s — one report, no stacking
-  if(reason.divertT>0){ reason.divertT-=dt; if(reason.divertT<=0) resumePlan(); }                    // a diversion times out → return to the standing half-day plan
-  if(!reason.plan.length && !reason.opusInFlight && !reason.phaseInit){ reason.phaseInit=true;        // BOOT: lay out a plan for the current half-day once (thereafter only sunrise/sunset)
-    planHalfDay((typeof HORROR!=='undefined'&&HORROR._nightActive)?'night':'day'); }
+  if(reason.reportT>=REASON_INTERVAL){ reason.reportT=0; flushGemini([buildReport('general')]); }   // the 10s heartbeat — one report, no stacking (triggers fire instantly via reasonEvent)
 }
 
 // DEBUG auto-start (headless verification)
@@ -8543,6 +8787,10 @@ if(DEBUG){ boot.style.display='none'; started=true; if(Q.get('wretch')){ wretch.
 window.__hc={
   st(){ try{ return {started, grabbed:player.grabbed, gp:wretch.grabPhase, ws:wretch.state, wa:wretch.active, dist:+(wretch.dist||0).toFixed(2), watched:!!(wretch.sense&&wretch.sense.watched), seen:!!(wretch.sense&&wretch.sense.seen), obs:+(wretch.observed||0).toFixed(1), form:wretch.form, wy:+wretch.pos.y.toFixed(1), py:+player.pos.y.toFixed(1), fps:Math.round(fpsAvg) }; }catch(e){ return {err:e.message}; } },
   perf(){ try{ if(window.__benchInfoSnap) return window.__benchInfoSnap; return {calls:renderer.info.render.calls, tris:renderer.info.render.triangles, geoms:renderer.info.memory.geometries, tex:renderer.info.memory.textures, progs:(renderer.info.programs||[]).length}; }catch(e){ return {err:e.message}; } },
+  // ---- COGNITION QA (V3) ----
+  mind(){ try{ return { plan:reason.plan.map(s=>({i:s.intent,p:s.phase||null})), step:reason.step, journal:reason.journal.length, seq:(typeof CTXD!=='undefined')?CTXD.seq:null, thought:reason.liveThought||null, orch:reason.orchTrigger, divertT:+((reason.divertT||0)).toFixed(1), nav:{active:nav.active,beh:nav.behavior,label:nav.label,divert:nav.divert}, lastMutual:+((WILL.lastMutual||0)).toFixed(1), willLog:WILL.log.slice(-6) }; }catch(e){ return {err:e.message}; } },
+  stim(k,extra){ try{ reasonEvent(k,extra||{x:Math.round(player.pos.x),z:Math.round(player.pos.z)}); return 'fired '+k; }catch(e){ return e.message; } },
+  nudge(){ try{ WILL.lastMutual=-1e9; WILL.lastOrch=-1e9; return 'cold'; }catch(e){ return e.message; } },
   look(){ if(!wretch.active)return 'inactive'; const dx=wretch.pos.x-player.pos.x, dy=(wretch.pos.y+2.4)-(player.pos.y+EYE), dz=wretch.pos.z-player.pos.z, L=Math.hypot(dx,dy,dz)||1; player.yaw=Math.atan2(-dx,-dz); player.pitch=clamp(Math.asin(dy/L),-1.2,1.2); return {yaw:+player.yaw.toFixed(2),pitch:+player.pitch.toFixed(2),dist:+Math.hypot(dx,dz).toFixed(1)}; },
   put(dx,dz){ if(!wretch.active)this.summon(); wretch.pos.set(player.pos.x+(dx||0), player.pos.y, player.pos.z+(dz||0)); return {x:+wretch.pos.x.toFixed(1),z:+wretch.pos.z.toFixed(1)}; },
   blood(n){ const fx=-Math.sin(player.yaw), fz=-Math.cos(player.yaw), rx=-fz, rz=fx; for(let i=0;i<(n||3);i++){ const f=2+i*1.1, s=(Math.random()-0.5)*3; spawnBloodSplat(player.pos.x+fx*f+rx*s, player.pos.z+fz*f+rz*s, 1.2+Math.random()*0.8); } return 'splat'; },   // QA: paint gore in front of the player
