@@ -879,6 +879,7 @@ const _lv  = new Uint8Array(LPW*LPW*WH);           // reusable padded flood scra
 let _lvLit = false;
 const _lpi = (px,py,pz)=> px + pz*LPW + py*(LPW*LPW);
 const _bfsQ = new Int32Array(1<<16);
+const _bkN = new Array(9);   // bakeLight's cached 3x3 neighbor-chunk refs (flood reads blocks directly, no Map hit per cell)
 function chunkEmitters(c){
   if(c._emit) return c._emit;
   const e=[], b=c.blocks;
@@ -888,9 +889,10 @@ function chunkEmitters(c){
 }
 function bakeLight(c){
   _lvLit=false;
-  const cx0=c.cx*CK, cz0=c.cz*CK; let qn=0; const Q=_bfsQ;
+  const cx0=c.cx*CK, cz0=c.cz*CK; let qn=0; const Q=_bfsQ; const NB=_bkN;
   for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++){
-    const nc=getChunk(c.cx+dx,c.cz+dz); if(!nc||!nc.generated) continue;
+    const nc=getChunk(c.cx+dx,c.cz+dz); NB[(dx+1)+(dz+1)*3]=(nc&&nc.generated)?nc:null;   // cache the 3x3 refs — the flood below reads blocks straight off them instead of a Map hit per neighbor cell
+    if(!nc||!nc.generated) continue;
     const e=chunkEmitters(nc); if(!e.length) continue;
     const nx0=(c.cx+dx)*CK, nz0=(c.cz+dz)*CK;
     for(let i=0;i<e.length;i+=4){
@@ -910,8 +912,9 @@ function bakeLight(c){
       if(f===0)nx--; else if(f===1)nx++; else if(f===2)nz--; else if(f===3)nz++; else if(f===4)ny--; else ny++;
       if(nx<0||nx>=LPW||nz<0||nz>=LPW||ny<0||ny>=WH) continue;
       const ni=_lpi(nx,ny,nz); if(_lv[ni]>=nl) continue;
-      const b=getBlock(cx0+nx-LPAD, ny, cz0+nz-LPAD);
-      if(b!==AIR && isOpaque[b]) continue;                 // light stops at solids
+      const wx=nx-LPAD, wz=nz-LPAD;                        // local to the center chunk: -15..30
+      const ch=NB[((wx>>4)+1)+((wz>>4)+1)*3];              // direct 3x3 ref (wx>>4 maps -15..-1 → -1, 0..15 → 0, 16..30 → 1)
+      if(ch){ const b=ch.blocks[(wx&15)+(wz&15)*CK+ny*CK*CK]; if(b!==AIR && isOpaque[b]) continue; }   // missing chunk == AIR, matching getBlock
       _lv[ni]=nl; if(nl>1 && qn<Q.length) Q[qn++]=ni;
     }
   }
@@ -962,11 +965,40 @@ function _growMesh(){ _mCap*=2;
   const K=new Float32Array(_mCap);   K.set(_mK); _mK=K;
 }
 
+// PADDED CHUNK SNAPSHOT — one linear copy per rebuild, then every mesher pass reads flat typed arrays.
+// Before this, EVERY voxel sample in the greedy sweeps went through getBlock = key() + world.get (a Map
+// hit) — ~300k+ per chunk rebuild — plus a second Map hit per visible face for skyExposure. The snapshot
+// is the whole 3x3-neighborhood window the mesher can ever touch: chunk + 1-voxel border shell.
+const _SW=CK+2;                                    // 18
+const _snapB=new Uint8Array(_SW*_SW*WH);           // block ids; index (lx+1) + (lz+1)*_SW + ly*_SW*_SW
+const _snapT=new Int16Array(_SW*_SW);              // per-column opaque-top for the window (skylight source)
+function snapshotChunk(c){
+  const N=_snapN; for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++){ const nc=getChunk(c.cx+dx,c.cz+dz); N[(dx+1)+(dz+1)*3]=(nc&&nc.generated)?nc:null; }
+  const B=c.blocks, XM=N[3],XP=N[5],ZM=N[1],ZP=N[7];
+  for(let y=0;y<WH;y++){ const yb=y*CK*CK, ys=y*_SW*_SW;
+    for(let z=0;z<CK;z++) _snapB.set(B.subarray(yb+z*CK, yb+z*CK+CK), ys+(z+1)*_SW+1);   // interior: x-rows are contiguous in c.blocks (idx = x + z*CK + y*CK*CK)
+    if(ZM) _snapB.set(ZM.blocks.subarray(yb+15*CK, yb+15*CK+CK), ys+1); else _snapB.fill(0, ys+1, ys+1+CK);                         // z=-1 strip = neighbor's z=15 row (contiguous)
+    if(ZP) _snapB.set(ZP.blocks.subarray(yb, yb+CK), ys+17*_SW+1); else _snapB.fill(0, ys+17*_SW+1, ys+17*_SW+1+CK);                // z=16 strip = neighbor's z=0 row
+    if(XM){ const s=XM.blocks; for(let z=0;z<CK;z++) _snapB[ys+(z+1)*_SW]=s[yb+z*CK+15]; } else for(let z=0;z<CK;z++) _snapB[ys+(z+1)*_SW]=0;    // x=-1 column
+    if(XP){ const s=XP.blocks; for(let z=0;z<CK;z++) _snapB[ys+(z+1)*_SW+17]=s[yb+z*CK]; } else for(let z=0;z<CK;z++) _snapB[ys+(z+1)*_SW+17]=0; // x=16 column
+    _snapB[ys]        = N[0]? N[0].blocks[yb+15*CK+15] : 0;   // corner (-1,-1)
+    _snapB[ys+17]     = N[2]? N[2].blocks[yb+15*CK]    : 0;   // corner (16,-1)
+    _snapB[ys+17*_SW] = N[6]? N[6].blocks[yb+15]       : 0;   // corner (-1,16)
+    _snapB[ys+17*_SW+17]=N[8]? N[8].blocks[yb]         : 0;   // corner (16,16)
+  }
+  for(let pz=0;pz<_SW;pz++)for(let px=0;px<_SW;px++){ const wx=px-1, wz=pz-1;
+    const ch=N[((wx>>4)+1)+((wz>>4)+1)*3];                    // wx>>4 maps -1→-1, 0..15→0, 16→1
+    let t=CFG.SEA; if(ch){ t=ch.htop[(wx&15)+(wz&15)*CK]; if(t<0)t=0; }
+    _snapT[px+pz*_SW]=t; }
+}
+const _snapN=new Array(9);
+function _sg(lx,ly,lz){ return (ly<0||ly>=WH) ? 0 : _snapB[(lx+1) + (lz+1)*_SW + ly*_SW*_SW]; }   // 0 === BID.air
+function _ssky(lx,ly,lz){ const th=_snapT[(lx+1)+(lz+1)*_SW]; if(ly>=th)return 1; const v=1-(th-ly)/6; return v<0?0:v; }
+
 function greedyMesh(c, pass){
   // pass: 'opaque' | 'cutout'
   let _vn=0;                           // vertices written into the shared scratch this call
-  const cx0=c.cx*CK, cz0=c.cz*CK;
-  const g=(lx,ly,lz)=> getBlock(cx0+lx, ly, cz0+lz);
+  const g=_sg;                         // padded-snapshot reads (snapshotChunk(c) ran in buildChunkMeshes) — NOT world getBlock
   const isSrc = pass==='opaque'
       ? (id)=> id!==AIR && isOpaque[id]
       : pass==='leaf'
@@ -988,8 +1020,8 @@ function greedyMesh(c, pass){
       for (x[v]=0; x[v]<dV; x[v]++){
         for (x[u]=0; x[u]<dU; x[u]++, n++){
           let a=0,b=0;
-          if (x[d]>=0){ const id=g(x[0],x[1],x[2]); if(isSrc(id)){ const nid=g(x[0]+q[0],x[1]+q[1],x[2]+q[2]); if(!hides(nid,id)){ const sky=Math.round(skyExposure(cx0+x[0]+q[0],x[1]+q[1],cz0+x[2]+q[2])*15); a=packFace(id,faceTile(id,d,false),sky,false);} } }
-          if (x[d]<dD-1){ const xx=x[0]+q[0],xy=x[1]+q[1],xz=x[2]+q[2]; const id=g(xx,xy,xz); if(isSrc(id)){ const nid=g(x[0],x[1],x[2]); if(!hides(nid,id)){ const sky=Math.round(skyExposure(cx0+x[0],x[1],cz0+x[2])*15); b=packFace(id,faceTile(id,d,true),sky,true);} } }
+          if (x[d]>=0){ const id=g(x[0],x[1],x[2]); if(isSrc(id)){ const nid=g(x[0]+q[0],x[1]+q[1],x[2]+q[2]); if(!hides(nid,id)){ const sky=Math.round(_ssky(x[0]+q[0],x[1]+q[1],x[2]+q[2])*15); a=packFace(id,faceTile(id,d,false),sky,false);} } }
+          if (x[d]<dD-1){ const xx=x[0]+q[0],xy=x[1]+q[1],xz=x[2]+q[2]; const id=g(xx,xy,xz); if(isSrc(id)){ const nid=g(x[0],x[1],x[2]); if(!hides(nid,id)){ const sky=Math.round(_ssky(x[0],x[1],x[2])*15); b=packFace(id,faceTile(id,d,true),sky,true);} } }
           // only one side wins (a face belongs to the solid side facing air)
           mask[n] = a ? a : b;
         }
@@ -1052,8 +1084,8 @@ function greedyMesh(c, pass){
 
 // water surface + sides (own shader)
 function waterMesh(c){
-  const P=[], NM=[], TOPF=[], DEP=[]; const cx0=c.cx*CK, cz0=c.cz*CK;
-  const g=(lx,ly,lz)=>getBlock(cx0+lx,ly,cz0+lz);
+  const P=[], NM=[], TOPF=[], DEP=[];
+  const g=_sg;   // padded-snapshot reads (see snapshotChunk)
   const push=(a,b,cc,d,nx,ny,nz,top,depth)=>{ const quad=[a,b,cc,d]; const o=[0,1,2,0,2,3];
     for(let t=0;t<6;t++){const vv=quad[o[t]];P.push(vv[0],vv[1],vv[2]);NM.push(nx,ny,nz);TOPF.push(top);DEP.push(depth);} };
   for (let ly=0;ly<WH;ly++) for (let lz=0;lz<CK;lz++) for (let lx=0;lx<CK;lx++){
@@ -1098,7 +1130,7 @@ function foliageMesh(c){
   };
   for (let ly=0;ly<WH;ly++) for (let lz=0;lz<CK;lz++) for (let lx=0;lx<CK;lx++){
     const id=g(lx,ly,lz); if (id===AIR||blockCat[id]!=='cross') continue;
-    const tile=B[id].tileI; const sky=clamp(skyExposure(cx0+lx,ly,cz0+lz),0,1);
+    const tile=B[id].tileI; const sky=clamp(_ssky(lx,ly,lz),0,1);
     const wind=B[id].foliage?1: (B[id].light?0:0.5);
     const jx=(xhash(cx0+lx,1,cz0+lz,71)-0.5)*0.3, jz=(xhash(cx0+lx,2,cz0+lz,73)-0.5)*0.3;
     quad(lx+0.5+jx, ly, lz+0.5+jz, 0.85,0.85, tile, sky, wind);
@@ -1670,15 +1702,30 @@ function grabFrame(){ try{
 // =====================================================================
 const remeshSet = new Set();
 function markRemesh(cx,cz){ const c=getChunk(cx,cz); if(c){ c.dirty=true; remeshSet.add(key(cx,cz)); } }
+// LIGHT-ONLY UPDATE PATH — the light volume is a 3D texture fully decoupled from mesh topology, so a
+// torch place/break must NOT rebuild 9 chunks' geometry (the old behavior: ~30-60ms of greedy meshing
+// per light edit). Neighbors only need their light texture re-flooded + (on lit<->unlit transitions)
+// their materials rebound. Only the EDITED chunk needs a real remesh (the torch model itself).
+const relightSet=new Set();
+function markRelight(cx,cz){ const c=getChunk(cx,cz); if(c&&c.meshed&&!c.dirty) relightSet.add(key(cx,cz)); }   // dirty chunks skip: their pending remesh re-bakes anyway
+function relightChunk(c){
+  const hadL=c.light3D;
+  buildLightTexture(c);                                  // re-flood; for an already-lit chunk this UPDATES the same texture object in place
+  if(c.light3D===hadL) return;                           // same object (or still unlit) — bound materials pick the new texels up via needsUpdate, nothing to rebind
+  if(c.group) c.group.traverse(o=>{ if(o.isMesh && o.userData.baseMat){
+    const old=o.material;
+    o.material = c.light3D ? _chunkMat(o.userData.baseMat, c.light3D) : o.userData.baseMat;   // program is cache-keyed → no shader recompile, just fresh uniforms
+    if(old && old.userData && old.userData.chunkClone) old.dispose(); } });
+}
 function setBlockWorld(wx,wy,wz,b,record){
   if (wy<1||wy>=WH) return;
   const c=getChunk(wx>>4,wz>>4); if(!c||!c.generated) return;
   const lx=wx&15, lz=wz&15;
   const _old=c.blocks[idx(lx,wy,lz)];
   c.blocks[idx(lx,wy,lz)]=b;
-  if(blockLight[_old]||blockLight[b]){                 // a light block changed → invalidate the baked emitter caches & re-flood this chunk + its neighbours (torch range crosses borders)
-    for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++){ const nc=getChunk(c.cx+dx,c.cz+dz); if(nc){ nc._emit=null; markRemesh(nc.cx,nc.cz); } }
-  }
+  if(blockLight[_old]||blockLight[b]){                 // a light block changed → invalidate the baked emitter caches; neighbours get a cheap RELIGHT (texture re-flood), not a geometry rebuild
+    for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++){ const nc=getChunk(c.cx+dx,c.cz+dz); if(nc){ nc._emit=null; if(dx||dz) markRelight(nc.cx,nc.cz); } }
+  }                                                    // the edited chunk itself still gets the full markRemesh below — its geometry really changed (the torch/lantern model)
   if(b===WATER) c.hasWater=true; else if(blockCat[b]==='cross') c.hasCross=true; else if(blockCat[b]==='model') c.hasModel=true;
   // maintain column top for skylight
   const ci=lx+lz*CK;
@@ -1957,17 +2004,19 @@ function disposeChunkMeshes(c){
 function buildChunkMeshes(c){
   if(c.group) disposeChunkMeshes(c);
   buildLightTexture(c);                // flood-fill this chunk's baked block-light into its 3D texture (null if no light near) — must precede material selection
+  snapshotChunk(c);                    // one linear copy; all greedy/water/foliage passes below read the flat snapshot, not the world Map
   const g=new THREE.Group(); g.position.set(c.cx*CK,0,c.cz*CK);
-  // LIT chunks get per-chunk material clones bound to their light volume; unlit chunks reuse the shared templates (zero overhead)
+  // LIT chunks get per-chunk material clones bound to their light volume; unlit chunks reuse the shared templates (zero overhead).
+  // userData.baseMat tags each mesh's template so relightChunk() can rebind on lit<->unlit transitions without a geometry rebuild.
   const L=c.light3D;
   const _om = L? _chunkMat(opaqueMat,L) : opaqueMat;
   const _cm = L? _chunkMat(cutoutMat,L) : cutoutMat;
   const _lm = L? _chunkMat(leafMat,L)   : leafMat;
   const _fm = L? _chunkMat(foliageMat,L): foliageMat;
-  const og=greedyMesh(c,'opaque'); if(og){ og.computeBoundingSphere(); const m=new THREE.Mesh(og,_om); m.castShadow=true; m.receiveShadow=true; g.add(m); }
-  const cg=greedyMesh(c,'cutout'); if(cg){ cg.computeBoundingSphere(); const m=new THREE.Mesh(cg,_cm); m.castShadow=false; m.receiveShadow=true; g.add(m); }   // glass — see-through, no solid shadow
-  const lg=greedyMesh(c,'leaf'); if(lg){ lg.computeBoundingSphere(); const m=new THREE.Mesh(lg,_lm); m.castShadow=true; m.receiveShadow=true; m.customDepthMaterial=leafDepthMat; g.userData.leaf=m; g.add(m); }   // leaves cast ALPHA-TESTED shadows → dappled light shafts ("god rays") through the canopy gaps
-  if(c.hasCross){ const fg=foliageMesh(c); if(fg){ fg.computeBoundingSphere(); const m=new THREE.Mesh(fg,_fm); m.castShadow=false; m.receiveShadow=true; m.userData.detail=1; g.userData.foliage=m; g.add(m); } }   // detail=1: suppressible in the fogged far rings
+  const og=greedyMesh(c,'opaque'); if(og){ og.computeBoundingSphere(); const m=new THREE.Mesh(og,_om); m.castShadow=true; m.receiveShadow=true; m.userData.baseMat=opaqueMat; g.add(m); }
+  const cg=greedyMesh(c,'cutout'); if(cg){ cg.computeBoundingSphere(); const m=new THREE.Mesh(cg,_cm); m.castShadow=false; m.receiveShadow=true; m.userData.baseMat=cutoutMat; g.add(m); }   // glass — see-through, no solid shadow
+  const lg=greedyMesh(c,'leaf'); if(lg){ lg.computeBoundingSphere(); const m=new THREE.Mesh(lg,_lm); m.castShadow=true; m.receiveShadow=true; m.customDepthMaterial=leafDepthMat; m.userData.baseMat=leafMat; g.userData.leaf=m; g.add(m); }   // leaves cast ALPHA-TESTED shadows → dappled light shafts ("god rays") through the canopy gaps
+  if(c.hasCross){ const fg=foliageMesh(c); if(fg){ fg.computeBoundingSphere(); const m=new THREE.Mesh(fg,_fm); m.castShadow=false; m.receiveShadow=true; m.userData.detail=1; m.userData.baseMat=foliageMat; g.userData.foliage=m; g.add(m); } }   // detail=1: suppressible in the fogged far rings
   if(c.hasWater){ const wg=waterMesh(c); if(wg){ wg.computeBoundingSphere(); const m=new THREE.Mesh(wg,waterMat); m.castShadow=false; m.receiveShadow=false; m.renderOrder=3; m.userData.detail=1; g.userData.water=m; g.add(m); } }
   if(c.hasModel) buildModelBlocks(c,g); else c.emitters=[];
   chunkRoot.add(g); c.group=g; c.meshed=true; c.dirty=false;
@@ -2074,6 +2123,8 @@ function streamChunks(genBudget, meshBudget){
   for(let i=0;i<RING.length && meshBudget>0;i++){ const o=RING[i]; if(Math.abs(o[0])>CFG.RENDER_DIST||Math.abs(o[1])>CFG.RENDER_DIST) continue; const c=getChunk(pcx+o[0],pcz+o[1]); if(c && c.dirty && neighbors8(c)){ buildChunkMeshes(c); _streamMeshed=true; remeshSet.delete(key(c.cx,c.cz)); meshBudget--; if(performance.now()-meshT0>meshMS) return; } }
   // explicit edit-driven remeshes — same time slice (a big edit/explosion can't hitch the frame either)
   if(remeshSet.size){ for(const kk of Array.from(remeshSet)){ if(performance.now()-meshT0>meshMS)break; const c=world.get(kk); remeshSet.delete(kk); if(c&&neighbors8(c)){ buildChunkMeshes(c); _streamMeshed=true; } } }
+  // light-only refloods (torch place/break neighbors) — far cheaper than a remesh; same slice, drained after
+  if(relightSet.size){ for(const kk of relightSet){ if(performance.now()-meshT0>meshMS)break; relightSet.delete(kk); const c=world.get(kk); if(c&&c.meshed&&!c.dirty) relightChunk(c); } }
 }
 let unloadTick=0;
 function unloadFar(){
@@ -8356,6 +8407,8 @@ window.__hc={
   set(p){ Object.assign(wretch, p||{}); return wretch.state; },
   cam(o){ o=o||{}; if(o.pitch!=null)player.pitch=o.pitch; if(o.yaw!=null)player.yaw=o.yaw; return {yaw:player.yaw,pitch:player.pitch}; },
   probe(){ const P=player.pos; return { worldSize:world.size, sea:CFG.SEA, WH, feet:getBlock(Math.floor(P.x),Math.floor(P.y),Math.floor(P.z)), gyHere:groundYAt(P.x,P.z), gy26:groundYAt(P.x+26,P.z), gyN:groundYAt(P.x,P.z-26), chunkHere:!!getChunk(Math.floor(P.x)>>4,Math.floor(P.z)>>4), chunk26:!!getChunk((Math.floor(P.x)+26)>>4,Math.floor(P.z)>>4) }; },
+  setBlock(dx,dy,dz,name){ const P=player.pos, wx=Math.floor(P.x)+(dx|0), wy=Math.floor(P.y)+(dy|0), wz=Math.floor(P.z)+(dz|0); const id=name==null?0:(typeof name==='number'?name:BID[name]); if(id===undefined)return 'unknown block: '+name; setBlockWorld(wx,wy,wz,id,false); return {wx,wy,wz,id,queued:{remesh:remeshSet.size,relight:relightSet.size}}; },   // QA/bench: place or clear (name=null) a block relative to the player; reports the edit-queue depths
+  editQ(){ return {remesh:remeshSet.size, relight:relightSet.size}; },   // QA/bench: watch the edit queues drain
   // ---- ENTITY RENDER QA ----
   _qaLight:null,
   qa(on){ if(on){ if(!this._qaLight){ this._qaLight=new THREE.PointLight(0xffe8d0,0,60,2); scene.add(this._qaLight); this._qaKey=new THREE.DirectionalLight(0xffffff,0); scene.add(this._qaKey); } this._qaLight.intensity=on===true?90:on; this._qaKey.intensity=1.4; } else { if(this._qaLight){this._qaLight.intensity=0;} if(this._qaKey)this._qaKey.intensity=0; } return !!this._qaLight; },
