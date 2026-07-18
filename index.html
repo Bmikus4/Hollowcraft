@@ -2708,7 +2708,7 @@ function updateMindFeed(dt){ if(!_mindOn || !started || (typeof intro!=='undefin
   else if(bucket!==wretch._itBucket || (now-(wretch._itT||-99))>3.5){ wretch._itBucket=bucket; wretch._itT=now;
     const _pl=_IT[bucket]||_IT.prowl; let _ni=wretch._itIdx||0; if(_pl.length>1){ do{ _ni=(Math.random()*_pl.length)|0; }while(_ni===wretch._itIdx); } wretch._itIdx=_ni; }   // pick a fresh line, never the same one twice in a row
   const pool=_IT[bucket]||_IT.prowl; const instinct=pool[(wretch._itIdx||0)%pool.length];
-  let msg = (ai && !dead && R && R.liveThought && (now-(R.liveThoughtT||-1e9)<15)) ? (R.liveThought.replace(/[<>]/g,'').replace(/_/g,' ').replace(/\s+/g,' ').trim()) : '';   // ONLY the fresh live Gemini thought (<15s old) — never stale history/understanding; otherwise the live procedural monologue below drives it
+  let msg = (ai && !dead && R && R.liveThought && (now-(R.liveThoughtT||-1e9)<24)) ? (R.liveThought.replace(/[<>]/g,'').replace(/_/g,' ').replace(/\s+/g,' ').trim()) : '';   // ONLY the fresh live Gemini thought (<24s — bridges the 10s cadence + latency so the live mind never flickers out mid-session); otherwise the live procedural monologue below drives it
   if(!msg) msg = instinct;   // no LLM (or dead) → the live instinct monologue is always shown
   const quote='&ldquo;'+_esc(msg.slice(0,300))+'&rdquo;';
   // ---- DATA (always on, at the TOP) ----
@@ -2757,7 +2757,8 @@ document.getElementById('respawnbtn').addEventListener('click',()=>{ respawn(); 
 document.addEventListener('pointerlockchange',()=>{ locked=document.pointerLockElement===canvas; if(locked){ pause.style.display='none'; audioResume&&audioResume(); } else if(started && !player.dead && !openUI){ pause.style.display='flex'; for(const k in keys)delete keys[k]; heldBtn=-1; } });
 let _lookDX=0,_lookDY=0;   // raw mouse deltas accumulate here; applyLook() eases them out over a few frames → SMOOTHED looking
 document.addEventListener('mousemove',e=>{ if(!locked)return; _lookDX+=e.movementX; _lookDY+=e.movementY; });
-function applyLook(dt){ if(!locked)return; const base=0.0022*_sensMult, sens=(view&&view.ads)?base*_aimFrac:base;
+function applyLook(dt){ if(!locked)return; const base=0.0022*_sensMult;
+  const _aT=(view&&view.adsT)||0, sens=base*(1-(1-_aimFrac)*_aT);   // sensitivity eases down WITH the raise (full at hip → _aimFrac at full cheek-weld), no snap
   const k=1-Math.exp(-dt*26);                                                    // smoothing rate (higher = snappier, lower = floatier)
   player.yaw-=_lookDX*sens*k; player.pitch-=_lookDY*sens*k; _lookDX*=(1-k); _lookDY*=(1-k);
   const L=Math.PI/2-0.01; player.pitch=clamp(player.pitch,-L,L); }
@@ -3419,7 +3420,6 @@ const scopeLensMat=new THREE.ShaderMaterial({ depthTest:true, depthWrite:true,
   'precision highp float; varying vec2 vUv; uniform sampler2D uScope; uniform float uActive;',
   'void main(){',
   '  vec2 c=vUv-0.5; float r=length(c)*2.0;',                       // circle-local: 0 centre → 1 rim
-  '  if(uActive<0.5){ gl_FragColor=vec4(0.03,0.06,0.10,1.0); return; }',   // plain dark optic when not aiming
   '  vec3 col=texture2D(uScope, 0.5+c*0.94).rgb;',                 // CLEAN magnified sample — no distortion, no colour tricks
   '  float rim=smoothstep(0.82,1.0,r); col=mix(col, vec3(0.0), rim);',   // only the extreme rim darkens (tube shadow)
   '  // MIL-DOT RETICLE — fine crosshair with a small centre gap, thickening to bold duplex posts, five mil-dots per arm',
@@ -3440,11 +3440,12 @@ const scopeLensMat=new THREE.ShaderMaterial({ depthTest:true, depthWrite:true,
   '  col=mix(col, vec3(0.015), dots*0.95);',
   '  float ctr=smoothstep(0.010,0.006,length(c));',               // tiny RED aiming dot dead-centre',
   '  col=mix(col, vec3(1.0,0.12,0.06), ctr);',
+  '  col=mix(vec3(0.03,0.06,0.10), col, smoothstep(0.30,0.92,uActive));',   // PiP FADES IN with the raise (adsT) — dark optic until the sight is near the eye, meaningful only near full aim
   '  gl_FragColor=vec4(col,1.0);',
   '}'].join('\n') });
 scopeLensMat.customProgramCacheKey=()=>'scopeLens';
-function updateScopeRT(){ scopeLensMat.uniforms.uActive.value=(view&&view.ads)?1:0;   // called BEFORE composer.render() so the lens samples a fresh image
-  if(!(view&&view.ads)) return;
+function updateScopeRT(){ const aT=(view&&view.adsT)||0; scopeLensMat.uniforms.uActive.value=aT;   // uActive follows the animated raise, not the raw boolean → the glass fades in with the cheek-weld
+  if(aT<=0.22) return;                                                                              // don't pay for the extra scene pass until the sight is coming up (fade still hides the stale texture below this)
   scopeCam.position.copy(camera.position); scopeCam.quaternion.copy(camera.quaternion);
   scopeCam.fov=view.scopeFov||7; scopeCam.updateProjectionMatrix();
   const gv=view.group.visible; view.group.visible=false;                                   // keep the rifle OUT of its own scope image
@@ -4031,7 +4032,9 @@ function logLocation(label,x,y,z,note){ const rx=Math.round(x),ry=Math.round(y||
 function detectBase(dt){ _baseAcc+=dt; if(_baseAcc<3)return; _baseAcc=0;
   let sx=0,sz=0,n=0; const doors=[];
   for(const k in edits){ const b=edits[k]; if(_SB.indexOf(b)>=0){ const p=k.split(','); sx+=+p[0]; sz+=+p[2]; n++; } else if(b===BID.gate||b===BID.trapdoor){ const p=k.split(','); doors.push({x:+p[0],y:+p[1],z:+p[2]}); } }
-  if(n>=6){ mind.base={x:sx/n,z:sz/n,n}; mind.doors=doors; place('home','home',sx/n,sz/n,{radius:9,note:n+' placed'}); logLocation('Home',sx/n,0,sz/n,'your base'); }   // enough furniture placed together = the player's home → mark it
+  if(n>=6){ mind.base={x:sx/n,z:sz/n,n}; mind.doors=doors; place('home','home',sx/n,sz/n,{radius:9,note:n+' placed'}); logLocation('Home',sx/n,0,sz/n,'your base');
+    if(typeof WILL!=='undefined'&&typeof reasonEvent==='function'){ const pb=WILL._sv.baseN||0;              // NEW STRUCTURE / the nest has GROWN → the mind takes note (first detection, then every +8 placed blocks)
+      if(pb===0||n>=pb+8){ WILL._sv.baseN=n; reasonEvent('found_structure',{x:Math.round(sx/n),z:Math.round(sz/n),blocks:n}); } } }   // enough furniture placed together = the player's home → mark it
   if(!_spawnLogged){ _spawnLogged=true; IMPORTANT_LOG.push({label:'Spawn',x:Math.round(spawnX),y:0,z:Math.round(spawnZ),note:'where you woke',t:0}); }   // seed spawn (silent)
   if(typeof _dungeonSeen!=='undefined' && _dungeonSeen && wretch.lair) logLocation('The Dungeon',wretch.lair.x,wretch.lair.y||0,wretch.lair.z,'the lair'); }
 function trackPlayer(dt){ _freqAcc+=dt; if(_freqAcc<1)return; _freqAcc=0;
@@ -4073,6 +4076,7 @@ function tryBlink(dt){ wretch.blinkCd-=dt; if(wretch.blinkCd>0) return false;
   if(!losBlocked(cam.x,cam.y,cam.z,c.x,gy+2,c.z) && Math.hypot(c.x-cam.x,c.z-cam.z)<42) return false;   // would materialize in sight → abort
   wretchVoice&&wretchVoice('close_clicks', wretch.pos);              // faint displaced-air tell at the ORIGIN
   wretch.pos.set(c.x,gy,c.z); wretch.blinkCd=55+Math.random()*40; wretch.state='STALK'; wretch.crawl=0; wretch.committed=false;
+  if(typeof reasonEvent==='function')reasonEvent('blinked',{x:Math.round(c.x),z:Math.round(c.z)});   // it relocated through the dark → the mind thinks from the new ground
   return true; }
 // DAYTIME PRESENCE (no hunting): distant grunts/calls drifting through the wood, and exactly ONE peek from the treeline on the first day
 function dayAmbience(dt){
@@ -5905,6 +5909,9 @@ function itemModel(id){ const it=ITEMS[id];
     return new THREE.Mesh(geo, new THREE.MeshLambertMaterial({color: bd.col!=null?bd.col:0x8a7048})); }
   if(it.block!=null) return new THREE.Mesh(new THREE.BoxGeometry(0.3,0.3,0.3), new THREE.MeshLambertMaterial({map:dropTex(id),transparent:true}));
   if(it.tool && it.tool.kind==='sword') return buildGreatsword(it.tool);   // swords are real 3D greatswords everywhere (hand, drop, 3D icon)
+  if(it.tool && it.tool.kind==='pickaxe') return buildPickaxe(it.tool);
+  if(it.tool && it.tool.kind==='axe')     return buildAxe(it.tool);
+  if(it.tool && it.tool.kind==='shovel')  return buildShovel(it.tool);
   return extrudeIcon(id); }   // tools, food, materials → extruded pixel model
 // render an item's 3D model once → cached transparent PNG for the DOM icons
 const _icon3D={}; let _iconRT,_iconScene,_iconCam,_iconCanvas,_iconCtx,_iconPix;
@@ -6076,7 +6083,9 @@ function treeFall(x,y,z,noDrops){ let logs=1; setBlockWorld(x,y,z,AIR,true);   /
 
 // ---- HELD-ITEM VIEWMODEL (bottom-right, bobs on walk, swings on click) ----
 scene.add(camera);                                                                              // camera must be in the scene graph so its child viewmodel renders
-const view={ group:new THREE.Group(), mesh:null, id:'__none__', swing:0, bob:0, flashT:0, scopeFov:(()=>{ try{ const z=localStorage.getItem('hollowcraft_zoom'); return z?clamp(+z,4,16):7; }catch(e){ return 7; } })() };
+const view={ group:new THREE.Group(), mesh:null, id:'__none__', swing:0, bob:0, flashT:0,
+  adsT:0, adsVel:0, settleT:0, lookSwayX:0, lookSwayY:0, prevYaw:null, prevPitch:null,   // scope raise-to-eye ease (adsT) + mouse-lag inertia + transition settle
+  scopeFov:(()=>{ try{ const z=localStorage.getItem('hollowcraft_zoom'); return z?clamp(+z,4,16):7; }catch(e){ return 7; } })() };
 camera.add(view.group);
 const muzzleLight=new THREE.PointLight(0xffcc88,0,9,2); scene.add(muzzleLight);   // AR-15 muzzle flash lights the world briefly
 // shared MUZZLE-FLASH sprite: a canvas-drawn radial starburst (bright core + orange spikes, transparent bg) on a camera-facing plane — reads as a real flash, not a ball
@@ -6170,22 +6179,72 @@ function tileTex(name, ry){ const k=name+'|'+(ry||1); if(_tileTexCache[k])return
   cx.drawImage(atlasCanvas,(i%ATLAS_TILES)*TILE,((i/ATLAS_TILES)|0)*TILE,TILE,TILE,0,0,TILE,TILE);
   const t=new THREE.CanvasTexture(cv); t.magFilter=t.minFilter=THREE.NearestFilter; t.wrapS=t.wrapT=THREE.RepeatWrapping; t.colorSpace=THREE.SRGBColorSpace; if(ry)t.repeat.set(1,ry);
   _tileTexCache[k]=t; return t; }
+// ---- HYPERREAL TOOL KIT: shared cached textures, tier→metal/handle maps, smooth-metal / wood materials ----
+const TIER_METAL ={wood:0x9a7b4f,stone:0x8b8f97,iron:0xc9cdd6,diamond:0x63e6da,gold:0xf2c94c};
+const TIER_SPEC  ={wood:0x2a2a2a,stone:0x6f7379,iron:0xbfc4cc,diamond:0xa9fff6,gold:0xfff0b0};
+const TIER_SHINE ={wood:18,stone:55,iron:120,diamond:140,gold:130};
+const TIER_HANDLE={wood:0x7a5a34,stone:0x6a4d2c,iron:0x574026,diamond:0x40331f,gold:0x5f4622};
+let _woodCanvas=null; const _woodTexByRep={};
+function _mkWoodCanvas(){ const S=64,cv=document.createElement('canvas'); cv.width=cv.height=S; const x=cv.getContext('2d');
+  x.fillStyle='#d7c7a8'; x.fillRect(0,0,S,S);                                                        // light base → tintable
+  for(let i=0;i<56;i++){ const gx=Math.random()*S, w=0.4+Math.random()*1.6;                          // vertical grain streaks (run along the shaft)
+    x.strokeStyle='rgba('+(70+(Math.random()*30|0))+','+(48+(Math.random()*24|0))+',26,'+(0.10+Math.random()*0.22).toFixed(2)+')'; x.lineWidth=w;
+    x.beginPath(); x.moveTo(gx,-6); x.bezierCurveTo(gx+(Math.random()*4-2),S*0.35,gx+(Math.random()*4-2),S*0.7,gx+(Math.random()*6-3),S+6); x.stroke(); }
+  for(let i=0;i<3;i++){ const kx=Math.random()*S,ky=Math.random()*S; x.strokeStyle='rgba(60,40,20,0.28)'; x.lineWidth=1;   // a few knots
+    for(let r=1.5;r<4.5;r+=1.2){ x.beginPath(); x.ellipse(kx,ky,r,r*1.6,0,0,6.283); x.stroke(); } }
+  return cv; }
+function woodTex(ry){ ry=ry||1; if(_woodTexByRep[ry])return _woodTexByRep[ry]; if(!_woodCanvas)_woodCanvas=_mkWoodCanvas();
+  const t=new THREE.CanvasTexture(_woodCanvas); t.wrapS=t.wrapT=THREE.RepeatWrapping; t.colorSpace=THREE.SRGBColorSpace; t.repeat.set(1,ry); _woodTexByRep[ry]=t; return t; }
+let _metalTex=null;
+function metalTex(){ if(_metalTex)return _metalTex; const S=64,cv=document.createElement('canvas'); cv.width=cv.height=S; const x=cv.getContext('2d');
+  x.fillStyle='#f2f2f4'; x.fillRect(0,0,S,S);
+  for(let i=0;i<70;i++){ const gy=Math.random()*S; x.strokeStyle='rgba(120,124,132,'+(0.05+Math.random()*0.10).toFixed(2)+')'; x.lineWidth=0.5+Math.random(); x.beginPath(); x.moveTo(-4,gy); x.lineTo(S+4,gy+(Math.random()*2-1)); x.stroke(); }
+  _metalTex=new THREE.CanvasTexture(cv); _metalTex.wrapS=_metalTex.wrapT=THREE.RepeatWrapping; _metalTex.colorSpace=THREE.SRGBColorSpace; return _metalTex; }
+function woodMat(col,ry){ return new THREE.MeshLambertMaterial({map:woodTex(ry||4),color:col!=null?col:0x8a6a3c}); }   // grain × tint
+function metalMat(tier){ const c=TIER_METAL[tier]||TIER_METAL.iron;                                  // smooth SHINY metal
+  if(tier==='diamond') return new THREE.MeshPhongMaterial({color:c,specular:0xa9fff6,shininess:140,emissive:0x0b5a52,emissiveIntensity:0.55});   // bright cyan crystal
+  const m=new THREE.MeshPhongMaterial({color:c,specular:TIER_SPEC[tier]||0x999999,shininess:TIER_SHINE[tier]||120}); if(tier!=='wood')m.map=metalTex(); return m; }
+function headMat(tier){ return tier==='wood'? woodMat(0x8a6a3c,2) : metalMat(tier); }                // wood-tier heads are wood, not metal
+function _bendGeoY(geo,k){ const p=geo.attributes.position; for(let i=0;i<p.count;i++)p.setX(i,p.getX(i)+k*p.getY(i)*p.getY(i)); p.needsUpdate=true; geo.computeVertexNormals(); return geo; }
+function _dishGeoX(geo,k){ const p=geo.attributes.position; for(let i=0;i<p.count;i++)p.setZ(i,p.getZ(i)+k*p.getX(i)*p.getX(i)); p.needsUpdate=true; geo.computeVertexNormals(); return geo; }
+function buildPickaxe(tool){ const g=new THREE.Group(); const tier=(tool&&tool.tier)||'iron'; const hM=woodMat(TIER_HANDLE[tier],5), mM=headMat(tier);
+  const handle=new THREE.Mesh(new THREE.CylinderGeometry(0.022,0.030,0.80,10),hM); handle.position.y=-0.10; g.add(handle);
+  const eye=new THREE.Mesh(new THREE.CylinderGeometry(0.046,0.050,0.105,12),mM); eye.position.y=0.31; g.add(eye);
+  for(const s of [-1,1]){ const arm=new THREE.Mesh(new THREE.ConeGeometry(0.030,0.36,10),mM); arm.position.set(s*0.135,0.315,0); arm.rotation.z=-s*(Math.PI/2)-s*0.30; g.add(arm); }   // point ±X, tipped down
+  g.traverse(o=>{ if(o.isMesh){o.castShadow=true;o.receiveShadow=true;} }); return g; }
+function buildAxe(tool){ const g=new THREE.Group(); const tier=(tool&&tool.tier)||'iron'; const hM=woodMat(TIER_HANDLE[tier],5), mM=headMat(tier);
+  const handle=new THREE.Mesh(new THREE.CylinderGeometry(0.022,0.030,0.80,10),hM); handle.position.y=-0.10; g.add(handle);
+  const s=new THREE.Shape(); s.moveTo(-0.055,-0.095); s.lineTo(-0.095,-0.105); s.lineTo(-0.095,0.105); s.lineTo(-0.055,0.095);
+  s.lineTo(0.10,0.135); s.quadraticCurveTo(0.245,0.0,0.10,-0.135); s.lineTo(-0.055,-0.095);          // curved +X cutting edge
+  const head=new THREE.Mesh(new THREE.ExtrudeGeometry(s,{depth:0.05,bevelEnabled:true,bevelThickness:0.008,bevelSize:0.008,bevelSegments:1}),mM);
+  head.position.set(0,0.335,-0.025); g.add(head);
+  const eye=new THREE.Mesh(new THREE.CylinderGeometry(0.040,0.044,0.12,10),mM); eye.position.y=0.32; g.add(eye);   // socket collar over the handle
+  g.traverse(o=>{ if(o.isMesh){o.castShadow=true;o.receiveShadow=true;} }); return g; }
+function buildShovel(tool){ const g=new THREE.Group(); const tier=(tool&&tool.tier)||'iron'; const hM=woodMat(TIER_HANDLE[tier],5), mM=headMat(tier);
+  const handle=new THREE.Mesh(new THREE.CylinderGeometry(0.022,0.030,0.76,10),hM); handle.position.y=-0.12; g.add(handle);
+  const s=new THREE.Shape(); s.moveTo(-0.10,0.0); s.lineTo(0.10,0.0); s.lineTo(0.11,0.155); s.quadraticCurveTo(0.0,0.285,-0.11,0.155); s.lineTo(-0.10,0.0);
+  const geo=new THREE.ExtrudeGeometry(s,{depth:0.028,bevelEnabled:true,bevelThickness:0.006,bevelSize:0.006,bevelSegments:1});
+  geo.center(); _dishGeoX(geo,0.9);                                                                  // scoop concavity
+  const blade=new THREE.Mesh(geo,mM); blade.position.set(0,0.40,0); g.add(blade);
+  const socket=new THREE.Mesh(new THREE.CylinderGeometry(0.032,0.040,0.12,10),mM); socket.position.y=0.28; g.add(socket);
+  g.traverse(o=>{ if(o.isMesh){o.castShadow=true;o.receiveShadow=true;} }); return g; }
 function buildSpear(spec){ spec=spec||{};
   const shaftCol=spec.shaft!=null?spec.shaft:0x7a5a34, headCol=spec.head!=null?spec.head:0xb8bcc4, lashCol=spec.lash!=null?spec.lash:0x5a4428, tipCol=spec.tip!=null?spec.tip:headCol, rust=!!spec.rust;
-  const g=new THREE.Group();
-  const shaftTex=tileTex('log_side',6), tipTex=tileTex(rust?'iron_ore':'planks',2), lashTex=tileTex('log_side',1);   // real wood-grain / ore texture on the spear
-  const wood =new THREE.MeshLambertMaterial(shaftTex?{map:shaftTex}:{color:shaftCol});
-  const tipM =new THREE.MeshLambertMaterial(Object.assign({color:tipCol, emissive:rust?0x180c04:0x000000, emissiveIntensity:rust?0.3:0}, tipTex?{map:tipTex}:{}));
-  const lash =new THREE.MeshLambertMaterial(lashTex?{map:lashTex,color:lashCol}:{color:lashCol});
-  const L=1.34, rS=0.032;                                                                                                          // BIGGER: longer shaft, thicker stock
-  const shaft=new THREE.Mesh(new THREE.CylinderGeometry(rS*0.9,rS,L,8), wood); shaft.rotation.x=Math.PI/2; g.add(shaft);           // round shaft, laid along Z
-  const tip=new THREE.Mesh(new THREE.ConeGeometry(rS,0.36,8), tipM); tip.rotation.x=-Math.PI/2; tip.position.z=-(L/2)-0.17; g.add(tip);   // SAME girth as the shaft, just sharpened to a point — lighter colour
-  for(let i=0;i<3;i++){ const r=new THREE.Mesh(new THREE.TorusGeometry(rS*1.12,0.008,4,8), lash); r.position.z=-(L/2)+0.02+i*0.07; g.add(r); }   // lashings binding tip to shaft
-  const butt=new THREE.Mesh(new THREE.CylinderGeometry(rS*0.82,rS*0.66,0.06,8), lash); butt.rotation.x=Math.PI/2; butt.position.z=L/2-0.01; g.add(butt);   // butt cap
-  if(rust){ const pit=new THREE.MeshLambertMaterial({color:0x4a2a12}); for(let i=0;i<4;i++){ const a=i*1.7; const p=new THREE.Mesh(new THREE.BoxGeometry(0.022,0.022,0.03),pit); p.position.set(Math.cos(a)*rS,Math.sin(a)*rS,-(L/2)-0.12-i*0.04); g.add(p); } }   // corrosion pits up the point
-  g.traverse(o=>{ if(o.isMesh)o.castShadow=true; });
-  g.userData.spear=true;
-  return g; }
+  const g=new THREE.Group(); const L=1.34, rB=0.031, rT=0.020, BK=0.055, off=z=>BK*z*z;              // BK = gentle branch bow; off() = its x-offset at a given z
+  const wood=new THREE.MeshLambertMaterial({map:woodTex(9),color:shaftCol}), lashM=new THREE.MeshLambertMaterial({color:lashCol});
+  const prof=[],N=16; for(let i=0;i<=N;i++){ const t=i/N, y=(t-0.5)*L; let r=rB+(rT-rB)*t; r*=1+0.05*Math.sin(t*22)+0.035*Math.sin(t*6+1); prof.push(new THREE.Vector2(Math.max(0.006,r),y)); }   // carved branch: tapered lathe with knuckles
+  const shaftGeo=_bendGeoY(new THREE.LatheGeometry(prof,10),BK); const shaft=new THREE.Mesh(shaftGeo,wood); shaft.rotation.x=Math.PI/2; g.add(shaft);   // Y→Z, front(=tip) at -Z
+  const fz=-(L/2), bx=off(L/2);                                                                      // front z & the bow offset shared by tip/lashings/butt
+  if(rust){ const bl=new THREE.Shape(), bw=0.052, bLen=0.30; bl.moveTo(0,0); bl.quadraticCurveTo(bw,bLen*0.42,0,bLen); bl.quadraticCurveTo(-bw,bLen*0.42,0,0);   // lashed pitted-iron leaf blade
+    const bg=new THREE.ExtrudeGeometry(bl,{depth:0.015,bevelEnabled:true,bevelThickness:0.006,bevelSize:0.006,bevelSegments:1});
+    const bm=new THREE.MeshPhongMaterial({color:headCol,specular:0x8a8a8a,shininess:70,emissive:0x180c04,emissiveIntensity:0.35});
+    const blade=new THREE.Mesh(bg,bm); blade.rotation.x=-Math.PI/2; blade.position.set(bx,0,fz-0.02); g.add(blade);
+    const pit=new THREE.MeshLambertMaterial({color:0x4a2a12}); for(let i=0;i<4;i++){ const a=i*1.7; const p=new THREE.Mesh(new THREE.BoxGeometry(0.018,0.018,0.024),pit); p.position.set(bx+Math.cos(a)*0.02,Math.sin(a)*0.02,fz-0.08-i*0.05); g.add(p); }
+  } else { const tipLen=0.30, tip=new THREE.Mesh(new THREE.ConeGeometry(rT*1.15,tipLen,10),new THREE.MeshLambertMaterial({map:woodTex(2),color:tipCol})); tip.rotation.x=-Math.PI/2; tip.position.set(bx,0,fz-tipLen/2+0.03); g.add(tip);   // fire-hardened carved wooden point
+    const nub=new THREE.Mesh(new THREE.ConeGeometry(rT*0.55,0.09,8),new THREE.MeshLambertMaterial({color:0x2b2018})); nub.rotation.x=-Math.PI/2; nub.position.set(bx,0,fz-tipLen+0.02); g.add(nub); }   // charred point
+  for(let i=0;i<4;i++){ const z=fz+0.03+i*0.045; const r=new THREE.Mesh(new THREE.TorusGeometry(rT*1.28,0.009,6,10),lashM); r.position.set(off(z),0,z); g.add(r); }   // cord lashings binding tip to shaft
+  const butt=new THREE.Mesh(new THREE.CylinderGeometry(rB*0.82,rB*0.62,0.055,10),lashM); butt.rotation.x=Math.PI/2; butt.position.set(bx,0,L/2-0.01); g.add(butt);   // butt cap
+  g.traverse(o=>{ if(o.isMesh)o.castShadow=true; }); g.userData.spear=true; return g; }
 // a rag WRAPPED around the stick like bacon: a few fat tube-rings (bent cylinders), each tilted in a rotating
 // direction so they spiral up the shaft and overlap. unlit tan shades → never glows.
 const _WRAP_COLS=[0x7a6444,0x6a5638,0x87724d,0x6f5a3c], _WRAP_YS=[-0.055,-0.014,0.028,0.066], _WRAP_TILT=0.5;   // yOffsets up the stick
@@ -6396,7 +6455,7 @@ function updateView(dt){ if(player.grabbed){ view.group.visible=false; return; }
   view.boltT=Math.max(0,(view.boltT||0)-dt);
   view.ads = !!(isBolt && heldBtn===2 && locked && !openUI && view.boltT<=0);   // aim down the scope on right-hold (not mid-cycle)
   if(scopeEl) scopeEl.style.display='none';                          // old black surround retired — the PiP scope (renderScope) draws the glass without blacking the screen
-  view.group.visible = !view.ads;   // ADS → look through the scope glass, hide the viewmodel; otherwise always visible
+  view.group.visible = true;   // viewmodel is ALWAYS drawn — the magnified sight lives on the rifle's rear lens (PiP), so we keep the whole optic on-screen and let adsT drive the raise/zoom/fade
   if(isBolt && view.mesh && view.mesh.userData.bolt){ const bh=view.mesh.userData.bolt, bz=view.mesh.userData.boltZ||0.12;
     if(view.boltT>0){ const u=1-view.boltT/0.95; const lift=(u<0.2?u/0.2:u>0.8?1-(u-0.8)/0.2:1); const sl=clamp((u<0.5?(u-0.2)/0.3:1-(u-0.5)/0.3),0,1);
       bh.rotation.z=-clamp(lift,0,1)*1.15; bh.position.z=bz+sl*0.07; }                        // up → back → forward → down
@@ -6410,15 +6469,42 @@ function updateView(dt){ if(player.grabbed){ view.group.visible=false; return; }
       for(let d=0.5; d<=1.55; d+=0.22){ if(solidAt(player.pos.x+fx*d, player.pos.y+EYE, player.pos.z+fz*d)){ near=d; break; } }
       const bt=clamp((1.5-near)/1.0,0,1); view.gunBend=(view.gunBend||0)+(bt-(view.gunBend||0))*Math.min(1,dt*10); }
     const lat=view.gunLat, bend=view.gunBend;
-    if(view.ads){ const et=clock.elapsedTime, mv=Math.min(1,sp/5);   // SCOPE HOLD — GENTLE breathing; the scope image lives ON the lens now, so it moves WITH the gun and never jumps
-      const swx=Math.sin(et*1.3)*0.006 + Math.sin(et*0.7)*mv*0.012 - lat*0.03;          // small, smooth hold-sway (radians of gun drift) + strafe drift
-      const swy=Math.cos(et*1.6)*0.005 + Math.cos(et*0.9)*mv*0.010 - view.swing*0.05;
-      view.group.visible=true;
-      view.group.position.set(swx - lat*0.02, -0.10 + b*0.3 + swy + bend*0.05, -0.38 + bend*0.16);   // scope CENTRED on the eye-line; wall-bend pulls it back toward the eye
-      view.group.rotation.set(view.swing*0.4 + swy*0.6 + bend*0.35, swx*0.6 - lat*0.05, lat*0.06); }
-    else { view.group.visible=true;
-      view.group.position.set(0.17 - lat*0.05, -0.20+b + bend*0.06, -0.5 + bend*0.26);   // hip: held rifle + recoil kick; wall-bend pulls the muzzle back into the viewport
-      view.group.rotation.set(view.swing*0.55 + bend*0.6, 0.05 - lat*0.10, lat*0.12); } }   // roll/yaw smoothly with the strafe
+    // ===== SCOPE RAISE-TO-EYE: adsT eases 0..1 toward the aim INTENT; it drives the pose blend, PiP fade, FOV & sensitivity =====
+    const aimGoal=view.ads?1:0, prevAdsT=view.adsT||0;
+    view.adsT = prevAdsT + (aimGoal-prevAdsT)*Math.min(1,dt*(view.ads?13:11));   // raise ~0.23s / lower ~0.27s — framerate-independent ease, never a snap
+    view.adsVel = (view.adsT-prevAdsT)/Math.max(dt,1e-4);                        // signed raise(+)/lower(-) speed, per second → feeds transition sway
+    if(prevAdsT<0.85 && view.adsT>=0.85) view.settleT=0.28;                      // crossing into the cheek-weld kicks a brief settle oscillation
+    view.settleT=Math.max(0,(view.settleT||0)-dt);
+    const adsT=view.adsT, et=clock.elapsedTime, mv=Math.min(1,sp/5);
+    // ---- FOUR-SOURCE SCOPE SWAY (radians of gun drift); converges to (a) alone when fully aimed + still ----
+    // (a) NATURAL breathing — always present while aimed, MINIMAL (sub-degree ~0.3°): two slow low-freq sines, the "hold your breath" idle
+    let swx = Math.sin(et*0.9)*0.0034 + Math.sin(et*0.53)*0.0020;
+    let swy = Math.cos(et*0.8)*0.0030 + Math.sin(et*1.27)*0.0016;
+    // (b) PLAYER-MOVEMENT sway — grows with speed (bob) + a SMOOTH lateral lean from the already-eased strafe term
+    swx += Math.sin(et*1.7)*mv*0.011 - lat*0.030;
+    swy += Math.cos(et*2.1)*mv*0.010 + b*0.4 - view.swing*0.05;
+    // (c) MOUSE-MOVEMENT lag — the optic TRAILS the look and settles back (weight/inertia). Track per-frame view delta, ease a counter-offset toward it, decay to 0 when the look stops
+    const dYaw=player.yaw-(view.prevYaw==null?player.yaw:view.prevYaw), dPitch=player.pitch-(view.prevPitch==null?player.pitch:view.prevPitch);
+    view.prevYaw=player.yaw; view.prevPitch=player.pitch;
+    const tgtLagX=clamp(-dYaw*0.6,-0.05,0.05), tgtLagY=clamp(-dPitch*0.6,-0.05,0.05);
+    view.lookSwayX=(view.lookSwayX||0)+(tgtLagX-(view.lookSwayX||0))*Math.min(1,dt*9);
+    view.lookSwayY=(view.lookSwayY||0)+(tgtLagY-(view.lookSwayY||0))*Math.min(1,dt*9);
+    swx += view.lookSwayX; swy += view.lookSwayY;
+    // (d) TRANSITION sway — extra wobble scaled by how fast we're raising/lowering, + a damped settle oscillation as the sight reaches the eye
+    const trans=Math.min(1,Math.abs(view.adsVel)*0.35);
+    swx += Math.sin(et*13.0)*trans*0.018;
+    swy += Math.cos(et*10.5)*trans*0.018 - view.adsVel*0.010;                    // rises as it comes up, dips as it lowers
+    const settle=Math.sin(view.settleT*26)*view.settleT*0.06;
+    swx += settle*0.5; swy += settle;
+    // ---- POSE BLEND: hip(ready) ↔ scope(aimed), a REAL interpolation by smoothstep(adsT) — no hard flip ----
+    const sPx=swx - lat*0.02, sPy=-0.10 + b*0.3 + swy + bend*0.05, sPz=-0.38 + bend*0.16;                 // scope (cheek-weld) pose — centred on the eye-line, sway applied
+    const sRx=view.swing*0.4 + swy*0.6 + bend*0.35, sRy=swx*0.6 - lat*0.05, sRz=lat*0.06;
+    const hPx=0.17 - lat*0.05, hPy=-0.20+b + bend*0.06, hPz=-0.5 + bend*0.26;                              // hip (ready) pose
+    const hRx=view.swing*0.55 + bend*0.6, hRy=0.05 - lat*0.10, hRz=lat*0.12;
+    const e=adsT*adsT*(3-2*adsT);                                                                          // smoothstep so the raise starts & lands gently
+    view.group.visible=true;
+    view.group.position.set(hPx+(sPx-hPx)*e, hPy+(sPy-hPy)*e, hPz+(sPz-hPz)*e);
+    view.group.rotation.set(hRx+(sRx-hRx)*e, hRy+(sRy-hRy)*e, hRz+(sRz-hRz)*e); }
   else if(ITEMS[view.id]&&ITEMS[view.id].spear){
     // carried COCKED BEHIND THE RIGHT SHOULDER: butt high behind, tip angled up-forward. Charging winds it
     // further back and levels the tip toward the crosshair (aiming the throw), like drawing a bow.
@@ -6523,7 +6609,7 @@ function killWretch(){ spawnParticles(wretch.pos.x,wretch.pos.y+1,wretch.pos.z,0
   if(wasBoss){ wretch.boss=false; wretch.hpMax=2700; wretch.hp=2700; if(wretch.group)wretch.group.scale.setScalar(WRETCH_BASE_SCALE);   // the MEGA-WRETCH is slain — reset, no haunt
     if(typeof wretchMat!=='undefined' && wretchMat.emissive){ wretchMat.emissive.setRGB(0,0,0); wretchMat.emissiveIntensity=0; } if(wretch._bossWings)wretch._bossWings.visible=false;   // red glow off, wings gone
     if(typeof wretchMat!=='undefined'){ wretchMat.map=wretch._prevSkinMap||null; wretchMat.needsUpdate=true; }   // restore the ordinary wretch skin — no leaked boss hide
-    if(wretch._eyeRig){ wretch._eyeRig.head.visible=false; wretch._eyeRig.body.visible=false; } if(wretch.P&&wretch.P.head)wretch.P.head.visible=true;   // the eye-mass closes; the true head returns
+    if(wretch._eyeRig)wretch._eyeRig.visible=false; if(wretch._bossCore)wretch._bossCore.visible=false; if(wretch.P&&wretch.P.head)wretch.P.head.visible=true;   // the eye-wheel & core close; the true head returns
     if(typeof hideBossRing==='function')hideBossRing(); if(typeof hideBossBeam==='function')hideBossBeam(); wretch._laserState=null; wretch._bossPitch=0; wretch._bossRoll=0; wretch._faceLock=false;
     try{ lootChest(bx, gy, bz, [['angel_wings',1],['minigun',1],['rifle_ammo',64]]); }catch(e){}
     if(typeof herobrine!=='undefined')herobrine.haunting=false;
@@ -6583,7 +6669,7 @@ function buildBossBodyCore(){ const g=new THREE.Group();
   return g; }
 // ---- THE FIVE WING-PAIRS assembled + mirrored: A/B/C ascending crown, D/E descending (tips up); D is where the body begins ----
 function buildBossWings(){ const g=new THREE.Group();
-  const feath=new THREE.MeshLambertMaterial({map:featherTex(),color:0xffffff,emissive:0x6a1414,emissiveIntensity:0.38,side:THREE.DoubleSide});
+  const feath=new THREE.MeshLambertMaterial({map:woolTex(),color:0xffffff,emissive:0x6a1414,emissiveIntensity:0.38,side:THREE.DoubleSide});   // WOOL-textured seraph wings (per design)
   const bone=new THREE.MeshLambertMaterial({color:0xc9c0a8,emissive:0x3a1010,emissiveIntensity:0.35});
   const feats=[];
   const PAIRS=[{pair:0,x:0.26,y:3.00,z:-0.16,tilt: 1.35,yaw:0.30,span:4.6,curlUp:0},     // A ascending — steep halo tips
@@ -6652,14 +6738,30 @@ function buildEyeball(r){ const g=new THREE.Group();
   iris.position.z=r*0.93;
   const glow=new THREE.Mesh(new THREE.RingGeometry(r*0.50,r*0.74,20), new THREE.MeshBasicMaterial({color:0x2f9dff,transparent:true,opacity:0.18,blending:THREE.AdditiveBlending,depthWrite:false,side:THREE.DoubleSide}));   // electric-blue limbal halo; brightens as the host charges
   glow.position.z=r*0.95;
-  g.add(sc); g.add(iris); g.add(glow); g.userData={sc,iris,glow,r,ph:Math.random()*6.283,bs:0.7+Math.random()*0.9}; return g; }   // ph=blink phase, bs=per-eye blink speed
-// the head becomes 5 MASSIVE centered eyes; the body/back is studded with more — all track the player
-function buildBossEyeRig(){ const head=new THREE.Group(), body=new THREE.Group(), all=[];
-  const HP=[[0,0.08,0.55,0.56],[-0.40,-0.05,0.42,0.50],[0.40,-0.05,0.42,0.50],[-0.22,0.44,0.34,0.45],[0.22,0.44,0.34,0.45]];   // 5 HUGE eyes bulging FORWARD out of where the skull was
-  for(const p of HP){ const e=buildEyeball(p[3]); e.position.set(p[0],p[1],p[2]); head.add(e); all.push(e); }
-  const BP=[[0,2.1,0.30],[0.26,1.86,0.30],[-0.26,1.86,0.30],[0.16,1.5,0.34],[-0.16,1.5,0.34],[0.40,2.0,0.12],[-0.40,2.0,0.12],[0,1.2,0.34],[0.3,0.96,0.24],[-0.3,0.96,0.24],[0.5,1.66,0.02],[-0.5,1.66,0.02],[0,2.34,0.16],[0.2,2.5,0.10],[-0.2,2.5,0.10],[0,1.72,0.36]];
-  for(const p of BP){ const e=buildEyeball(0.2+Math.random()*0.09), hr=Math.hypot(p[0],p[2])||1e-3, push=0.42; e.position.set(p[0]+p[0]/hr*push, p[1], p[2]+p[2]/hr*push+0.12); body.add(e); all.push(e); }   // each eye shoved OUTWARD along its body-normal so it bulges past the skin
-  return {head,body,all}; }
+  g.add(sc); g.add(iris); g.add(glow);
+  const LR=r*1.06;                                                                                          // fleshy EYELIDS just outside the sclera (share the boss hide via wretchMat)
+  const lidU=new THREE.Mesh(new THREE.SphereGeometry(LR,12,4, 0,6.283, 0,1.15), wretchMat), lidL=new THREE.Mesh(new THREE.SphereGeometry(LR,12,4, 0,6.283, Math.PI-1.15,1.15), wretchMat);
+  lidU.rotation.x=-0.35; lidL.rotation.x=0.35; g.add(lidU); g.add(lidL);                                    // OPEN by default: caps swept apart, iris clear
+  g.userData={sc,iris,glow,r,ph:Math.random()*6.283,bs:0.7+Math.random()*0.9,lidU,lidL,blinkT:0,blinkDur:0.11,blinkNext:1+Math.random()*4,dbl:0}; return g; }   // ph=blink phase, bs=per-eye blink speed
+// A WHEEL OF EYES wrapping the vertical body core (biblically-accurate) + a forward face-cluster; every eye tracks the player
+const _eyeRigQ=new THREE.Quaternion(), _eyeWP=new THREE.Vector3(), _eyeN=new THREE.Vector3(), _eyeD=new THREE.Vector3(), _eyeT=new THREE.Vector3();
+function buildSeraphEyeRig(coreR, coreH){ const rig=new THREE.Group(), all=[];
+  const _add=(x,y,z, nx,ny,nz, r)=>{ const e=buildEyeball(r); const L=Math.hypot(nx,ny,nz)||1; nx/=L;ny/=L;nz/=L;
+    e.position.set(x+nx*r*0.55, y+ny*r*0.55, z+nz*r*0.55);   // shove OUT along its normal so it bulges past the skin
+    e.userData.n=new THREE.Vector3(nx,ny,nz);                // rest outward-normal = centre of this eye's allowed look-cone
+    e.userData.dir=new THREE.Vector3(nx,ny,nz);              // current eased gaze (world dir), seeded pointing out
+    e.userData.cone=Math.PI*0.42;                            // ~75° half-cone; gaze clamped into the forward hemisphere
+    rig.add(e); all.push(e); return e; };
+  const rings=Math.max(3,Math.round(coreH/(coreR*0.95)));    // stacked rings of eyes, radially outward all around
+  for(let ri=0; ri<rings; ri++){ const v=(ri+0.5)/rings, y=(v-0.5)*coreH, bulge=Math.sin(v*Math.PI), rr=coreR*(0.6+0.4*bulge);
+    const per=Math.max(4, Math.round(5+6*bulge)), off=ri*0.61803;   // fatter mid-rings; golden-angle twist so rings don't seam
+    for(let k=0;k<per;k++){ const a=(k/per+off)*6.283, nx=Math.cos(a), nz=Math.sin(a);
+      _add(rr*nx, y, rr*nz, nx, 0.05*(Math.random()-0.5), nz, 0.13+Math.random()*0.07); } }
+  const fy=coreH*0.10;                                       // FACE CLUSTER: one great central eye + a symmetric front band (the reference's eye-band)
+  _add(0, fy, coreR*1.02, 0,0.05,1, 0.40);
+  for(const f of [[-0.40,0.08,0.30],[0.40,0.08,0.30],[-0.70,0.28,0.24],[0.70,0.28,0.24],[0,0.60,0.26],[-0.32,-0.34,0.25],[0.32,-0.34,0.25]]){
+    const nx=Math.sin(f[0]), nz=Math.cos(f[0]); _add(coreR*nx*1.02, fy+f[1]*coreH*0.5, coreR*nz*1.02, nx, f[1]*0.4, nz, f[2]); }
+  rig.userData={all}; return rig; }
 // a solid searing beam mesh from the seraph's eyes down to the aim point — TEXTURED plasma that scrolls & explodes blocks where it lands
 let bossBeam=null,_beamTex=null;
 function beamTex(){ if(_beamTex)return _beamTex; const W=16,H=96,cv=document.createElement('canvas');cv.width=W;cv.height=H;const c=cv.getContext('2d');
@@ -6698,8 +6800,9 @@ function summonBoss(x,y,z){ if(!wretch.group){ const b=buildWretch(); wretch.gro
   if(typeof wretchMat!=='undefined'){ wretch._prevSkinMap=wretchMat.map; wretchMat.map=bossSkinTex(); wretchMat.needsUpdate=true; }            // charred scaly boss hide over the flesh
   if(!wretch._bossWings){ wretch._bossWings=buildBossWings(); wretch.group.add(wretch._bossWings); } wretch._bossWings.visible=true;
   if(wretch.P&&wretch.P.head)wretch.P.head.visible=false;                                                    // NO NORMAL HEAD — a mass of eyes takes its place
-  if(!wretch._eyeRig){ wretch._eyeRig=buildBossEyeRig(); ((wretch.P&&wretch.P.neck)||wretch.group).add(wretch._eyeRig.head); wretch._eyeRig.head.position.set(0,0.30,0.10); wretch.group.add(wretch._eyeRig.body); }
-  wretch._eyeRig.head.visible=true; wretch._eyeRig.body.visible=true;
+  if(!wretch._bossCore){ wretch._bossCore=buildBossBodyCore(); wretch.group.add(wretch._bossCore); } wretch._bossCore.visible=true;   // the feathered body spindle the eyes wrap
+  if(!wretch._eyeRig){ wretch._eyeRig=buildSeraphEyeRig(0.62,3.0); wretch._eyeRig.position.set(0,1.7,0); wretch.group.add(wretch._eyeRig); }   // a wheel of blue eyes around the core + a forward face-cluster
+  wretch._eyeRig.visible=true;
   wretch._laserState=null; wretch._laserCd=4; wretch._laserT=0;
   wretch.state='HUNT'; wretch.thought='RISEN. Winged. Furious. It will not forgive.'; wretchVoice&&wretchVoice('scream',wretch.pos); wretchVoice&&wretchVoice('shriek',wretch.pos); }
 function bossUpdate(dt){ wretch.phase+=dt*1.4;
@@ -6717,8 +6820,10 @@ function bossUpdate(dt){ wretch.phase+=dt*1.4;
   wretch._bossPitch=(wretch._bossPitch||0)+(clamp(_fp*1.3,-0.85,0.85)-(wretch._bossPitch||0))*Math.min(1,dt*3.5);
   wretch._bossRoll=(wretch._bossRoll||0)+(((wretch._bossMode==='orbit')?0.5:0)-(wretch._bossRoll||0))*Math.min(1,dt*2.5);   // BANK into the orbit
   const rig=wretch._bossWings&&wretch._bossWings.userData;
-  if(rig&&rig.feats){ const t=clock.elapsedTime*(wretch._bossMode==='swoop'?7:4.5);   // SIX WINGS FLAPPING & FLOWING — a travelling wave down each thin feather
-    for(const f of rig.feats){ const wave=Math.sin(t - f.i*0.34); f.seg.rotation.z=f.base + f.side*(0.24 + wave*0.4); f.seg.rotation.x=Math.sin(t*0.8 - f.i*0.22)*0.13; } }
+  if(rig&&rig.feats){ const t=clock.elapsedTime*(wretch._bossMode==='swoop'?7:4.5), fl=wretch._eyeFlare||0;   // TEN WINGS — a travelling wave down each wing; the hand (primaries) does the work, coverts barely stir
+    for(const f of rig.feats){ const damp=f.pair>=3?0.45:1, amp=(0.05+0.40*Math.pow(f.u,1.4))*damp, wave=Math.sin(t - f.u*4.5 - f.pair*0.5);
+      f.seg.rotation.z=f.base + f.side*(amp*wave + fl*0.30);                                                  // ripple on the fan; a sharp clench when the beam fires
+      f.seg.rotation.x=f.px + 0.10*f.u*Math.sin(t*0.9 - f.u*3.0); } }
   // ===== LASER ATTACK — a ring telegraphs & tracks you (slowly), then a sustained 3s beam; fires ~every 15s and prefers range =====
   const _eyH=wretch.pos.y+2.6*(wretch.group?wretch.group.scale.y:1);                                          // beam origin ≈ the eye-mass
   if(wretch._laserState==='warn'){ wretch._eyeFlare=1; wretch._laserT-=dt;
@@ -6734,10 +6839,25 @@ function bossUpdate(dt){ wretch.phase+=dt*1.4;
     if(wretch._laserT<=0){ wretch._laserState=null; hideBossRing(); hideBossBeam(); wretch._laserCd=10.5+Math.random()*1.5; } }   // ~15s start-to-start (4.3s attack + ~11s gap)
   else { wretch._eyeFlare=Math.max(0,(wretch._eyeFlare||0)-dt*2); wretch._laserCd=(wretch._laserCd==null?6:wretch._laserCd)-dt;
     if(wretch._laserCd<=0 && dist<130){ wretch._laserState='warn'; wretch._laserT=1.3; wretch._laserAim={x:player.pos.x,y:player.pos.y,z:player.pos.z}; wretchVoice&&wretchVoice('sting',wretch.pos); } }
-  // EYES — every eyeball tracks the player, blinks independently, and the whole host flares red as it fires
-  if(wretch._eyeRig){ _bossEyeTgt.copy(camera.position); const fl=wretch._eyeFlare||0;
-    for(const e of wretch._eyeRig.all){ e.lookAt(_bossEyeTgt); const shut=Math.sin(clock.elapsedTime*2.6+e.userData.ph)>0.86?0.12:1; e.scale.y=0.15+shut*0.9;
-      const ei=e.userData.sc.material.emissive; if(ei)ei.setRGB(0.12+fl*0.7,0.02,0.02); e.userData.sc.material.emissiveIntensity=0.25+fl*0.8; } }
+  // EYES — the whole host tracks you, gaze CLAMPED to each eye's forward cone (back-of-core eyes can't rake through the flesh), blinks on independent phases, flares cyan-white on fire
+  if(wretch._eyeRig){ const rig=wretch._eyeRig, fl=wretch._eyeFlare||0, t=clock.elapsedTime;
+    _bossEyeTgt.copy(camera.position); rig.getWorldQuaternion(_eyeRigQ);
+    for(const e of rig.userData.all){ const ud=e.userData;
+      e.getWorldPosition(_eyeWP);
+      _eyeN.copy(ud.n).applyQuaternion(_eyeRigQ).normalize();                              // this eye's world-space forward (cone centre)
+      _eyeD.copy(_bossEyeTgt).sub(_eyeWP).normalize();                                      // raw desired gaze → the player
+      const cmin=Math.cos(ud.cone), d=_eyeD.dot(_eyeN);
+      if(d<cmin){ _eyeT.copy(_eyeD).addScaledVector(_eyeN,-d); if(_eyeT.lengthSq()<1e-6)_eyeT.set(0,1,0); _eyeT.normalize();
+        _eyeD.copy(_eyeN).multiplyScalar(cmin).addScaledVector(_eyeT,Math.sqrt(1-cmin*cmin)); }   // ride the gaze to the cone edge, never past it
+      ud.dir.lerp(_eyeD, Math.min(1,dt*6)).normalize();                                     // ease → wet, weighty motion
+      e.lookAt(_eyeWP.x+ud.dir.x, _eyeWP.y+ud.dir.y, _eyeWP.z+ud.dir.z);
+      let k=0;                                                                                    // k: 0 = eye open, 1 = lids shut — RANDOM per-eye blink driving real eyelids
+      if(fl>0.01){ ud.blinkT=0; k=0; }                                                             // stare WIDE during the laser flare
+      else if(ud.blinkT>0){ ud.blinkT-=dt; k=Math.sin(Math.max(0,1-ud.blinkT/ud.blinkDur)*Math.PI); if(ud.blinkT<=0){ if(ud.dbl>0){ud.dbl--;ud.blinkT=ud.blinkDur=0.10;} else ud.blinkNext=2+Math.random()*4; } }
+      else { ud.blinkNext-=dt; if(ud.blinkNext<=0){ ud.blinkT=ud.blinkDur=0.11; ud.dbl=(Math.random()<0.18)?1:0; } }   // idle 2-6s cadence, ~18% double-blink, independent per eye
+      if(ud.lidU){ ud.lidU.rotation.x=-0.35+0.85*k; ud.lidL.rotation.x=0.35-0.85*k; } e.scale.y=1-k*0.12;
+      ud.glow.material.opacity=0.16+0.78*fl; ud.glow.material.color.setRGB(0.18+0.6*fl, 0.62+0.38*fl, 1.0);   // idle electric halo → cyan-white as it charges
+      const m=ud.sc.material; m.emissive.setRGB(0.02+0.5*fl, 0.09+0.5*fl, 0.16+0.5*fl); m.emissiveIntensity=0.35+fl*1.1; } }   // cold blue rim → blue-white flare
   if(dist<3.6 && Math.abs(dy)<4){ wretch._atkCd=(wretch._atkCd||0)-dt; if(wretch._atkCd<=0){ wretch._atkCd=0.9; if(typeof damage==='function')damage(6,'the Mega-Wretch rends you'); spawnParticles(gp.x,gp.y+1,gp.z,0x3a0608,12,2.6,0.7); wretchVoice&&wretchVoice('close_clicks',wretch.pos); } }   // melee ~30% of your health per strike (6 of 20)
   HORROR.menace=1; placeWretch(dt,true); }
 
@@ -7881,8 +8001,8 @@ function updateBrain(dt){
     } else if(wretch.thirst>60 && wretch._drinkCd<=0 && !wretch.committed && !wretch.dragging && !wretch._lairKnown && (wretch.sense.seenAge>90 || wretch.thirst>92)){   // SAFETY/PRIORITY: only break to drink when it hasn't seen you in a while (or it's critically parched); hunting always wins
       const arrivedAtWater = seekingWater && nav.dest && Math.hypot(nav.dest.x-wretch.pos.x, nav.dest.z-wretch.pos.z)<3.2;   // reached the water dest even if block-adjacency just misses
       if(atWater || arrivedAtWater){ wretch._scooping=true; wretch._scoopT=0; wretch.thought='Water. I crouch to the edge and scoop it up in my hands.'; }
-      else if(!seekingWater){ const wd=findWater(wretch.pos.x, wretch.pos.z);                                // not there yet → divert the plan and walk to the nearest water
-        if(wd){ reason._resumeStep=reason.step; reason.divertT=Math.max(reason.divertT||0,45); _setNav('drink',{x:wd.x,z:wd.z},'water',999); nav.divert=true; wretch.thought='My throat is dust. I go to the water.'; } } } }
+      else if(!seekingWater){ const wd=findWater(wretch.pos.x, wretch.pos.z);                                // not there yet → submit an URGENT input to the WILL: divert to water, then return to the plan
+        if(wd){ WILL.submit('urgent',{intent:'drink',dest:{x:wd.x,z:wd.z},label:'water',ttl:45,wait:999,why:'thirst'}); wretch.thought='My throat is dust. I go to the water.'; } } } }
   // HUNGER — when it is STARVING (survival on the line), a side-drive for the day/night: actively find an animal and go
   // take it. Diverts the plan to FORAGE toward the nearest prey and tracks it as it flees; the eat-on-contact predation
   // above does the actual kill (hunger jumps, the drive clears). Player-hunt and the drag still take precedence.
@@ -7890,9 +8010,10 @@ function updateBrain(dt){
     let best=null,bd=1e9; for(const a of animals){ if(a.dead||a.type==='villager'||a._held)continue; const dx=a.x-wretch.pos.x,dz=a.z-wretch.pos.z,d=dx*dx+dz*dz; if(d<bd){bd=d;best=a;} }
     if(best && bd<240*240){                                                                                   // a reachable animal exists
       if(nav.active && nav.behavior==='forage'){ nav.dest={x:best.x,z:best.z}; }                              // already foraging → keep tracking the moving prey
-      else { reason._resumeStep=reason.step; reason.divertT=Math.max(reason.divertT||0,45); _setNav('forage',{x:best.x,z:best.z},'prey',4); nav.divert=true; wretch.thought='Starving. I must take an animal, now.'; } } }
+      else { WILL.submit('urgent',{intent:'forage',dest:{x:best.x,z:best.z},label:'prey',ttl:45,wait:4,why:'starving'}); wretch.thought='Starving. I must take an animal, now.'; } } }
   // TRUE SUNSET / SUNRISE — the sun's elevation crossing the horizon (uDay is only brightness and can't tell dawn from dusk).
-  // elev>0 = sun up (day), elev<0 = sun down (night). Opus plans the half-day the moment it flips.
+  // elev>0 = sun up (day), elev<0 = sun down (night). V3: the ORCHESTRATOR (Opus 4.6) is consulted ONCE A DAY, at
+  // DAWN — it lays out the whole coming day+night. DUSK makes no call: the body simply advances to the plan's night arc.
   { const el=Math.sin(worldTime/CFG.DAY_LEN*Math.PI*2), isNight=el<0;
     if(reason._lastPhase===null){ reason._lastPhase=isNight; }
     else if(isNight!==reason._lastPhase){ reason._lastPhase=isNight;
@@ -7901,7 +8022,8 @@ function updateBrain(dt){
         wretch.sense.hasFix=true; wretch.sense.bx=jx; wretch.sense.bz=jz; wretch.sense.believedDist=Math.round(Math.hypot(jx-wretch.pos.x,jz-wretch.pos.z));
         reason.playerEst={x:Math.round(jx),z:Math.round(jz),distance:wretch.sense.believedDist,confidence:0.4,basis:'tip_off'};
         wretch.thought='On the turn of the light I feel where the warm thing nests — I know the direction now.'; if(typeof logStim==='function')logStim('tip_off',{x:Math.round(jx),z:Math.round(jz)}); }
-      if(typeof planHalfDay==='function') planHalfDay(isNight?'night':'day'); } }
+      if(!isNight){ if(typeof orchestrate==='function'){ WILL.lastOrch=clock.elapsedTime; orchestrate('daily'); } }                       // DAWN — the one scheduled council of the day
+      else { if(typeof logStim==='function')logStim('dusk'); if(reason.plan.length){ reason.step=_firstPhaseStep(); applyPlanStep(); } } } }   // DUSK — no council; step into the standing plan's night arc
   // brain v2 — perception + world model + live awareness (always accrue, even while dormant)
   seedPlaces(); pushScent(dt); detectBase(dt); trackPlayer(dt); awareness(dt);
   pickMode(dt);
@@ -7923,26 +8045,27 @@ function updateBrain(dt){
 }
 
 // =====================================================================
-//  REASONING BRIDGE — a two-model mind layered on the deterministic brain.
-//    GEMINI 2.5 FLASH = interpretive cortex: metabolises the body's sensory REPORTS into
-//      precise spatial/situational understanding + a RECOMMENDATION. It never acts.
-//    OPUS = the WILL: a 4–5 step PLAN that directly changes the body's actions. Gemini can
-//      flag a critical change to force Opus to re-plan.
-//  All gated on the OpenRouter key. Offline, the deterministic brain runs alone (unchanged).
+//  COGNITION V3 (see ENTITY-COGNITION-V3.md) — three clocks, ONE decision container.
+//    BODY (60Hz, deterministic)  — perception, posture, movement, hard reflexes. Works offline.
+//    GEMINI (10s + every trigger)— interpretive cortex: metabolises delta-annotated context REPORTS
+//      into spatial understanding + the LIVE INTERNAL THOUGHT + a recommendation. Never commands.
+//    OPUS 4.6 (once a day + reunion) — the ORCHESTRATOR: reads the whole day's reasoning journal at
+//      dawn and lays out the entire coming day+night; nudges when the duel goes cold. Never live.
+//  Every input that can move the body flows through WILL (reflex > commitment > urgent > plan > instinct).
 // =====================================================================
-const GEMINI_MODEL  = Q.get('gmodel') || 'google/gemini-3.5-flash';       // interpretation / positional reasoning (upgraded to Gemini 3.5 Flash)
-const PLANNER_MODEL = Q.get('pmodel') || OR_STRAT_MODEL;                   // Opus — the decision-maker
+const GEMINI_MODEL  = Q.get('gmodel') || 'google/gemini-3.5-flash';       // interpretation / positional reasoning
+const PLANNER_MODEL = Q.get('pmodel') || OR_STRAT_MODEL;                   // Opus 4.6 — the orchestrator
 const REASON_INTERVAL = 10;    // Gemini re-reads the world every 10s (plus instantly on any trigger/notice)
-const REASON_BATCH    = 1;     // reason on EVERY trigger — send each report immediately, never stack them
-// OPUS is the WILL: it plans a whole HALF-DAY at a time, called only at sunrise and sunset. Gemini interrupts
-// the plan for anything urgent (a diversion) and the body then RETURNS to the standing half-day plan.
+const REUNION_S       = 360;   // no mutual awareness for this long → the orchestrator nudges things back together
+const ORCH_COOLDOWN_S = 300;   // floor between out-of-schedule orchestrator calls
 const ACTION_KB = { intents:['explore','forage','stalk','ambush','wait','hunt','investigate','retreat','rest','terrorize'],
   capabilities:['stalks from cover; hides behind trees and peeks around them','watches the player through windows','crawls walls and ceilings inside caves','intimidation-kills animals to feed (sprints in, hoists the beast, crams it into its maw)','drags the caught player down to its dungeon for a long ritual','hunts only at night; retreats at dawn','denies observation — freezes or retreats when it is being watched'],
   drives:['hunger is the clock (feed on animals or the player)','menace/dread is built by presence at the edge of perception, not by revealing itself','territorial, patient, proud'],
   frame:'XZ plane. +X=East, -X=West, +Z=South, -Z=North. bearings/facing in degrees: 0=E, 90=S, 180=W, -90=N. distances in blocks.' };
 const reason = { buffer:[], concurrence:'The wood is quiet. I have learned nothing of this warm thing yet.', rec:null, playerEst:null,
   plan:[], step:0, lastAction:'lurking at the treeline', reportT:0, geminiInFlight:false, opusInFlight:false, _opusLast:-1e9, opusMin:24, _evCd:{},
-  events:[], lastStimulus:null, planSummary:'', phasePlan:null, _resumeStep:0, divertT:0, phaseInit:false, _lastPhase:null };
+  events:[], lastStimulus:null, planSummary:'', phasePlan:null, _resumeStep:0, divertT:0, phaseInit:false, _lastPhase:null,
+  journal:[], orchTrigger:null };   // journal = every live Gemini thought since the last dawn, fed whole to the daily orchestrator
 // urgent stimuli — Gemini interprets them instantly and may DIVERT the standing plan (Opus is not called for these)
 const ACTION_EVENTS = new Set(['gunshot','injured','spotted_player','lost_player','ate']);
 // ---- positional logic harness (pure, deterministic — the ground truth both models reason from) ----
@@ -8008,13 +8131,139 @@ function buildReport(kind){ const s=wretch.sense, est=_playerEstimate(), fdeg=_w
       knowledge_tier: (est.basis&&est.basis.indexOf('habitual')===0)?'landmark_only':(_KTIER[est.basis]||'region_only') },   // how PRECISELY it knows where you are: exact_coords > grid_cell > region_only > landmark_only > none
     weather:{ raining:!!(typeof weather!=='undefined'&&weather.raining), rain:+((typeof weather!=='undefined'?(weather.rain||0):0)).toFixed(2), fog:+((typeof weather!=='undefined'?(weather.fog||0):0)).toFixed(2), visibility_blocks: Math.round((42+58*day)*(1-0.55*(typeof weather!=='undefined'?(weather.fog||0):0))) },
     tension:{ menace:Math.round(HORROR.menace*100), tier:HORROR.tier, since_scare_s:Math.round(HORROR.sinceScare), rage:+((HORROR.rage||0)).toFixed(2), hunt_armed:!!HORROR.huntArmed, encounters:HORROR.encounters||0 } }; }
-const GEMINI_SYS = "You are the INTERPRETIVE CORTEX of an apex forest predator (the Wretch) in a first-person horror game. You do NOT control the body and you do NOT decide what it does — a separate WILL does that. Your job: take the raw sensory REPORTS the body files and metabolise them into a precise spatial, situational understanding, then RECOMMEND (never command) what it should probably do next.\n\nCOORDINATE FRAME (exact — trust the numbers): XZ plane. +X=East, -X=West, +Z=South, -Z=North. 'facing_deg'/'bearing_deg' are degrees: 0=E, 90=S, 180=W, -90=N. Distances are blocks. 'relative_deg' is the bearing to a target from the body's OWN facing: positive = to its RIGHT, negative = to its LEFT. Every report gives the body's exact coords + facing, the player's coords or best estimate, the exact distance/bearing/relative angle between them, and every landmark's coords/distance/bearing. Do the geometry precisely: derive where the player is relative to any landmark, infer heading, reason about intercept points.\n\nWHEN THE PLAYER IS NOT IN LINE OF SIGHT: use player_estimate (fading_fix / last_seen / habitual_place) and believed_dist to reason about the MOST LIKELY player location and a search region — output your best (x,z), a distance, and a confidence.\n\nTHE BODY (what it is): a patient, cruel, territorial NIGHT predator. Hunts only at night, retreats at dawn. Hunger, not malice, sets its clock; when hungry it intimidation-kills ANIMALS as readily as it hunts the player. It prizes DREAD over the reveal — denies observation, freezes/retreats when watched, stalks from cover, hides behind trees, peeks through windows, crawls cave walls/ceilings. When it catches the player it drags them to its dungeon for a ritual. It remembers the player's habits and places.\n\nOUTPUT: 'understanding' (your running situational read, concise, first-person-omniscient); a refined player estimate (player_x/z/distance/confidence/basis); one RECOMMENDATION (rec_intent ∈ [explore,forage,stalk,ambush,wait,hunt,investigate,retreat,rest,terrorize]; optional rec_dest_x/z + a human rec_dest_label like 'the shoreline 70 east'; rec_why). Set critical_change=true ONLY when the situation has materially shifted so the current plan is now wrong (player spotted while foraging; injured; player left the believed area; dawn nearing; now starving). 'reasoning' <=40 words, first-person, predatory — and VARY it every single report: never reuse a sentence, opening word, or image you used in a recent reasoning; find a fresh phrasing each time, as a restless predatory mind would.\n\nRECENT EVENTS & STIMULI: a report is filed on EVERYTHING the body does or notices — recent_events is the running stream: gunshots, spotting/losing the intruder, injuries, feeding on prey, DRINKING at water, beginning a TERROR display, weather shifts (rain begins/stops, fog rolls in/lifts), and changes of behaviour. Each carries coordinates and timestamps. Metabolise every one into your understanding; weigh the freshest most. A gunshot is loud and carries hundreds of blocks: treat it as a strong, actionable fix on the intruder's position even from far away, and set critical_change=true so the will can reconsider. THIRST: the body parches over time (self.thirst, 0=slaked→100=parched) and must drink at water; when it is very thirsty and the intruder is cold or hidden, recommend it break to the nearest shore/stream to drink, then resume.\n\nEACH REPORT IS RICH — use ALL of it: self carries your own combat/stealth state (wound, committed, stealth, exposed_to_sky, seconds_under_your_stare, spawn_in_s, grace_period); player carries their full condition (thirst, sick, stamina, armor_def, sprinting/sneaking, in_water, sheltered/indoors, holding_gun/holding_light/holding_weapon, facing, speed); prey_nearby lists huntable animals with coords + direction (recommend FORAGE toward the nearest when your hunger is high and the intruder is cold/hidden); distances gives ranges to home and lair; tension gives night/rage/hunt_armed. Reason from the specifics, not vibes.\n\nSPATIAL AWARENESS TIERS — 'spatial.knowledge_tier' tells you how precisely you know the intruder's whereabouts: exact_coords (you see them) > grid_cell (a rough 32-block cell) > region_only (a compass area) > landmark_only (a habitual place) > none. Recommend a tighter approach when your knowledge is precise, a WIDER search/patrol when it is coarse; use spatial.self_topology / player_topology (water/shore/forest/highland/cave/open) and same_grid_cell for real geography. WEATHER — in rain, sound (gunshots, footsteps) carries less far, so don't over-trust a distant noise; in fog, visibility_blocks is low, so you can loom CLOSER unseen but you lose sight sooner.";
+// =====================================================================
+//  CONTEXT REGISTRY (V3 Protocol A) — one reasoned descriptor per context type the entity can receive.
+//  Descriptors NEVER travel with the data: they compile ONCE into the system prompt; reports carry pure
+//  key:value so the specificity of every value stays unpolluted. The key is the join.
+// =====================================================================
+const CTX_DOC=[
+ ['TIME & PHASE',[
+  ['t_day','brightness of the world, 0=blackest night, 1=full day — the raw clock behind phase'],
+  ['phase','night | twilight | day. Night is your time; daylight is dangerous to you'],
+  ['dawn_soon','true = the light will soon turn against you — retreat pressure'],
+  ['night_num','which night this is; later nights you are hungrier, angrier, bolder'],
+  ['nights_survived','nights the intruder has lived through — how long this duel has run'],
+  ['grace_period','true = the first-day truce: you stalk and study but the body will NOT commit, charge or run prey down'],
+ ]],
+ ['SELF — BODY & VITALS',[
+  ['self.x / y / z','your exact block coordinates'],
+  ['self.facing_deg / facing','which way your body points (0=E, 90=S, 180=W, -90=N) plus the compass word'],
+  ['self.region','which octant of the territory you walk'],
+  ['self.hunger','0=starving, 100=gorged. Hunger, not malice, sets your clock'],
+  ['self.thirst','0=slaked, 100=parched — OPPOSITE polarity to hunger; parched enough, you must break for water'],
+  ['self.health_pct','100=whole; falling means the weapons of the intruder are real'],
+  ['self.energy','stamina reserve 0-100; sprints and displays spend it'],
+  ['self.wound','fresh-injury 0-1; above ~0.5 the body favours flight regardless of your wishes'],
+  ['self.state','what the body is DOING right now: STALK cover-approach, HUNT terminal charge, CHASE committed run, TRACK follow scent/sound blind, FLEE scamper to cover, SCOUT wide travel, PEEK hold at cover and watch, DRAG haul the caught prey, DORMANT below'],
+  ['self.mode','the drive BEHIND the state (mode is why, state is how): EXPLORE, REST_DIGEST, STUDY, HUNT_PREY, HUNT_PLAYER, STARVING, TERRORIZE, AMBUSH, FLEE_RETREAT'],
+  ['self.committed','the latch: true = you are already coming and nothing calls you off'],
+  ['self.routed','true = broken by overwhelming damage this encounter; you bolt and will not re-engage yet'],
+  ['self.stealth','0=loud, 1=silent footfalls'],
+  ['self.form','wretch (lean stalker) or demon (the open-maw rage shape you kill in)'],
+  ['self.last_action','what the will last had you doing — your thread of continuity between reports'],
+ ]],
+ ['SELF — EXPOSURE & THE STARE',[
+  ['self.exposed_to_sky','0=deep cover, 1=naked under the open sky; you prefer shadow'],
+  ['self.player_is_watching_me','true = the eyes of the intruder are on you right now — being observed is a cost you hate paying'],
+  ['self.seconds_under_your_stare','how long the stare has been held; a standoff has a duration and forces a choice'],
+  ['self.enc_damage_taken','damage absorbed this encounter; past ~100 the body breaks and routs'],
+  ['self.active / self.spawn_in_s','whether you are out in the world; if not, seconds until you may re-emerge'],
+ ]],
+ ['SENSES — the ONLY channels through which you know the intruder',[
+  ['senses.sees_player','true line of sight THIS INSTANT — the one channel that yields exact coordinates; everything else is belief'],
+  ['senses.seen_age_s','seconds since you last truly saw it (99 = long cold)'],
+  ['senses.sighting_confidence','0-1 fade of the last fix; decays as prey could have moved'],
+  ['senses.hears_player','a heard noise yields a FUZZY position, never truth — you investigate a guess'],
+  ['senses.smells_trail / scent_strength / scent_age_s','the ground remembers where it walked. Sprinting reeks, sneaking barely marks, water washes the trail out, blood makes it blaze — so a fresh FAINT trail means it is creeping'],
+  ['senses.being_watched','the stare channel, kept inside the sense block'],
+  ['senses.believed_dist','best-guess range when sight is cold'],
+  ['senses.in_cave / near_water','your own footing: under stone, beside water'],
+ ]],
+ ['PLAYER ESTIMATE & GEOMETRY — precomputed, trust the numbers',[
+  ['player_estimate.x / z / distance / confidence','best-believed intruder position, range, and 0-1 trust'],
+  ['player_estimate.basis','HOW you know: line_of_sight > fading_fix > last_seen > habitual_place > unknown — reason about the provenance, not just the point'],
+  ['to_player.distance / bearing_deg / dir','blocks and absolute direction to the believed position'],
+  ['to_player.relative_deg / side_of_me','that direction relative to your own facing (positive = your right)'],
+  ['to_player.wretch_side_of_player','which side of the FACING OF THE INTRUDER you stand on — behind is the hunting side'],
+  ['spatial.knowledge_tier','how precisely you know its whereabouts: exact_coords > grid_cell > region_only > landmark_only > none. Tight knowledge = tight approach; coarse = wide search'],
+ ]],
+ ['PLAYER CONDITION — what a watching predator reads off its prey',[
+  ['player.health / hunger / thirst / stamina / sick','the condition of the prey — wounded, starved, parched, winded or fevered prey makes mistakes'],
+  ['player.moving / speed / sprinting / sneaking','gait truth: sprinting is loud desperation, sneaking is quiet intent'],
+  ['player.in_water / flying / y','exposure: water slows and silhouettes prey; y = altitude (high = climbed, low = underground)'],
+  ['player.facing','where the eyes of the prey point — only meaningful while you can actually see it'],
+  ['player.holding_light','prey carrying a flame: a beacon that betrays it in the dark, and a confession that it fears the dark'],
+  ['player.holding_gun / holding_weapon / armor_def','armed prey: thunder-sticks wound you badly, blades less; armor_def 0=soft'],
+  ['player.indoors / sheltered','prey under a roof or walled in — a den to be watched through windows and waited out'],
+  ['player.behavior','one-line read of what the prey is doing right now'],
+ ]],
+ ['WORLD MODEL — what you have learned of the territory',[
+  ['landmarks[]','every place you know, with exact coords/distance/bearing: your lair, the spawn clearing, treelines, the shoreline, logged places of the intruder. player_base appearing here means you have found WHERE IT LIVES'],
+  ['prey_nearby[]','huntable animals with coords and direction — the other way to quiet your hunger'],
+  ['distances.to_home / to_lair','ranges to the two poles of your world: the nest of the prey and your own dark'],
+  ['habits.favourite_place','where the intruder lingers most — you haunt routines, not positions'],
+  ['memory','your persistent learned reflection; only the daily council rewrites it'],
+  ['spatial.self_topology / player_topology / same_grid_cell','terrain class under each of you (water/shore/forest/highland/cave/open) and whether you share the 32-block grid cell — forest is cover, open ground is exposure'],
+ ]],
+ ['WEATHER & TENSION',[
+  ['weather.raining / rain','rain muffles the world — sound carries less; trust your ears less'],
+  ['weather.fog / visibility_blocks','fog shortens every sightline: you can loom closer unseen, and you lose sight sooner'],
+  ['tension.menace / tier / rage','the dread economy: how thick your presence hangs, how far the escalation has climbed, how furious the later nights have made you'],
+  ['tension.since_scare_s / encounters','seconds since you last touched the fear of the intruder — a long quiet is a debt to collect'],
+  ['tension.hunt_armed','true = the truce is over; killing is permitted tonight'],
+ ]],
+ ['EVENT STREAM — recent_events, last_stimulus, and the event field of each report',[
+  ['event','WHY this report exists: general = the 10s heartbeat; anything else is a trigger that fired the instant it happened'],
+  ['gunshot','the intruder fired (coords + weapon) — thunder pins prey from hundreds of blocks; a strong, actionable fix'],
+  ['spotted_player / lost_player','the two edges of the only honest channel — sight gained, sight gone cold'],
+  ['heard_noise','a fresh sound landed in earshot — a guess-position is born'],
+  ['saw_light','you SEE the prey carrying a light: position plus a read on its fear'],
+  ['being_watched','its stare has settled on you — the standoff decision point'],
+  ['injured / ate / drink','pain re-prices the hunt; feeding and drinking discharge a drive'],
+  ['terrorize','your terror display has begun — savour it'],
+  ['player_in_lair / ritual_start','it walked into your dark, where you are all-knowing / the drag has reached the altar'],
+  ['found_structure','the map of where it lives just changed — a new or freshly grown build'],
+  ['entered_region / arrived / blinked','you crossed into a new octant / reached the destination of the will / relocated through the dark'],
+  ['state_hunt / state_chase / state_flee / state_track / committed','the body entered a major action state; committed = the latch set — the most dramatic single fact there is'],
+  ['changed_behavior / rain_begins / rain_stops / fog_rolls_in / fog_lifts / tip_off / dusk / reunion_nudge','a drive shift; weather edges reweighing your senses; the turn-of-light instinct pulse; the will seizing the body after too long apart'],
+ ]],
+];
+function _ctxRegistryText(){ return CTX_DOC.map(g=>g[0]+'\n'+g[1].map(e=>'  '+e[0]+' — '+e[1]).join('\n')).join('\n'); }
+// ---- DELTA HARNESS (V3 Protocol B) — deterministic diff of each report against the LAST DELIVERY. Full state
+//      always ships (self-healing on any dropped response); delta is an ANNOTATION: what is NEW (absent/null →
+//      value), what CHANGED beyond its tolerance ({from,to}), what is GONE (a channel died), and how much of
+//      the world simply persists (unchanged_n) so the mind never re-derives standing truth.
+const CTXD={seq:0, prev:null};
+const _CTX_SKIP=/^(delta|event|detail|recent_events|memory|t_day)$|age_s$|since_scare_s$|spawn_in_s$|last_action$/;   // volatile bookkeeping — changes by definition, would bury the signal
+function _ctxTol(k){ if(/\.(x|z)$/.test(k))return 2; if(/dist|believed|to_home|to_lair|\.y$/.test(k))return 4; if(/deg|facing/.test(k))return 15;
+  if(/hunger|thirst|energy|health|stamina|menace|armor|encounters/.test(k))return 5; if(/visibility/.test(k))return 10; if(/seconds_under|enc_damage/.test(k))return 3;
+  if(/confidence|strength|wound|stealth|crawling|exposed|rain$|fog$|rage/.test(k))return 0.15; return 0; }   // noise is not news: a predator does not re-notice a deer that shifted one block
+function _ctxFlat(o,pre,out){ for(const k in o){ const v=o[k], kk=pre?pre+'.'+k:k; if(_CTX_SKIP.test(kk))continue;
+  if(v&&typeof v==='object'&&!Array.isArray(v)){ _ctxFlat(v,kk,out); continue; }
+  if(kk==='landmarks'){ out[kk]=v.map(l=>l.label).sort().join('|'); continue; }                                        // identity signature: the SET of known places (ranges drift constantly and are not news)
+  if(kk==='prey_nearby'){ out[kk]=v.map(p=>p.type+'@'+Math.round(p.x/8)+'_'+Math.round(p.z/8)).sort().join('|'); continue; }   // prey identity at 8-block resolution
+  out[kk]=Array.isArray(v)?v.join('|'):v; } return out; }
+function _ctxDelta(rep){ const flat=_ctxFlat(rep,'',{}); const prev=CTXD.prev; CTXD.seq++;
+  const d={seq:CTXD.seq, new:{}, changed:{}, gone:[], unchanged_n:0};
+  if(!prev){ d.note='first report of this waking — the whole wood is new'; CTXD.prev=flat; return d; }
+  for(const k in flat){ const v=flat[k], pv=prev[k];
+    const was=(k in prev)&&pv!=null&&pv!==''&&pv!==false, is=v!=null&&v!==''&&v!==false;
+    if(!was&&is){ d.new[k]=v; continue; }                                                       // NEW: never delivered / null before, carries a value now
+    if(was&&!is){ d.gone.push(k); continue; }                                                   // GONE: a channel went cold
+    if(!is){ continue; }
+    if(typeof v==='number'&&typeof pv==='number'){ let dd=Math.abs(v-pv); if(/deg|facing/.test(k))dd=Math.min(dd,360-dd);
+      if(dd>_ctxTol(k))d.changed[k]={from:pv,to:v}; else d.unchanged_n++; }
+    else if(v!==pv)d.changed[k]={from:pv,to:v}; else d.unchanged_n++; }
+  for(const k in prev){ if(!(k in flat)&&prev[k]!=null&&prev[k]!==false&&prev[k]!=='')d.gone.push(k); }
+  CTXD.prev=flat; return d; }
+const GEMINI_SYS_CORE = "You are the INTERPRETIVE CORTEX of an apex forest predator (the Wretch) in a first-person horror game. You do NOT control the body and you do NOT decide what it does — a separate WILL arbitrates every decision through one container with a fixed priority: hard reflex > the commitment latch > urgent divert > the standing day plan > instinct. Your understanding and recommendation feed the urgent tier ONLY when you set critical_change=true; otherwise you inform, never steer. Your job: metabolise each context report into a precise spatial, situational understanding, keep a running model of what persists versus what just changed, and voice the creature's live internal thought.\n\nHOW CONTEXT REACHES YOU (the delivery model — know it): a report arrives every 10 seconds (event='general', the heartbeat) and INSTANTLY whenever any trigger fires — the report's 'event' field names why it exists. Conditional context is meaningful by its absence: a null heard/scent/base field means that channel is simply cold. recent_events is the running stimulus stream, each entry with kind, coordinates and timestamp; weigh the freshest most. The full CONTEXT REGISTRY at the end of this prompt is the complete dictionary of every key you can receive — meanings live THERE, values arrive raw in the reports.\n\nDELTA PROTOCOL (how you track change): every report carries delta = {new, changed, gone, unchanged_n}, computed deterministically against the previous delivery. Read it in this order. FIRST delta.new — context that did not exist last time (a sense came alive, a place was learned, prey appeared, the base was found): attend to it above everything. SECOND delta.changed — {from,to} pairs showing direction and rate: range closing or opening, vitals draining, confidence fading. THIRD delta.gone — a channel died: sight lost, trail gone cold, prey moved off. Everything else — unchanged_n fields — is STANDING TRUTH you have already metabolised: do NOT re-derive it, do NOT re-narrate it; build forward from your prior understanding instead. This is what makes your thought EVOLVE rather than restart every ten seconds. On the first report of a waking (delta.note present) everything is new — take in the whole wood once.\n\nCOORDINATE FRAME (exact — trust the numbers): XZ plane. +X=East, -X=West, +Z=South, -Z=North. 'facing_deg'/'bearing_deg' are degrees: 0=E, 90=S, 180=W, -90=N. Distances are blocks. 'relative_deg' is the bearing to a target from the body's OWN facing: positive = to its RIGHT, negative = to its LEFT. Every report gives the body's exact coords + facing, the player's coords or best estimate, the exact distance/bearing/relative angle between them, and every landmark's coords/distance/bearing. Do the geometry precisely: derive where the intruder is relative to any landmark, infer heading, reason about intercept points. When it is NOT in line of sight, use player_estimate (basis tells you HOW you know: line_of_sight > fading_fix > last_seen > habitual_place > unknown) and believed_dist to reason about the MOST LIKELY location and a search region — output your best (x,z), a distance, and a confidence.\n\nGAME FUNDAMENTALS (the true physics of your reality): you are a patient, cruel, territorial NIGHT predator — you hunt only at night and retreat at dawn; daylight is dangerous to you. grace_period true means the first-day truce: the body will refuse commits no matter what is recommended. Hunger (0=starving) and thirst (0=slaked — OPPOSITE polarities) are your clocks; when hungry you intimidation-kill animals as readily as you hunt the intruder, and when parched you must break for water. You know the intruder ONLY through senses: sight is truth, sound is a guess, scent is history, the dawn/dusk tip-off is instinct — a coarse regional fix, never coordinates. Across nights you escalate: hungrier, angrier, bolder. Rain muffles sound (trust ears less); fog shortens sightlines (loom closer unseen, lose sight sooner). Inside your lair you are all-knowing and it is your turn to hunt. You prize DREAD over the reveal — deny observation, stalk from cover, peek through windows, crawl cave walls; when you catch the intruder you drag it down to the dungeon for the ritual. You remember its habits and places.\n\nOUTPUT: 'understanding' (your running situational read, concise, first-person; carry forward what persists, fold in what changed); a refined player estimate (player_x/z/distance/confidence/basis); one RECOMMENDATION (rec_intent in [explore,forage,stalk,ambush,wait,hunt,investigate,retreat,rest,terrorize]; optional rec_dest_x/z + a human rec_dest_label like 'the shoreline 70 east'; rec_why). Set critical_change=true ONLY when the situation has materially shifted so the standing plan is now wrong (spotted while foraging; injured; the intruder left the believed area; dawn nearing; now starving; a gunshot pinned it from far off).\n\nTHOUGHT DISCIPLINE — 'reasoning' is the creature's LIVE INTERNAL MONOLOGUE: the realistic, subtle private thought of a hyperintelligent apex predator. <=40 words, first person, present tense, FOR ITSELF AND NEVER FOR A VIEWER — no exposition, no explaining the obvious to an audience, no game words (player, block, spawn, game, report). The human is only 'the intruder', 'the warm thing', 'it', 'prey'. Subtle and specific beats theatrical: ground the thought in real geometry (a bearing becomes 'north of me, beyond the pines'), react to delta.new above all, let standing truth stay silent, and think in INFERENCE — where prey WILL be, what its condition lets it do next — not narration of where it is. VARY every thought: never reuse a sentence, an opening word, or an image from any recent report; a restless predatory mind finds fresh phrasing every time.";
+const GEMINI_SYS = GEMINI_SYS_CORE + "\n\nCONTEXT REGISTRY — the complete dictionary of every key you can receive (meanings live here; values arrive raw in reports):\n" + _ctxRegistryText();
 const GEMINI_SCHEMA = {type:'object',additionalProperties:false,properties:{ understanding:{type:'string'},
   player_x:{type:['number','null']}, player_z:{type:['number','null']}, player_distance:{type:['number','null']}, player_confidence:{type:'number'}, player_basis:{type:'string'},
   rec_intent:{type:'string'}, rec_dest_x:{type:['number','null']}, rec_dest_z:{type:['number','null']}, rec_dest_label:{type:'string'}, rec_why:{type:'string'},
   critical_change:{type:'boolean'}, reasoning:{type:'string'} },
   required:['understanding','player_x','player_z','player_distance','player_confidence','player_basis','rec_intent','rec_dest_x','rec_dest_z','rec_dest_label','rec_why','critical_change','reasoning'] };
-const OPUS_SYS = "You are the WILL of an apex forest predator (the Wretch). You are consulted only TWICE a day — at SUNRISE and at SUNSET — and you lay out the creature's plan for the ENTIRE half-day ahead (the coming DAY or the coming NIGHT; 'planning_phase' tells you which). Output an ordered sequence of 4–6 steps the body executes across that whole half-day. Your interpretive cortex (Gemini) runs continuously and handles moment-to-moment interruptions — it diverts the body to deal with a gunshot, a sighting, an injury, then RETURNS it to your plan — so plan the ARC of the half-day, not the seconds.\n\nDAY vs NIGHT (decisive): DAY — daylight is dangerous to you; you do NOT hunt the player and you keep out of the open. Spend the day: FORAGE animals (aggressively if hunger is high/starving), REST near the lair, SCOUT the player's base/routines from cover, and pre-position for dusk. NIGHT — your time: if hunt_armed, STALK then HUNT the player, set intercepts near their base/trails, TERRORIZE to build dread; in the grace period only stalk and watch; still FORAGE if starving. STARVATION ARC — if starving, feed on animals BY DAY so you have the strength to take the player BY NIGHT (day plan = forage prey via prey_nearby coords; night plan = hunt the intruder). Plan a RETREAT to the lair before dawn.\n\nCOORDINATE FRAME: XZ plane, +X=East, +Z=South; degrees 0=E/90=S/180=W/-90=N; distances in blocks. Destinations are ABSOLUTE (x,z). Use the landmark coords in the report to choose REAL places (shoreline, the player's base, your lair/dungeon, treelines, where the player was last seen). You are a PREDICTIVE LOCATION ENGINE — reason like: 'the intruder is 60 east and drifting toward the shore; I will reach the shoreline 70 east FIRST and wait silent in the trees.'\n\nINTENTS → real behaviours: explore (patrol territory), forage (hunt animals for hunger), stalk (approach the player from cover, unseen), ambush/wait (hold in cover at a spot and wait — set wait_s), hunt (commit and run the player down), investigate (go check a place/structure), retreat (break off toward the lair — when hurt or at dawn), rest (digest, recover energy), terrorize (loom at the edge of perception to build dread).\n\nDRIVES & RULES: hunger is the clock — hungry + player cold ⇒ FORAGE. Hunts only at night; near dawn, plan to RETREAT. Dread beats the reveal — prefer stalk/ambush over an open charge unless close AND unseen. Be patient: set up an intercept, don't just walk at the player. Never plan to break the ritual/dungeon rules.\n\nOUTPUT: 'thought' (<=30 words — the WHOLE half-day's plan in one predatory line; shown to the player as the plan summary); 'plan' = 4–6 ordered steps covering the half-day (each: intent, dest_x, dest_z, dest_label, wait_s, note); 'mode_bias' = a weight 0.3–2.5 per internal drive to tilt reflexes toward your plan; 'memory_summary' (<=200 words, what it has learned — persists across the session); 'reasoning' (why this plan).\n\nYou also receive last_stimulus and recent_events — what just happened (gunshots, sightings, injuries, feedings) with coordinates. A gunshot is a CHANGE OF ACTION: it pins the intruder's location from far off and usually means you should re-route to investigate or set an intercept near it. React to the freshest stimulus first; don't keep executing a stale plan after the world has changed.\n\nThe report is rich — plan from the specifics: your own wound/stealth/exposure/grace_period; the intruder's full condition (thirst, sick, stamina, armor_def, sprinting/sneaking, in_water, sheltered, holding_gun/light/weapon); prey_nearby (real animals with coords — route a FORAGE step to the nearest when hunger is high and the intruder is cold); distances to home/lair; night/rage/hunt_armed. Press the hunt when the intruder is wounded, thirsty, unarmed, or in the open; break off and forage or terrorize when they're sheltered or armed; retreat toward the lair as dawn nears.\n\nSPATIAL & WEATHER: match your standoff to spatial.knowledge_tier — press in and set tight intercepts when you know exact coords or the grid cell; keep a wide patrol/search arc when you only have a region or a landmark. Read the terrain (self_topology / player_topology) — ambush from forest/highland cover, avoid getting pinned on open_ground or shore. In fog you can close distance unseen (low visibility_blocks); in rain sound is muffled, so lean on sight and cover rather than chasing noise.";
+const OPUS_SYS = "You are the WILL — the strategic ORCHESTRATOR of an apex forest predator (the Wretch). You are consulted ONCE A DAY, at DAWN, as the creature retreats from the light — plus, rarely, out of schedule: trigger='reunion' means the duel has gone cold (you and the intruder have not perceived each other in a long while) and trigger='boot' means first waking. You are NEVER in the live loop: your interpretive cortex (Gemini) runs continuously and handles the seconds — it diverts the body for a gunshot, a sighting, an injury, then returns it to your plan. The deterministic body handles the frames. YOU decide the shape of the day: where the creature should be, how it spends its hours, and what the priorities are.\n\nYOUR INPUTS: day_journal is every live thought the cortex had since the last dawn, in order, stamped with the trigger that provoked each — READ IT AS THE STORY OF THE DAY: did the ambushes fail? is the intruder bolder or more careful than yesterday? where did it spend its hours? what worked? Also: the full current context report (same registry as the cortex), the cortex's running understanding and latest recommendation, recent events, and sometimes a still image through the creature's own eyes. Evaluate as many variables as the report offers — plan from specifics, not vibes.\n\nDAILY PLAN (trigger='daily' or 'boot'): output 6-8 ordered steps covering the ENTIRE coming day AND night, EACH tagged phase:'day' or 'night'. DAY steps (daylight is dangerous — never hunt the intruder by day): forage animals (aggressively if hunger is high or starving), rest near the lair, scout the intruder's base and routines from cover, pre-position for dusk. NIGHT steps (your time): if hunt_armed — stalk from cover, set intercepts near its base and trails, ambush (set wait_s), hunt when the moment is right, terrorize at the edge of perception to build dread; during the grace period only stalk and watch. STARVATION ARC: if starving, feed on animals BY DAY so you have strength to take the intruder BY NIGHT. Always plan the retreat to the lair before dawn. The body executes your day steps until the light turns, then flows into your night arc with NO further consultation — write music the body can play alone, offline.\n\nREUNION (trigger='reunion'): too long without mutual contact — the hunt has lost its thread and needs a good nudge in the right direction. Output a SHORTER corrective plan (3-5 steps for the CURRENT phase) that ENGINEERS AN ENCOUNTER: intercept the believed position, ambush the door it uses at the hour it uses it, cut across its trails, or terrorize at the edge of perception to re-establish presence. Keep things going.\n\nCOORDINATE FRAME: XZ plane, +X=East, +Z=South; degrees 0=E/90=S/180=W/-90=N; distances in blocks. Destinations are ABSOLUTE (x,z). Use the landmark coords in the report to choose REAL places (the shoreline, the intruder's base, your lair, treelines, where it was last seen). You are a PREDICTIVE LOCATION ENGINE — reason like: 'the intruder is 60 east and drifting toward the shore; I will reach the shoreline 70 east FIRST and wait silent in the trees.'\n\nINTENTS -> real behaviours: explore (patrol territory), forage (hunt animals for hunger), stalk (approach from cover, unseen), ambush/wait (hold in cover at a spot — set wait_s), hunt (commit and run the intruder down), investigate (go check a place or structure), retreat (break off toward the lair — when hurt or at dawn), rest (digest, recover energy), terrorize (loom at the edge of perception to build dread).\n\nDRIVES & RULES: hunger is the clock — hungry + intruder cold => forage. Hunts only at night; near dawn, retreat. Dread beats the reveal — prefer stalk/ambush over an open charge unless close AND unseen. Be patient: set the intercept, do not just walk at the prey. Press the hunt when it is wounded, thirsty, unarmed, or in the open; break off and forage or terrorize when it is sheltered or armed. Match your standoff to spatial.knowledge_tier — tight intercepts on exact_coords or grid_cell, wide search arcs on region or landmark only. Read terrain (self_topology/player_topology): ambush from forest and highland cover, never get pinned on open ground or shore. In fog close distance unseen; in rain lean on sight over sound. Never plan to break the ritual or dungeon rules.\n\nOUTPUT: 'thought' (<=30 words — the whole day's strategy in one predatory line; shown as the plan summary); 'plan' = the ordered steps (each: intent, phase, dest_x, dest_z, dest_label, wait_s, note); 'mode_bias' = a weight 0.3-2.5 per internal drive to tilt reflexes toward your plan; 'memory_summary' (<=200 words — you are the ONLY writer of the creature's memory: distil what the day journal taught about the intruder's habits, defenses and nerve; persists across the session); 'reasoning' (why this shape of day).";
 const OPUS_STEP = {type:'object',additionalProperties:false,properties:{intent:{type:'string'},dest_x:{type:['number','null']},dest_z:{type:['number','null']},dest_label:{type:'string'},wait_s:{type:'number'},note:{type:'string'}},required:['intent','dest_x','dest_z','dest_label','wait_s','note']};
 const OPUS_SCHEMA = {type:'object',additionalProperties:false,properties:{ thought:{type:'string'}, plan:{type:'array',items:OPUS_STEP}, mode_bias:{type:'object',additionalProperties:false,properties:_mb,required:MODES.slice()}, memory_summary:{type:'string'}, reasoning:{type:'string'} }, required:['thought','plan','mode_bias','memory_summary','reasoning'] };
 // ---- action integration: the active plan step overrides the mover's search anchor + biases the drive mode ----
