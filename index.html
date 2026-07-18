@@ -1542,6 +1542,24 @@ const pointPool = [];
 for(let i=0;i<LIGHT_POOL;i++){ const pl=new THREE.PointLight(0xff9838,0,34,1.3); pl.position.set(0,-999,0); pl.castShadow=false; scene.add(pl); pointPool.push(pl); }
 let _heldST=0;
 const heldLight = new THREE.PointLight(0xffb060, 0, 14, 2); scene.add(heldLight);   // torch/lantern in hand — NO shadow (baked world handles occlusion; the hand light is a soft personal glow)
+// GLOW POOL — the ONLY dynamic world-glow lights (cook fires, glowing drops, lair hall/crypt). Fixed
+// count, resident from boot, driven by intensity/position only: adding/removing/visible-toggling a
+// light changes the shader's light count and RECOMPILES every lit material (a 50-300ms hitch, and the
+// renderer's own comment at the pool below says so). Producers register candidates each frame; the 3
+// nearest win. Slot count NEVER changes after this line.
+const GLOW_N=3, glowPool=[], _glowCand=[], _glowStatic=[];
+for(let i=0;i<GLOW_N;i++){ const L=new THREE.PointLight(0xff8626,0,9,1.6); L.position.set(0,-999,0); scene.add(L); glowPool.push(L); }
+function glowCand(x,y,z,intensity,dist,color){ _glowCand.push({x,y,z,i:intensity,d:dist,c:color,s:0}); }
+function assignGlowPool(){
+  const px=player.pos.x, py=player.pos.y+1, pz=player.pos.z;
+  for(const s of _glowStatic){ const dx=s.x-px,dy=s.y-py,dz=s.z-pz; if(dx*dx+dy*dy+dz*dz < 2500) _glowCand.push(s); }   // statics (lair) join within 50u
+  for(const c of _glowCand){ const dx=c.x-px,dy=c.y-py,dz=c.z-pz; c.s=dx*dx+dy*dy+dz*dz; }
+  _glowCand.sort((a,b)=>a.s-b.s);
+  for(let i=0;i<GLOW_N;i++){ const L=glowPool[i];
+    if(i<_glowCand.length){ const c=_glowCand[i]; L.position.set(c.x,c.y,c.z); L.color.setHex(c.c); L.intensity=c.i; L.distance=c.d; }
+    else { L.intensity=0; L.position.set(0,-999,0); } }
+  _glowCand.length=0;
+}
 
 // =====================================================================
 //  POST — bloom (warm glow) + output(ACES). SSAO/god-rays added in setup.
@@ -2120,8 +2138,9 @@ function cullChunks(){
       n._vf=_visFrame; q.push(n, _oppDir[d], dirs|(1<<d));
     }
   }
+  const fogCheb=Math.max(2, Math.ceil(2.146/Math.max(1e-6,scene.fog.density)/CK));   // distance where FogExp2 reaches ~99% opacity, in chunks: anything past it is pure fog color on screen — skip drawing it entirely. Daylight fog cuts nothing (falls beyond RD); night/underwater/fog-weather cut real draws.
   world.forEach(c=>{ if(!c.group) return; const cheb=Math.max(Math.abs(c.cx-pcx),Math.abs(c.cz-pcz));
-    const vis = cheb<=5 || (c._vf===_visFrame);   // near ring (within shadow-caster range) always on → preserves shadows; Three's per-mesh frustum cull still skips its camera draws. occlusion hides only farther chunks.
+    const vis = (cheb<=5 || (c._vf===_visFrame)) && cheb<=fogCheb;   // near ring (within shadow-caster range) always on → preserves shadows; Three's per-mesh frustum cull still skips its camera draws. occlusion hides only farther chunks.
     c.group.visible=vis;
     if(vis){ const far=cheb>fogRing;               // fog-distance detail suppression (foliage/water are sub-signal out there)
       const f=c.group.userData.foliage, w=c.group.userData.water; if(f)f.visible=!far; if(w)w.visible=!far;
@@ -2344,10 +2363,16 @@ function updateSky(dt){
   // SMOOTH sun↔moon blend across the ENTIRE twilight band — no hard boolean snap (that instant warm→blue cut was the harsh transition)
   { const gz=smooth(0.0,0.25,Math.abs(elev));                                       // grazing (dawn/dusk orange) → high (white)
     const wR=1.0, wG=lerp(0.74,0.96,gz), wB=lerp(0.52,0.88,gz);                      // warm key color; oranger near the horizon
-    sunLight.color.setRGB(lerp(0.42,wR,day), lerp(0.49,wG,day), lerp(0.75,wB,day));  // moon-blue 0x6a7ec0 → warm sun, driven by `day`
-    sunLight.intensity=lerp(0.9,3.4,day); }
-  hemi.intensity=lerp(0.16,0.62,day);
-  ambient.intensity=lerp(0.10,0.32,day);
+    sunLight.color.setRGB(lerp(0.36,wR,day), lerp(0.44,wG,day), lerp(0.74,wB,day));  // deeper moon-blue → warm sun, driven by `day`
+    sunLight.intensity=lerp(0.55,3.4,day); }                                         // DARKNESS-FIRST night: the moon is a faint blue key, not a second sun (was 0.9)
+  hemi.intensity=lerp(0.10,0.62,day);                                                // night ambient floor: LOW but non-zero — silhouettes stay readable (too-dark reads as frustration, not fear), true black lives at the fog wall
+  ambient.intensity=lerp(0.055,0.32,day);
+  // NIGHT SHADOW KILL — in deep night the realtime shadow pass buys nothing the baked light volume +
+  // low ambient don't already sell, and it costs a full caster-scene re-render every SHADOW_EVERY frames
+  // plus a shadow-map fetch in every lit fragment, all night long. Hysteresis so dusk doesn't flap.
+  // (Both shader variants are prewarmed behind the load screen — the toggle is a cached-program switch, not a compile hitch.)
+  if(day<0.06 && sunLight.castShadow) sunLight.castShadow=false;
+  else if(day>0.12 && !sunLight.castShadow) sunLight.castShadow=true;
   const oc=weather.overcast||0;                                                    // OVERCAST: rain snuffs the sun, greys the air
   if(oc>0.01){ sunLight.intensity*=(1-0.62*oc); hemi.intensity*=(1-0.30*oc); ambient.intensity*=(1-0.18*oc); sunLight.color.lerp(_fogGrey.setRGB(0.5,0.54,0.6), oc*0.5); }
   // fog + bg follow horizon darkness
@@ -2358,7 +2383,7 @@ function updateSky(dt){
   const wf=_under?0:weather.fog;                                                    // FOG WEATHER: thickens the haze + pales the air — but it NEVER seeps underground/into the dungeon, so the lantern & room stay readable in fog
   if(wf>0.01){ fc.lerp(_fogGrey.setRGB(0.34+0.2*day, 0.36+0.2*day, 0.40+0.2*day), Math.min(0.88,wf*0.95)); }
   if(scene.background&&scene.background.isColor)scene.background.copy(fc);   // guard: a skybox CubeTexture background isn't a Color — don't call .copy on it
-  scene.fog.density=lerp(2.1,1.7,day)/(CFG.RENDER_DIST*CK) * (1+wf*wf*18);   // fog e-folds at the CURRENT render edge (not FAR/RD_MAX) → it always hides the actual chunk edge, so you never see sky through the last trees regardless of the render-distance setting. Denser daytime coefficient closes the old daylight seam.
+  scene.fog.density=lerp(2.6,1.7,day)/(CFG.RENDER_DIST*CK) * (1+wf*wf*18);   // fog e-folds at the CURRENT render edge; night coefficient RAISED (2.1→2.6): sight lines close in after dark — the Silent Hill move — and cullChunks turns the opaque fog wall into a draw-distance CUT (fog as occlusion, not just mood)
   waterMat.uniforms.uFogDensity.value=scene.fog.density;
   // hide the SKY behind the fog (and fade it back gradually as the bank clears)
   fogShell.position.copy(camera.position); fogShell.material.color.copy(fc);
@@ -3047,8 +3072,7 @@ function updateCookTimers(dt){
     if(c.items){ for(const it of c.items){ if(!it.done){ it.t+=dt; if(it.t>=MEAT_TIME){ it.done=true; it.out=it.out||COOK[it.id]||'cooked_meat'; } } } }
     if(!c.spit && (!c.items||!c.items.length)) delete campfires[k]; } }
 // --- dynamic cooking visuals: fire glow + melting item inside the furnace; spit sticks + hanging meat on the campfire ---
-const cookGroup=new THREE.Group(); scene.add(cookGroup); const cookFx={}; const cookLights=[];
-for(let i=0;i<3;i++){ const L=new THREE.PointLight(0xff8626,0,9,1.6); L.visible=false; cookGroup.add(L); cookLights.push(L); }
+const cookGroup=new THREE.Group(); scene.add(cookGroup); const cookFx={};   // fire GLOW comes from the shared glowPool (visible-toggling dedicated lights recompiled every lit material)
 function _cookDispose(g){ g.traverse(o=>{ if(o.geometry)o.geometry.dispose(); if(o.material&&o.material!==flameMat&&o.material.dispose)o.material.dispose(); }); }
 function makeFurnaceFx(st){ const g=new THREE.Group();
   const glow=new THREE.Mesh(new THREE.PlaneGeometry(0.42,0.38), new THREE.MeshBasicMaterial({color:0xff6a1e,transparent:true,opacity:0,depthWrite:false,side:THREE.DoubleSide})); glow.position.z=0.005; g.add(glow); g.userData.glow=glow;
@@ -3064,7 +3088,7 @@ function makeCampfireFx(st){ const g=new THREE.Group(); const wood=new THREE.Mes
       if(it.done)im.traverse(o=>{ if(o.material&&o.material.color)o.material.color.multiplyScalar(0.68); }); g.add(im); }); }   // cooked pieces char darker
   return g; }
 function updateCookingFx(dt){ updateCookTimers(dt);
-  const px=player.pos.x, pz=player.pos.z, t=clock.elapsedTime; let li=0; const live=new Set();
+  const px=player.pos.x, pz=player.pos.z, t=clock.elapsedTime; const live=new Set();
   const run=(dict,kind)=>{ for(const k in dict){ const st=dict[k], p=k.split(','), bx=+p[0],by=+p[1],bz=+p[2];
     if(Math.abs(bx-px)>28||Math.abs(bz-pz)>28) continue; live.add(k);
     const sig=kind+'|'+(st.spit||0)+'|'+(st.in?st.in.id:'-')+'|'+(st.out?st.out.id:'-')+'|'+(st.items?st.items.map(i=>i.id+(i.done?'*':'')).join(','):'');
@@ -3076,11 +3100,10 @@ function updateCookingFx(dt){ updateCookTimers(dt);
       if(g.userData.item){ g.userData.item.visible=!!st.in; g.userData.item.scale.setScalar(0.44*(1-prog*0.3)); g.userData.item.position.y=0.03-prog*0.1; }
       if(g.userData.flame) g.userData.flame.visible=!!st.in;
       if(g.userData.glow) g.userData.glow.material.opacity = st.in? (0.55+Math.sin(t*9+bx)*0.2):0;
-      if(st.in && li<cookLights.length){ const L=cookLights[li++]; L.visible=true; L.position.set(bx+0.5,by+0.5,bz+0.5); L.intensity=13+Math.sin(t*12)*3; }
+      if(st.in) glowCand(bx+0.5, by+0.5, bz+0.5, 13+Math.sin(t*12)*3, 9, 0xff8626);   // fire glow via the shared pool
     } else { g.position.set(bx+0.5, by, bz+0.5); }   // campfire meats sit statically on the spit (rebuilt when a piece is added/cooks)
   } };
   run(furnaces,'furnace'); run(campfires,'campfire');
-  for(;li<cookLights.length;li++) cookLights[li].visible=false;
   for(const k in cookFx){ if(!live.has(k)){ cookGroup.remove(cookFx[k].g); _cookDispose(cookFx[k].g); delete cookFx[k]; } } }
 
 // =====================================================================
@@ -3594,6 +3617,7 @@ function loop(){
   if(started){ const B=_BUILDERS; _builderIdx=(_builderIdx+1)%B.length; _bulkRun(B[_builderIdx]); }   // ONE builder per frame, in bulk-edit mode: a village fires as ~3ms of array writes + a deferred remesh wave instead of a 50-90ms frame; a 16-frame poll rotation delays a structure's appearance imperceptibly
   assignPointLights();
   updateBlockFx(dt); updateCookingFx(dt);
+  assignGlowPool();   // AFTER the producers (updateDrops ran earlier, updateCookingFx just above): 3 nearest glow sources win the fixed slots
   if((unloadTick=(unloadTick+1)%180)===0) unloadFar();
   drainUnloads();   // amortized: at most 3 chunk disposals per frame (unloadFar only queues)
   const t1=performance.now();
@@ -3641,6 +3665,7 @@ function loop(){
   // loading gate
   if(!initialReady){ const c=getChunk(Math.floor(player.pos.x)>>4,Math.floor(player.pos.z)>>4); if(c&&c.meshed){ initialReady=true;
     try{ for(const id in ITEMS) slotIconURL(id); }catch(e){}   // PRE-WARM every item icon behind the load overlay — icon3DURL does a synchronous GPU readback (readRenderTargetPixels) per modelled item, which used to land as a 2-15ms mid-combat hitch on first pickup and a 100ms+ freeze on first creative-menu open
+    try{ sunLight.castShadow=false; renderer.render(scene,camera); sunLight.castShadow=true; }catch(e){}   // PRE-WARM the shadows-OFF shader variants (night kills the shadow pass) so the first dusk is a cached-program switch, not a compile storm
     document.getElementById('load').style.display='none'; } }
   fpsAvg+=((dt>0?1/dt:60)-fpsAvg)*0.05;
   _retargetFps(dt);
@@ -5383,11 +5408,11 @@ function decorateDungeon(cx,fy,cz){ const g=new THREE.Group(); scene.add(g); con
   // weld every bucket → one static mesh per material (red-symbol materials still toggle via setSymbolGlow — the merged mesh references them)
   buckets.forEach((items,mat)=>{ if(items.length){ const m=new THREE.Mesh(mergeGeos(items),mat); m.frustumCulled=true; g.add(m); } });
   // a dim RED ritual light at the hall's heart — off until the symbols burn (adds real crimson glow to the frenzy)
-  wretch.redLight=new THREE.PointLight(0xff1808,0,26,1.7); wretch.redLight.position.set(cx,fw+3,cz); g.add(wretch.redLight);
+  if(wretch.redLight) wretch.redLight.position.set(cx,fw+3,cz);   // ritual light pre-created at boot (scene-level, intensity 0) — parking it here at build time avoids the light-count change that would recompile every lit material mid-game
   spawnDungeonBugs(cx,fy,cz,g);   // 8-leg spiders on the floor + massive daddy-long-legs crawling the walls & ceiling
   // WARM DUNGEON ILLUMINATION — the hall and the crypt are lit whenever you're down here (the altar lantern alone wasn't lighting the room). The AR-15 recipe now lives ONLY in the crypt below.
-  { const hall=new THREE.PointLight(0xffb262, 26, 34, 1.4); hall.position.set(cx, fw+3.2, cz); g.add(hall);
-    const L=wretch.lair; if(L && L.b2cx!=null){ const crypt=new THREE.PointLight(0xffa850, 20, 26, 1.5); crypt.position.set(L.b2cx, (L.b2y!=null?L.b2y:fy-6)+3, L.b2cz); g.add(crypt); } }
+  { _glowStatic.push({x:cx, y:fw+3.2, z:cz, i:26, d:34, c:0xffb262, s:0});           // hall + crypt light via the shared glowPool: same warm illumination whenever you're down here, zero light-count churn
+    const L=wretch.lair; if(L && L.b2cx!=null) _glowStatic.push({x:L.b2cx, y:(L.b2y!=null?L.b2y:fy-6)+3, z:L.b2cz, i:20, d:26, c:0xffa850, s:0}); }
   // dungeon SPIDERS crawling the floor (they climb the walls via the animal AI)
   if(typeof buildAnimalMesh==='function' && typeof animals!=='undefined') for(let i=0;i<8;i++){ const sxp=cx+(Math.random()*2-1)*(DR-2), szp=cz+(Math.random()*2-1)*(DR-2);
     const mesh=buildAnimalMesh('spider'); mesh.position.set(sxp,fw,szp); animals.push({type:'spider',mesh,x:sxp,y:fw,z:szp,yaw:Math.random()*6.283,hp:ANIMALS.spider.hp,timer:0,flee:0,dead:false}); }
@@ -6060,10 +6085,10 @@ function spawnDrop(id,n,x,y,z,delay,did){ if(!ITEMS[id])return; n=n||1;
   if(did==null && NET.on){ did=netDropSeq(); netDrop(did,id,n,x,y,z,delay); }                                                // co-op: give it a shared id + broadcast (unless this IS a remote drop)
   const d={mesh:m,x,y,z,vx:Math.cos(a)*1.5,vy:2.2+Math.random()*1.4,vz:Math.sin(a)*1.5,age:0,rest:false,id,n,delay:(delay==null?0.5:delay),did:did||0};
   const bl=(ITEMS[id].block!=null)?blockLight[ITEMS[id].block]:0;                                                            // a dropped torch/lantern/candle still glows on the ground
-  if(bl>0){ d.light=new THREE.PointLight(bl>=15?0xffe6b4:0xffb060, bl>=15?15:10, 9, 1.6); dropGroup.add(d.light); }
+  if(bl>0){ d.glow=bl; }   // glow via the shared glowPool (a PointLight per dropped torch recompiled every lit material AND stacked unbounded fragment cost)
   drops.push(d);
-  if(drops.length>200){ const o=drops.shift(); dropGroup.remove(o.mesh); if(o.light)dropGroup.remove(o.light); _disposeView(o.mesh); } }
-function removeDropById(did){ for(let i=drops.length-1;i>=0;i--){ if(drops[i].did===did){ const o=drops[i]; dropGroup.remove(o.mesh); if(o.light)dropGroup.remove(o.light); _disposeView(o.mesh); drops.splice(i,1); } } }
+  if(drops.length>200){ const o=drops.shift(); dropGroup.remove(o.mesh); _disposeView(o.mesh); } }
+function removeDropById(did){ for(let i=drops.length-1;i>=0;i--){ if(drops[i].did===did){ const o=drops[i]; dropGroup.remove(o.mesh); _disposeView(o.mesh); drops.splice(i,1); } } }
 function updateDrops(dt){ for(let i=drops.length-1;i>=0;i--){ const d=drops[i]; d.age+=dt;
     if(!d.rest){ d.vy-=14*dt; d.x+=d.vx*dt; d.y+=d.vy*dt; d.z+=d.vz*dt; d.vx*=0.86; d.vz*=0.86;
       // rest on the FIRST solid block directly beneath the item — NOT groundYAt (that returns the topmost
@@ -6073,11 +6098,11 @@ function updateDrops(dt){ for(let i=drops.length-1;i>=0;i--){ const d=drops[i]; 
       else if(solidAt(bx,by,bz)){ d.y=by+1+0.13; d.rest=true; d.vy=0; } }
     const bob=d.rest?Math.sin((clock.elapsedTime+i)*2)*0.06:0;
     d.mesh.position.set(d.x,d.y+bob,d.z); d.mesh.rotation.y+=dt*1.6;                          // hover-bob + slow spin
-    if(d.light) d.light.position.set(d.x,d.y+0.25,d.z);                                        // dropped light source glows
+    if(d.glow) glowCand(d.x, d.y+0.25, d.z, d.glow>=15?15:10, 9, d.glow>=15?0xffe6b4:0xffb060);   // dropped light source glows (pooled)
     const pdx=player.pos.x-d.x, pdy=(player.pos.y+0.8)-d.y, pdz=player.pos.z-d.z, pd=Math.hypot(pdx,pdy,pdz);
     if(d.age>d.delay && pd<1.6){ if(pd>0.45){ const s=Math.min(1,dt*9); d.x+=pdx*s; d.y+=pdy*s; d.z+=pdz*s; }   // magnet toward player (after its pickup delay)
-      else { const left=invAdd(d.id,d.n); if(left<=0){ sfxPickup&&sfxPickup(); if(NET.on&&d.did)netSend({t:'dpick',did:d.did}); dropGroup.remove(d.mesh); if(d.light)dropGroup.remove(d.light); _disposeView(d.mesh); drops.splice(i,1); continue; } else d.n=left; } }
-    if(d.age>300){ dropGroup.remove(d.mesh); if(d.light)dropGroup.remove(d.light); _disposeView(d.mesh); drops.splice(i,1); } } }   // despawn ~5min
+      else { const left=invAdd(d.id,d.n); if(left<=0){ sfxPickup&&sfxPickup(); if(NET.on&&d.did)netSend({t:'dpick',did:d.did}); dropGroup.remove(d.mesh); _disposeView(d.mesh); drops.splice(i,1); continue; } else d.n=left; } }
+    if(d.age>300){ dropGroup.remove(d.mesh); _disposeView(d.mesh); drops.splice(i,1); } } }   // despawn ~5min
 
 // ---- THROWN SPEARS (real 3D projectiles: gravity arc, oriented to travel, then STICK into whatever they hit) ----
 const spears=[], stuckSpears=[]; const _spDir=new THREE.Vector3(); const _SP_GRAV=20;
@@ -6255,6 +6280,7 @@ function muzzleFlashTex(){ if(_muzzleTex)return _muzzleTex; const c=document.cre
   _muzzleTex=new THREE.CanvasTexture(c); return _muzzleTex; }
 function buildMuzzleFlash(){ return new THREE.Mesh(new THREE.PlaneGeometry(0.4,0.4), new THREE.MeshBasicMaterial({map:muzzleFlashTex(),transparent:true,blending:THREE.AdditiveBlending,depthWrite:false,depthTest:false,side:THREE.DoubleSide})); }
 const jumpLight=new THREE.PointLight(0xffe0d2,0,8,2); scene.add(jumpLight);       // soft NON-glare fill on the maw during the jumpscare so the face reads (not blown out)
+wretch.redLight=new THREE.PointLight(0xff1808,0,26,1.7); wretch.redLight.position.set(0,-999,0); scene.add(wretch.redLight);   // the lair's ritual light — RESIDENT from boot at intensity 0 (repositioned when the dungeon builds); mid-game light-count changes recompile every lit material
 function _disposeView(o){ o.traverse(x=>{ if(x.geometry)x.geometry.dispose(); if(x.material)x.material.dispose(); }); }
 function mergeGeos(list){   // weld several geometries (each with an optional transform) into ONE BufferGeometry — no addon needed
   const P=[],N=[],U=[],I=[]; let off=0;
