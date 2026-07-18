@@ -6120,17 +6120,51 @@ function updateStuckSpears(dt){ for(let i=stuckSpears.length-1;i>=0;i--){ const 
     if(st.age>300){ scene.remove(st.mesh); _disposeView(st.mesh); stuckSpears.splice(i,1); } } }
 // ---- PARTICLES (block-break puffs, blood, etc.) ----
 const fxGroup=new THREE.Group(); scene.add(fxGroup);
-const particles=[]; const _pGeo=new THREE.BoxGeometry(0.09,0.09,0.09);
-const _pMatCache={};   // pooled particle materials by color — was allocating a MeshLambertMaterial per particle (up to 400 churning)
-function pMat(color){ return _pMatCache[color]||(_pMatCache[color]=new THREE.MeshLambertMaterial({color})); }
-function spawnParticles(x,y,z,color,count,spread,up){ const gy0=groundYAt(x,z); for(let i=0;i<(count||8);i++){ const m=new THREE.Mesh(_pGeo,pMat(color)); m.position.set(x,y,z); fxGroup.add(m);
-    particles.push({mesh:m,vx:(Math.random()-0.5)*(spread||2),vy:(up||1)+Math.random()*(spread||2),vz:(Math.random()-0.5)*(spread||2),age:0,ttl:0.5+Math.random()*0.4,gy:gy0}); }   // gy cached at spawn (particles are short-lived; ground doesn't move)
-  while(particles.length>400){ const p=particles.shift(); fxGroup.remove(p.mesh); } }   // pooled material → never dispose here
-function updateParticles(dt){ for(let i=particles.length-1;i>=0;i--){ const p=particles[i]; p.age+=dt; p.vy-=16*dt;
-    p.mesh.position.x+=p.vx*dt; p.mesh.position.y+=p.vy*dt; p.mesh.position.z+=p.vz*dt;
-    const gy=p.gy; if(p.mesh.position.y<gy+0.05){ p.mesh.position.y=gy+0.05; p.vy*=-0.3; p.vx*=0.5; p.vz*=0.5; }   // cached ground-Y — no per-frame downward scan
-    p.mesh.scale.setScalar(Math.max(0.01,1-p.age/p.ttl));
-    if(p.age>=p.ttl){ fxGroup.remove(p.mesh); particles.splice(i,1); } } }
+// PARTICLES — ONE InstancedMesh + struct-of-arrays state. The old system was a full THREE.Mesh
+// (matrix, quaternion, event map, scene-graph node) and a separate DRAW CALL per particle, capped
+// at 400 — a saturated firefight/boss-laser cost 2-8ms of CPU dispatch + GC churn. Now: 512 slots,
+// one draw call, zero steady-state allocation. Slots are packed [0.._pN); deaths swap-remove.
+const _pGeo=new THREE.BoxGeometry(0.09,0.09,0.09);
+const P_MAX=512;
+const _pIM=new THREE.InstancedMesh(_pGeo, new THREE.MeshLambertMaterial({color:0xffffff}), P_MAX);
+_pIM.instanceMatrix.setUsage(THREE.DynamicDrawUsage); _pIM.count=0; _pIM.frustumCulled=false;   // near-player short-lived FX — bounds churn costs more than it saves
+_pIM.setColorAt(0, new THREE.Color(1,1,1)); _pIM.instanceColor.setUsage(THREE.DynamicDrawUsage);   // allocates instanceColor
+fxGroup.add(_pIM);
+const _pPos=new Float32Array(P_MAX*3), _pVel=new Float32Array(P_MAX*3), _pAge=new Float32Array(P_MAX), _pTtl=new Float32Array(P_MAX), _pGy=new Float32Array(P_MAX);
+let _pN=0, _pWrap=0;
+const _pCol=new THREE.Color();
+function spawnParticles(x,y,z,color,count,spread,up){ const gy0=groundYAt(x,z); _pCol.set(color);
+  const CA=_pIM.instanceColor.array;
+  for(let i=0;i<(count||8);i++){
+    let s; if(_pN<P_MAX){ s=_pN++; } else { s=_pWrap=(_pWrap+1)%P_MAX; }        // full → recycle a rotating slot (visual noise only)
+    const s3=s*3;
+    _pPos[s3]=x; _pPos[s3+1]=y; _pPos[s3+2]=z;
+    _pVel[s3]=(Math.random()-0.5)*(spread||2); _pVel[s3+1]=(up||1)+Math.random()*(spread||2); _pVel[s3+2]=(Math.random()-0.5)*(spread||2);
+    _pAge[s]=0; _pTtl[s]=0.5+Math.random()*0.4; _pGy[s]=gy0;                    // gy cached at spawn (particles are short-lived; ground doesn't move)
+    CA[s3]=_pCol.r; CA[s3+1]=_pCol.g; CA[s3+2]=_pCol.b;
+  }
+  _pIM.instanceColor.needsUpdate=true; }
+function updateParticles(dt){ if(!_pN){ _pIM.count=0; return; }
+  const MA=_pIM.instanceMatrix.array, CA=_pIM.instanceColor.array;
+  for(let i=_pN-1;i>=0;i--){ const i3=i*3;
+    _pAge[i]+=dt;
+    if(_pAge[i]>=_pTtl[i]){ const L=--_pN, L3=L*3;                              // swap-remove the dead slot: last live particle moves in
+      if(i!==L){ _pPos[i3]=_pPos[L3];_pPos[i3+1]=_pPos[L3+1];_pPos[i3+2]=_pPos[L3+2];
+        _pVel[i3]=_pVel[L3];_pVel[i3+1]=_pVel[L3+1];_pVel[i3+2]=_pVel[L3+2];
+        _pAge[i]=_pAge[L]; _pTtl[i]=_pTtl[L]; _pGy[i]=_pGy[L];
+        CA[i3]=CA[L3];CA[i3+1]=CA[L3+1];CA[i3+2]=CA[L3+2]; }
+      if(_pWrap>=_pN) _pWrap=0;
+      continue; }
+    _pVel[i3+1]-=16*dt;
+    _pPos[i3]+=_pVel[i3]*dt; _pPos[i3+1]+=_pVel[i3+1]*dt; _pPos[i3+2]+=_pVel[i3+2]*dt;
+    if(_pPos[i3+1]<_pGy[i]+0.05){ _pPos[i3+1]=_pGy[i]+0.05; _pVel[i3+1]*=-0.3; _pVel[i3]*=0.5; _pVel[i3+2]*=0.5; }
+  }
+  for(let i=0;i<_pN;i++){ const i3=i*3, o=i*16, sc=Math.max(0.01,1-_pAge[i]/_pTtl[i]);
+    MA[o]=sc;   MA[o+1]=0;  MA[o+2]=0;  MA[o+3]=0;
+    MA[o+4]=0;  MA[o+5]=sc; MA[o+6]=0;  MA[o+7]=0;
+    MA[o+8]=0;  MA[o+9]=0;  MA[o+10]=sc;MA[o+11]=0;
+    MA[o+12]=_pPos[i3]; MA[o+13]=_pPos[i3+1]; MA[o+14]=_pPos[i3+2]; MA[o+15]=1; }
+  _pIM.count=_pN; _pIM.instanceMatrix.needsUpdate=true; _pIM.instanceColor.needsUpdate=true; }
 // ---- EJECTED SHELL CASINGS — a spent brass rectangle flips out of the receiver, tumbles, falls, and TINKS on the ground ----
 const _shellGeo=new THREE.BoxGeometry(0.02,0.02,0.055);
 const _shellMat=new THREE.MeshPhongMaterial({color:0xc9a24a, shininess:120, specular:0x6b5a20});
@@ -8468,6 +8502,7 @@ window.__hc={
   setBlock(dx,dy,dz,name){ const P=player.pos, wx=Math.floor(P.x)+(dx|0), wy=Math.floor(P.y)+(dy|0), wz=Math.floor(P.z)+(dz|0); const id=name==null?0:(typeof name==='number'?name:BID[name]); if(id===undefined)return 'unknown block: '+name; setBlockWorld(wx,wy,wz,id,true); return {wx,wy,wz,id,queued:{remesh:remeshSet.size,relight:relightSet.size}}; },   // QA/bench: place or clear (name=null) a block relative to the player, RECORDED like a player edit; reports the edit-queue depths
   editQ(){ return {remesh:remeshSet.size, relight:relightSet.size}; },   // QA/bench: watch the edit queues drain
   editCount(){ return Object.keys(edits).length; },                      // QA/bench: total recorded world edits (late-join sync payload size)
+  fx(n){ for(let i=0;i<(n||10);i++) spawnParticles(player.pos.x+(Math.random()-0.5)*8, player.pos.y+1.5, player.pos.z+(Math.random()-0.5)*8, i%2?0xff5a20:0x35682c, 50, 3, 2); return {live:_pN}; },   // QA/bench: particle saturation burst
   netInfo(){ return {on:NET.on, host:NET.host, id:NET.id, ws:NET.ws?NET.ws.readyState:-1, peers:Object.keys(NET.peers).length, syncQ:NET.syncQ?NET.syncQ.length:0}; },   // QA/bench: co-op state
   // ---- ENTITY RENDER QA ----
   _qaLight:null,
