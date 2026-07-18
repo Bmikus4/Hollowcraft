@@ -3413,16 +3413,23 @@ function netMsg(m){
   if(m.t==='welcome'){ NET.id=m.id; NET.host=!!m.host; NET.hostId=m.hostId||m.id; wretch.owner=NET.hostId; flashName(NET.host?'you are the HOST':'joined a game'); }
   else if(m.t==='host'){ NET.hostId=m.id; if(wretch.owner==null)wretch.owner=m.id; }
   else if(m.t==='youAreHost'){ NET.host=true; NET.hostId=NET.id; NET.wnet=null; if(wretch.owner==null||wretch.owner!==NET.id)wretch.owner=NET.id; flashName('you are now the HOST'); }
-  else if(m.t==='peerJoin'){ if(NET.host){ const e={}; let n=0; for(const k in edits){ e[k]=edits[k]; if(++n>20000)break; } netSend({t:'sync',to:m.id,edits:e,tm:worldTime}); } }   // host replays the world (all block edits + time) to a late joiner — fixes "joined but see nobody's changes"
-  else if(m.t==='sync'){ if(m.to!==NET.id||!m.edits)return; NET.applying=true;                                                                     // apply a received world snapshot
-    for(const k in m.edits){ edits[k]=m.edits[k]; const p=k.split(','), wx=+p[0],wy=+p[1],wz=+p[2]; editIndexPut(wx,wy,wz,m.edits[k]); const c=getChunk(wx>>4,wz>>4); if(c&&c.generated) setBlockWorld(wx,wy,wz,m.edits[k],false); }   // generated chunks update now; the rest apply via applyEdits as they stream in (indexed per chunk)
-    NET.applying=false; if(m.tm!=null)worldTime=m.tm; flashName('world synced'); }
+  else if(m.t==='peerJoin'){ if(NET.host){                                       // host replays the world to a late joiner — PAGINATED. The old single-message sync crossed the relay's
+    const keys=Object.keys(edits), PAGE=1200;                                    // 64KB MAX_MSG at ~3600 edits, and the relay hard-destroys the OVERSIZED SENDER'S socket: any late join
+    for(let i=0;i<keys.length;i+=PAGE){ const e={};                              // into a lived-in world instantly killed the HOST's connection. Pages of 1200 stay ~24KB; the queue
+      for(let j=i;j<i+PAGE&&j<keys.length;j++) e[keys[j]]=edits[keys[j]];        // drains 2/frame from netUpdate so the host never stringifies the whole world in one frame either.
+      NET.syncQ=NET.syncQ||[]; NET.syncQ.push({t:'sync',to:m.id,edits:e,last:i+PAGE>=keys.length,tm:worldTime}); }
+    if(!keys.length) netSend({t:'sync',to:m.id,edits:{},last:true,tm:worldTime}); } }
+  else if(m.t==='sync'){ if(m.to!==NET.id||!m.edits)return; NET.applying=true; beginBulk();                                                        // apply a received world-snapshot PAGE (bulk: flat writes + one coalesced remesh wave)
+    try{ for(const k in m.edits){ edits[k]=m.edits[k]; const p=k.split(','), wx=+p[0],wy=+p[1],wz=+p[2]; editIndexPut(wx,wy,wz,m.edits[k]); const c=getChunk(wx>>4,wz>>4); if(c&&c.generated) setBlockWorld(wx,wy,wz,m.edits[k],false); } }finally{ endBulk(); }   // generated chunks update now; the rest apply via applyEdits as they stream in (indexed per chunk)
+    NET.applying=false; if(m.last){ if(m.tm!=null)worldTime=m.tm; flashName('world synced'); } }
   else if(m.t==='time'){ if(!NET.host && m.tm!=null) worldTime=m.tm; }                                                                             // host clock (1Hz)
   else if(m.t==='peerLeave'){ removeAvatar(m.id); delete NET.peers[m.id]; if(wretch.owner===m.id) wretch.owner=NET.hostId; }
   else if(m.t==='p'){ NET.peers[m.id]=m; ensureAvatar(m.id); const a=NET.avatars[m.id]; if(a){ a.tx=m.x; a.ty=m.y; a.tz=m.z; a.tyaw=m.yaw||0; a.tpitch=m.pitch||0; a.tied=!!m.tied; a.dead=!!m.dead;
     if(m.nm!==a.nm){ a.nm=m.nm; if(a.tag)a.g.remove(a.tag); a.tag=nameTag(m.nm); a.g.add(a.tag); }                          // nametag (server-set text, rendered locally)
     if(m.held!==a.held){ a.held=m.held; setAvatarHeld(a,m.held); } } }                                                     // held item shown in their hand
   else if(m.t==='b'){ NET.applying=true; try{ setBlockWorld(m.x,m.y,m.z,m.b,true); }catch(e){} NET.applying=false; }                       // remote block edit
+  else if(m.t==='bb'){ NET.applying=true; beginBulk(); try{ for(const e of m.e) setBlockWorld(e[0],e[1],e[2],e[3],true); }catch(err){} finally{ endBulk(); } NET.applying=false; }   // remote block-edit BATCH (one frame's burst)
+  else if(m.t==='drops'){ NET.applying=true; try{ for(const d of m.d) spawnDrop(d.i,d.n,d.x,d.y,d.z,d.d,d.did); }catch(e){} NET.applying=false; }   // batched item spawns (tree-fall log shower etc)
   else if(m.t==='tree'){ NET.applying=true; beginBulk(); try{ treeFall(m.x,m.y,m.z,true); }catch(e){} finally{ endBulk(); } NET.applying=false; }   // remote tree-fall (no drops — they arrive separately); bulk-coalesced like the local path
   else if(m.t==='drop'){ NET.applying=true; try{ spawnDrop(m.i,m.n,m.x,m.y,m.z,m.d,m.did); }catch(e){} NET.applying=false; }             // shared floating item
   else if(m.t==='dpick'){ removeDropById(m.did); }                                                                                        // someone collected it
@@ -3453,11 +3460,18 @@ function setAvatarHeld(a,id){ if(a.heldMesh){ a.hand.remove(a.heldMesh); _dispos
   else if(it.block!=null){ m.scale.setScalar(0.85); w.position.set(0,0.02,0); }                                 // a block cube gripped
   else { m.scale.setScalar(0.5); w.rotation.set(-0.4,0,0.25); w.position.set(0,0.04,-0.02); }                   // tools/materials: canted up out of the grip like the viewmodel
   a.hand.add(w); a.heldMesh=w; }
-function netEdit(x,y,z,b){ if(NET.on && !NET.applying) netSend({t:'b',x,y,z,b}); }                    // player break/place
-function netTree(x,y,z){ if(NET.on && !NET.applying) netSend({t:'tree',x,y,z}); }                     // a felled tree
-function netDrop(did,i,n,x,y,z,d){ if(NET.on && !NET.applying) netSend({t:'drop',did,i,n,x,y,z,d}); } // a spawned item
+const _netEditQ=[], _netDropQ=[];   // per-frame outbound batching — a burst (explosion, laser, log shower) used to emit one relay message per block/drop and trip the relay's 240 msg/s cap (silent drops = permanent desync)
+function netEdit(x,y,z,b){ if(NET.on && !NET.applying) _netEditQ.push([x,y,z,b]); }                   // player break/place (flushed once per frame)
+function netTree(x,y,z){ if(NET.on && !NET.applying) netSend({t:'tree',x,y,z}); }                     // a felled tree (already one message for the whole fall)
+function netFlushQueues(){
+  if(_netEditQ.length){ if(_netEditQ.length===1){ const e=_netEditQ[0]; netSend({t:'b',x:e[0],y:e[1],z:e[2],b:e[3]}); } else netSend({t:'bb',e:_netEditQ.slice()}); _netEditQ.length=0; }
+  if(_netDropQ.length){ if(_netDropQ.length===1){ const d=_netDropQ[0]; netSend({t:'drop',did:d.did,i:d.i,n:d.n,x:d.x,y:d.y,z:d.z,d:d.d}); } else netSend({t:'drops',d:_netDropQ.slice()}); _netDropQ.length=0; }
+  if(NET.syncQ&&NET.syncQ.length){ for(let i=0;i<2&&NET.syncQ.length;i++) netSend(NET.syncQ.shift()); }   // late-join sync pages, 2/frame
+}
+function netDrop(did,i,n,x,y,z,d){ if(NET.on && !NET.applying) _netDropQ.push({did,i,n,x,y,z,d}); }   // a spawned item (flushed once per frame, batched)
 function netDropSeq(){ return (NET.id*1000000)+(++NET.dropSeq); }                                     // globally-unique drop id
 function netUpdate(dt){ if(!NET.on)return;
+  netFlushQueues();   // batched block-edit/drop bursts + late-join sync pages
   NET.sendAcc+=dt; if(NET.sendAcc>0.05){ NET.sendAcc=0; const s=inv[selSlot];
     // rounded (2cm / ~0.06deg — invisible) + send-on-change with a 0.5s heartbeat: idle players stop flooding the relay, packets ~40% smaller
     const px=+player.pos.x.toFixed(2),py=+player.pos.y.toFixed(2),pz=+player.pos.z.toFixed(2),yaw=+player.yaw.toFixed(3),pit=+player.pitch.toFixed(3),held=s?s.id:null,tied=!!player.tied,dead=!!player.dead;
@@ -8451,8 +8465,10 @@ window.__hc={
   set(p){ Object.assign(wretch, p||{}); return wretch.state; },
   cam(o){ o=o||{}; if(o.pitch!=null)player.pitch=o.pitch; if(o.yaw!=null)player.yaw=o.yaw; return {yaw:player.yaw,pitch:player.pitch}; },
   probe(){ const P=player.pos; return { worldSize:world.size, sea:CFG.SEA, WH, feet:getBlock(Math.floor(P.x),Math.floor(P.y),Math.floor(P.z)), gyHere:groundYAt(P.x,P.z), gy26:groundYAt(P.x+26,P.z), gyN:groundYAt(P.x,P.z-26), chunkHere:!!getChunk(Math.floor(P.x)>>4,Math.floor(P.z)>>4), chunk26:!!getChunk((Math.floor(P.x)+26)>>4,Math.floor(P.z)>>4) }; },
-  setBlock(dx,dy,dz,name){ const P=player.pos, wx=Math.floor(P.x)+(dx|0), wy=Math.floor(P.y)+(dy|0), wz=Math.floor(P.z)+(dz|0); const id=name==null?0:(typeof name==='number'?name:BID[name]); if(id===undefined)return 'unknown block: '+name; setBlockWorld(wx,wy,wz,id,false); return {wx,wy,wz,id,queued:{remesh:remeshSet.size,relight:relightSet.size}}; },   // QA/bench: place or clear (name=null) a block relative to the player; reports the edit-queue depths
+  setBlock(dx,dy,dz,name){ const P=player.pos, wx=Math.floor(P.x)+(dx|0), wy=Math.floor(P.y)+(dy|0), wz=Math.floor(P.z)+(dz|0); const id=name==null?0:(typeof name==='number'?name:BID[name]); if(id===undefined)return 'unknown block: '+name; setBlockWorld(wx,wy,wz,id,true); return {wx,wy,wz,id,queued:{remesh:remeshSet.size,relight:relightSet.size}}; },   // QA/bench: place or clear (name=null) a block relative to the player, RECORDED like a player edit; reports the edit-queue depths
   editQ(){ return {remesh:remeshSet.size, relight:relightSet.size}; },   // QA/bench: watch the edit queues drain
+  editCount(){ return Object.keys(edits).length; },                      // QA/bench: total recorded world edits (late-join sync payload size)
+  netInfo(){ return {on:NET.on, host:NET.host, id:NET.id, ws:NET.ws?NET.ws.readyState:-1, peers:Object.keys(NET.peers).length, syncQ:NET.syncQ?NET.syncQ.length:0}; },   // QA/bench: co-op state
   // ---- ENTITY RENDER QA ----
   _qaLight:null,
   qa(on){ if(on){ if(!this._qaLight){ this._qaLight=new THREE.PointLight(0xffe8d0,0,60,2); scene.add(this._qaLight); this._qaKey=new THREE.DirectionalLight(0xffffff,0); scene.add(this._qaKey); } this._qaLight.intensity=on===true?90:on; this._qaKey.intensity=1.4; } else { if(this._qaLight){this._qaLight.intensity=0;} if(this._qaKey)this._qaKey.intensity=0; } return !!this._qaLight; },

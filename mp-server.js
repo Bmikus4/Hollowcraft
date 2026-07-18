@@ -13,15 +13,17 @@ const GUID='258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_CLIENTS = Number(process.env.MP_MAX)||12;   // reject beyond this
 const MAX_MSG     = 64*1024;                           // drop any frame claiming to be bigger (memory-blow guard)
 const RATE_MSGS   = 240;                               // per-client messages per second before we start dropping
-const ALLOWED = new Set(['p','b','tree','drop','dpick','an','w','own','grab','rescue','sync','time','chest']);   // relay only known message types
+const ALLOWED = new Set(['p','b','bb','tree','drop','drops','dpick','an','w','own','grab','rescue','sync','time','chest']);   // relay only known message types ('bb'/'drops' = per-frame batches)
+const HIFREQ  = new Set(['p','w','an','time']);        // shed-able under backpressure: next tick resends fresher state anyway. Event messages (edits/drops/sync) are NEVER shed.
+const MAX_BEHIND = 256*1024;                           // a client buffered further behind than this stops receiving high-frequency traffic until it drains
 let nextId=1, hostId=null; const clients=new Map();   // id -> {sock, alive, msgs, win}
 // ---- LAN GAME BROWSER state (UDP beacons; carried over Hamachi/real LAN) ----
 const SELF=crypto.randomBytes(4).toString('hex');     // unique id so we ignore our own beacon
 let advertise={on:false,name:'Hollowcraft'};          // toggled by the game via /advertise when you click Host
 const lanHosts=new Map();                             // sid -> {ip,name,gport,players,last} discovered on the network
 
-function send(sock, obj){ try{ sock.write(frame(JSON.stringify(obj))); }catch(e){} }
-function broadcast(obj, exceptId){ const s=JSON.stringify(obj); for(const [id,c] of clients){ if(id===exceptId)continue; try{ c.sock.write(frame(s)); }catch(e){} } }
+function send(sock, obj){ try{ if(HIFREQ.has(obj.t) && sock.writableLength>MAX_BEHIND) return; sock.write(frame(JSON.stringify(obj))); }catch(e){} }   // backpressure: a slow client loses transform ticks, never events
+function broadcast(obj, exceptId){ const s=JSON.stringify(obj), hi=HIFREQ.has(obj.t); for(const [id,c] of clients){ if(id===exceptId)continue; try{ if(hi && c.sock.writableLength>MAX_BEHIND) continue; c.sock.write(frame(s)); }catch(e){} } }
 function frame(str){ const b=Buffer.from(str); const len=b.length; let head;
   if(len<126){ head=Buffer.from([0x81,len]); }
   else if(len<65536){ head=Buffer.alloc(4); head[0]=0x81; head[1]=126; head.writeUInt16BE(len,2); }
