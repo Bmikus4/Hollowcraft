@@ -2065,7 +2065,8 @@ function streamChunks(genBudget, meshBudget){
   _streamMeshed=false;
   const pcx=Math.floor(player.pos.x)>>4, pcz=Math.floor(player.pos.z)>>4;
   const genT0=performance.now();
-  for(let i=0;i<RING.length && genBudget>0;i++){ const o=RING[i]; const kk=key(pcx+o[0],pcz+o[1]); let c=world.get(kk); if(!c){ c=makeChunk(pcx+o[0],pcz+o[1]); world.set(kk,c); } if(!c.generated){ generateChunk(c); genBudget--; if(performance.now()-genT0>2.5)break; } }   // time-slice gen too (was uncapped): a slow terrain-gen can't stack into a hitch when you cross into new territory
+  const genR=CFG.RENDER_DIST+1;   // gen only what meshing can ever need (mesh needs neighbors8 → RD+1). unloadFar deletes at RD+2, so gen<unload = real hysteresis. Without this clamp the loop endlessly regenerated rings RD+3..13 that unloadFar kept deleting — a permanent ~2.5ms+/frame streaming storm (THE dominant baseline frame cost), forever, even standing still.
+  for(let i=0;i<RING.length && genBudget>0;i++){ const o=RING[i]; if(o[0]>genR||o[0]<-genR||o[1]>genR||o[1]<-genR) continue; const kk=key(pcx+o[0],pcz+o[1]); let c=world.get(kk); if(!c){ c=makeChunk(pcx+o[0],pcz+o[1]); world.set(kk,c); } if(!c.generated){ generateChunk(c); genBudget--; if(performance.now()-genT0>2.5)break; } }   // time-slice gen too (was uncapped): a slow terrain-gen can't stack into a hitch when you cross into new territory
   // meshing is time-sliced AND count-capped: a single heavy forest chunk can cost several ms, so a cluster
   // of them entering the ring at once used to stack into one big frame spike (the "walking into the woods"
   // stutter). Keep the slice well under a 60fps frame (16.6ms) so meshing + render + shadow never blow a frame.
@@ -3006,11 +3007,12 @@ const hotbarSlots=[];
 function refreshHotbar(){ for(let i=0;i<9;i++){ const d=hotbarSlots[i], s=inv[i]; d.className='slot'+(i===selSlot?' sel':''); d.style.backgroundImage=s?'url('+slotIconURL(s.id)+')':''; d.querySelector('.cnt').textContent=(s&&s.n>1)?s.n:'';
     const db=d.querySelector('.durbar'); const it=s?ITEMS[s.id]:null;                       // show a green→red wear bar for damaged tools
     if(it&&it.tool){ const cur=(s.dur==null?it.tool.dur:s.dur), f=clamp(cur/it.tool.dur,0,1); db.style.display=f<1?'block':'none'; db.style.width=(42*f).toFixed(0)+'px'; db.style.background='hsl('+(f*115).toFixed(0)+',80%,45%)'; } else db.style.display='none'; } }
-function pip(kind,frac){ const c=document.createElement('canvas'); c.width=c.height=18; const x=c.getContext('2d'); x.clearRect(0,0,18,18); if(kind==='heart'){ x.fillStyle=frac>0?'#b0303a':'#301015'; x.beginPath(); x.moveTo(9,16); x.bezierCurveTo(-2,8,4,1,9,6); x.bezierCurveTo(14,1,20,8,9,16); x.fill(); if(frac>0&&frac<1){ x.fillStyle='#301015'; x.fillRect(9,0,9,18);} } else { x.fillStyle=frac>0?'#a9762f':'#2a2012'; x.beginPath(); x.arc(6,10,5,0,7); x.arc(12,10,5,0,7); x.fill(); x.fillRect(1,8,16,6);} return c.toDataURL(); }
-function buildBars(){ heartsEl.innerHTML=''; hungerEl.innerHTML=''; for(let i=0;i<10;i++){ const h=document.createElement('div'); h.className='pip'; const frac=clamp(player.health/2-i,0,1); h.style.backgroundImage='url('+pip('heart',frac)+')'; heartsEl.appendChild(h); const g=document.createElement('div'); g.className='pip'; const gf=clamp(player.hunger/2-i,0,1); g.style.backgroundImage='url('+pip('drum',gf)+')'; hungerEl.appendChild(g);} }
-let lastHealth=-1,lastHunger=-1;
-function updateBars(){ if(player.health!==lastHealth||player.hunger!==lastHunger){ buildBars(); lastHealth=player.health; lastHunger=player.hunger; }
-  const hud=hotbarEl.parentElement; if(hud) hud.style.opacity=(player.grabbed||player.tied||(typeof intro!=='undefined'&&intro.active))?'0':'1';   // bound in the dungeon / during the intro → hotbar + items vanish
+// (pip()/buildBars() heart-and-drumstick rows DELETED — the minimap rings replaced them visually long ago
+//  (#bars is display:none'd in buildMinimap), yet every damage/hunger tick still painted 20 canvases +
+//  20 toDataURLs into the hidden container. updateBars keeps only its live side effect: the HUD fade.)
+let _lastHudOp='';
+function updateBars(){ const op=(player.grabbed||player.tied||(typeof intro!=='undefined'&&intro.active))?'0':'1';
+  if(op!==_lastHudOp){ _lastHudOp=op; const hud=hotbarEl.parentElement; if(hud) hud.style.opacity=op; }   // bound in the dungeon / during the intro → hotbar + items vanish (style written only on change)
 }
 // =====================================================================
 //  MINIMAP + HEALTH/HUNGER RINGS — circular compass map, health arc wrapped around it (Sons-of-the-Forest style),
@@ -3084,8 +3086,10 @@ function updateWretchBar(){ const show = wretch.active && wretch.everHurt && wre
     const bar=document.createElement('div'); bar.style.cssText='height:15px;background:rgba(8,2,2,.72);border:2px solid #1a0606;border-radius:3px;box-shadow:0 0 14px rgba(120,10,10,.4),inset 0 0 8px #000;overflow:hidden';
     _wbFill=document.createElement('div'); _wbFill.style.cssText='height:100%;width:100%;background:linear-gradient(90deg,#3a0606,#a01818 60%,#6e0c0c);box-shadow:0 0 10px #7a1010;transition:width .25s';
     bar.appendChild(_wbFill); _wb.appendChild(lab); _wb.appendChild(bar); document.body.appendChild(_wb); }
-  if(!show){ _wb.style.display='none'; return; }
-  _wb.style.display='block'; _wbFill.style.width=(clamp(wretch.hp/(wretch.hpMax||2700),0,1)*100).toFixed(1)+'%'; }
+  if(!show){ if(_wb._shown){ _wb._shown=false; _wb.style.display='none'; } return; }
+  if(!_wb._shown){ _wb._shown=true; _wb.style.display='block'; }
+  const w=(clamp(wretch.hp/(wretch.hpMax||2700),0,1)*100).toFixed(1)+'%';
+  if(w!==_wb._lastW){ _wb._lastW=w; _wbFill.style.width=w; } }   // style writes only on change — a CSS-transitioned width was being reassigned every frame
 const blackOverlay=document.createElement('div'); blackOverlay.style.cssText='position:fixed;inset:0;background:#000;opacity:0;z-index:19;pointer-events:none;transition:opacity .5s;'; document.body.appendChild(blackOverlay);   // devour fade-to-black
 // VERY HEAVY jumpscare vignette — a deep dark tunnel closing to a small window on the maw (over the black overlay so it reads even as darkness rushes in)
 const _jsBlack=new THREE.Color(0,0,0);   // solid unlit void used as the jumpscare background
@@ -3125,6 +3129,13 @@ let audioResume=null, sfxBreak=null, sfxPlace=null;
 // =====================================================================
 const clock=new THREE.Clock();
 let acc=0, fpsAvg=60, initialReady=false, adaptTick=0; const RD_MAX=CFG.RD_MAX;   // adaptive quality can climb back to the full ceiling (not the possibly-low restored RD)
+// DISPLAY-AWARE FPS TARGET — rAF can never beat the display's refresh, so fixed setpoints are wrong on both
+// 60Hz (a >70 restore threshold would never fire → quality wedged at minimum) and 144Hz (a 58 restore leaves
+// 70fps undefended). Track the fastest credible frame delta ever seen (= the vsync floor), derive the target:
+let _minDt=1/60, _fpsShed=53, _fpsRestore=58;   // safe 60Hz defaults until real deltas arrive
+function _retargetFps(dt){ if(dt>0.003 && dt<_minDt) _minDt=dt;
+  const refresh=1/_minDt, target=Math.min(70, refresh*0.94);
+  _fpsShed=target*0.94; _fpsRestore=Math.min(refresh-2, target*1.06); }
 let shadowTick=0; let SHADOW_EVERY = CFG.quality==='Ultra'?3:4;   // re-render the shadow map 1-in-N frames (sun/dapple barely moves); higher N → the canopy godray-shadow pass costs less. adaptive quality can raise N under load
 // motion-blur reprojection state
 const _curVP=new THREE.Matrix4(), _prevVP=new THREE.Matrix4(), _mbW=new THREE.Vector3(), _prevMbW=new THREE.Vector3(), _mbV4=new THREE.Vector4(), _mbPV4=new THREE.Vector4();
@@ -3472,7 +3483,7 @@ function loop(){
   const t0=performance.now();
   // adaptive stream budget: mesh/gen fewer chunks per frame when the frame is already tight (spreads the cost, fewer hitches),
   // more when there's headroom (fills the world faster). meshing is the pricier half so it gets the wider swing.
-  const meshB = fpsAvg<50?1 : fpsAvg>58?3 : 2, genB = fpsAvg<40?1:2;   // fewer, smaller mesh bites per frame → smoother streaming (relies on the time-slice too)
+  const meshB = fpsAvg<_fpsShed?1 : fpsAvg>_fpsRestore?3 : 2, genB = fpsAvg<40?1:2;   // fewer, smaller mesh bites per frame → smoother streaming (relies on the time-slice too); wide bites only with target-relative headroom
   streamChunks(genB, meshB);
   buildCabin();   // build the cabin even on the menu so the cinematic's cabin shot has something to frame
   if(started){ buildSpawnChest(); buildMine(); buildVillage(); buildTowers(); buildGraveyard();
@@ -3488,7 +3499,9 @@ function loop(){
   if(godrayPass){ camera.updateMatrixWorld();                                            // project the sky-sun direction to screen space for the god-ray origin
     _sunProj.copy(camera.position).addScaledVector(globalU.uSunDir.value, 2000).project(camera);
     const front = _sunProj.z<1.0, day=globalU.uDay.value;
-    godrayPass.uniforms.uActive.value = (_godraysOn && front && day>0.15) ? 1 : 0;         // passthrough at night / sun behind us / adaptively shed under load
+    const _grActive = (_godraysOn && front && day>0.15);
+    godrayPass.enabled = _grActive;                                                        // a DISABLED pass is skipped by the composer entirely — "uActive=0 passthrough" still paid a full-screen pass every frame (all night long)
+    godrayPass.uniforms.uActive.value = _grActive ? 1 : 0;
     godrayPass.uniforms.uSun.value.set(_sunProj.x*0.5+0.5, _sunProj.y*0.5+0.5);
     godrayPass.uniforms.uStrength.value = 0.6*day; }                                      // shafts strongest at midday, gone at night
   if(_mbMode && motionPass){                                                           // depth-reprojection motion blur uniforms
@@ -3516,22 +3529,25 @@ function loop(){
   if(typeof updateScopeRT==='function') updateScopeRT();                   // render the magnified scope image to the lens texture BEFORE the main pass draws (and samples) the gun
   if(_mbMode){ renderer.setRenderTarget(_sceneRT); renderer.render(scene, camera); renderer.setRenderTarget(null); }   // scene → our depth-carrying target (feeds motionPass); classic path renders inside composer
   composer.render();
+  // BENCH-ONLY: when the harness sets __benchInfo, accumulate renderer.info across ALL passes in the frame (autoReset off) and snapshot+reset here — otherwise info only ever shows the composer's final quad pass
+  if(window.__benchInfo){ const _I=renderer.info; _I.autoReset=false; window.__benchInfoSnap={calls:_I.render.calls,tris:_I.render.triangles,geoms:_I.memory.geometries,tex:_I.memory.textures,progs:(_I.programs||[]).length}; _I.reset(); } else if(renderer.info.autoReset===false) renderer.info.autoReset=true;
   if(openUI==='inv' && typeof renderPView==='function') renderPView(dt);   // spin the armor mannequin while the inventory is open
   const t2=performance.now();
   // loading gate
   if(!initialReady){ const c=getChunk(Math.floor(player.pos.x)>>4,Math.floor(player.pos.z)>>4); if(c&&c.meshed){ initialReady=true; document.getElementById('load').style.display='none'; } }
   fpsAvg+=((dt>0?1/dt:60)-fpsAvg)*0.05;
-  // ADAPTIVE QUALITY — nudge render distance every ~2.5s to hold framerate (4..user setting)
+  _retargetFps(dt);
+  // ADAPTIVE QUALITY — setpoints derived from the DISPLAY-AWARE target (defend min(70, refresh), see _retargetFps)
   if(started && (adaptTick=(adaptTick+1)%75)===0){   // check ~every 1.2s (was 2.5s) so lag is shed fast
     // RENDER DISTANCE is the player's setting — HONORED exactly (no silent lowering). Adaptive quality only trims
     // internal resolution + shadow-refresh cadence to hold framerate, so "set 8ch" really renders 8ch.
     const baseShadow = CFG.quality==='Ultra'?2:3;
-    if(fpsAvg<45){                                                                              // SHED cost EARLY (was <32), cheapest-visual-loss first:
+    if(fpsAvg<_fpsShed){                                                                        // SHED cost EARLY, cheapest-visual-loss first:
       if(_pixelScale>0.51){ _pixelScale=Math.max(0.5,_pixelScale-0.12); applyResolution(); }     // 1) internal resolution (down to 0.5)
       else if(SHADOW_EVERY<6) SHADOW_EVERY++;                                                    // 2) refresh shadows less often
       else if(_godraysOn && godrayPass){ _godraysOn=false; }                                     // 3) drop god rays
       else if(bloomPass && bloomPass.enabled){ bloomPass.enabled=false; }                        // 4) last resort: drop bloom
-    } else if(fpsAvg>58){                                                                        // RESTORE in reverse only with real headroom
+    } else if(fpsAvg>_fpsRestore){                                                               // RESTORE in reverse only with real headroom
       if(bloomPass && !bloomPass.enabled){ bloomPass.enabled=true; }
       else if(!_godraysOn && godrayPass){ _godraysOn=true; }
       else if(SHADOW_EVERY>baseShadow) SHADOW_EVERY--;
@@ -3546,7 +3562,6 @@ renderer.setAnimationLoop(loop);
 document.addEventListener('visibilitychange',()=>{ renderer.setAnimationLoop(document.hidden?null:loop); if(!document.hidden)clock.getDelta(); });
 addEventListener('resize',()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); applyResolution(); });
 canvas.setAttribute('role','img'); canvas.setAttribute('aria-label','Hollowcraft — a first-person voxel horror forest, stalked by the Wretch.');
-buildBars();
 
 // =====================================================================
 //  HORROR — shared state (Director writes, Body + audio read)
@@ -8330,7 +8345,7 @@ if(DEBUG){ boot.style.display='none'; started=true; if(Q.get('wretch')){ wretch.
 // headless introspection + entity render harness hook
 window.__hc={
   st(){ try{ return {started, grabbed:player.grabbed, gp:wretch.grabPhase, ws:wretch.state, wa:wretch.active, dist:+(wretch.dist||0).toFixed(2), watched:!!(wretch.sense&&wretch.sense.watched), seen:!!(wretch.sense&&wretch.sense.seen), obs:+(wretch.observed||0).toFixed(1), form:wretch.form, wy:+wretch.pos.y.toFixed(1), py:+player.pos.y.toFixed(1), fps:Math.round(fpsAvg) }; }catch(e){ return {err:e.message}; } },
-  perf(){ try{ return {calls:renderer.info.render.calls, tris:renderer.info.render.triangles, geoms:renderer.info.memory.geometries, tex:renderer.info.memory.textures, progs:(renderer.info.programs||[]).length}; }catch(e){ return {err:e.message}; } },
+  perf(){ try{ if(window.__benchInfoSnap) return window.__benchInfoSnap; return {calls:renderer.info.render.calls, tris:renderer.info.render.triangles, geoms:renderer.info.memory.geometries, tex:renderer.info.memory.textures, progs:(renderer.info.programs||[]).length}; }catch(e){ return {err:e.message}; } },
   look(){ if(!wretch.active)return 'inactive'; const dx=wretch.pos.x-player.pos.x, dy=(wretch.pos.y+2.4)-(player.pos.y+EYE), dz=wretch.pos.z-player.pos.z, L=Math.hypot(dx,dy,dz)||1; player.yaw=Math.atan2(-dx,-dz); player.pitch=clamp(Math.asin(dy/L),-1.2,1.2); return {yaw:+player.yaw.toFixed(2),pitch:+player.pitch.toFixed(2),dist:+Math.hypot(dx,dz).toFixed(1)}; },
   put(dx,dz){ if(!wretch.active)this.summon(); wretch.pos.set(player.pos.x+(dx||0), player.pos.y, player.pos.z+(dz||0)); return {x:+wretch.pos.x.toFixed(1),z:+wretch.pos.z.toFixed(1)}; },
   blood(n){ const fx=-Math.sin(player.yaw), fz=-Math.cos(player.yaw), rx=-fz, rz=fx; for(let i=0;i<(n||3);i++){ const f=2+i*1.1, s=(Math.random()-0.5)*3; spawnBloodSplat(player.pos.x+fx*f+rx*s, player.pos.z+fz*f+rz*s, 1.2+Math.random()*0.8); } return 'splat'; },   // QA: paint gore in front of the player
