@@ -13,7 +13,7 @@ const GUID='258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_CLIENTS = Number(process.env.MP_MAX)||12;   // reject beyond this
 const MAX_MSG     = 64*1024;                           // drop any frame claiming to be bigger (memory-blow guard)
 const RATE_MSGS   = 240;                               // per-client messages per second before we start dropping
-const ALLOWED = new Set(['p','b','bb','tree','drop','drops','dpick','an','w','own','grab','rescue','sync','time','chest']);   // relay only known message types ('bb'/'drops' = per-frame batches)
+const ALLOWED = new Set(['p','b','bb','tree','drop','drops','dpick','an','w','own','grab','rescue','sync','time','chest','dmg','bossdead','hb','shot','hw','han']);   // relay only known message types ('bb'/'drops' = per-frame batches; dmg/bossdead/hb/shot/hw/han = boss+Herobrine+gun sync)
 const HIFREQ  = new Set(['p','w','an','time']);        // shed-able under backpressure: next tick resends fresher state anyway. Event messages (edits/drops/sync) are NEVER shed.
 const MAX_BEHIND = 256*1024;                           // a client buffered further behind than this stops receiving high-frequency traffic until it drains
 let nextId=1, hostId=null; const clients=new Map();   // id -> {sock, alive, msgs, win}
