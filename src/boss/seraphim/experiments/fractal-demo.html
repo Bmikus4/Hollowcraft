@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Seraphim Fractal — math prototype (Agent D)</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0b0d; overflow: hidden; }
+  #c { display: block; width: 100vw; height: 100vh; }
+  #hud {
+    position: fixed; left: 10px; top: 10px; z-index: 10;
+    font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace;
+    color: #f5f1ea; text-shadow: 0 1px 2px #000; pointer-events: none;
+    background: rgba(20,16,14,.42); padding: 6px 9px; border-radius: 6px;
+  }
+  #hud b { color: #d9902f; }
+  .lil-gui { --width: 300px; }
+</style>
+<!-- standalone harness: own importmap, repo root is 4 levels up from experiments/ -->
+<script type="importmap">
+{ "imports": {
+    "three": "../../../../vendor/three.module.js",
+    "three/addons/": "../../../../vendor/jsm/"
+} }
+</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">SERAPHIM FRACTAL · <b><span id="fps">--</span> fps</b> · <span id="res">--</span> (half-res march)<br>
+shrink <b>inversion R</b> to swallow reality · morph <b>m</b> boss→fractal</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
+renderer.setPixelRatio(1);
+renderer.autoClear = false;
+
+// ---- 1080p target; cap internal resolution at 1920x1080, march at HALF ----
+function pickSize() {
+  const w = Math.min(window.innerWidth  || 1920, 1920);
+  const h = Math.min(window.innerHeight || 1080, 1080);
+  return { w, h };
+}
+let FULL = pickSize();
+let HALF = { w: Math.max(2, (FULL.w >> 1)), h: Math.max(2, (FULL.h >> 1)) };
+
+// half-res HDR render target (HalfFloat -> emissive > 1 survives for bloom)
+const rt = new THREE.WebGLRenderTarget(HALF.w, HALF.h, {
+  minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+  type: THREE.HalfFloatType, depthBuffer: false, stencilBuffer: false,
+});
+
+const quadCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const quadGeo = new THREE.PlaneGeometry(2, 2);
+
+// ---- orbit camera: manipulated by OrbitControls; used only to derive ray basis
+const orbitCam = new THREE.PerspectiveCamera(55, FULL.w / FULL.h, 0.01, 100);
+orbitCam.position.set(0.0, 0.35, 3.6);
+const controls = new OrbitControls(orbitCam, canvas);
+controls.target.set(0, 0, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance = 0.05;
+controls.maxDistance = 40;
+
+// ---- iris texture: prefer Agent-B JPEG, else procedural fallback ----
+function proceduralIris() {
+  const S = 512, cv = document.createElement('canvas'); cv.width = cv.height = S;
+  const g = cv.getContext('2d');
+  // U (x) = radius from pupil (0=center), V (y) = angle. matches shader polar UV.
+  for (let x = 0; x < S; x++) {
+    const rad = x / (S - 1);              // 0 center -> 1 rim
+    // radial colour ramp: dark pupil -> glacial blue iris -> dark limbal ring
+    let base;
+    if (rad < 0.16)        base = [10, 12, 16];                  // pupil
+    else if (rad > 0.92)   base = [26, 40, 52];                  // limbal ring
+    else {
+      const tt = (rad - 0.16) / 0.76;
+      base = [ 0x4a + (0x7f - 0x4a) * (1 - tt),                  // #7fb4c9 core -> #4a7d94 rim
+               0x7d + (0xb4 - 0x7d) * (1 - tt),
+               0x94 + (0xc9 - 0x94) * (1 - tt) ];
+    }
+    for (let y = 0; y < S; y++) {
+      const ang = y / (S - 1) * Math.PI * 2.0;
+      const fib = 0.5 + 0.5 * Math.sin(ang * 42.0 + rad * 6.0);  // iris fibers
+      const spk = Math.pow(0.5 + 0.5 * Math.sin(ang * 13.0), 3.0);
+      const m = 0.75 + 0.35 * fib * (rad > 0.16 ? 1 : 0.2) + 0.15 * spk;
+      g.fillStyle = `rgb(${base[0]*m|0},${base[1]*m|0},${base[2]*m|0})`;
+      g.fillRect(x, y, 1, 1);
+    }
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.wrapS = THREE.ClampToEdgeWrapping; tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+let irisTex = proceduralIris();
+let irisSource = 'procedural (Agent-B JPEG absent)';
+new THREE.TextureLoader().load('../../../../assets/seraphim/eye/iris_albedo.jpg',
+  (t) => { t.wrapS = THREE.ClampToEdgeWrapping; t.wrapT = THREE.RepeatWrapping;
+           material.uniforms.uIris.value = t; irisSource = 'assets/seraphim/eye/iris_albedo.jpg';
+           document.getElementById('res').title = irisSource; },
+  undefined, () => {/* keep procedural */});
+
+// ---- params (all live in GUI) ----
+const P = {
+  type: 'KIFS',            // KIFS | Mandelbulb
+  iter: 12,                // KIFS folds n
+  s: 2.30,                 // KIFS scale
+  b: 1.00,                 // KIFS radius offset
+  cx: 1.00, cy: 1.00, cz: 1.00,   // KIFS fold offset c
+  k: 8.0,                  // Mandelbulb power
+  bulbIter: 8,
+  invR: 1.90,              // inversion radius (shrink => encloses)
+  rot1Speed: 0.030,        // R1 rad/s (<= 0.05 nausea limit)
+  rot2Speed: 0.018,        // R2 rad/s
+  morph: 1.00,             // 0 boss -> 1 fractal
+  bossSmink: 4.0,
+  rho: 0.70, tauMax: 0.55, irisWidth: 0.10, irisStrength: 0.95,
+  scrWidth: 0.06, scrStrength: 0.75,
+  maxSteps: 96, eps: 0.0016, far: 22.0,
+  sigma: 0.055, wrap: 0.50, aoStrength: 0.85, shadowK: 8.0, coreRadius: 3.2,
+  ivory: '#f2ece4', rust: '#7e2c20', ember: '#d9902f', fog: '#f5f1ea',
+  autoMorph: false, autoR: false,
+};
+
+const material = new THREE.ShaderMaterial({
+  uniforms: {
+    uCamPos: { value: new THREE.Vector3() },
+    uCamRight: { value: new THREE.Vector3() },
+    uCamUp: { value: new THREE.Vector3() },
+    uCamFwd: { value: new THREE.Vector3() },
+    uTanHalfFov: { value: Math.tan(THREE.MathUtils.degToRad(orbitCam.fov) * 0.5) },
+    uAspect: { value: FULL.w / FULL.h },
+    uType: { value: 0.0 },
+    uIter: { value: P.iter },
+    uS: { value: P.s }, uB: { value: P.b }, uC: { value: new THREE.Vector3(P.cx, P.cy, P.cz) },
+    uK: { value: P.k }, uBulbIter: { value: P.bulbIter },
+    uR1: { value: new THREE.Matrix3() }, uR2: { value: new THREE.Matrix3() },
+    uInvR: { value: P.invR },
+    uRho: { value: P.rho }, uTauMax: { value: P.tauMax },
+    uIrisWidth: { value: P.irisWidth }, uScrWidth: { value: P.scrWidth },
+    uIrisStrength: { value: P.irisStrength }, uScrStrength: { value: P.scrStrength },
+    uIris: { value: irisTex },
+    uMorph: { value: P.morph }, uBossSmink: { value: P.bossSmink },
+    uMaxSteps: { value: P.maxSteps }, uEps: { value: P.eps }, uFar: { value: P.far },
+    uSigma: { value: P.sigma }, uWrap: { value: P.wrap },
+    uAoStrength: { value: P.aoStrength }, uShadowK: { value: P.shadowK },
+    uCoreRadius: { value: P.coreRadius },
+    uLightDir: { value: new THREE.Vector3(0.35, 0.9, 0.5).normalize() },
+    uIvory: { value: new THREE.Color(P.ivory) }, uRust: { value: new THREE.Color(P.rust) },
+    uEmber: { value: new THREE.Color(P.ember) }, uFog: { value: new THREE.Color(P.fog) },
+    uTime: { value: 0 },
+  },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+  fragmentShader: '// placeholder (replaced by fetched GLSL)\nvoid main(){ gl_FragColor = vec4(0.0); }',
+});
+const marchQuad = new THREE.Mesh(quadGeo, material);
+const marchScene = new THREE.Scene(); marchScene.add(marchQuad);
+
+// ---- composite: upscale RT + cheap threshold bloom + chromatic aberration + tonemap
+const composite = new THREE.ShaderMaterial({
+  uniforms: {
+    uTex: { value: rt.texture },
+    uTexel: { value: new THREE.Vector2(1 / HALF.w, 1 / HALF.h) },
+    uBloom: { value: 0.85 }, uBloomThresh: { value: 0.85 }, uCA: { value: 0.0016 },
+    uFogCol: { value: new THREE.Color(P.fog) },
+  },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+  fragmentShader: `
+    precision highp float; varying vec2 vUv;
+    uniform sampler2D uTex; uniform vec2 uTexel;
+    uniform float uBloom, uBloomThresh, uCA; uniform vec3 uFogCol;
+    vec3 samp(vec2 uv){
+      // slight chromatic aberration: split channels radially
+      vec2 d = (uv - 0.5) * uCA;
+      float r = texture2D(uTex, uv + d).r;
+      float g = texture2D(uTex, uv).g;
+      float b = texture2D(uTex, uv - d).b;
+      return vec3(r, g, b);
+    }
+    void main(){
+      vec3 base = samp(vUv);
+      // 9-tap thresholded bloom (bright, overexposed holy glow)
+      vec3 bl = vec3(0.0); float wsum = 0.0;
+      for (int y=-1;y<=1;y++) for (int x=-1;x<=1;x++){
+        float w = (x==0&&y==0)?4.0:((x==0||y==0)?2.0:1.0);
+        vec3 s = texture2D(uTex, vUv + vec2(float(x),float(y))*uTexel*2.5).rgb;
+        bl += max(s - uBloomThresh, 0.0) * w; wsum += w;
+      }
+      bl /= wsum;
+      vec3 col = base + bl * uBloom;
+      col = col / (col + vec3(0.55));            // Reinhard-ish tonemap toward overexposed white
+      col = pow(col, vec3(0.9));                 // mild lift
+      gl_FragColor = vec4(col, 1.0);
+    }`,
+});
+const compQuad = new THREE.Mesh(quadGeo, composite);
+const compScene = new THREE.Scene(); compScene.add(compQuad);
+
+// ---- fetch the real fragment shader ----
+const glsl = await (await fetch('./fractal.frag.glsl')).text();
+material.fragmentShader = glsl;
+material.needsUpdate = true;
+
+// ---- GUI (all params live) ----
+const gui = new GUI({ title: 'Seraphim Fractal' });
+function pushColors() {
+  material.uniforms.uIvory.value.set(P.ivory);
+  material.uniforms.uRust.value.set(P.rust);
+  material.uniforms.uEmber.value.set(P.ember);
+  material.uniforms.uFog.value.set(P.fog);
+  composite.uniforms.uFogCol.value.set(P.fog);
+}
+const fF = gui.addFolder('Fractal');
+fF.add(P, 'type', ['KIFS', 'Mandelbulb']).onChange(v => material.uniforms.uType.value = v === 'KIFS' ? 0 : 1);
+fF.add(P, 'iter', 4, 16, 1).onChange(v => material.uniforms.uIter.value = v);
+fF.add(P, 's', 1.8, 2.8, 0.001).name('scale s').onChange(v => material.uniforms.uS.value = v);
+fF.add(P, 'b', 0.0, 3.0, 0.001).name('offset b').onChange(v => material.uniforms.uB.value = v);
+fF.add(P, 'cx', 0.0, 2.0, 0.001).onChange(v => material.uniforms.uC.value.x = v);
+fF.add(P, 'cy', 0.0, 2.0, 0.001).onChange(v => material.uniforms.uC.value.y = v);
+fF.add(P, 'cz', 0.0, 2.0, 0.001).onChange(v => material.uniforms.uC.value.z = v);
+fF.add(P, 'k', 2.0, 12.0, 0.1).name('mbulb power k').onChange(v => material.uniforms.uK.value = v);
+fF.add(P, 'bulbIter', 3, 16, 1).onChange(v => material.uniforms.uBulbIter.value = v);
+
+const iF = gui.addFolder('Inversion / Morph');
+iF.add(P, 'invR', 0.15, 6.0, 0.001).name('inversion R').listen().onChange(v => material.uniforms.uInvR.value = v);
+iF.add(P, 'morph', 0.0, 1.0, 0.001).name('morph m').listen().onChange(v => material.uniforms.uMorph.value = v);
+iF.add(P, 'bossSmink', 1.0, 12.0, 0.1).name('boss smin k').onChange(v => material.uniforms.uBossSmink.value = v);
+iF.add(P, 'rot1Speed', 0.0, 0.05, 0.001).name('R1 rad/s');
+iF.add(P, 'rot2Speed', 0.0, 0.05, 0.001).name('R2 rad/s');
+iF.add(P, 'autoMorph').name('auto morph');
+iF.add(P, 'autoR').name('auto R (swallow)');
+
+const tF = gui.addFolder('Orbit traps');
+tF.add(P, 'rho', 0.0, 2.0, 0.001).name('eye rho').onChange(v => material.uniforms.uRho.value = v);
+tF.add(P, 'tauMax', 0.05, 1.5, 0.001).onChange(v => material.uniforms.uTauMax.value = v);
+tF.add(P, 'irisWidth', 0.005, 0.4, 0.001).onChange(v => material.uniforms.uIrisWidth.value = v);
+tF.add(P, 'irisStrength', 0.0, 1.0, 0.01).onChange(v => material.uniforms.uIrisStrength.value = v);
+tF.add(P, 'scrWidth', 0.005, 0.3, 0.001).onChange(v => material.uniforms.uScrWidth.value = v);
+tF.add(P, 'scrStrength', 0.0, 1.0, 0.01).onChange(v => material.uniforms.uScrStrength.value = v);
+
+const sF = gui.addFolder('March / shading');
+sF.add(P, 'maxSteps', 32, 128, 1).onChange(v => material.uniforms.uMaxSteps.value = v);
+sF.add(P, 'eps', 0.0005, 0.006, 0.0001).onChange(v => material.uniforms.uEps.value = v);
+sF.add(P, 'far', 5, 40, 0.5).onChange(v => material.uniforms.uFar.value = v);
+sF.add(P, 'sigma', 0.0, 0.3, 0.001).name('fog sigma').onChange(v => material.uniforms.uSigma.value = v);
+sF.add(P, 'wrap', 0.0, 1.5, 0.01).name('wrap SSS w').onChange(v => material.uniforms.uWrap.value = v);
+sF.add(P, 'aoStrength', 0.0, 2.0, 0.01).onChange(v => material.uniforms.uAoStrength.value = v);
+sF.add(P, 'shadowK', 2.0, 24.0, 0.5).onChange(v => material.uniforms.uShadowK.value = v);
+sF.add(P, 'coreRadius', 0.5, 6.0, 0.05).onChange(v => material.uniforms.uCoreRadius.value = v);
+
+const pF = gui.addFolder('Palette (canon §1)');
+pF.addColor(P, 'ivory').onChange(pushColors);
+pF.addColor(P, 'rust').onChange(pushColors);
+pF.addColor(P, 'ember').onChange(pushColors);
+pF.addColor(P, 'fog').onChange(pushColors);
+const bF = gui.addFolder('Post');
+bF.add(composite.uniforms.uBloom, 'value', 0.0, 2.0, 0.01).name('bloom');
+bF.add(composite.uniforms.uBloomThresh, 'value', 0.0, 2.0, 0.01).name('bloom thresh');
+bF.add(composite.uniforms.uCA, 'value', 0.0, 0.01, 0.0001).name('chromatic ab');
+pF.close(); sF.close(); tF.close(); bF.close();
+
+// ---- presets: quick jumps to seraphic regions ----
+gui.add({ cathedral(){ setPreset('cathedral'); } }, 'cathedral').name('preset: cathedral wings');
+gui.add({ flesh(){ setPreset('flesh'); } }, 'flesh').name('preset: mandelbulb flesh');
+function setPreset(name) {
+  if (name === 'cathedral') Object.assign(P, { type:'KIFS', iter:12, s:2.30, b:1.0, cx:1.0, cy:1.0, cz:1.0, invR:1.9, rho:0.70, morph:1.0 });
+  if (name === 'flesh')     Object.assign(P, { type:'Mandelbulb', k:8.0, bulbIter:9, invR:2.3, rho:1.1, morph:1.0 });
+  material.uniforms.uType.value = P.type === 'KIFS' ? 0 : 1;
+  material.uniforms.uIter.value = P.iter; material.uniforms.uS.value = P.s; material.uniforms.uB.value = P.b;
+  material.uniforms.uC.value.set(P.cx, P.cy, P.cz); material.uniforms.uK.value = P.k;
+  material.uniforms.uBulbIter.value = P.bulbIter; material.uniforms.uInvR.value = P.invR;
+  material.uniforms.uRho.value = P.rho; material.uniforms.uMorph.value = P.morph;
+  gui.controllersRecursive().forEach(c => c.updateDisplay());
+}
+
+// ---- resize ----
+function resize() {
+  FULL = pickSize();
+  HALF = { w: Math.max(2, FULL.w >> 1), h: Math.max(2, FULL.h >> 1) };
+  renderer.setSize(FULL.w, FULL.h, false);
+  rt.setSize(HALF.w, HALF.h);
+  composite.uniforms.uTexel.value.set(1 / HALF.w, 1 / HALF.h);
+  orbitCam.aspect = FULL.w / FULL.h; orbitCam.updateProjectionMatrix();
+  material.uniforms.uAspect.value = FULL.w / FULL.h;
+  material.uniforms.uTanHalfFov.value = Math.tan(THREE.MathUtils.degToRad(orbitCam.fov) * 0.5);
+  document.getElementById('res').textContent = FULL.w + '×' + FULL.h;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ---- rotation matrices (animated, <= 0.05 rad/s) ----
+let a1 = 0.2, a2 = -0.15;
+const m4 = new THREE.Matrix4(), eul = new THREE.Euler();
+function updateRot(dt) {
+  a1 += P.rot1Speed * dt; a2 += P.rot2Speed * dt;
+  eul.set(a1 * 0.7, a1, a1 * 0.35); m4.makeRotationFromEuler(eul);
+  material.uniforms.uR1.value.setFromMatrix4(m4);
+  eul.set(a2 * 0.4, a2 * 0.8, a2); m4.makeRotationFromEuler(eul);
+  material.uniforms.uR2.value.setFromMatrix4(m4);
+}
+
+// ---- debug hooks (verification / headless driving) ----
+window.__mat = material; window.__comp = composite; window.__P = P;
+
+// ---- fps meter -> window.__diag ----
+window.__diag = { fps: 0, frames: 0 };
+let fpsAccum = 0, fpsFrames = 0, fpsT = performance.now();
+const fpsEl = document.getElementById('fps');
+
+const clock = new THREE.Clock();
+const _e = new THREE.Vector3();
+function frame() {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const el = clock.elapsedTime;
+  controls.update();
+
+  // auto animations
+  if (P.autoMorph) { P.morph = 0.5 + 0.5 * Math.sin(el * 0.15); material.uniforms.uMorph.value = P.morph; }
+  if (P.autoR)     { P.invR  = 0.4 + 2.4 * (0.5 + 0.5 * Math.cos(el * 0.10)); material.uniforms.uInvR.value = P.invR; }
+
+  updateRot(dt);
+  material.uniforms.uTime.value = el;
+
+  // camera basis for the ray
+  orbitCam.updateMatrixWorld();
+  const e = orbitCam.matrixWorld.elements;
+  material.uniforms.uCamPos.value.copy(orbitCam.position);
+  material.uniforms.uCamRight.value.set(e[0], e[1], e[2]).normalize();
+  material.uniforms.uCamUp.value.set(e[4], e[5], e[6]).normalize();
+  material.uniforms.uCamFwd.value.set(-e[8], -e[9], -e[10]).normalize();
+
+  // pass 1: half-res raymarch -> RT
+  renderer.setRenderTarget(rt);
+  renderer.clear();
+  renderer.render(marchScene, quadCam);
+  // pass 2: upscale + bloom -> screen
+  renderer.setRenderTarget(null);
+  renderer.clear();
+  renderer.render(compScene, quadCam);
+
+  // fps
+  fpsFrames++; fpsAccum += dt; window.__diag.frames++;
+  const now = performance.now();
+  if (now - fpsT >= 500) {
+    window.__diag.fps = +(fpsFrames / ((now - fpsT) / 1000)).toFixed(1);
+    fpsEl.textContent = window.__diag.fps.toFixed(0);
+    fpsT = now; fpsFrames = 0;
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

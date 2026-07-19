@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Seraphim — Material Harness (Agent C)</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #f5f1ea; overflow: hidden; font: 12px/1.4 monospace; color: #2a2420; }
+  #hud { position: fixed; left: 8px; top: 8px; z-index: 10; background: rgba(255,255,255,.6); padding: 6px 8px; border-radius: 5px; white-space: pre; }
+</style>
+<!-- standalone document importmap: repo root is four levels up from this file -->
+<script type="importmap">
+{ "imports": {
+  "three": "../../../../vendor/three.module.js",
+  "three/addons/": "../../../../vendor/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="hud">Seraphim material harness — booting…</div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+import {
+  buildBodyMaterial, makeAtlasTexture, buildCorneaMaterial, buildEyeMaterial,
+  makeFx, addSeraphLighting, A_VERTEX_AVAILABLE
+} from './index.js';
+
+const hud = document.getElementById('hud');
+const log = (s) => { hud.textContent = s; };
+
+// ---- renderer / scene / camera ----------------------------------------------
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xf5f1ea);
+scene.fog = new THREE.Fog(0xf5f1ea, 8, 34);              // white distance fog (canon §5)
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 1.4, 8);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 1.0, 0);
+controls.enableDamping = true;
+
+// ---- canon lighting rig ------------------------------------------------------
+const rig = addSeraphLighting(scene, { scale: 1.0 });
+
+// ---- BODY: sample instanced feather-quads (declare A's exact attributes) -----
+// The body material's vertex stage (Agent A's, or the contract-faithful fallback
+// here since A is Wave-1-parallel) reads these; the fragment stage is Agent C's.
+const NF = 64;
+// UNIT feather: position.y in [0,1] (quill root -> tip), matching Agent A's rig
+// convention. Declares BOTH `uv` (fallback vertex) and `localUv` (A's vertex).
+const featherGeo = new THREE.PlaneGeometry(0.34, 1, 1, 6);
+featherGeo.translate(0, 0.5, 0);                // root at y=0, tip at y=1
+const inst = new THREE.InstancedBufferGeometry();
+inst.index = featherGeo.index;
+inst.attributes.position = featherGeo.attributes.position;
+inst.attributes.normal = featherGeo.attributes.normal;
+inst.attributes.uv = featherGeo.attributes.uv;
+inst.setAttribute('localUv', featherGeo.attributes.uv.clone());  // Agent A reads localUv
+inst.instanceCount = NF;
+
+const aSegment = new Float32Array(NF);
+const aRestOffset = new Float32Array(NF * 3);
+const aRestQuat = new Float32Array(NF * 4);
+const aPhase = new Float32Array(NF);
+const aRow = new Float32Array(NF);
+const aStain = new Float32Array(NF);
+const aLen = new Float32Array(NF);
+const aVariant = new Float32Array(NF);          // Agent A's per-instance atlas variant
+
+const _q = new THREE.Quaternion();
+const _e = new THREE.Euler();
+for (let i = 0; i < NF; i++) {
+  const t = i / (NF - 1);                       // 0..1 across the fan
+  const ang = (t - 0.5) * Math.PI * 1.15;       // fan spread
+  const radius = 1.4 + Math.abs(t - 0.5) * 1.2;
+  const x = Math.sin(ang) * radius;
+  const y = 0.6 + Math.cos(ang) * radius * 0.5;
+  aRestOffset[i*3+0] = x;
+  aRestOffset[i*3+1] = y;
+  aRestOffset[i*3+2] = -Math.abs(t - 0.5) * 0.4;
+  // orient feathers to splay outward along the fan; face +Z toward camera-ish
+  _e.set(-0.25, 0, ang * 0.7);
+  _q.setFromEuler(_e);
+  aRestQuat[i*4+0] = _q.x; aRestQuat[i*4+1] = _q.y; aRestQuat[i*4+2] = _q.z; aRestQuat[i*4+3] = _q.w;
+  aSegment[i] = Math.min(3, (t * 4) | 0);
+  aPhase[i] = (i / NF) * Math.PI * 2;            // spread across [0,2π]
+  aRow[i] = (i % 4);
+  aVariant[i] = i % 4;                           // show all 4 atlas variants
+  // stain: white at the fan tips (edges), rust in the core (center)
+  aStain[i] = Math.pow(1.0 - Math.abs(t - 0.5) * 2.0, 1.4);
+  aLen[i] = 1.3 + Math.random() * 0.5;
+}
+inst.setAttribute('aSegment', new THREE.InstancedBufferAttribute(aSegment, 1));
+inst.setAttribute('aRestOffset', new THREE.InstancedBufferAttribute(aRestOffset, 3));
+inst.setAttribute('aRestQuat', new THREE.InstancedBufferAttribute(aRestQuat, 4));
+inst.setAttribute('aPhase', new THREE.InstancedBufferAttribute(aPhase, 1));
+inst.setAttribute('aRow', new THREE.InstancedBufferAttribute(aRow, 1));
+inst.setAttribute('aStain', new THREE.InstancedBufferAttribute(aStain, 1));
+inst.setAttribute('aLen', new THREE.InstancedBufferAttribute(aLen, 1));
+inst.setAttribute('aVariant', new THREE.InstancedBufferAttribute(aVariant, 1));
+
+// identity bone rig stub (Agent E's rig writes these in the real assembly)
+const bones = [0,1,2,3].map(() => new THREE.Matrix4());
+const getBones = () => bones;
+
+const atlas = makeAtlasTexture(2048, renderer);
+const bodyMat = buildBodyMaterial({ getBones, atlas, renderer });
+const feathers = new THREE.Mesh(inst, bodyMat);
+feathers.frustumCulled = false;
+scene.add(feathers);
+
+// ---- EYE + CORNEA (specular catchlight demo) --------------------------------
+const eyeMat = buildEyeMaterial({ procedural: 'iris' });      // material #2
+const eyeball = new THREE.Mesh(new THREE.SphereGeometry(0.9, 48, 32), eyeMat);
+eyeball.position.set(-2.6, 1.0, 0.5);
+scene.add(eyeball);
+
+const corneaMat = buildCorneaMaterial();                      // material #3
+const cornea = new THREE.Mesh(new THREE.SphereGeometry(0.94, 48, 32), corneaMat);
+cornea.position.copy(eyeball.position);
+scene.add(cornea);
+
+// ---- FX: beam (2 additive layers) + embers (<=8) ----------------------------
+const fx = makeFx({ count: 8, spread: 2.4, size: 0.45 });     // material #4
+fx.embers.mesh.position.set(0, 0.6, 0);
+scene.add(fx.group);
+const beamOrigin = new THREE.Vector3(0, 0.4, 0.2);
+const beamTarget = new THREE.Vector3(4.2, 1.8, -1.0);
+
+// ---- GUI ---------------------------------------------------------------------
+const params = {
+  flutter: 7.5, exposure: 1.05, beam: true, embers: true,
+  fog: true, spin: false, wireframe: false,
+};
+const gui = new GUI();
+gui.add(params, 'flutter', 0, 14).name('flutter freq');
+gui.add(params, 'exposure', 0.4, 2).name('exposure').onChange(v => renderer.toneMappingExposure = v);
+gui.add(params, 'beam').name('laser beam').onChange(v => fx.beam.setVisible(v));
+gui.add(params, 'embers').name('embers').onChange(v => fx.embers.mesh.visible = v);
+gui.add(params, 'fog').name('white fog').onChange(v => scene.fog = v ? new THREE.Fog(0xf5f1ea, 8, 34) : null);
+gui.add(params, 'spin').name('auto-spin');
+gui.add(params, 'wireframe').name('body wireframe').onChange(v => bodyMat.wireframe = v);
+
+// ---- loop --------------------------------------------------------------------
+const clock = new THREE.Clock();
+let frame = 0;
+function animate() {
+  requestAnimationFrame(animate);
+  const elapsed = clock.getElapsedTime();
+  const dt = clock.getDelta();
+
+  // drive body vertex uniforms
+  if (bodyMat.userData.setTime) bodyMat.userData.setTime(elapsed);
+  if (bodyMat.userData.shader && bodyMat.userData.shader.uniforms.uFlutterFreq)
+    bodyMat.userData.shader.uniforms.uFlutterFreq.value = params.flutter;
+  if (bodyMat.userData.updateBones) bodyMat.userData.updateBones();
+  if (bodyMat.userData.setLightDir) bodyMat.userData.setLightDir(rig.getKeyLightDir());
+
+  // fx
+  if (params.beam) fx.beam.update(beamOrigin, beamTarget, elapsed);
+  else fx.beam.setVisible(false);
+  fx.embers.update(elapsed);
+  fx.embers.setMuzzle(beamOrigin, params.beam ? 0.7 : 0);
+  fx.embers.setImpact(beamTarget, params.beam ? 1.0 : 0);
+
+  if (params.spin) feathers.rotation.y = elapsed * 0.25;
+
+  controls.update();
+  renderer.render(scene, camera);
+
+  frame++;
+  if (frame === 2) publishDiag();
+}
+
+function countMaterials() {
+  const set = new Set();
+  scene.traverse(o => {
+    if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => set.add(m.uuid));
+  });
+  return set.size;
+}
+
+function publishDiag() {
+  const info = renderer.info;
+  const mats = countMaterials();
+  window.__diag = {
+    drawCalls: info.render.calls,
+    triangles: info.render.triangles,
+    materials: mats,
+    agentAVertex: A_VERTEX_AVAILABLE,
+    bodyUsingAgentA: !!bodyMat.userData.usingAgentA,
+  };
+  log(
+    `SERAPHIM MATERIAL HARNESS (Agent C)\n` +
+    `draw calls : ${info.render.calls}\n` +
+    `triangles  : ${info.render.triangles}\n` +
+    `materials  : ${mats}  (budget <=4)\n` +
+    `agent A vtx: ${A_VERTEX_AVAILABLE ? 'present' : 'FALLBACK (A not shipped)'}\n` +
+    `— orbit to inspect; scripture legible mid-distance; ivory→rust by vStain`
+  );
+  console.log('[__diag]', window.__diag);
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+animate();
+window.__ready = true;
+</script>
+</body>
+</html>

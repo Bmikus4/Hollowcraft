@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Seraphim — Eye Band Harness</title>
+<!-- Standalone document: own importmap (repo root is four levels up). -->
+<script type="importmap">
+{ "imports": {
+    "three": "../../../../vendor/three.module.js",
+    "three/addons/": "../../../../vendor/jsm/"
+} }
+</script>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #f3efe8; }
+  #c { display: block; width: 100vw; height: 100vh; }
+  #hud {
+    position: fixed; left: 12px; bottom: 12px; z-index: 10;
+    font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; color: #2a2018;
+    background: rgba(255,255,255,0.55); padding: 8px 10px; border-radius: 8px;
+    white-space: pre; pointer-events: none;
+  }
+  #bar { position: fixed; left: 12px; top: 12px; z-index: 10; display: flex; gap: 8px; }
+  #bar button {
+    font: 12px ui-monospace, monospace; padding: 7px 11px; border: none; border-radius: 7px;
+    background: #2a2018; color: #f3efe8; cursor: pointer;
+  }
+  #bar button:hover { background: #4a3a2a; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="bar">
+  <button id="tel">telegraphBlink()</button>
+  <button id="chg">charge (hold flare)</button>
+</div>
+<div id="hud">loading…</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+import { buildEyeBand } from '../geometry/eye.js';
+
+const canvas = document.getElementById('c');
+const hud = document.getElementById('hud');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.95;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xf5f1ea);
+scene.fog = new THREE.Fog(0xf5f1ea, 12, 42);              // white distance fog (canon §5)
+
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 0.4, 9);
+
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+controls.target.set(0, 0, 0);
+
+// lighting (canon §5): white key above-behind, hemisphere fill, warm core point
+const key = new THREE.DirectionalLight(0xffffff, 1.5); key.position.set(2, 5, 4); scene.add(key);
+scene.add(new THREE.HemisphereLight(0xffffff, 0xcfc5ba, 0.65));
+const warm = new THREE.PointLight(0xffd9a0, 2.5, 30); warm.position.set(0, 0, 5); scene.add(warm);
+// a small bright near-camera point so the cornea clearcoat throws a catchlight
+const spec = new THREE.PointLight(0xffffff, 3, 40); spec.position.set(-1.8, 2.8, 6.5); scene.add(spec);
+
+// moving marker the band tracks
+const marker = new THREE.Mesh(
+  new THREE.SphereGeometry(0.22, 16, 12),
+  new THREE.MeshStandardMaterial({ color: 0xd9902f, emissive: 0xd9902f, emissiveIntensity: 0.6, roughness: 0.4 })
+);
+scene.add(marker);
+
+// charge flare sprite parked at the laser socket (harness-only demo of origin)
+const flareTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 128; const x = c.getContext('2d');
+  const g = x.createRadialGradient(64, 64, 0, 64, 64, 64);
+  g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(0.3, 'rgba(159,216,255,0.8)'); g.addColorStop(1, 'rgba(159,216,255,0)');
+  x.fillStyle = g; x.fillRect(0, 0, 128, 128); return new THREE.CanvasTexture(c);
+})();
+const flare = new THREE.Sprite(new THREE.SpriteMaterial({ map: flareTex, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true }));
+flare.scale.setScalar(0.001); scene.add(flare);
+
+let band, charging = false, chargeV = 0;
+const state = { auto: true, saccades: true, markerSpeed: 1 };
+
+const gui = new GUI();
+gui.add(state, 'auto').name('auto orbit marker');
+gui.add(state, 'markerSpeed', 0, 3, 0.05).name('marker speed');
+gui.add({ telegraph: () => band && band.telegraphBlink() }, 'telegraph').name('telegraphBlink()');
+
+document.getElementById('tel').onclick = () => band && band.telegraphBlink();
+const chg = document.getElementById('chg');
+chg.onmousedown = () => { charging = true; };
+window.addEventListener('mouseup', () => { charging = false; });
+
+const clock = new THREE.Clock();
+let firstFrame = true;
+
+function frameDiag() {
+  const info = renderer.info;
+  console.log('[eye-harness] renderer.info.render =', JSON.stringify(info.render),
+              ' memory =', JSON.stringify(info.memory), ' programs =', info.programs ? info.programs.length : '?');
+  window.__diag = { drawCalls: info.render.calls, triangles: info.render.triangles,
+                    geometries: info.memory.geometries, textures: info.memory.textures,
+                    programs: info.programs ? info.programs.length : null };
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = clock.getDelta(), t = clock.elapsedTime;
+
+  // marker orbits + bobs in front of the band
+  if (state.auto) {
+    const a = t * state.markerSpeed * 0.7;
+    marker.position.set(Math.sin(a) * 5.5, Math.sin(a * 1.7) * 2.2 + 0.5, 5.5 + Math.cos(a) * 2.0);
+  }
+
+  if (band) {
+    band.setGazeTarget(marker.position);
+    chargeV += ((charging ? 1 : 0) - chargeV) * Math.min(1, dt * 4);
+    band.setCharge(chargeV);
+    band.update(dt, t);
+    // park the flare at the socket while charging
+    band.laserSocket.getWorldPosition(flare.position);
+    flare.scale.setScalar(0.2 + chargeV * 1.6);
+    flare.material.opacity = chargeV;
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+
+  if (firstFrame && band) { firstFrame = false; frameDiag(); }
+  if (band) hud.textContent =
+    `eye band: 7 eyes | textures: ${band.texSource}\n` +
+    `draws=${renderer.info.render.calls}  tris=${renderer.info.render.triangles}\n` +
+    `charge=${chargeV.toFixed(2)}  hold "charge" button to flare`;
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+(async () => {
+  band = await buildEyeBand({ scale: 1.0 });
+  scene.add(band.group);
+  window.__band = band;                     // for headless drivers (telegraph/charge)
+  window.__h = { scene, camera, renderer, controls };
+  hud.textContent = 'ready';
+  animate();
+})().catch(e => { hud.textContent = 'ERROR: ' + e.message; console.error(e); });
+</script>
+</body>
+</html>

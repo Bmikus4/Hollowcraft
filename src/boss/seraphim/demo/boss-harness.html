@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Seraphim — Boss Harness (Agent E)</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #f5f1ea; }
+  #hud { position: fixed; left: 10px; bottom: 8px; font: 12px/1.45 ui-monospace, monospace;
+         color: #4a3b34; background: rgba(255,255,255,.6); padding: 7px 10px; border-radius: 6px;
+         white-space: pre; pointer-events: none; }
+</style>
+<!-- standalone document: own importmap, four levels up to repo root -->
+<script type="importmap">
+{ "imports": {
+    "three": "../../../../vendor/three.module.js",
+    "three/addons/": "../../../../vendor/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="hud">booting…</div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { SeraphimModel, SERAPH_H } from '../index.js';
+
+const hud = document.getElementById('hud');
+
+// ---- renderer / scene / camera ----
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xf5f1ea, 1);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0xf5f1ea, 30, 120);   // white holy-dread cloudscape
+
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 600);
+camera.position.set(3, 4, 34);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 1.5, 0);
+
+// bloom composer — STANDS IN for the game's existing EffectComposer/UnrealBloomPass
+// (canon §5: overexposed, bloom-heavy holy dread). The model reuses the game's
+// composer in-engine and never builds its own; the harness owns this one.
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.45, 0.45, 0.96);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+
+// ---- ground + rock ledge + 1.8 m capsule (scale reference) ----
+const GROUND_Y = -SERAPH_H * 1.4;
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(400, 400),
+  new THREE.MeshStandardMaterial({ color: 0xe9e3d8, roughness: 1.0 }));
+ground.rotation.x = -Math.PI / 2; ground.position.y = GROUND_Y; scene.add(ground);
+
+const ledge = new THREE.Mesh(new THREE.BoxGeometry(6, 2.4, 5),
+  new THREE.MeshStandardMaterial({ color: 0x8a8175, roughness: 1.0 }));
+ledge.position.set(9, GROUND_Y + 1.2, 4); scene.add(ledge);
+
+const capsule = new THREE.Mesh(new THREE.CapsuleGeometry(0.35, 1.1, 6, 12),
+  new THREE.MeshStandardMaterial({ color: 0x2b2b30, roughness: 0.9 }));
+capsule.position.set(9, GROUND_Y + 2.4 + 0.9, 4);   // 1.8 m tall on the ledge
+scene.add(capsule);
+
+// ---- a moving laser target the beam tracks (shows the outrunnable sweep) ----
+const targetBall = new THREE.Mesh(new THREE.SphereGeometry(0.6, 16, 12),
+  new THREE.MeshStandardMaterial({ color: 0xc0392b, emissive: 0x501008, roughness: 0.5 }));
+scene.add(targetBall);
+const targetPos = new THREE.Vector3(14, 2, 6);
+function updateTarget(t, moving) {
+  if (moving) targetPos.set(Math.cos(t * 0.6) * 18, 3 + Math.sin(t * 0.9) * 4, Math.sin(t * 0.6) * 18);
+  targetBall.position.copy(targetPos);
+}
+
+// ---- injected raycast for laser hit resolution (analytic-ish; demo colliders) ----
+const ray = new THREE.Raycaster();
+const colliders = [ground, ledge, capsule, targetBall];
+function raycastFn(origin, dir) {
+  ray.set(origin, dir);
+  const hits = ray.intersectObjects(colliders, false);
+  if (!hits.length) return null;
+  const h = hits[0];
+  return { point: h.point, normal: h.face ? h.face.normal.clone().transformDirection(h.object.matrixWorld) : new THREE.Vector3(0, 1, 0), distance: h.distance };
+}
+
+// ---- build the boss ----
+const model = new SeraphimModel({ renderer, camera, scene, quality: 'high', raycastFn });
+scene.add(model.object3d);
+let lastHit = null;
+model.onLaserHit((p) => { lastHit = p; });
+
+// ---- GUI ----
+const params = {
+  state: 'idle', omega: 1.0, flapIntensity: 0.6, fold: 0.05,
+  moveTarget: true, trackingSpeed: 1.4, laserCharge: 0.0,
+  telegraph: () => model.telegraph(),
+  charge: () => model.startLaserCharge(),
+  fire: () => model.fireLaser(() => targetPos),
+  stop: () => model.stopLaser(),
+  reset: () => { camera.position.set(3, 4, 34); controls.target.set(0, 1.5, 0); },
+};
+const gui = new GUI();
+gui.add(params, 'state', ['idle', 'aggro', 'attack_windup', 'attack', 'stagger', 'death']).name('state').onChange(v => model.setState(v));
+gui.add(params, 'omega', 0, 3, 0.05).name('ω scale').onChange(v => model.setOmegaScale(v));
+gui.add(params, 'flapIntensity', 0, 1, 0.01).name('flap intensity').onChange(v => model.setFlapIntensity(v));
+gui.add(params, 'fold', 0, 1, 0.01).name('fold').onChange(v => model.setFold(v));
+gui.add(params, 'trackingSpeed', 0.2, 6, 0.1).name('laser track ω').onChange(v => model.setLaserTrackingSpeed(v));
+gui.add(params, 'moveTarget').name('target orbits');
+const fL = gui.addFolder('laser / telegraph');
+// CONTINUOUS external charge-visual bridge — drives ONLY the central-eye charge
+// visual (iris ramp + pupil constrict + lid peel), NO auto-fire. This is the signal
+// the game maps from wretch._eyeFlare each frame; demonstrable independent of ▶ fire.
+fL.add(params, 'laserCharge', 0, 1, 0.01).name('laserCharge (0..1, no fire)').onChange(v => model.setLaserCharge(v));
+fL.add(params, 'telegraph').name('▶ telegraph (all eyes)');
+fL.add(params, 'charge').name('▶ charge (0.8s→fire)');
+fL.add(params, 'fire').name('▶ fire (sustained)');
+fL.add(params, 'stop').name('▶ stop (cooldown)');
+gui.add(params, 'reset').name('reset camera');
+model.setOmegaScale(params.omega);
+model.setLaserTrackingSpeed(params.trackingSpeed);
+
+// ---- diagnostics published for headless verification ----
+// WHOLE-BOSS ledger — scoped to model.object3d (the gates are per-boss, not the
+// demo scene) and respecting ancestor visibility (a hidden LOD level / invisible
+// beam draws nothing). renderer.info totals are kept for reference.
+function computeDiag() {
+  const info = renderer.info;
+  const roles = new Set(), mats = new Set();
+  let bossDraws = 0, bossTris = 0;
+  (function walk(o, vis) {
+    vis = vis && o.visible;
+    if (vis && (o.isMesh || o.isInstancedMesh)) {
+      bossDraws++;
+      const g = o.geometry, inst = o.isInstancedMesh ? o.count : 1;
+      const tri = g.index ? g.index.count / 3 : (g.attributes.position ? g.attributes.position.count / 3 : 0);
+      bossTris += tri * inst;
+      const arr = Array.isArray(o.material) ? o.material : [o.material];
+      for (const m of arr) { if (!m) continue; mats.add(m); if (m.userData && m.userData.seraphRole) roles.add(m.userData.seraphRole); }
+    }
+    for (const c of o.children) walk(c, vis);
+  })(model.object3d, true);
+  return {
+    drawCalls: bossDraws,                  // WHOLE BOSS (gate ≤15)
+    triangles: Math.round(bossTris),       // WHOLE BOSS (gate ≤150k)
+    materials: roles.size,                 // canon §5 material ROLES (gate ≤4)
+    materialRoles: [...roles].sort(),
+    materialObjects: mats.size,            // raw distinct THREE.Material instances
+    programs: info.programs.length,
+    sceneDrawCalls: info.render.calls,     // incl. ground/ledge/capsule/target
+    sceneTriangles: info.render.triangles,
+    wings: model.wings.length,
+    eyes: model.eyeBand.eyes.length,
+    texSource: model.texSource || 'loading',
+  };
+}
+
+window.__boss = { model, renderer, scene, camera, params, targetPos, computeDiag, get lastHit() { return lastHit; } };
+
+// ---- render loop ----
+const clock = new THREE.Clock();
+let firstFrameDone = false;
+function tick() {
+  const dt = Math.min(0.05, clock.getDelta());
+  const el = clock.elapsedTime;
+  updateTarget(el, params.moveTarget);
+  model.lookAt(camera.position);   // eyes track the viewer (the "player"); laser aims at targetPos
+  model.update(dt, el);
+  controls.update();
+  composer.render();
+
+  window.__diag = computeDiag();
+  if (!firstFrameDone) {
+    firstFrameDone = true;
+    console.log('[boss-harness] __diag =', JSON.stringify(window.__diag));
+  }
+  const d = window.__diag;
+  hud.textContent =
+    `state       : ${params.state}\n` +
+    `draw calls  : ${d.drawCalls}   (gate ≤15)\n` +
+    `triangles   : ${d.triangles.toLocaleString()}   (gate ≤150k)\n` +
+    `materials   : ${d.materials} roles [${d.materialRoles.join(',')}]  (gate ≤4)\n` +
+    `mat objects : ${d.materialObjects}   programs: ${d.programs}\n` +
+    `wings/eyes  : ${d.wings}/${d.eyes}   eyeTex: ${d.texSource}`;
+  requestAnimationFrame(tick);
+}
+model.ready.finally(() => { clock.start(); tick(); });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  composer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>

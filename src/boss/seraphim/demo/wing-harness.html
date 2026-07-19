@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Seraphim — Wing Harness (Agent A)</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #f5f1ea; }
+  #hud { position: fixed; left: 10px; bottom: 8px; font: 12px/1.4 ui-monospace, monospace;
+         color: #4a3b34; background: rgba(255,255,255,.55); padding: 6px 9px; border-radius: 6px;
+         white-space: pre; pointer-events: none; }
+</style>
+<!-- standalone document: own importmap, four levels up to repo root -->
+<script type="importmap">
+{ "imports": {
+    "three": "../../../../vendor/three.module.js",
+    "three/addons/": "../../../../vendor/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="hud">booting…</div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+import { buildWing } from '../geometry/wing.js';
+
+const hud = document.getElementById('hud');
+
+// ---- scene / renderer ----
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xf5f1ea, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0xf5f1ea, 12, 46); // white distance fog (holy-dread cloudscape)
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(6.5, 3.5, 11);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(3, 0.2, 1.5);
+
+// ---- lights (canon 5: white key above-behind, hemi fill, warm core point) ----
+const key = new THREE.DirectionalLight(0xffffff, 2.2);
+key.position.set(-4, 9, -6);
+scene.add(key);
+scene.add(new THREE.HemisphereLight(0xffffff, 0xcfc5ba, 1.1));
+const core = new THREE.PointLight(0xffd9a0, 8, 20);
+core.position.set(-0.5, 0.5, 0);
+scene.add(core);
+
+// ---- build one wing (mid-pair-like config, horizontal plane) ----
+const S = 6;
+function wingConfig() {
+  return {
+    side: +1,
+    span: S,
+    normal: [0, 1, 0], // wing plane horizontal; feathers grow +Z, flutter in +Y
+    joints: [[0, 0, 0], [0.18 * S, 0, 0.02 * S], [0.55 * S, 0, 0.0], [1.0 * S, 0, -0.04 * S]],
+    flap: { omega: 1.4, ampHumerus: 0.5, ampRadius: 0.38, ampCarpus: 0.3, phase: 0, phi: 0.6, beta: 0.15 / 1.4 },
+    droopK: 0.14,
+    fanScale: 1.0,
+    variantSeed: 2,
+  };
+}
+
+let wing = buildWing(wingConfig());
+scene.add(wing.group);
+
+// optional mirrored partner (negative-X root scale, per canon 3)
+let mirror = null;
+function setMirror(on) {
+  if (on && !mirror) { mirror = buildWing(wingConfig()); mirror.group.scale.x = -1; scene.add(mirror.group); }
+  else if (!on && mirror) { scene.remove(mirror.group); mirror = null; }
+}
+
+// ---- GUI ----
+const params = { omega: 1.4, fold: 0, flapIntensity: 1.0, mirror: false, wireframe: false,
+  reset: () => { controls.target.set(3, 0.2, 1.5); camera.position.set(6.5, 3.5, 11); },
+  snapFold: () => { const t0 = performance.now(); const iv = setInterval(() => { const k = Math.min(1, (performance.now() - t0) / 500); params.fold = k; gui.controllersRecursive().forEach(c => c.updateDisplay()); if (k >= 1) clearInterval(iv); }, 16); } };
+const gui = new GUI();
+gui.add(params, 'omega', 0.0, 4.0, 0.05).name('ω (flap rate)').onChange(v => { wing.setOmega(v); if (mirror) mirror.setOmega(v); });
+gui.add(params, 'flapIntensity', 0, 1, 0.01).name('flap intensity');
+gui.add(params, 'fold', 0, 1, 0.01).name('fold').listen();
+gui.add(params, 'snapFold').name('▶ snap fold 0→1');
+gui.add(params, 'mirror').name('mirror pair').onChange(setMirror);
+gui.add(params, 'wireframe').name('wireframe').onChange(v => { wing.material.wireframe = v; if (mirror) mirror.material.wireframe = v; });
+gui.add(params, 'reset').name('reset camera');
+wing.setOmega(params.omega);
+
+// debug hook for headless verification
+window.__harness = { wing, params, get mirror() { return mirror; }, renderer, scene, camera };
+
+// ---- render loop ----
+const clock = new THREE.Clock();
+let firstFrameDone = false;
+function tick() {
+  const dt = Math.min(0.05, clock.getDelta());
+  const elapsed = clock.elapsedTime;
+  wing.setFold(params.fold);
+  wing.setFlapIntensity(params.flapIntensity);
+  wing.update(dt, elapsed);
+  if (mirror) { mirror.setFold(params.fold); mirror.setFlapIntensity(params.flapIntensity); mirror.update(dt, elapsed); }
+  controls.update();
+  renderer.render(scene, camera);
+
+  if (!firstFrameDone) {
+    firstFrameDone = true;
+    const info = renderer.info;
+    window.__diag = { drawCalls: info.render.calls, triangles: info.render.triangles,
+      feathers: wing.feats.length, featherTris: wing.instancedMesh.geometry.userData.triangles,
+      voxels: wing.instancedMesh.geometry.userData.voxels };
+    console.log('[wing-harness] renderer.info.render =', JSON.stringify(info.render));
+    console.log('[wing-harness] __diag =', JSON.stringify(window.__diag));
+    hud.textContent =
+      `feathers/wing : ${window.__diag.feathers}\n` +
+      `feather tris  : ${window.__diag.featherTris}  (voxels ${window.__diag.voxels})\n` +
+      `draw calls    : ${window.__diag.drawCalls}\n` +
+      `triangles     : ${window.__diag.triangles}`;
+  }
+  requestAnimationFrame(tick);
+}
+tick();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
