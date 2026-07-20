@@ -23,6 +23,20 @@ let _model = null;      // SeraphimModel
 let _beam = null;       // makeBeam() result { mesh, update, setVisible, ... }
 let _scene = null;
 let _elapsed = 0;
+let _prewarmed = false; // prewarm() ran once (build + shader precompile off the summon path)
+
+// Build the singleton model ONCE with its standard child-transform + state, but do
+// NOT attach it to any scene here. Shared by prewarm() and seraphOn() so a
+// prebuilt-by-prewarm model and a first-summon model are byte-identical.
+function buildModel(opts = {}) {
+  const { scene, camera, renderer } = opts;
+  const m = new SeraphimModel({ renderer, camera, scene });
+  m.object3d.scale.setScalar(1.0);
+  // QA hooks read _bossWings.userData.feats.length — keep it a harmless array.
+  m.object3d.userData.feats = m.object3d.userData.feats || [];
+  m.setState('aggro');
+  return m;
+}
 
 // The C-fx beam ships at 0.08 m core / 0.20 m sheath — hairline against a ~40 m
 // boss. Fatten to read as a searing lance whose girth matches the ~3-block ground
@@ -56,17 +70,15 @@ export function seraphOn(wretch, opts = {}) {
   const { scene, camera, renderer, anchorY = 1.7 } = opts;
   _scene = scene || _scene;
 
-  if (!_model) {
-    _model = new SeraphimModel({ renderer, camera, scene });
-    // child of wretch.group → inherits pos + _bossPitch/_bossRoll lean + faceLock
-    // yaw. Chosen child scale = 1.0 (model natural wingspan 12.8 u × wretch.group
-    // 3.04 ≈ 39 m tip-to-tip, ~52 m tall — inside canon's 30–60 m). The band sits
-    // near local y=BOSS_WING_CY so the old anchor height is preserved.
-    _model.object3d.scale.setScalar(1.0);
+  // child of wretch.group → inherits pos + _bossPitch/_bossRoll lean + faceLock
+  // yaw. Chosen child scale = 1.0 (model natural wingspan 12.8 u × wretch.group
+  // 3.04 ≈ 39 m tip-to-tip, ~52 m tall — inside canon's 30–60 m). The band sits
+  // near local y=BOSS_WING_CY so the old anchor height is preserved.
+  if (!_model) _model = buildModel({ scene, camera, renderer });
+  // Attach even when the model was prebuilt by prewarm() (parent is null / a warm
+  // scene). Re-parenting to wretch.group + the anchor height happens once.
+  if (_model.object3d.parent !== wretch.group) {
     _model.object3d.position.set(0, anchorY, 0);
-    // QA hooks read _bossWings.userData.feats.length — keep it a harmless array.
-    _model.object3d.userData.feats = _model.object3d.userData.feats || [];
-    _model.setState('aggro');
     wretch.group.add(_model.object3d);
   }
   _model.object3d.visible = true;
@@ -119,8 +131,52 @@ export function seraphHideBeam() {
   if (_beam) _beam.setVisible(false);
 }
 
+// PREWARM — kill the first-summon load hitch. seraphOn() builds the whole model
+// synchronously on the first summon (atlas CanvasTexture gen + all geometry + the
+// first-use shader COMPILE at first render) = one big frame stall right when the
+// boss appears. prewarm() pays that cost AHEAD of time, off the summon path (call
+// it during/after world load via requestIdleCallback). Idempotent; changes NO boss
+// AI — it only pre-creates the singleton + uploads/compiles its programs, then
+// detaches. seraphOn() later finds _model already built and just attaches + shows.
+//
+// ctx: { scene, camera, renderer } — renderer is required to precompile. Returns a
+// Promise resolving to the model once its async eye textures are compiled too.
+export function prewarm(ctx = {}) {
+  if (_prewarmed) return Promise.resolve(_model);
+  const { scene, camera, renderer } = ctx;
+  if (!renderer) return Promise.resolve(null);   // no GPU device → nothing to precompile
+  _prewarmed = true;
+
+  if (!_model) _model = buildModel({ scene, camera, renderer });
+
+  const cam = camera || new THREE.PerspectiveCamera();
+  const warm = new THREE.Scene();
+  // Compile in a throwaway scene so we never render the boss into the live view.
+  // Restore any parent afterwards (seraphOn may have attached it if a summon raced
+  // in before prewarm ran — harmless, but keep the tree intact).
+  const compile = () => {
+    try {
+      const parent = _model.object3d.parent;
+      warm.add(_model.object3d);        // detaches from parent (adds to warm)
+      _model.update(0.016, 0);          // prime instance matrices + uniforms
+      if (renderer.compile) renderer.compile(warm, cam);
+      warm.remove(_model.object3d);
+      if (parent) parent.add(_model.object3d);
+    } catch (e) { /* precompile is best-effort; never break load */ }
+  };
+
+  compile();   // geometry + base programs compiled now (the bulk of the stall)
+
+  // Second pass once Agent B's baked eye maps resolve: applying a map flips
+  // USE_MAP → the eye program recompiles on next render. Do it here (off the summon
+  // path) instead of letting it stall a gameplay frame.
+  const ready = (_model.ready && _model.ready.then) ? _model.ready : Promise.resolve(_model);
+  return ready.then(() => { compile(); return _model; }).catch(() => _model);
+}
+
 // Optional teardown (not used by the seam today; kept for completeness).
 export function seraphDispose() {
   if (_beam) { if (_beam.mesh.parent) _beam.mesh.parent.remove(_beam.mesh); _beam.mesh.geometry.dispose(); _beam = null; }
   if (_model) { if (_model.object3d.parent) _model.object3d.parent.remove(_model.object3d); _model.dispose(); _model = null; }
+  _prewarmed = false;
 }

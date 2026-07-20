@@ -124,17 +124,20 @@ function buildEyeBand2(opts = {}) {
   const group = new THREE.Group(); group.name = 'seraphEyeBand';
 
   // arc layout (central i=0, ±1..3), canon §4.3 "band of seven": size R·base^|i|.
-  // F-4: raised the falloff base 0.55→0.70 (ring-2/3 eyes were too tiny to read),
-  // widened the gap 1.06→1.18 to spread the flanks out from behind the feathers,
-  // flattened the vertical droop, and lifted the flanks PROUD of the feather plane
-  // (+z, was -z) so they aren't occluded — the 7-band motif now reads. Budget-
-  // neutral: pure scale/position params, same 7 instances / geometry / materials.
+  // F-4 spread the flanks out but pushed them too "proud" (+0.085·x, gap 1.18) so the
+  // seven read as googly balls on stalks. F-5 (this pass) nestles them into a coherent
+  // ridge: central eye enlarged to DOMINATE + bulge forward as the centerpiece; gap
+  // tightened; the proud +z dialed right back (0.085→0.03) with a small -z seat so the
+  // sclera spheres sit INTO the plumage ridge, not out on stalks. Budget-neutral: pure
+  // scale/position params, same 7 instances / geometry / materials.
+  const CENTRAL_SIZE = 1.24;   // dominant central eye — unmistakable centerpiece
+  const CENTRAL_Z = 0.12;      // nudge the central pupil forward; nothing sits in front of it
   const sizeOf = (i) => Math.pow(0.70, Math.abs(i));
-  const gap = 1.18;
-  const layout = [{ i: 0, x: 0, y: 0, z: 0, size: 1 }];
+  const gap = 1.08;            // tightened 1.18→1.08 → one coherent horizontal band
+  const layout = [{ i: 0, x: 0, y: 0, z: CENTRAL_Z, size: CENTRAL_SIZE }];
   for (const sign of [-1, 1]) {
-    let x = 0, prev = 1;
-    for (let a = 1; a <= 3; a++) { const s = sizeOf(a); x += (prev + s) * gap; prev = s; layout.push({ i: sign * a, x: sign * x, y: -0.028 * x * x, z: 0.085 * x, size: s }); }
+    let x = 0, prev = CENTRAL_SIZE;
+    for (let a = 1; a <= 3; a++) { const s = sizeOf(a); x += (prev + s) * gap; prev = s; layout.push({ i: sign * a, x: sign * x, y: -0.024 * x * x, z: 0.03 * x - 0.05, size: s }); }
   }
   layout.sort((p, q) => p.i - q.i);                 // -3..3, central at centre
   const N = layout.length;                          // 7
@@ -179,12 +182,16 @@ function buildEyeBand2(opts = {}) {
   irisGeoInst.setAttribute('aUvScale', new THREE.InstancedBufferAttribute(aUvScale, 1));
   irisGeoInst.setAttribute('aCharge', new THREE.InstancedBufferAttribute(aCharge, 1));
 
+  // A3 draw-call reclaim: MERGE the two eyelid meshes into ONE InstancedMesh (14
+  // instances) so the eye band is 4 draw calls not 5. Both lids share ONE geometry
+  // (the +Y cap G.lidU) and ONE material; the LOWER lids are the same cap flipped in
+  // Y via a negative-determinant instance matrix (lidMat is DoubleSide so the winding
+  // flip renders fine). Instances 0..N-1 = upper lids, N..2N-1 = lower lids.
   const im = {
     sclera: new THREE.InstancedMesh(G.sclera, scleraMat, N),
     iris: new THREE.InstancedMesh(irisGeoInst, irisMat, N),
     cornea: new THREE.InstancedMesh(G.cornea, corneaMat, N),
-    lidU: new THREE.InstancedMesh(G.lidU, lidMat, N),
-    lidL: new THREE.InstancedMesh(G.lidL, lidMat, N),
+    lid: new THREE.InstancedMesh(G.lidU, lidMat, N * 2),
   };
   im.cornea.renderOrder = 3;
   for (const k of Object.keys(im)) { im[k].frustumCulled = false; group.add(im[k]); }
@@ -193,7 +200,7 @@ function buildEyeBand2(opts = {}) {
   const centralPivot = new THREE.Object3D();
   group.add(centralPivot);
   const laserSocket = new THREE.Object3D(); laserSocket.name = 'laserSocket';
-  laserSocket.position.set(0, 0, PUPIL_Z);
+  laserSocket.position.set(0, 0, CENTRAL_Z + PUPIL_Z * CENTRAL_SIZE);   // pupil depth of the now-enlarged, forward central eye
   centralPivot.add(laserSocket);
 
   // ---- per-eye state --------------------------------------------------------
@@ -243,6 +250,7 @@ function buildEyeBand2(opts = {}) {
   let chargeX = 0;
 
   const tmp = new THREE.Matrix4(), tmpR = new THREE.Matrix4();
+  const _flipY = new THREE.Matrix4().makeScale(1, -1, 1);   // upper-lid cap → lower-lid cap
 
   const api = {
     group, laserSocket, eyes, layout,
@@ -308,8 +316,10 @@ function buildEyeBand2(opts = {}) {
         let close = Math.max(e.blinkAmt, e.deathClose);
         let upper = lerp(LID_OPEN, LID_CLOSED, clamp(close, 0, 1));
         if (e.isC && chargeX > 0) upper = Math.min(upper, lerp(LID_OPEN, LID_PEEL, chargeX));
-        tmpR.makeRotationX(upper); im.lidU.setMatrixAt(e.k, tmp.multiplyMatrices(P, tmpR));
-        tmpR.makeRotationX(-upper); im.lidL.setMatrixAt(e.k, tmp.multiplyMatrices(P, tmpR));
+        // upper lid → instance e.k ; lower lid → instance N+e.k (same +Y cap
+        // geometry flipped in Y via _flipY so both share ONE InstancedMesh = 1 dc)
+        tmpR.makeRotationX(upper); im.lid.setMatrixAt(e.k, tmp.multiplyMatrices(P, tmpR));
+        tmpR.makeRotationX(-upper); im.lid.setMatrixAt(N + e.k, tmp.multiplyMatrices(P, tmpR).multiply(_flipY));
       }
       for (const k of Object.keys(im)) im[k].instanceMatrix.needsUpdate = true;
     },
@@ -335,14 +345,28 @@ function buildEyeBand2(opts = {}) {
 function wingConfigs() {
   const j = (S) => [[0, 0, 0], [0.18 * S, 0, 0.02 * S], [0.55 * S, 0, 0], [1.0 * S, 0, -0.04 * S]];
   return [
-    { key: 'upper', span: 1.2 * H, pos: [0.15 * H, 0.35 * H, -0.05 * H], rotY: 0.52, rotZ: 0.96, omegaMul: 1.0,
-      droopK: 0.12, fanScale: 1.15, variantSeed: 1,
+    // UPPER (A1 playtest fix): the V read too CLOSED with a wedge of sky at the top
+    // centre and the feathers floating free of the body. Fixes: (a) roots pulled IN
+    // toward the core attach point (x 0.15H→0.06H, y 0.35H→0.37H) so the inner
+    // feathers overlap the eye-band ridge and CLOSE the top gap; (b) inward tilt
+    // reduced (rotZ 0.96→0.74) + slightly more outward yaw (rotY 0.52→0.60) so the
+    // pair OPENS into a broad V of attached wings instead of two near-vertical blades.
+    { key: 'upper', span: 1.2 * H, pos: [0.06 * H, 0.37 * H, -0.04 * H], rotY: 0.60, rotZ: 0.74, omegaMul: 1.0,
+      droopK: 0.12, fanScale: 1.15, variantSeed: 1, voxLen: 7,
       flap: { ampHumerus: 0.60, ampRadius: 0.42, ampCarpus: 0.34, phase: 0.0, phi: 0.6 } },
+    // UPPER-MID (A2 playtest addition): NEW 4th pair, sits BELOW the upper V and
+    // ABOVE the lateral mid pair. Interpolates upper(pitch ~55°,yaw ~30°,1.2H) →
+    // mid(horizontal,yaw ~80°,1.0H): pitch up ~24° (rotZ 0.42), modest yaw (rotY 0.18),
+    // span 1.1H, its own desync phase (+π/6, between upper 0 and mid +π/3) and ω
+    // (0.8, between 1.0 and 0.6). Slightly lower feather resolution (voxLen 6) per A3.
+    { key: 'uppermid', span: 1.1 * H, pos: [0.22 * H, 0.17 * H, 0.0], rotY: 0.18, rotZ: 0.42, omegaMul: 0.8,
+      droopK: 0.14, fanScale: 1.05, variantSeed: 4, voxLen: 6,
+      flap: { ampHumerus: 0.44, ampRadius: 0.31, ampCarpus: 0.25, phase: Math.PI / 6, phi: 0.6 } },
     { key: 'mid', span: 1.0 * H, pos: [0.30 * H, 0.0, 0.0], rotY: -0.32, rotZ: -0.17, omegaMul: 0.6,
-      droopK: 0.16, fanScale: 1.0, variantSeed: 2,
+      droopK: 0.16, fanScale: 1.0, variantSeed: 2, voxLen: 7,
       flap: { ampHumerus: 0.28, ampRadius: 0.20, ampCarpus: 0.16, phase: Math.PI / 3, phi: 0.6 } },
     { key: 'lower', span: 1.3 * H, pos: [0.12 * H, -0.30 * H, 0.05 * H], rotY: 0.22, rotZ: -1.15, omegaMul: 0.3,
-      droopK: 0.30, fanScale: 0.9, variantSeed: 3,
+      droopK: 0.30, fanScale: 0.9, variantSeed: 3, voxLen: 7,
       flap: { ampHumerus: 0.12, ampRadius: 0.08, ampCarpus: 0.06, phase: Math.PI / 2, phi: 0.6 } },
   ];
 }
@@ -380,18 +404,22 @@ function buildCoreMass(bodyMat, count = 46, voxLen = 7) {
   const aVariant = new Float32Array(n);
   const q = new THREE.Quaternion(), e = new THREE.Euler(), off = new THREE.Vector3();
   for (let i = 0; i < n; i++) {
-    // downward cone scatter
+    // FIX-1: hang as a narrow, tapered downward TRAIN beneath the eye-band — NOT a wide
+    // forward boulder. Bias EVERY feather behind the central pupil (z stays < 0) so the
+    // core can never occlude the dominant central eye; correlate reach with drop so it
+    // reads as draping plumage that tapers to a point.
     const a = Math.random() * Math.PI * 2;
-    const r = (0.1 + Math.random() * 0.9) * 0.7 * H;
-    const down = 0.15 * H + Math.random() * 0.5 * H;
-    off.set(Math.cos(a) * r * 0.45, -down, Math.sin(a) * r * 0.35 - 0.1 * H);
+    const rr = Math.random();
+    const r = (0.12 + rr * 0.88) * 0.40 * H;           // narrow radius (was 0.7·H)
+    const down = (0.05 + Math.random() * 0.80) * H;    // drape below the band
+    off.set(Math.cos(a) * r * 0.42, -down, Math.sin(a) * r * 0.20 - 0.22 * H);
     aRestOffset.set([off.x, off.y, off.z], i * 3);
-    // point mostly downward with scatter (feather +Y is length axis pre-orient)
-    e.set(Math.PI * (0.72 + Math.random() * 0.22), (Math.random() - 0.5) * 0.8, a + Math.PI, 'XYZ');
+    // point straight-ish down with scatter (feather +Y is length axis pre-orient)
+    e.set(Math.PI * (0.82 + Math.random() * 0.16), (Math.random() - 0.5) * 0.7, a + Math.PI, 'XYZ');
     q.setFromEuler(e);
     aRestQuat.set([q.x, q.y, q.z, q.w], i * 4);
     aPhase[i] = Math.random() * 6.283;
-    aLen[i] = (0.45 + Math.random() * 0.6) * H * 0.5;
+    aLen[i] = (0.30 + Math.random() * 0.45) * H * 0.5;  // shorter feathers → hanging plumage, not slabs
     aVariant[i] = i % 4;
   }
   geo.setAttribute('aSegment', new THREE.InstancedBufferAttribute(aSegment, 1));
@@ -472,12 +500,16 @@ export class SeraphimModel {
     this.atlas = makeAtlasTexture(2048, this.renderer);
     this._bodyMats = [];
 
-    // ---- six wings ----------------------------------------------------------
-    const voxLen = this.quality === 'low' ? 7 : 9;   // triangle-budget lever
+    // ---- EIGHT wings (4 mirrored pairs: upper, upper-mid, mid, lower) --------
+    // triangle-budget lever: per-config voxel resolution (A3). Two extra wings would
+    // push tris toward/over 150k at the old voxLen 9, so the base feather voxel count
+    // is trimmed (cfg.voxLen, ~6-7 vs the old 9) — measured in boss-harness __diag.
+    const defVoxLen = this.quality === 'low' ? 6 : 7;
     this.wings = [];
     this.mirrorL = new THREE.Group(); this.mirrorL.scale.x = -1; this.core.add(this.mirrorL);
     let wingTris = 0;
     for (const cfg of wingConfigs()) {
+      const voxLen = cfg.voxLen != null ? cfg.voxLen : defVoxLen;
       for (const side of [+1, -1]) {
         const mat = buildBodyMaterial({ atlas: this.atlas, renderer: this.renderer, emberStrength: 0.42, sssStrength: 0.3 });
         mat.userData.seraphRole = 'body';
@@ -505,15 +537,15 @@ export class SeraphimModel {
     coreMat.userData.seraphRole = 'body';
     this._bodyMats.push(coreMat);
     this._coreMat = coreMat;
-    const cm = buildCoreMass(coreMat, this.quality === 'low' ? 32 : 46, voxLen);
+    const cm = buildCoreMass(coreMat, this.quality === 'low' ? 32 : 46, 6);   // shorter voxel feathers → hanging plumage, not slabs
     this.coreMass = cm.mesh;
-    this.coreMass.position.set(0, H * 0.05, 0);
+    this.coreMass.position.set(0, -H * 0.14, 0);   // FIX-1: hang the train BELOW the band (was +H*0.05, level with the eyes → eclipsed them)
     this.core.add(this.coreMass);
     this._coreTris = cm.tris;
 
     // ---- eye band (5 dc, central folded in) ---------------------------------
     this.eyeBand = buildEyeBand2({});
-    this.eyeBand.group.position.set(0, H * 0.02, 0);
+    this.eyeBand.group.position.set(0, H * 0.06, 0);   // FIX-1: lift the band clear above the hanging core train
     this.core.add(this.eyeBand.group);
     this.laserSocket = this.eyeBand.laserSocket;
 

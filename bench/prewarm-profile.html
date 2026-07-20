@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Seraphim — prewarm profile</title>
+<!-- bench/ is one level under repo root -->
+<script type="importmap">
+{ "imports": {
+    "three": "../vendor/three.module.js",
+    "three/addons/": "../vendor/jsm/"
+} }
+</script>
+</head>
+<body>
+<script type="module">
+import * as THREE from 'three';
+import { SeraphimModel } from '../src/boss/seraphim/index.js';
+
+function freshRig() {
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(640, 480);
+  document.body.appendChild(renderer.domElement);
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(45, 640 / 480, 0.1, 600);
+  camera.position.set(0, 4, 34);
+  return { renderer, scene, camera };
+}
+function teardown(rig, model) {
+  try { if (model) model.dispose(); } catch (e) {}
+  try { rig.renderer.dispose(); rig.renderer.forceContextLoss && rig.renderer.forceContextLoss(); } catch (e) {}
+  try { rig.renderer.domElement.remove(); } catch (e) {}
+}
+
+// COLD = no prewarm: the summon frame pays build + first-render shader compile.
+window.profileCold = () => {
+  const rig = freshRig();
+  const t0 = performance.now();
+  const m = new SeraphimModel({ renderer: rig.renderer, camera: rig.camera, scene: rig.scene });
+  const t1 = performance.now();
+  rig.scene.add(m.object3d);
+  m.update(0.016, 0);
+  rig.renderer.render(rig.scene, rig.camera);   // first-use shader COMPILE happens here → the stall
+  const t2 = performance.now();
+  const out = { build: +(t1 - t0).toFixed(1), coldFirstRender: +(t2 - t1).toFixed(1), summonHitchTotal: +(t2 - t0).toFixed(1) };
+  teardown(rig, m);
+  return out;
+};
+
+// WARM = prewarm off the summon path. Real timeline: prewarm runs at idle (seconds
+// before summon), so its async shader compile + GPU program realization finish in the
+// background. warmPrep() does build + compileAsync + one realize-render; the runner
+// then WAITS (mimicking the gap to summon) before warmSummon() times only the summon
+// frame — the programs are already live, so no compile stall remains.
+window.warmPrep = async () => {
+  const rig = freshRig();
+  const p0 = performance.now();
+  const m = new SeraphimModel({ renderer: rig.renderer, camera: rig.camera, scene: rig.scene });
+  m.update(0.016, 0);
+  const warm = new THREE.Scene(); warm.add(m.object3d);
+  if (rig.renderer.compileAsync) await rig.renderer.compileAsync(warm, rig.camera);
+  else rig.renderer.compile(warm, rig.camera);
+  rig.renderer.render(warm, rig.camera);        // realize programs on the GPU with a real draw
+  warm.remove(m.object3d);
+  const p1 = performance.now();
+  window.__warm = { rig, model: m, prewarmCost: +(p1 - p0).toFixed(1) };
+  return window.__warm.prewarmCost;
+};
+window.warmSummon = () => {
+  const { rig, model, prewarmCost } = window.__warm;
+  const s0 = performance.now();
+  rig.scene.add(model.object3d);
+  model.update(0.016, 0);
+  rig.renderer.render(rig.scene, rig.camera);   // summon frame — programs already live
+  const s1 = performance.now();
+  const out = { prewarmCost, summonHitchAfterPrewarm: +(s1 - s0).toFixed(1) };
+  teardown(rig, model);
+  window.__warm = null;
+  return out;
+};
+
+window.__profileReady = true;
+</script>
+</body>
+</html>
