@@ -49,11 +49,11 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     ck('arms raised (shoulder swung up toward -1.0)', c.arm<-0.55, c);
     ck('upright on its toes (crawl released)', c.crawl<0.35, c);
 
-    // D: look at it + screenshot the slink
-    await page.evaluate(`__hc.look()`); await sleep(400);
+    // D: hold the slink with the QA force flag so the camera can see it, then release and verify the organic watch-break
+    await page.evaluate(`__hc.sneak(true)`); await sleep(700);
+    await page.evaluate(`__hc.look()`); await sleep(250);
     await page.screenshot({ path: path.join(OUT,'wretch-tiptoe.png') });
-    // watching it must BREAK the sneak (conf dies + exit)
-    await sleep(2600);
+    await page.evaluate(`__hc.sneak(false)`); await sleep(2600);
     const d = await page.evaluate(`__hc.sneak()`);
     ck('being watched breaks the sneak', d.sneaking===false, d);
 
