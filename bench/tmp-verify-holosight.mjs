@@ -68,7 +68,7 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     let s7=await S(); ck('lowered: crosshair back', s7.xhOp>0.7 && !s7.retVis, s7);
     await page.screenshot({ path: path.join(OUT,'holo-ar-hip.png') });
 
-    // ---------- dot BOLT rifle: no scope lens, ADS survives the bolt cycle, mag=5 ----------
+    // ---------- dot BOLT rifle: no scope lens, bolt cycle DROPS ADS then re-raises (rifle-only un-ADS, per Ben 2026-07-20), mag=5 ----------
     await page.evaluate(`__hc.gun('hunting_rifle_dot')`); await sleep(400);
     let b0=await S();
     ck('dot rifle has NO scope lens', b0.scopeLens===false, b0);
@@ -78,14 +78,17 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     await page.evaluate(`__hc.shoot()`); await sleep(300);
     let b1=await S();
     ck('bolt cycling', b1.boltT>0.3, b1);
-    ck('ADS SURVIVES the bolt cycle', b1.ads===true && b1.adsT>0.8, b1);
+    ck('bolt cycle DROPS ADS (rifle un-ADSes on fire)', b1.ads===false, b1);
+    await sleep(1100);
+    let b2=await S();
+    ck('ADS re-raises after the bolt (rmb still held)', b2.boltT===0 && b2.ads===true, b2);
 
-    // ---------- scoped rifle keeps its scope + also never drops ADS on fire ----------
+    // ---------- scoped rifle keeps its scope + same bolt-cycle un-ADS ----------
     await page.evaluate(`__hc.gun('hunting_rifle')`); await sleep(400);
     let c0=await S(); ck('plain rifle KEEPS scope lens', c0.scopeLens===true, c0);
     await page.evaluate(`__hc.aim(true)`); await sleep(900);
     await page.evaluate(`__hc.shoot()`); await sleep(300);
-    let c1=await S(); ck('scoped rifle: ADS survives fire too', c1.ads===true && c1.adsT>0.8, c1);
+    let c1=await S(); ck('scoped rifle: bolt cycle drops ADS too', c1.ads===false && c1.boltT>0.3, c1);
     ck('scoped ADS: no holo reticle', !c1.retVis, c1);
     await page.evaluate(`__hc.aim(false)`);
 
