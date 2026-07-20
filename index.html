@@ -1459,14 +1459,15 @@ const pineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, sid
   '  vec3 pine=uPine*shade;',
   '  float t=clamp((elev-bottom)/max(top-bottom,1e-4),0.0,1.0);',                                // 0 at the fog-bound base → 1 at the tips (which poke a touch clearer of the haze)
   '  float fog=clamp(uFogAmt*(1.0-0.18*t),0.0,1.0);',                                            // fade the whole silhouette into the SAME fog the terrain fades to (density-driven → matches weather/day)
+  '  fog=max(fog, 1.0-smoothstep(0.0,0.42,hs));',                                                // …and past the shore the taper drowns COMPLETELY in fog — the coastline dissolves into haze, never a hard green end (Ben 07-20)
   '  gl_FragColor=vec4(mix(pine,uFogCol,fog), smoothstep(0.2,0.45,m)); }'].join('\n') });        // SOLID silhouette with a quick edge fade — proportional alpha made coastal arcs read as pale half-ghosts against the sky
 const pineLayer=new THREE.Mesh(_horizGeo, pineMat); pineLayer.frustumCulled=false; pineLayer.renderOrder=-5; scene.add(pineLayer);   // over the ocean seam
 let _pineLastX=1e9, _pineLastZ=1e9, _pineLastRD=0;
 function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.position.copy(camera.position); const day=globalU.uDay.value;
   _uWater.value.setRGB(lerp(0.04,0.20,day), lerp(0.07,0.29,day), lerp(0.10,0.34,day));         // deep sea grey-blue, matches the real water surface
   _uSky.value.setRGB(lerp(0.12,0.60,day), lerp(0.15,0.68,day), lerp(0.20,0.78,day));            // horizon-band air the water melts into
-  { const dim=0.10+0.90*day, base=[0.078,0.157,0.071]; _uPine.value.setRGB(base[0]*dim, base[1]*dim, base[2]*dim);   // darkest-leaf colour; at NIGHT it goes near-BLACK silhouette (0.45 floor read as a glowing green slab against the dark sky — Ben's 09:27 screenshot)
-    const _wf=(typeof weather!=='undefined'?(weather.fog||0):0); pineMat.uniforms.uFogAmt.value=clamp(0.32 + 0.62*_wf, 0, 0.93);   // horizon treeline fades with WEATHER fog ONLY — decoupled from the render-distance terrain fog, which (now that fog tracks the shrunk current RD) was washing the treeline fully invisible. Clear day → visible; full bank → washed.
+  { const dim=0.10+0.90*day, base=[0.050,0.102,0.046]; _uPine.value.setRGB(base[0]*dim, base[1]*dim, base[2]*dim);   // DARK forest green matching the real edge trees (Ben 07-20 rev3); at NIGHT it goes near-BLACK silhouette
+    { const _ef=1-Math.exp(-Math.pow(CFG.RENDER_DIST*CK*scene.fog.density,2)); pineMat.uniforms.uFogAmt.value=clamp(_ef*0.93,0,0.97); }   // MATCH the farthest rendered chunks' fog wash exactly (exp2 at the wall distance — includes weather + day/night via density), held a hair under so the tip-gradient still reads (Ben 07-20: the backdrop must look like a continuation of the fogged edge trees, not a clean green cutout beside them)
     pineMat.uniforms.uCamY.value=camera.position.y; pineMat.uniforms.uVisD.value=CFG.RENDER_DIST*CK;   // per-frame (jumps/climbs shift the eye between mask recomputes; RD slider moves the wall)
     // the pine-visibility mask depends only on player position + render distance, so recompute the 128 rays +
     // re-upload the DataTexture only when the player has actually moved (or RD changed). <2 blocks of parallax
@@ -1484,9 +1485,9 @@ function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.p
         // along your LEFT and RIGHT periphery — and TAPER down the receding coastline into the horizon waterline
         // (Ben's sketch), not stand as a full-height wall across the beach. k: 1 landward/tangent → 0 at the
         // seaward cone edge; it scales BOTH the phantom forest's ground height and (via B) its canopy height.
-        const cosA=(dx*vx+dz*vz)/vd, k=clamp((0.88-cosA)/0.68,0,1), cont=cf*smooth(0.05,0.5,k);
+        const cosA=(dx*vx+dz*vz)/vd, k=clamp((0.62-cosA)/0.62,0,1), cont=cf*smooth(0.15,0.6,k);   // WIDER clear cone (±~52° of dead-seaward) → the phantom coast sits well back from the shore (Ben 07-20 rev3)
         let hs=vis>0?1:0;   // real forest arcs keep full canopy
-        if(cont>vis){ vis=cont; hMax=Math.max(hMax, CFG.SEA+1+Math.round(7*k)); hs=Math.min(1,0.12+0.88*k); }
+        if(cont>vis){ vis=cont; hMax=Math.max(hMax, CFG.SEA+1+Math.round(7*k*k)); hs=Math.min(1,0.05+0.95*k*k); }   // QUADRATIC taper — the treeline dives hard into the horizon at its seaward end instead of easing out
         _pineMaskData[i*4]=Math.round(vis*255); _pineMaskData[i*4+1]=Math.round(clamp(hMax/WH,0,1)*255); _pineMaskData[i*4+2]=Math.round(hs*255); }   // G = ground height, B = canopy-height scale → the silhouette descends the coast to the horizon
       _pineMask.needsUpdate=true; } } }
 function bakeSky(){ if(!USE_SKYCUBE) return; try{ const prevTone=renderer.toneMapping; renderer.toneMapping=THREE.NoToneMapping;   // bake LINEAR (background render tonemaps once, like the old dome)
@@ -3771,6 +3772,8 @@ function netUpdate(dt){ if(!NET.on)return;
     a.g.position.x+=(a.tx-a.g.position.x)*k; a.g.position.y+=(a.ty-a.g.position.y)*k; a.g.position.z+=(a.tz-a.g.position.z)*k; a.g.rotation.y=a.tyaw+Math.PI; a.g.visible=!a.dead;   // +π: the model's front (held-arm side) was pointing opposite the look direction → it rendered backward
     const spd=Math.hypot(a.g.position.x-a.px,a.g.position.z-a.pz)/Math.max(dt,1e-3); a.px=a.g.position.x; a.pz=a.g.position.z;   // walk cycle derived locally from movement
     const moving=spd>0.6; a.gait+=dt*Math.min(spd,6)*2.2; const sw=moving?Math.sin(a.gait)*0.6:0, sw2=moving?Math.sin(a.gait+Math.PI)*0.6:0;
+    if(moving && !a.dead){ a.stepAcc=(a.stepAcc||0)+spd*dt;   // TEAMMATE FOOTSTEPS (Ben 07-20): peers tread audibly at FULL volume, spatialized at their avatar — only your own steps are ducked
+      if(a.stepAcc>2.0){ a.stepAcc=0; if(typeof sfxStep==='function' && Math.hypot(a.g.position.x-player.pos.x,a.g.position.z-player.pos.z)<44) sfxStep(a.g.position, 1.0); } }
     a.legL.rotation.x=sw; a.legR.rotation.x=sw2; a.armL.rotation.x=sw2*0.7; a.armR.rotation.x=(a.held?-0.9:sw*0.7);   // right arm holds item forward when carrying
     if(a.head) a.head.rotation.x=clamp(-(a.tpitch||0),-0.7,0.7); }
   // the Wretch OWNER (host, or a captured player) broadcasts its pose; the host also broadcasts the animal snapshot + time
@@ -3992,6 +3995,9 @@ canvas.setAttribute('role','img'); canvas.setAttribute('aria-label','Hollowcraft
 //  HORROR — shared state (Director writes, Body + audio read)
 // =====================================================================
 const HORROR={ tier:1, menace:0, sinceScare:80, nightsSurvived:0, sightings:0, encounters:0, dusk:false };
+// SESSION SKILL LEDGER — the Wretch's read on THIS player's skill at THIS game, learned live: how encounters
+// went (routs vs captures), whether they shoot it whenever it shows itself, whether they go AFK. Feeds sneakConf.
+const SKILL={ routs:0, grabs:0, afkSpells:0, perfTotal:0, perfShot:0, idleT:0, _afkFlag:false, _perfWas:false };
 let _audioFrame=null, wretchVoice=null, setThreat=null, sfxStep=null, sfxAmbience=null;
 function updateAudio(dt){ if(_audioFrame) _audioFrame(dt); }
 
@@ -4695,6 +4701,13 @@ function updateWretch(dt){
   if(wretch.committed){ wretch.commitT+=dt; if((s.seenAge>4 && !s.heard && wretch.commitT>3) || wretch.wound>0.85) wretch.committed=false; }
   // routed damage decays if it's left alone (so chip damage across separate encounters doesn't stack forever)
   wretch.lastHitT=(wretch.lastHitT==null?99:wretch.lastHitT)+dt; if(wretch.lastHitT>10){ wretch.encDmg=0; wretch.routed=false; }
+  // ---- SESSION SKILL LEDGER — what it has LEARNED about THIS player, THIS session (drives sneak confidence) ----
+  { const mv=Math.abs(player.yaw-(SKILL._y==null?player.yaw:SKILL._y))+Math.abs(player.pitch-(SKILL._p==null?player.pitch:SKILL._p))>0.002
+      || Math.hypot(player.pos.x-(SKILL._x==null?player.pos.x:SKILL._x),player.pos.z-(SKILL._z==null?player.pos.z:SKILL._z))>0.02 || lmbHeld || rmbHeld;
+    SKILL._y=player.yaw; SKILL._p=player.pitch; SKILL._x=player.pos.x; SKILL._z=player.pos.z;
+    if(mv){ SKILL.idleT=0; SKILL._afkFlag=false; } else { SKILL.idleT+=dt; if(SKILL.idleT>75 && !SKILL._afkFlag){ SKILL._afkFlag=true; SKILL.afkSpells++; } } }   // 75s of nothing = an AFK spell it remembers
+  { const _rt=((typeof nav!=='undefined'&&nav.active&&nav.behavior==='terrorize')||brain.mode==='TERRORIZE');                    // performance accounting: did this player SHOOT the show?
+    if(SKILL._perfWas && !_rt){ SKILL.perfTotal++; if(wretch._terrorBroken)SKILL.perfShot++; } SKILL._perfWas=_rt; }
   // ---- STATE SELECT ----
   let st;
   if(wretch.routed){ st='FLEE'; }                                                       // took >100 dmg this encounter → terror rout (overrides the chase)
@@ -4728,20 +4741,26 @@ function updateWretch(dt){
   if(!(HORROR.huntArmed||wretch._summoned)){                                            // NIGHT ONE (grace): it ONLY stalks & watches — never commits, charges, or runs you down (FLEE from a shot still allowed)
     wretch.committed=false; if(st==='HUNT'||st==='CHASE'||st==='TRACK') st='STALK'; }
   wretch.state=st;
-  // ---- TIP-TOE SNEAK (Ben 07-20): a CONFIDENCE metric — how sure it is that YOU won't see it approach in the
-  // open: squarely behind your gaze + darkness + fog. Confident enough, it skips the screaming charge entirely
-  // and tip-toes straight up behind you — dead silent, footsteps at half volume — until it's within arm's reach.
+  // ---- TIP-TOE SNEAK CONFIDENCE (Ben 07-20 v2): built on the PLAYER'S ACTUAL SKILL at this game, learned live
+  // this session — not weather, not time of day. It STARTS fully confident; the player has to TEACH it caution.
+  //   - how have encounters gone? every rout (it broke and fled under fire) costs lasting confidence
+  //   - does this player shoot it whenever it shows itself? (terror performances that ended in gunfire)
+  //   - has it taken this player before? every landed grab restores its nerve
+  //   - does this player go AFK? remembered spells + being idle RIGHT NOW make it bold
+  // Works any day or night EXCEPT the day-1 grace (same arming gate as every aggressive act).
   { const ld=lookDir(), twx=wretch.pos.x-player.pos.x, twz=wretch.pos.z-player.pos.z, twd=Math.hypot(twx,twz)||1;
-    const behind=clamp(-(ld.x*twx+ld.z*twz)/twd,0,1);                                    // 1 = dead in your blind spot
-    const _py=(wretch._lastPyaw==null?player.yaw:wretch._lastPyaw), _pp=(wretch._lastPpitch==null?player.pitch:wretch._lastPpitch);   // PLAYER INATTENTION — you've been staring down one heading
-    wretch._lastPyaw=player.yaw; wretch._lastPpitch=player.pitch;
-    if(Math.abs(player.yaw-_py)+Math.abs(player.pitch-_pp) < dt*0.22) wretch._stareT=(wretch._stareT||0)+dt; else wretch._stareT=Math.max(0,(wretch._stareT||0)-dt*2);
-    const stare=clamp((wretch._stareT||0)/6,0,1);                                        // ~6s of a fixed gaze = it is SURE of you
-    const target=watched?0 : Math.min(1, 0.55*behind + 0.28*(1-day) + 0.17*(typeof weather!=='undefined'?(weather.fog||0):0) + 0.20*stare);
-    wretch.sneakConf=(wretch.sneakConf||0)+(target-(wretch.sneakConf||0))*Math.min(1,dt*1.5);   // conviction builds/breaks over ~1s, never flickers
+    const behind=clamp(-(ld.x*twx+ld.z*twz)/twd,0,1);                                    // trigger-gate geometry only (never walks across the middle of your view), NOT part of confidence
+    const shootRatio=SKILL.perfShot/Math.max(1,SKILL.perfTotal);
+    const target=watched?0 : clamp(1
+      - 0.22*Math.min(SKILL.routs,3)                                                     // it has been beaten off before — caution, up to -0.66
+      - 0.35*shootRatio                                                                  // a player who ALWAYS shoots the show is dangerous
+      + 0.15*Math.min(SKILL.grabs,3)                                                     // it has dragged this one to the dark before — prey is weak
+      + 0.20*Math.min(SKILL.afkSpells,2)                                                 // this player leaves the world unattended
+      + 0.30*clamp((SKILL.idleT-15)/30,0,1), 0.1, 1);                                    // …and is idle RIGHT NOW
+    wretch.sneakConf=(wretch.sneakConf==null?1:wretch.sneakConf)+(target-(wretch.sneakConf==null?1:wretch.sneakConf))*Math.min(1,dt*1.5);   // STARTS AT FULL CONFIDENCE; conviction shifts over ~1s, never flickers
     if(wretch._forceSneak){ wretch.sneaking=true; }                                       // QA override
-    else if(!wretch.sneaking){                                                            // activation radius 42 blocks (Ben 07-20)
-      if((st==='STALK'||((st==='HUNT'||st==='CHASE')&&!wretch.committed)) && !watched && near>6 && near<42 && wretch.sneakConf>0.62) wretch.sneaking=true; }
+    else if(!wretch.sneaking){                                                            // activation radius 42 blocks; armed days/nights only (not day 1)
+      if((st==='STALK'||((st==='HUNT'||st==='CHASE')&&!wretch.committed)) && (HORROR.huntArmed||wretch._summoned) && !watched && behind>0.1 && near>6 && near<42 && wretch.sneakConf>0.55) wretch.sneaking=true; }
     else if(watched || near<=5.5 || wretch.committed || wretch.sneakConf<0.4 || wretch.fleeing || wretch.routed) wretch.sneaking=false;   // at 5.5 blocks the point-blank commit takes over; caught looking → back to cover rules
     if(wretch.sneaking){ st='STALK'; wretch.state='STALK'; } }                            // the sneak OWNS the approach — it preempts the loud charge while it stays unseen
   const wantDemon = brain.mode==='STARVING' || (wretch.committed&&near<10) || (st==='HUNT'&&(HORROR.tier>=3||reckless)) || wretch.dragging;
@@ -5001,7 +5020,7 @@ function placeWretch(dt,moving){
   if(P.eyeMat.emissive){ if(dem) P.eyeMat.emissive.setRGB(eg*2.2, eg*0.08, eg*0.04); else P.eyeMat.emissive.setRGB(eg*0.30, eg*0.28, eg*0.20); }
   if(wretch._eyeGlowSpr){ if(wretch._eyeGlowSpr.parent)wretch._eyeGlowSpr.parent.remove(wretch._eyeGlowSpr); wretch._eyeGlowSpr=null; }   // REMOVED the free-floating red glow sprite (it hovered on the head, not the eyes, and glowed even when idle)
 }
-function beginDrag(){ wretch.dragging=true; wretch.grabPhase='jumpscare'; wretch.jumpscareT=0; wretch.dragT=0; wretch.struggle=0; wretch._mash=0; wretch.dragPath=null;   // fresh route built at haul time
+function beginDrag(){ wretch.dragging=true; wretch.grabPhase='jumpscare'; wretch.jumpscareT=0; wretch.dragT=0; wretch.struggle=0; wretch._mash=0; wretch.dragPath=null; SKILL.grabs++;   // fresh route built at haul time; a landed grab feeds its confidence — this prey CAN be taken
   wretch.captured=true; wretch.thought='I have you now. To the dark, to the deep.'; if(typeof logStim==='function')logStim('captured_player');   // it KNOWS it has taken the player (feed + memory); reasoning pauses until the ritual resolves
   player.grabbed=true; player.vel.set(0,0,0); wretch.committed=false;
   if(typeof reasonEvent==='function')reasonEvent('ritual_start');                  // special event → interpret immediately
@@ -5161,7 +5180,8 @@ function dunCrawl(dt,rm,speed,dance){   // rapid random surface-to-surface scram
 function treeHugPose(P,dt){ const t=wretch.phase, side=wretch._peekSide||1;
   const out=0.5+0.5*(0.5+0.5*Math.sin(t*0.8));                                            // the HEAD eases out past the edge, then draws back
   const breath=Math.sin(t*1.6)*0.02;
-  for(let i=0;i<P.spine.length;i++){ const f=(i+1)/P.spine.length; P.spine[i].rotation.set(0.05+breath, -side*0.05*f, -side*0.06*f); }   // upright, tucked slightly AWAY from the edge (shoulders stay behind the trunk)
+  P.pelvis.rotation.set(0, side*(0.28+0.42*out), 0);                                      // the HIPS literally rotate toward the open side (Ben 07-20) — the whole torso corkscrews out from behind the trunk with the peek pulse
+  for(let i=0;i<P.spine.length;i++){ const f=(i+1)/P.spine.length; P.spine[i].rotation.set(0.05+breath, -side*0.05*f + side*0.30*out*f, -side*0.06*f); }   // lower spine stays tucked; upper links twist OUT with the pulse, carrying the shoulders past the bark
   P.neck.rotation.set(0.02+breath, side*(0.9+0.5*out), -side*0.14*out);                   // crane the whole neck hard around the edge — this carries the head out past the trunk
   if(P.head)P.head.rotation.set(0.05, side*(0.35+0.2*out), side*0.05);                    // head turned to fix on the player
   for(let ai=0;ai<P.arms.length;ai++){ const c=P.arms[ai], s=ai?1:-1; c[1].rotation.set(-0.12+breath, 0, s*0.08); if(c[2])c[2].rotation.set(-0.5,0,-s*0.12); for(let i=3;i<c.length;i++)c[i].rotation.set(-0.12,0,0); }   // arms hang tucked against the body, hidden — no reaching to the front
@@ -7298,7 +7318,7 @@ function hurtWretch(dmg){ if(wretch.hp==null){ wretch.hpMax=2700; wretch.hp=2700
   if(_freshEnc) HORROR.shotEnc=(HORROR.shotEnc||0)+1;                                     // count distinct encounters where you've shot it
   if(wretch.encDmg>100 && !wretch.routed && !wretch._dunRetreat && !wretch.boss){   // the boss NEVER flees — it fights to the death
     if(wretch._dunHunt){ wretch._dunRetreat=true; wretch.committed=false; wretch.encDmg=0; wretch._fleeScream=false; wretchVoice&&wretchVoice('scream',wretch.pos); wretch.thought='Stung! Back to the heart of my dark — I will come at you again.'; }   // in its lair it NEVER flees to the woods — it withdraws to the main room, then hunts anew
-    else { wretch.routed=true; wretch.committed=false; wretch.state='FLEE'; wretch._fleeScream=false; if(wretch.dragging&&typeof endDrag==='function')endDrag(false); wretchVoice&&wretchVoice('scream',wretch.pos); wretchVoice&&wretchVoice('shriek',wretch.pos); } }   // out in the world: 100+ damage in one encounter → it breaks and BOLTS for the treeline
+    else { wretch.routed=true; SKILL.routs++; wretch.committed=false; wretch.state='FLEE'; wretch._fleeScream=false; if(wretch.dragging&&typeof endDrag==='function')endDrag(false); wretchVoice&&wretchVoice('scream',wretch.pos); wretchVoice&&wretchVoice('shriek',wretch.pos); } }   // out in the world: 100+ damage in one encounter → it breaks and BOLTS — and it REMEMBERS being beaten (skill ledger)
   if(!wretch.boss && !wretch._terrorBroken && ((typeof nav!=='undefined'&&nav.active&&nav.behavior==='terrorize')||(typeof brain!=='undefined'&&brain.mode==='TERRORIZE'))){
     wretch._terrorBroken=true;                                                            // SHOT MID-PERFORMANCE → the dance is OVER for good…
     if((HORROR.huntArmed||wretch._summoned) && wretch.wound<=0.6){ wretch.committed=true; wretch.commitT=0; wretch.crawl=Math.max(wretch.crawl,0.75); } }   // …and on an armed night it COMES FOR YOU right now (badly wounded → the normal flee rules answer instead)
@@ -8540,15 +8560,16 @@ function tone(dest,o){ if(!AC)return; try{ const t=AC.currentTime+(o.delay||0), 
 const FOOT={ grass:[2400,1.1,0.06,0.32], stone:[1500,6,0.08,0.6], wood:[900,8,0.11,0.5], sand:[1800,0.8,0.07,0.3], water:[700,0.6,0.18,0.4], dirt:[1600,1.5,0.07,0.4] };
 function matAt(x,y,z){ const b=getBlock(x,y,z); if(b===AIR)return 'grass'; if(b===WATER)return 'water'; const n=B[b]?B[b].name:''; if(n==='stone'||n==='cobble'||n==='mossy'||n==='iron_ore'||n==='coal_ore')return 'stone'; if(n==='planks'||n==='log'||n==='bookshelf')return 'wood'; if(n==='sand'||n==='gravel')return 'sand'; if(n==='grass')return 'grass'; return 'dirt'; }
 function matUnder(){ return matAt(player.pos.x,player.pos.y-0.2,player.pos.z); }
-sfxStep=()=>{ if(!AC)return; const mat=matUnder();
-  { const _smp=mat==='dirt'?'grass':mat; if(playSample(_smp, {x:player.pos.x,y:player.pos.y,z:player.pos.z}, _smp==='sand'?0.24:0.32))return; }   // per-material footstep sample takes priority; wet sand plays quieter than grass
-  const P=panAt(player.pos.x,player.pos.y,player.pos.z), r=0.9+Math.random()*0.2;
-  tone(P,{f:(88+Math.random()*16)*r,type:'sine',dur:0.085,vol:0.09,to:52});                        // universal soft heel-thud (the "weight")
-  if(mat==='grass'){ burst(P,0.075,0.055,3200*r,1.1,1500,'highpass'); }                             // dry-grass swish
-  else if(mat==='stone'){ burst(P,0.13,0.028,2100*r,7,900); tone(P,{f:170*r,type:'triangle',dur:0.045,vol:0.05,to:110}); }   // sharp click + little ring
-  else if(mat==='wood'){ tone(P,{f:205*r,type:'triangle',dur:0.11,vol:0.13,to:150}); burst(P,0.05,0.04,880,4,520); }          // hollow plank knock
-  else if(mat==='sand'){ burst(P,0.10,0.07,560*r,0.7,300,'lowpass'); }                              // soft muffled scuff
-  else { burst(P,0.075,0.05,1300*r,1.4,600); } };                                                   // dirt
+sfxStep=(pos,mul)=>{ if(!AC)return; const pp=pos||player.pos, m=(mul!=null?mul:0.7);   // no args = YOUR OWN tread at 70% (-30% locally, Ben 07-20); peers pass their avatar position at full volume — the SAME sound, fully spatial
+  const mat=pos?matAt(pp.x,pp.y-0.2,pp.z):matUnder();
+  { const _smp=mat==='dirt'?'grass':mat; if(playSample(_smp, {x:pp.x,y:pp.y,z:pp.z}, (_smp==='sand'?0.24:0.32)*m))return; }   // per-material footstep sample takes priority; wet sand plays quieter than grass
+  const P=panAt(pp.x,pp.y,pp.z), r=0.9+Math.random()*0.2;
+  tone(P,{f:(88+Math.random()*16)*r,type:'sine',dur:0.085,vol:0.09*m,to:52});                        // universal soft heel-thud (the "weight")
+  if(mat==='grass'){ burst(P,0.075*m,0.055,3200*r,1.1,1500,'highpass'); }                             // dry-grass swish
+  else if(mat==='stone'){ burst(P,0.13*m,0.028,2100*r,7,900); tone(P,{f:170*r,type:'triangle',dur:0.045,vol:0.05*m,to:110}); }   // sharp click + little ring
+  else if(mat==='wood'){ tone(P,{f:205*r,type:'triangle',dur:0.11,vol:0.13*m,to:150}); burst(P,0.05*m,0.04,880,4,520); }          // hollow plank knock
+  else if(mat==='sand'){ burst(P,0.10*m,0.07,560*r,0.7,300,'lowpass'); }                              // soft muffled scuff
+  else { burst(P,0.075*m,0.05,1300*r,1.4,600); } };                                                   // dirt
 // ===== WRETCH FOOTSTEPS v2 — fired by the ANIMATION layer at the exact frame a foot plants (see the beat
 // hook in the gait code), so if it visibly steps it audibly steps — no separate cadence clock, no state gates
 // silently dropping the sound while it runs. Fixes, by symptom:
@@ -8582,7 +8603,8 @@ function wretchFootfall(amp, gallop, st, force){ window.__ffBeat=(window.__ffBea
   const creepMul= running?1 : (1-(wretch.stealth||0)*0.55);                    // a careful tread is QUIET, never silently muted
   let vol=fade*creepMul*(charging?1.15:running?0.8:0.38)*(0.8+Math.random()*0.35)*(force?1:w);
   vol*=(wretch.sneaking?1:2);                                                // 2x volume overall (Ben 07-20); the tip-toe treads at the old pre-boost standard — still audible, just unboosted
-  if(vol<0.02)return;
+  vol=Math.max(vol, 0.055*fade*(wretch.sneaking?0.5:1));                     // NEVER fully silent inside its radius (Ben 07-20: if it moves, it sounds) — the old <0.02 mute-gate dropped careful treads at 5-8 blocks entirely
+  if(vol<0.006)return;
   const occl=stepOcclusion(); vol*=1-0.5*occl;
   window.__ffPlay=(window.__ffPlay||0)+1;                                      // QA counter: steps that actually sounded
   const p=stepPanAt(wretch.pos.x, wretch.pos.y+0.1, wretch.pos.z);
@@ -9304,6 +9326,8 @@ window.__hc={
     isBook:!!(ITEMS.field_guide&&ITEMS.field_guide.book), hasGuideFlag:!!(ITEMS.field_guide&&ITEMS.field_guide.guide), guideGone:(typeof toggleGuide==='undefined'),
     starter:STARTER_ITEMS.some(s=>s[0]==='field_guide'), held:view.id, bookHeld:!!(view.mesh&&view.mesh.userData.bookHeld), logN:IMPORTANT_LOG.length }; }catch(e){ return {err:e.message}; } },   // QA: field-guide book state (optionally jump to page n)
   bookPng(){ try{ return _bookCv?_bookCv.toDataURL('image/png'):null; }catch(e){ return null; } },   // QA: current baked page as a png data URI
+  arm(){ try{ HORROR.huntArmed=true; return true; }catch(e){ return e.message; } },                    // QA: end the day-1 grace
+  skill(o){ try{ if(o)Object.assign(SKILL,o); return Object.assign({},SKILL); }catch(e){ return {err:e.message}; } },   // QA: read/inject the session skill ledger
   sneak(on){ try{ if(on!=null)wretch._forceSneak=!!on;                                                // QA: force/release the tip-toe sneak + read its full state
     return { conf:+((wretch.sneakConf||0)).toFixed(2), sneaking:!!wretch.sneaking, blend:+((wretch._snB||0)).toFixed(2), state:wretch.state, crawl:+((wretch.crawl||0)).toFixed(2),
       arm:+(((wretch.P&&wretch.P.arms&&wretch.P.arms[0]&&wretch.P.arms[0][1])?wretch.P.arms[0][1].rotation.x:0)).toFixed(2) }; }catch(e){ return {err:e.message}; } },

@@ -32,15 +32,25 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     await sleep(2000);
     const fails=[]; const ck=(name,cond,info)=>{ if(!cond) fails.push(name+' :: '+JSON.stringify(info)); };
 
-    // A: summon, park it dead in the blind spot (player looks -z; +z is behind), night boot
-    await page.evaluate(`(()=>{ __hc.summon(); __hc.put(0, 14); })()`);
+    // A: summon armed (grace ended), park it dead in the blind spot (player looks -z; +z is behind)
+    await page.evaluate(`(()=>{ __hc.arm(); __hc.summon(); __hc.put(0, 14); })()`);
     await page.waitForFunction(`(() => { try { return __hc.st().wa===true; } catch(e){ return false; } })()`, { timeout:30000 });
-    for(let i=0;i<14;i++){ await page.evaluate(`__hc.put(0, 14)`); await sleep(250); }   // hold it behind while conviction builds
+    for(let i=0;i<8;i++){ await page.evaluate(`__hc.put(0, 14)`); await sleep(250); }   // hold it behind
     const a = await page.evaluate(`__hc.sneak()`);
-    ck('confidence climbs in the blind spot at night', a.conf>0.55, a);
+    ck('STARTS confident (skill model, no fog/darkness terms)', a.conf>0.55, a);
 
     // B: organic trigger (no force) — sneaking flips on and owns STALK
     ck('sneak triggered organically', a.sneaking===true && a.state==='STALK', a);
+
+    // B2: a skilled player TEACHES it caution — 3 routs + always-shoots-the-show → conviction collapses, sneak refused
+    await page.evaluate(`__hc.skill({routs:3, perfShot:4, perfTotal:4, grabs:0, afkSpells:0, idleT:0})`);
+    await sleep(2600);
+    const b2 = await page.evaluate(`__hc.sneak()`);
+    ck('learned caution: conviction collapses vs a proven shooter', b2.conf<0.4 && b2.sneaking===false, b2);
+    await page.evaluate(`__hc.skill({routs:0, perfShot:0, perfTotal:0})`);   // reset for the anim checks
+    for(let i=0;i<10;i++){ await page.evaluate(`__hc.put(0, 14)`); await sleep(250); }   // conviction recovers → re-sneaks
+    const b3 = await page.evaluate(`__hc.sneak()`);
+    ck('confidence recovers once the ledger clears', b3.sneaking===true, b3);
 
     // C: animation engages while it walks in — blend up, arm raised toward the dead-wrist pose, body upright
     await sleep(1500);
