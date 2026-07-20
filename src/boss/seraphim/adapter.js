@@ -147,6 +147,41 @@ export function seraphHideBeam() {
 // Wing-fold override for the emergence choreography (null releases to the rig's preset).
 export function seraphFold(v) { if (_model) _model._foldOverride = (v == null ? null : v); }
 
+// BLOODY EYE HOLES (user spec 07-20): when a chain tears out of eye i (layout index, never 0/central),
+// the lids clamp shut over the socket (existing per-eye deathClose channel) and a dark-red wound disc is
+// mounted at the pivot station. Returns the eye's current world position (the chain's origin) or null.
+const _woundMat = new THREE.MeshBasicMaterial({ color: 0x4a0507, side: THREE.DoubleSide });
+const _wounds = new Set();
+export function seraphWoundEye(i) {
+  if (!_model || !_model.eyeBand) return null;
+  const e = _model.eyeBand.eyes.find(x => x.l.i === i && !x.isC);
+  if (!e || _wounds.has(i)) return null;
+  _wounds.add(i);
+  e.deathClose = 1;                                                  // the socket clamps shut
+  const disc = new THREE.Mesh(new THREE.CircleGeometry(e.l.size * 0.7, 14), _woundMat);
+  disc.position.copy(e.pivot.position); disc.position.z += e.l.size * 0.55;
+  _model.eyeBand.group.add(disc);
+  const g = _model.eyeBand.group; g.updateWorldMatrix(true, false);
+  _ep.copy(e.pivot.position).applyMatrix4(g.matrixWorld);
+  return { x: _ep.x, y: _ep.y, z: _ep.z, i };
+}
+export function seraphHealEyes() {                                    // stage end — the sockets reopen, wounds vanish
+  if (!_model || !_model.eyeBand) return;
+  for (const e of _model.eyeBand.eyes) e.deathClose = 0;
+  const g = _model.eyeBand.group;
+  for (let k = g.children.length - 1; k >= 0; k--) { const c = g.children[k]; if (c.material === _woundMat) g.remove(c); }
+  _wounds.clear();
+}
+export function seraphFreshEyes() {                                   // which flank eyes are still unwounded (chain candidates)
+  if (!_model || !_model.eyeBand) return [];
+  const g = _model.eyeBand.group; g.updateWorldMatrix(true, false);
+  const out = [];
+  for (const e of _model.eyeBand.eyes) { if (e.isC || _wounds.has(e.l.i)) continue;
+    _ep.copy(e.pivot.position).applyMatrix4(g.matrixWorld);
+    out.push({ i: e.l.i, x: _ep.x, y: _ep.y, z: _ep.z }); }
+  return out;
+}
+
 // WING HITBOXES (user spec 07-20): three spheres along each of the eight wings' spans — a shot that lands
 // here has a 10% chance of wounding (the game rolls it); the EYES remain the 100% targets.
 const _wp2 = new THREE.Vector3();
