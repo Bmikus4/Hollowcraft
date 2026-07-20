@@ -44,7 +44,7 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
 
     // B2: a skilled player TEACHES it caution — 3 routs + always-shoots-the-show → conviction collapses, sneak refused
     await page.evaluate(`__hc.skill({routs:3, perfShot:4, perfTotal:4, grabs:0, afkSpells:0, idleT:0})`);
-    await sleep(2600);
+    for(let i=0;i<11;i++){ await page.evaluate(`__hc.put(0, 26)`); await sleep(250); }   // held out past grab range while conviction drains
     const b2 = await page.evaluate(`__hc.sneak()`);
     ck('learned caution: conviction collapses vs a proven shooter', b2.conf<0.4 && b2.sneaking===false, b2);
     await page.evaluate(`__hc.skill({routs:0, perfShot:0, perfTotal:0})`);   // reset for the anim checks
