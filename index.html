@@ -1434,18 +1434,19 @@ const pineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, sid
   'float treeline(float az){ return nz(az*46.0)*0.5+nz(az*110.0)*0.3+nz(az*210.0)*0.2; }',       // canopy-height noise 0..1
   'void main(){ vec3 d=normalize(vPos); float elev=d.y; float az=atan(vPos.z,vPos.x);',
   '  vec4 msk=texture2D(uMask, vec2((az+3.14159265)/6.2831853, 0.5));',
-  '  float m=msk.r; if(m<0.2) discard;',   // this azimuth looks over the sea/shore (or only a shallow land-run) → no pines; the higher cutoff trims faint fringe so the treeline ends cleanly instead of smearing around the horizon
-  '  float hT=msk.g*'+WH.toFixed(1)+'-uCamY;',                                                   // terrain top just past the fog wall, relative to the eye (per-azimuth, sampled alongside the mask)
+  '  float m=msk.r; if(m<0.2) discard;',   // this azimuth has no FOREST running on past the wall (sea/beach/bare rock) → no pines; cutoff trims faint fringe so the treeline ends cleanly
+  '  float dist=uVisD+msk.b*128.0;',                                                             // true distance of the anchoring sample (B channel) — heights project at the range they were found, not at the wall
+  '  float hT=msk.g*'+WH.toFixed(1)+'-uCamY;',                                                   // forest terrain top past the fog wall, relative to the eye (per-azimuth, sampled alongside the mask)
   '  float spike=pow(abs(sin(az*260.0)),6.0)*7.0;',
-  '  float hTree=(10.0+treeline(az)*24.0+spike)*m;',                                             // canopy BLOCKS above that terrain — the same 18..31-block scale as the real pines it stands in for
+  '  float hTree=(10.0+treeline(az)*24.0+spike)*(0.35+0.65*m);',                                 // canopy BLOCKS above that terrain — the same 18..31-block scale as the real pines it stands in for; shrinks only near arc ends
   '  float tip=hT+hTree;',
-  '  float base=hT/sqrt(uVisD*uVisD+hT*hT), top=tip/sqrt(uVisD*uVisD+tip*tip), bottom=base-0.18;',   // WORLD-anchored elevations: the silhouette rides the real terrain height at the render edge (so it stands ABOVE the rendered treeline) instead of a fixed screen angle that hid it below the world edge
+  '  float base=hT/sqrt(dist*dist+hT*hT), top=tip/sqrt(dist*dist+tip*tip), bottom=base-0.22;',   // WORLD-anchored elevations: the silhouette stands ON the real horizon forest floor instead of a fixed screen angle that hid it below the world edge
   '  if(elev>top || elev<bottom) discard;',                                                      // jagged silhouette band; green skirt extends below the terrain join (terrain in front occludes it)
   '  float shade=0.72+nz(az*320.0)*0.28;',
   '  vec3 pine=uPine*shade;',
   '  float t=clamp((elev-bottom)/max(top-bottom,1e-4),0.0,1.0);',                                // 0 at the fog-bound base → 1 at the tips (which poke a touch clearer of the haze)
   '  float fog=clamp(uFogAmt*(1.0-0.18*t),0.0,1.0);',                                            // fade the whole silhouette into the SAME fog the terrain fades to (density-driven → matches weather/day)
-  '  gl_FragColor=vec4(mix(pine,uFogCol,fog), m); }'].join('\n') });
+  '  gl_FragColor=vec4(mix(pine,uFogCol,fog), smoothstep(0.2,0.45,m)); }'].join('\n') });        // SOLID silhouette with a quick edge fade — proportional alpha made coastal arcs read as pale half-ghosts against the sky
 const pineLayer=new THREE.Mesh(_horizGeo, pineMat); pineLayer.frustumCulled=false; pineLayer.renderOrder=-5; scene.add(pineLayer);   // over the ocean seam
 let _pineLastX=1e9, _pineLastZ=1e9, _pineLastRD=0;
 function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.position.copy(camera.position); const day=globalU.uDay.value;
@@ -4632,7 +4633,10 @@ function updateWretch(dt){
   else if(wretch.fleeing){ st='FLEE'; }                                                 // LATCH: once it bolts it commits to the FULL retreat — never reverts to a calm walk-back the instant you look away
   else if(wretch.committed){ st = s.seen ? (near<6?'HUNT':'CHASE') : 'TRACK'; }          // UNINTERRUPTIBLE chase once committed
   else if(wretch.wound>0.5 || (day>0.64 && !hungry && s.seen && near<52)) st='FLEE';    // hurt, or caught in bright daylight WHILE it can see you
-  else if(watched && near<52) st=(wretch.observed>(2.2+(HORROR.rage||0)*4))?'FLEE':'STALK';   // being LOOKED AT → hold & loom; furious nights it ENDURES your stare far longer before bolting (n1 ~2s → n3 ~6s)
+  else if(watched && near<52){ const endure=2.2+(HORROR.rage||0)*4;                     // being LOOKED AT → hold & loom, ENDURING your stare (n1 ~2s → n3 ~6s)…
+    if(wretch.observed<=endure) st='STALK';
+    else if((HORROR.huntArmed||wretch._summoned) && wretch.wound<=0.4 && day<0.78){ wretch.committed=true; wretch.commitT=0; st=near<6?'HUNT':'CHASE'; }   // …then the STARE-DOWN BREAKS INTO THE CHARGE (armed nights, healthy): it ran up for a reason. Fixes run-up→sit→bolt passivity (Ben 07-20)
+    else st='FLEE'; }                                                                   // grace night / wounded / bright day → outstared, it still bolts
   else if(!watched && s.seen && near<26*fogAggro) st='HUNT';                            // close + unseen + in view → CHARGE (fog widens the pounce window)
   else if(!watched && s.seen && near<48*fogAggro) st='CHASE';                           // mid + unseen + in view → run it down
   else if(s.seenAge>3 && (s.scent||s.heard) && s.believedDist<80) st='TRACK';           // lost sight → follow scent/sound
@@ -4775,6 +4779,12 @@ function updateWretch(dt){
         wretch._tunPursue = wInTun;                                            // ceiling-crawl only in the tunnels, never the open hall
       } else { wretch._tunPursue=false; wretch._dropDescend=false; wretch._cryptAscend=false; wretch._playerInLair=false; wretch._lairKnown=false; }
     } else { wretch._tunPursue=false; wretch._dropDescend=false; } }
+  // SEA DISCIPLINE (Ben 07-20): the open water is for DISTANT hauntings only. With prey inside ~44 blocks, a
+  // wretch standing in the sea abandons whatever sent it there (stray fallback targets, will-chosen shoreline
+  // destinations) and makes straight for tree cover — normal cover rules resume the moment it's on land.
+  if(!wretch.committed && !wretch.fleeing && !wretch.dragging && near<44 && surfaceH(Math.floor(ex),Math.floor(ez))<=CFG.SEA){
+    const c=findCoverNear(cam.x,cam.z, Math.max(12, near*0.55));
+    if(c){ wretch.target.set(c.x,c.gy,c.z); speed=Math.max(speed,4.5); freeze=false; } }
   wretch.posture = wretch._scooping ? 'CROUCH' : wretch._tunPursue ? 'CRAWL' : (st==='HUNT'||st==='CHASE'||st==='TRACK'||st==='FLEE')?'CRAWL' : (s.onWall&&wretch.crawl>0.6)?'CLING'
     : (watched&&near<18)?'PRESS' : (near<26?'CROUCH':'STAND');                        // posture axis → pose + stealth
 
@@ -7169,6 +7179,9 @@ function fireGun(){ const held=heldSlot(), it=held?ITEMS[held.id]:null, bolt = i
       const head = hy>3.2 && r2<0.85*0.85, body = hy>-0.3 && hy<4.8 && r2<1.1*1.1;
       if(head||body){ const _wd=(bolt?(head?100:70):rev?(head?60:38):(head?55:40)) - (sup?20:0); if(!NET.on||wretchOwner()===NET.id)hurtWretch(_wd); else netSend({t:'hw',v:_wd});   // co-op: only the owner mutates HP; guests request the hit
         spawnParticles(px,py,pz,head?0xff3020:0x3a0608,head?16:12,2,0.6); if(head)flashName('headshot'); return true; } }
+    for(let bi=0;bi<skyBirds.length;bi++){ const b=skyBirds[bi]; if(b.dead)continue; const bp=b.m.position, br=0.9*b.m.scale.x;   // SKY BIRDS die to gunfire (Ben 07-20) — generous sphere, they're small and far
+      const dxb=px-bp.x, dyb=py-bp.y, dzb=pz-bp.z; if(dxb*dxb+dyb*dyb+dzb*dzb < br*br){ b.dead=true; b.vy=1.5; b.spin=(Math.random()-0.5)*7;
+        spawnParticles(bp.x,bp.y,bp.z,0x191920,14,2.2,0.9); flashName('bird down'); return true; } }
     let an=null; for(const a of animals){ if(a.dead)continue; const hh=(ANIMALS[a.type]?ANIMALS[a.type].h:1)*1.15, dxa=px-a.x, dza=pz-a.z, dya=py-a.y; if(dxa*dxa+dza*dza < 0.42 && dya>-0.25 && dya<hh+0.4){ an=a; break; } }   // vertical CAPSULE → tall villagers/deer get hit anywhere up the body
     if(an){ hurtAnimal(an,animDmg); spawnParticles(px,py,pz,0xcc2018,8,1.6,0.5); return true; }
     if(NET.on && !NET.host){ for(const _k in _netAnimals){ const _e=_netAnimals[_k]; const _dx=px-_e.x,_dz=pz-_e.z,_dy=py-_e.y;   // GUEST: the real animals[] is empty here → hit the host's mirrored animals and request the damage
@@ -7564,6 +7577,14 @@ function updateSkyBirds(dt){ _birdT-=dt;
     for(let i=0;i<n;i++){ const b=makeBird(); b.position.set(cx+(Math.random()-0.5)*10, hy+(Math.random()-0.5)*6, cz+(Math.random()-0.5)*10); b.scale.setScalar(1.5+Math.random()*1.2);
       skyBirdGroup.add(b); skyBirds.push({m:b,dir,spd:7+Math.random()*4,ph:Math.random()*6.283,life:45}); } }
   for(let i=skyBirds.length-1;i>=0;i--){ const b=skyBirds[i]; b.life-=dt; b.ph+=dt*7;
+    if(b.dead){ b.vy-=25*dt; b.m.position.y+=b.vy*dt;                                     // SHOT DEAD — it tumbles out of the sky, wings gone limp
+      b.m.position.x+=Math.sin(b.dir)*b.spd*0.25*dt; b.m.position.z+=Math.cos(b.dir)*b.spd*0.25*dt;
+      b.m.rotation.z+=b.spin*dt; b.m.userData.wl.rotation.z=1.25; b.m.userData.wr.rotation.z=-1.25;
+      const gy=Math.max(surfaceH(Math.floor(b.m.position.x),Math.floor(b.m.position.z)), CFG.SEA)+1;
+      if(b.m.position.y<=gy){ spawnParticles(b.m.position.x,gy,b.m.position.z,0x191920,8,1.4,0.6);   // lands (or splashes) → a feather where it fell
+        if(gy>CFG.SEA+1)spawnDrop('feather',1,b.m.position.x,gy+0.3,b.m.position.z); else sfxSplash&&sfxSplash(b.m.position.x,gy,b.m.position.z,0.5);
+        skyBirdGroup.remove(b.m); skyBirds.splice(i,1); }
+      continue; }
     b.m.position.x+=Math.sin(b.dir)*b.spd*dt; b.m.position.z+=Math.cos(b.dir)*b.spd*dt; b.m.rotation.y=-b.dir;
     const flap=Math.sin(b.ph)*0.6+0.1; b.m.userData.wl.rotation.z=flap; b.m.userData.wr.rotation.z=-flap;
     if(b.life<=0 || Math.hypot(b.m.position.x-player.pos.x,b.m.position.z-player.pos.z)>210){ skyBirdGroup.remove(b.m); skyBirds.splice(i,1); } } }
