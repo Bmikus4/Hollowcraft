@@ -423,6 +423,12 @@ function buildCoreMass(bodyMat, count = 46, voxLen = 7) {
     spots.push({ th, r, len: 0.52, layer: 0, stain: 0.78 });                                    // seed at the wing's inward edge
     for (const s of [1, -1]) spots.push({ th: th + s * 0.26, r: r * 0.76, len: 0.40, layer: 1, stain: 0.85 });  // left+right, shifted inward
   }
+  // FIX-4 (user spec 07-20): a full ring of SMALL red feathers directly behind the outermost (seed) row…
+  for (let i = 0; i < 20; i++) { const th = i / 20 * 6.283 + 0.157;
+    spots.push({ th, r: 0.345 * H, len: 0.30, layer: 3, stain: 0.94 }); }
+  // …and MASSIVE red plumes behind that — the outer corona the whole mantle stands on
+  for (let i = 0; i < 12; i++) { const th = (i + 0.5) / 12 * 6.283;
+    spots.push({ th, r: 0.42 * H, len: 1.15, layer: 4, stain: 0.88 }); }
   while (spots.length < n) {                                                                     // the rest fill the inside
     const th = Math.random() * 6.283, rr = Math.sqrt(Math.random());
     spots.push({ th, r: (0.03 + rr * 0.17) * H, len: 0.26 + Math.random() * 0.10, layer: 2, stain: 0.90 });
@@ -555,7 +561,7 @@ export class SeraphimModel {
     coreMat.userData.seraphRole = 'body';
     this._bodyMats.push(coreMat);
     this._coreMat = coreMat;
-    const cm = buildCoreMass(coreMat, this.quality === 'low' ? 32 : 46, 6);   // shorter voxel feathers → hanging plumage, not slabs
+    const cm = buildCoreMass(coreMat, this.quality === 'low' ? 64 : 78, 6);   // shorter voxel feathers → hanging plumage, not slabs (+32 = the FIX-4 small ring + massive corona)
     this.coreMass = cm.mesh;
     this.coreMass.position.set(0, 0, H * 0.02);   // FIX-3 (user spec 07-20): the mantle SEED plane sits AT the central eye's midpoint (its fill layers still step backward), matching the wing roots — one feather depth, the eyes lead it
     this.core.add(this.coreMass);

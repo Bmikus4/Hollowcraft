@@ -44,9 +44,11 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
       ck('game-scale radius sane (2.5-6m central)', c[0] && c[0].r>2.5 && c[0].r<6, c[0]);
     }
 
-    // D: screenshot for the feather-plane check (aim the camera at it)
+    // D: screenshot for the feather-plane check (aim the camera at it; let the flat-face slerp settle)
     await page.evaluate(`__hc.aimEye()`);
-    await sleep(400);
+    await sleep(2600);
+    await page.evaluate(`__hc.aimEye()`);
+    await sleep(200);
     await page.screenshot({ path: path.join(OUT,'ceraphim-feathers.png') });
 
     // B: shoot the central eye — hp must drop

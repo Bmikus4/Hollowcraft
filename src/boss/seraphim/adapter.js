@@ -100,12 +100,25 @@ export function seraphOff(/* wretch */) {
 
 // Per-frame drive (owner AND guests). All inputs come from mirrored wretch signals.
 // dt seconds; opts { wretch, camera, elapsed }.
+const _qPrev = new THREE.Quaternion();
+const _qGoal = new THREE.Quaternion();
 export function seraphAnimate(dt, opts = {}) {
   if (!_model) return;
   const { wretch, camera, elapsed } = opts;
   if (elapsed != null) _elapsed = elapsed;
 
-  if (camera) _model.lookAt(camera.position);
+  if (camera) {
+    // FLAT-FACE THE PLAYER (user spec 07-20): _model.lookAt only steers the EYES — the body was yaw-only from
+    // wretch.group, so overhead flight showed the underside. Object3D.lookAt computes the exact local quaternion
+    // (it refreshes ancestor matrices internally, so the parent's faceLock yaw + flight lean are compensated),
+    // then we slerp toward it so the great disc turns with mass instead of snapping.
+    const o = _model.object3d;
+    _qPrev.copy(o.quaternion);
+    o.lookAt(camera.position);
+    _qGoal.copy(o.quaternion);
+    o.quaternion.copy(_qPrev).slerp(_qGoal, 1 - Math.exp(-(dt || 0.016) * 2.5));
+    _model.lookAt(camera.position);          // the seven eyes converge on you on top of the body facing
+  }
 
   const mode = wretch && wretch._bossMode;
   const flap = mode === 'swoop' ? 1.0 : mode === 'orbit' ? 0.6 : 0.4;
