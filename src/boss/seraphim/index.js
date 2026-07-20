@@ -389,8 +389,13 @@ function trimWingFeathers(wing, cfg, voxLen) {
   return lowGeo.userData.triangles || 0;
 }
 
-// core feather mass: ONE InstancedMesh, cone-scatter of dense small rust feathers
-// hanging under the eye band, sharing the body material (canon §5). ≤ ~10k tris.
+// core feather mass: ONE InstancedMesh sharing the body material (canon §5). ≤ ~10k tris.
+// FIX-2 LAYOUT (user spec): a radial MANTLE that sits BEHIND the eye band, echoing the
+// eight outer wings — one SEED feather at the inward edge (root) of each wing, then a
+// flanker to each seed's left and right stepped slightly inward, and every remaining
+// feather filling the inner disc. All feathers lie in a back plane (flat face forward,
+// tips pointing radially out), so the red reads as layered plumage instead of a blob,
+// and nothing can occlude the eyes.
 function buildCoreMass(bodyMat, count = 46, voxLen = 7) {
   const geo = buildFeather({ variantSeed: 3, droopK: 0.22, length: voxLen });
   const n = count;
@@ -399,27 +404,38 @@ function buildCoreMass(bodyMat, count = 46, voxLen = 7) {
   const aRestQuat = new Float32Array(n * 4);
   const aPhase = new Float32Array(n);
   const aRow = new Float32Array(n).fill(3);
-  const aStain = new Float32Array(n).fill(0.85);  // heavy rust core (not fully saturated → less bloom)
+  const aStain = new Float32Array(n);
   const aLen = new Float32Array(n);
   const aVariant = new Float32Array(n);
-  const q = new THREE.Quaternion(), e = new THREE.Euler(), off = new THREE.Vector3();
+  const q = new THREE.Quaternion(), qt = new THREE.Quaternion(), e = new THREE.Euler(), off = new THREE.Vector3();
+  const XAXIS = new THREE.Vector3(1, 0, 0);
+  // the 8 wing-root anchors (both sides of the 4 pairs), XY in the core frame —
+  // KEEP IN SYNC with wingConfigs() pos[].
+  const roots = [];
+  for (const p of [[0.06, 0.37], [0.22, 0.17], [0.30, 0.00], [0.12, -0.30]])
+    for (const s of [1, -1]) roots.push([p[0] * s * H, p[1] * H]);
+  // build the placement list: 8 seeds → 16 inward-stepped flankers → central fill
+  const spots = [];
+  for (const [rx, ry] of roots) {
+    const th = Math.atan2(ry, rx), r = Math.hypot(rx, ry);
+    spots.push({ th, r, len: 0.52, layer: 0, stain: 0.78 });                                    // seed at the wing's inward edge
+    for (const s of [1, -1]) spots.push({ th: th + s * 0.26, r: r * 0.76, len: 0.40, layer: 1, stain: 0.85 });  // left+right, shifted inward
+  }
+  while (spots.length < n) {                                                                     // the rest fill the inside
+    const th = Math.random() * 6.283, rr = Math.sqrt(Math.random());
+    spots.push({ th, r: (0.03 + rr * 0.17) * H, len: 0.26 + Math.random() * 0.10, layer: 2, stain: 0.90 });
+  }
   for (let i = 0; i < n; i++) {
-    // FIX-1: hang as a narrow, tapered downward TRAIN beneath the eye-band — NOT a wide
-    // forward boulder. Bias EVERY feather behind the central pupil (z stays < 0) so the
-    // core can never occlude the dominant central eye; correlate reach with drop so it
-    // reads as draping plumage that tapers to a point.
-    const a = Math.random() * Math.PI * 2;
-    const rr = Math.random();
-    const r = (0.12 + rr * 0.88) * 0.40 * H;           // narrow radius (was 0.7·H)
-    const down = (0.05 + Math.random() * 0.80) * H;    // drape below the band
-    off.set(Math.cos(a) * r * 0.42, -down, Math.sin(a) * r * 0.20 - 0.22 * H);
+    const sp = spots[i];
+    const th = sp.th + (sp.layer === 2 ? 0 : (Math.random() - 0.5) * 0.06);                      // hand-placed rows keep their slots; only a hair of jitter
+    off.set(Math.cos(th) * sp.r, Math.sin(th) * sp.r, -0.030 * H * sp.layer + (Math.random() - 0.5) * 0.012 * H);   // deeper layers sit further back → visible layering
     aRestOffset.set([off.x, off.y, off.z], i * 3);
-    // point straight-ish down with scatter (feather +Y is length axis pre-orient)
-    e.set(Math.PI * (0.82 + Math.random() * 0.16), (Math.random() - 0.5) * 0.7, a + Math.PI, 'XYZ');
-    q.setFromEuler(e);
+    q.setFromEuler(e.set(0, 0, th - Math.PI / 2));                                               // feather +Y (length axis) points radially OUTWARD
+    qt.setFromAxisAngle(XAXIS, -(0.08 + Math.random() * 0.14)); q.multiply(qt);                  // slight lean away from the viewer for depth
     aRestQuat.set([q.x, q.y, q.z, q.w], i * 4);
     aPhase[i] = Math.random() * 6.283;
-    aLen[i] = (0.30 + Math.random() * 0.45) * H * 0.5;  // shorter feathers → hanging plumage, not slabs
+    aLen[i] = sp.len * H * 0.5;                                                                  // seeds longest → fill shortest: the mantle tapers inward
+    aStain[i] = sp.stain + (Math.random() - 0.5) * 0.06;                                         // stain deepens toward the centre; per-feather variance keeps edges readable
     aVariant[i] = i % 4;
   }
   geo.setAttribute('aSegment', new THREE.InstancedBufferAttribute(aSegment, 1));
@@ -539,7 +555,7 @@ export class SeraphimModel {
     this._coreMat = coreMat;
     const cm = buildCoreMass(coreMat, this.quality === 'low' ? 32 : 46, 6);   // shorter voxel feathers → hanging plumage, not slabs
     this.coreMass = cm.mesh;
-    this.coreMass.position.set(0, -H * 0.14, 0);   // FIX-1: hang the train BELOW the band (was +H*0.05, level with the eyes → eclipsed them)
+    this.coreMass.position.set(0, 0, -H * 0.12);   // FIX-2: the mantle plane sits BEHIND the eye band (feathers peek out radially around it, never in front of the eyes)
     this.core.add(this.coreMass);
     this._coreTris = cm.tris;
 
