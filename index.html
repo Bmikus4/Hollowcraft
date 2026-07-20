@@ -426,7 +426,8 @@ paintTile('grass_meadow',(x,y,r)=>{ const spread=6-((15-y)>>2); const blade=(x%3
 paintTile('grass_meadow_tall',(x,y,r)=>{ const spread=5-((15-y)>>2); const blade=(x%2===0)&&Math.abs(x-8)<spread; if(!blade||y<1)return[0,0,0,0]; const v=jit(r,0,26); if(y<4&&r()<0.30)return[214+v*0.2,198+v*0.2,96,255]; return [86+v*0.6,132+v,58+v*0.5,255]; });   // SLIM long blades + golden seed heads — drawn to be stretched over 2 blocks by the tall2 cross
 paintTile('stained_glass',(x,y,r)=>{ const lead=(x%5===0)||(y%4===0)||((x+y)%9===0); if(lead)return[28,26,32,255];   // BIBLICAL MOSAIC — dark lead cames dividing jewel-glass cells (church windows)
   const ci=(((x/5)|0)*7+((y/4)|0)*13+(((x+y)/9)|0)*3)%6, v=jit(r,0,26);
-  const pal=[[42,62,152],[152,32,44],[198,158,52],[34,118,62],[94,44,132],[186,196,214]]; const c=pal[ci]; return [c[0]+v*0.4,c[1]+v*0.4,c[2]+v*0.4,255]; });
+  if((x^y)&1) return [0,0,0,0];   // checkerboard dither — the cutout pass is binary alpha-test, so 50% discard = genuinely see-THROUGH jewel cells (Ben 07-20: stained glass must be transparent)
+  const pal=[[62,88,198],[198,44,58],[232,186,64],[46,150,80],[122,58,168],[206,216,236]]; const c=pal[ci]; return [c[0]+v*0.4,c[1]+v*0.4,c[2]+v*0.4,255]; });
 paintTile('planks_white',(x,y,r)=>{ const seam=(y%4===0)||(x===8&&(y>>2)%2===0); const v=jit(r,0,22);   // WHITE WORN planks — chalky paint, grey seams, weather streaks
   if(seam)return[148+v*0.4,144+v*0.4,136+v*0.4]; if(r()<0.06)return[172,168,156]; return [214+v*0.3,210+v*0.3,198+v*0.3]; });
 paintTile('fern',      (x,y,r)=>{ const cx=Math.abs(x-8); if(cx> (13-y)/2 || y<2)return[0,0,0,0]; const v=jit(r,0,24); return[44+v*0.5,76+v,40+v*0.5,255]; });
@@ -514,7 +515,7 @@ block('sulfur_ore',{cat:'model', model:'sulfur', col:0xc4ba54, opaque:false, sol
 block('furnace',{cat:'model', opaque:false, solid:true, model:'furnace', tile:'cobble', hard:2.4, tool:'pickaxe', drop:'furnace', use:'furnace' });   // placeable 3D smelter — right-click to load ore/meat/sand; it smelts over time with the item melting inside
 block('ladder',{cat:'model', model:'ladder', tile:'ladder', col:0x6a4a28, opaque:false, solid:false, climb:true, needFloor:false, hard:0.4, tool:'axe', drop:'ladder' });   // climbable — non-solid so you occupy the cell and go up/down
 block('glass',  { cat:'cutout', t:['glass','glass','glass'], opaque:false, solid:true, hard:0.3, drop:null });   // SOLID collision but transparent (cutout) render — you can see through it but not walk through it
-block('stained_glass',{ cat:'cutout', t:['stained_glass','stained_glass','stained_glass'], opaque:false, solid:true, hard:0.4, drop:null });   // jewel-mosaic church glass (Ben 07-20)
+block('stained_glass',{ cat:'cutout', t:['stained_glass','stained_glass','stained_glass'], opaque:false, solid:true, hard:0.4, light:7, drop:null });   // jewel-mosaic church glass (Ben 07-20) — dither-transparent + EMITS a soft glow so the window throws colored-glass light onto pews/ground
 block('planks_white',{ t:['planks_white','planks_white','planks_white'], hard:1.6, tool:'axe', drop:'planks_white' });   // white worn chapel planks
 block('table',  { cat:'solid', t:['table_top','table_side','planks'], hard:1.0, tool:'axe', use:'craft3' });
 block('thatch', { cat:'solid', t:['thatch','thatch','thatch'], hard:0.5 });
@@ -864,6 +865,10 @@ function generateChunk(c){
     for(let i=0;i<bl.length && !(a&&b&&w);i++){ const v=bl[i]; if(v===AIR)continue; if(v===WATER){w=true;continue;} const cat=blockCat[v]; if(cat==='cross')a=true; else if(cat==='model')b=true; }
     c.hasCross=a; c.hasModel=b; c.hasWater=w; }
   c.dirty=true;
+  // a freshly GENERATED chunk may carry worldgen emitters (trail lanterns, shrine torches, structure light) —
+  // any neighbour that meshed BEFORE this chunk existed baked its light volume without them. Cheap relight of
+  // the meshed ring so light crosses the seam (Ben 07-20: placed lights left neighbouring chunks/ground dark).
+  if(chunkEmitters(c).length) for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++){ if(dx||dz) markRelight(c.cx+dx,c.cz+dz); }
 }
 
 // player edits persist over generation
@@ -907,7 +912,7 @@ const LPW  = CK + LPAD*2;                          // padded frame width (46)
 const _lv  = new Uint8Array(LPW*LPW*WH);           // reusable padded flood scratch; idx = px + pz*LPW + py*LPW*LPW
 let _lvLit = false;
 const _lpi = (px,py,pz)=> px + pz*LPW + py*(LPW*LPW);
-const _bfsQ = new Int32Array(1<<16);
+const _bfsQ = new Int32Array(LPW*LPW*WH);   // sized to the FULL padded flood volume — the old 65k cap silently dropped propagation in emitter-dense areas (villages/shrines), leaving ground/chunk patches unlit
 const _bkN = new Array(9);   // bakeLight's cached 3x3 neighbor-chunk refs (flood reads blocks directly, no Map hit per cell)
 function chunkEmitters(c){
   if(c._emit) return c._emit;
@@ -1451,9 +1456,9 @@ const _pineMask=new THREE.DataTexture(_pineMaskData,_PN,1,THREE.RGBAFormat); _pi
 const _uPine={value:new THREE.Color(0.078,0.157,0.071)};   // = the DARKEST textured pixel in the leaf tile, rgb(20,40,18)
 const _uPineFog=new THREE.Color(0.1,0.13,0.2), _stormBlue=new THREE.Color(0.09,0.12,0.19), _fogShellCol=new THREE.Color(0xbfc4cc);
 const pineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, side:THREE.BackSide, fog:false,
-  uniforms:{ uMask:{value:_pineMask}, uPine:_uPine, uFogCol:{value:_uPineFog}, uFogAmt:{value:0}, uCamY:{value:CFG.SEA+2}, uVisD:{value:CFG.RENDER_DIST*CK} },   // uFogCol = scene fog pulled toward DARK STORMY BLUE (Ben 07-20), set per-frame in updateHorizon with uFogAmt/uCamY/uVisD
+  uniforms:{ uMask:{value:_pineMask}, uPine:_uPine, uFogCol:{value:_uPineFog}, uFogAmt:{value:0}, uWx:{value:0}, uCamY:{value:CFG.SEA+2}, uVisD:{value:CFG.RENDER_DIST*CK} },   // uFogCol = scene fog pulled toward DARK STORMY BLUE (Ben 07-20), set per-frame in updateHorizon with uFogAmt/uCamY/uVisD; uWx = weather fog
   vertexShader:_horizVert, fragmentShader:[
-  'precision highp float; varying vec3 vPos; uniform sampler2D uMask; uniform vec3 uPine, uFogCol; uniform float uFogAmt, uCamY, uVisD;',
+  'precision highp float; varying vec3 vPos; uniform sampler2D uMask; uniform vec3 uPine, uFogCol; uniform float uFogAmt, uWx, uCamY, uVisD;',
   'float hash(float n){ return fract(sin(n)*43758.5453); }',
   'float nz(float x){ float i=floor(x),f=fract(x); return mix(hash(i),hash(i+1.0),f*f*(3.0-2.0*f)); }',
   'float treeline(float az){ return nz(az*46.0)*0.55+nz(az*88.0)*0.30+nz(az*150.0)*0.15; }',     // canopy-height noise 0..1 — lower frequencies = broad rounded crowns, not needle teeth (Ben 07-20)
@@ -1473,7 +1478,7 @@ const pineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, sid
   '  float t=clamp(((elev-bottom)/max(top-bottom,1e-4))-0.03,0.0,1.0);',                         // 0 at the fog-bound base → 1 at the tips; the -0.03 lifts the fade-off boundary 3% higher up the silhouette (Ben 07-20)
   '  float fog=clamp(uFogAmt*(1.0-0.18*t),0.0,1.0);',                                            // fade the whole silhouette into the fog the terrain fades to (density-driven → matches weather/day)
   '  fog=max(fog, 1.0-smoothstep(0.0,0.22,hs));',                                                // …and past the shore the taper drowns COMPLETELY in fog — but only at the very end, so the concave ease-out (the treeline landing tangent to the ground, curving gently up) stays VISIBLE before the haze takes it (Ben 07-20)
-  '  gl_FragColor=vec4(mix(pine,uFogCol,fog), smoothstep(0.2,0.45,m)); }'].join('\n') });        // SOLID silhouette with a quick edge fade — proportional alpha made coastal arcs read as pale half-ghosts against the sky
+  '  gl_FragColor=vec4(mix(pine,uFogCol,fog), smoothstep(0.2,0.45,m)*clamp(1.0-uWx*1.25,0.0,1.0)); }'].join('\n') });   // SOLID silhouette with a quick edge fade; WEATHER FOG fades the whole layer OUT (Ben 07-20: at night the color-wash was invisible — near-black washing to near-black — so the pines punched dark holes through the fog bank; in fog the shell owns the horizon)
 const pineLayer=new THREE.Mesh(_horizGeo, pineMat); pineLayer.frustumCulled=false; pineLayer.renderOrder=-5; scene.add(pineLayer);   // over the ocean seam
 let _pineLastX=1e9, _pineLastZ=1e9, _pineLastRD=0;
 function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.position.copy(camera.position); const day=globalU.uDay.value;
@@ -1487,7 +1492,7 @@ function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.p
   { const dim=0.10+0.90*day, base=[0.050,0.102,0.046]; _uPine.value.setRGB(base[0]*dim, base[1]*dim, base[2]*dim);   // DARK forest green matching the real edge trees (Ben 07-20 rev3); at NIGHT it goes near-BLACK silhouette
     { const _ef=1-Math.exp(-Math.pow(CFG.RENDER_DIST*CK*scene.fog.density,2)); pineMat.uniforms.uFogAmt.value=clamp(_ef*0.93,0,0.97);   // MATCH the farthest rendered chunks' fog wash exactly (exp2 at the wall distance — includes weather + day/night via density), held a hair under so the tip-gradient still reads
       _uPineFog.copy(scene.fog.color).lerp(_stormBlue, 0.55).multiplyScalar(0.14+0.86*day);   // …and the fade lands on a DARK STORMY BLUE pulled from the live fog color — scaled to the night sky's deep blue after dark, else the fully-fogged taper sections paint a pale strip across the dark horizon
-      const _wf2=(typeof weather!=='undefined'?(weather.fog||0):0); if(_wf2>0.01) _uPineFog.lerp(_fogShellCol, Math.min(1,_wf2*0.95)); }   // WEATHER FOG overrides the night darkening: the fogShell shroud sits BEHIND the pine cylinder so it can never cover them — the pines must wash to the shell's own pale grey or they punch dark holes through a night fog bank (Ben 07-20)
+      const _wf2=(typeof weather!=='undefined'?(weather.fog||0):0); if(_wf2>0.01) _uPineFog.lerp(_fogShellCol, Math.min(1,_wf2*0.95)); pineMat.uniforms.uWx.value=_wf2; }   // WEATHER FOG overrides the night darkening AND fades the layer's alpha out (see pineMat fragment) — color-wash alone was invisible at night
     pineMat.uniforms.uCamY.value=camera.position.y; pineMat.uniforms.uVisD.value=CFG.RENDER_DIST*CK;   // per-frame (jumps/climbs shift the eye between mask recomputes; RD slider moves the wall)
     // the pine-visibility mask depends only on player position + render distance, so recompute the 128 rays +
     // re-upload the DataTexture only when the player has actually moved (or RD changed). <2 blocks of parallax
@@ -2493,7 +2498,7 @@ function physics(dt){
   else if(p.onLadder){ // LADDER — cling to the rungs and climb. Horizontal is DAMPED so pressing W (or strafing) can't
     // shove you out of the 1-wide ladder column mid-climb (the old bug: W ejected you off the ladder so you never rose).
     p.vel.x*=0.35; p.vel.z*=0.35;
-    if(keys.Space||fwd>0||p.pitch<-0.25) p.vel.y=3.2;        // W, Space, or just LOOK UP → ascend
+    if(keys.Space) p.vel.y=3.2;                              // HOLD SPACE to climb — W/look-up no longer auto-ascend (Ben 07-20)
     else if(p.sneak||fwd<0) p.vel.y=-3.4;                    // S / Sneak → descend
     else p.vel.y=-0.3; }                                     // otherwise hang with a slow controlled slide
   else if(armor[1] && ITEMS[armor[1].id] && ITEMS[armor[1].id].fly && !p.onGround && keys.Space){   // ANGEL WINGS — elytra glide: hold SPACE in the air to soar
@@ -2627,6 +2632,7 @@ function updateSky(dt){
   if(oc>0.01) fc.lerp(_fogGrey.setRGB(0.16+0.12*day,0.18+0.12*day,0.22+0.12*day), oc*0.6);   // rainy grey haze rolls the horizon in
   const _under=(typeof inDungeon==='function' && inDungeon(Math.floor(camera.position.x),Math.floor(camera.position.y),Math.floor(camera.position.z))) || (typeof playerRoofed==='function' && playerRoofed());
   const wf=_under?0:weather.fog;                                                    // FOG WEATHER: thickens the haze + pales the air — but it NEVER seeps underground/into the dungeon, so the lantern & room stay readable in fog
+  _vfogAmt.value=Math.min(1,wf*1.4);                                                // held-item fog follows WEATHER FOG only (Ben 07-20): crisp viewmodel in clear air
   if(wf>0.01){ fc.lerp(_fogGrey.setRGB(0.34+0.2*day, 0.36+0.2*day, 0.40+0.2*day), Math.min(0.88,wf*0.95)); }
   if(scene.background&&scene.background.isColor)scene.background.copy(fc);   // guard: a skybox CubeTexture background isn't a Color — don't call .copy on it
   scene.fog.density=lerp(2.2,1.7,day)/(CFG.RENDER_DIST*CK) * (1+wf*wf*18);   // fog e-folds at the CURRENT render edge; night coefficient 2.2 (was 2.6 — with the near-black fog color that turned whole chunks into void; the Silent Hill close-in stays, just readable) — cullChunks still turns the fog wall into a draw-distance CUT
@@ -7218,11 +7224,12 @@ function buildFist(){ const g=new THREE.Group();                                
 // HELD-ITEM FOG — the viewmodel sits ~0.5u from the eye where real scene fog is nil, so bake an EXAGGERATED
 // depth fog into its materials: the further a vertex extrudes from the body (camera-space depth), the more it
 // blends toward the live fog colour. A long rifle's muzzle sinks slightly into the murk; the grip stays clear.
+const _vfogAmt={value:0};   // held-item fog strength — WEATHER FOG only (Ben 07-20): clear air leaves the viewmodel crisp; a fog bank sinks the muzzle into the murk. Driven per-frame in updateHorizon.
 function applyViewFog(root){ if(!root)return; root.traverse(o=>{ if(!o.isMesh||!o.material)return; const mats=Array.isArray(o.material)?o.material:[o.material];
   mats.forEach(m=>{ if(!m||m._vfog||m.isMeshBasicMaterial||m.transparent)return; m._vfog=true; const prev=m.onBeforeCompile;
-    m.onBeforeCompile=(sh)=>{ if(prev)prev(sh); sh.uniforms.uVFogCol={value:scene.fog.color};   // shares the live fog colour by reference (tracks day/night/weather/underwater)
+    m.onBeforeCompile=(sh)=>{ if(prev)prev(sh); sh.uniforms.uVFogCol={value:scene.fog.color}; sh.uniforms.uVFogAmt=_vfogAmt;   // shares the live fog colour by reference (tracks day/night/weather/underwater)
       sh.vertexShader='varying float vVFogD;\n'+sh.vertexShader.replace('#include <project_vertex>','#include <project_vertex>\n vVFogD=-mvPosition.z;');
-      sh.fragmentShader='varying float vVFogD; uniform vec3 uVFogCol;\n'+sh.fragmentShader.replace('#include <dithering_fragment>','#include <dithering_fragment>\n gl_FragColor.rgb=mix(gl_FragColor.rgb, uVFogCol, clamp((vVFogD-0.32)/1.05,0.0,1.0)*0.42);');
+      sh.fragmentShader='varying float vVFogD; uniform vec3 uVFogCol; uniform float uVFogAmt;\n'+sh.fragmentShader.replace('#include <dithering_fragment>','#include <dithering_fragment>\n gl_FragColor.rgb=mix(gl_FragColor.rgb, uVFogCol, clamp((vVFogD-0.32)/1.05,0.0,1.0)*0.42*uVFogAmt);');
       m.needsUpdate=true; };
     m.needsUpdate=true; }); }); }
 function setViewItem(id){ if(view.id===id)return; view.id=id;
@@ -7310,8 +7317,8 @@ function updateView(dt){ updateRecoil(dt);                                      
   view.boltT=Math.max(0,(view.boltT||0)-dt); view.gunKick=Math.max(0,(view.gunKick||0)-dt*7);   // viewmodel kick decays (every gun bucks against the shoulder on fire)
   if(view.reloadT>0){ if(view.reloadId!==view.id){ view.reloadT=0; view.reloadId=null; }        // swapped guns mid-reload → cancel, no rounds transferred
     else { view.reloadT-=dt; if(view.reloadT<=0) finishReload(); } }
-  const isDotG=!!(ITEMS[view.id]&&ITEMS[view.id].dot), isRev=gunKind==='revolver';   // a gun with a crafted Holosun; the Python aims over its irons (Ben 07-20)
-  view.ads = !!((isBolt||isDotG||isRev) && rmbHeld && locked && !openUI && !(view.reloadT>0) && !(isBolt && (view.boltT||0)>0));   // right-hold aims; firing never breaks ADS EXCEPT the bolt rifle — working the bolt drops the sight, then it re-raises (rmb still held)
+  const isDotG=!!(ITEMS[view.id]&&ITEMS[view.id].dot), isRev=gunKind==='revolver', isIronAR=(gunKind===true&&!isDotG);   // a gun with a crafted Holosun; the Python + bare AR aim over their irons (Ben 07-20)
+  view.ads = !!((isBolt||isDotG||isRev||isIronAR) && rmbHeld && locked && !openUI && !(view.reloadT>0) && !(isBolt && (view.boltT||0)>0));   // right-hold aims; firing never breaks ADS EXCEPT the bolt rifle — working the bolt drops the sight, then it re-raises (rmb still held)
   if(scopeEl) scopeEl.style.display='none';                          // old black surround retired — the PiP scope (renderScope) draws the glass without blacking the screen
   view.group.visible = true;   // viewmodel is ALWAYS drawn — the magnified sight lives on the rifle's rear lens (PiP), so we keep the whole optic on-screen and let adsT drive the raise/zoom/fade
   if(isBolt && view.mesh && view.mesh.userData.bolt){ const bh=view.mesh.userData.bolt, bz=view.mesh.userData.boltZ||0.12;
@@ -7366,6 +7373,8 @@ function updateView(dt){ updateRecoil(dt);                                      
       aPx=swx*0.4; aPy=-dy + swy*0.5 + b*0.12; aPz=-0.30; aRx=swy*0.5; aRy=swx*0.5; aRz=0; }
     else if(isRev){ const dy=(view.mesh&&view.mesh.userData&&view.mesh.userData.dotY)||0.084;               // …or the PYTHON'S IRONS: rear notch + front blade dead on the eye line, arms extended
       aPx=swx*0.4; aPy=-dy + swy*0.5 + b*0.12; aPz=-0.36; aRx=swy*0.5; aRy=swx*0.5; aRz=0; }
+    else if(isIronAR){ const dy=(view.mesh&&view.mesh.userData&&view.mesh.userData.dotY)||0.118;            // …or the AR'S A2 IRONS (bare/suppressed alike): rear aperture + front post on the eye line
+      aPx=swx*0.4; aPy=-dy + swy*0.5 + b*0.12; aPz=-0.30; aRx=swy*0.5; aRy=swx*0.5; aRz=0; }
     view.group.position.set(hPx+(aPx-hPx)*e, hPy+(aPy-hPy)*e, hPz+(aPz-hPz)*e);
     view.group.rotation.set(hRx+(aRx-hRx)*e, hRy+(aRy-hRy)*e, hRz+(aRz-hRz)*e);
     if(view.gunKick){ view.group.position.z+=view.gunKick*0.09; view.group.rotation.x-=view.gunKick*0.5; }   // viewmodel bucks: rearward shove + muzzle rise, springs back independent of the camera
@@ -7445,7 +7454,7 @@ function fireGun(){ const held=heldSlot(), it=held?ITEMS[held.id]:null, bolt = i
     else if(bolt){ const q=sup?0.22:1; burst(master,1.8*q,0.04,3400,0.4,1400); burst(master,1.7*q,0.12,1500,0.5,300); burst(master,1.7*q,0.24,520,0.7,150); burst(master,1.4*q,0.55,78,0.5,42); }   // synth fallback: LOUD deep hunting-rifle BOOM (suppressed → far quieter)
     else { burst(master,1.7,0.05,3200,0.4,1600); burst(master,1.6,0.10,2200,0.5,400); burst(master,1.5,0.16,900,0.7,200); burst(master,1.2,0.36,110,0.5,55); } }
   if(!rev){ try{ ejectShell(o); }catch(e){} }                                                       // auto/bolt eject a spent casing; a REVOLVER retains its brass in the cylinder (no eject on fire)
-  const animDmg=(bolt?40:rev?14:10) - (sup?20:0);                                                    // the hunting rifle hits far harder; the revolver sits between rifle and AR
+  const animDmg=Math.max(5,(bolt?40:rev?14:10) - (sup?(bolt?20:4):0));                               // the hunting rifle hits far harder; suppressor costs the rifle -20 but light guns only -4 (the flat -20 drove AR/Python animal damage NEGATIVE — bullets healed animals)
   const _maxR=bolt?210:rev?120:70;                                                                    // the hunting rifle reaches ~3x as far as the AR; the revolver ~mid
   for(let t=0.6;t<_maxR;t+=0.35){ const px=o.x+d.x*t, py=o.y+d.y*t, pz=o.z+d.z*t;                      // finer step so tight hitboxes aren't skipped
     if((t%3)<0.5) spawnParticles(px,py,pz,0xfff0b0,1,0.2,0.12);                                    // bullet TRACER streak down the line
@@ -7464,10 +7473,10 @@ function fireGun(){ const held=heldSlot(), it=held?ITEMS[held.id]:null, bolt = i
     for(let bi=0;bi<skyBirds.length;bi++){ const b=skyBirds[bi]; if(b.dead)continue; const bp=b.m.position, br=0.9*b.m.scale.x;   // SKY BIRDS die to gunfire (Ben 07-20) — generous sphere, they're small and far
       const dxb=px-bp.x, dyb=py-bp.y, dzb=pz-bp.z; if(dxb*dxb+dyb*dyb+dzb*dzb < br*br){ b.dead=true; b.vy=1.5; b.spin=(Math.random()-0.5)*7;
         spawnParticles(bp.x,bp.y,bp.z,0x191920,14,2.2,0.9); flashName('bird down'); return true; } }
-    let an=null; for(const a of animals){ if(a.dead)continue; const hh=(ANIMALS[a.type]?ANIMALS[a.type].h:1)*1.15, dxa=px-a.x, dza=pz-a.z, dya=py-a.y; if(dxa*dxa+dza*dza < 0.42 && dya>-0.25 && dya<hh+0.4){ an=a; break; } }   // vertical CAPSULE → tall villagers/deer get hit anywhere up the body
+    let an=null; for(const a of animals){ if(a.dead)continue; const hh=(ANIMALS[a.type]?ANIMALS[a.type].h:1)*1.15, dxa=px-a.x, dza=pz-a.z, dya=py-a.y; const rr=hh>1.3?0.9:0.5; if(dxa*dxa+dza*dza < rr && dya>-0.25 && dya<hh+0.4){ an=a; break; } }   // vertical CAPSULE, radius scaled up for big-bodied animals (deer/sheep bodies reached well past the old 0.65 cylinder — center-mass shots whiffed)
     if(an){ hurtAnimal(an,animDmg); spawnParticles(px,py,pz,0xcc2018,8,1.6,0.5); return true; }
     if(NET.on && !NET.host){ for(const _k in _netAnimals){ const _e=_netAnimals[_k]; const _dx=px-_e.x,_dz=pz-_e.z,_dy=py-_e.y;   // GUEST: the real animals[] is empty here → hit the host's mirrored animals and request the damage
-      if(_dx*_dx+_dz*_dz<0.45 && _dy>-0.25 && _dy<2.2){ const _n=+String(_k).replace(/^n/,''); if(_n===_n)netSend({t:'han',n:_n,v:animDmg}); spawnParticles(px,py,pz,0xcc2018,8,1.6,0.5); return true; } } } }
+      if(_dx*_dx+_dz*_dz<0.9 && _dy>-0.25 && _dy<2.2){ const _n=+String(_k).replace(/^n/,''); if(_n===_n)netSend({t:'han',n:_n,v:animDmg}); spawnParticles(px,py,pz,0xcc2018,8,1.6,0.5); return true; } } } }
   return true; }
 function meleeAttack(){ const d=lookDir(), ox=player.pos.x, oy=player.pos.y+EYE, oz=player.pos.z;
   const held=heldSlot(); const it=held?ITEMS[held.id]:null; const dmg=(it&&it.tool)?WEAPON_DMG(it.tool):1;   // empty hand = 1
@@ -7999,7 +8008,7 @@ function buildAnimalMesh(type,corrupt){ const spec=ANIMALS[type], g=new THREE.Gr
     const tail=new THREE.Mesh(new THREE.BoxGeometry(0.07*s,0.10*s,0.05*s),new THREE.MeshLambertMaterial({color:0xe8e2d2})); tail.position.set(0,0.72*s,-0.38*s); g.add(tail);
     for(const [lx,lz] of [[-0.09,0.28],[0.09,0.28],[-0.09,-0.28],[0.09,-0.28]]){ const leg=new THREE.Mesh(new THREE.BoxGeometry(0.065*s,0.52*s,0.065*s),mat); leg.position.set(lx*s,0.24*s,lz*s); g.add(leg); }
     if(!corrupt && Math.random()<0.2){ const am=new THREE.MeshLambertMaterial({color:0x9a8560});   // a STAG
-      for(const ax of [-1,1]){ const beam=new THREE.Mesh(new THREE.BoxGeometry(0.035*s,0.30*s,0.035*s),am); beam.position.set(ax*0.08*s,1.32*s,0.44*s); beam.rotation.z=ax*0.5; g.add(beam);
+      for(const ax of [-1,1]){ const beam=new THREE.Mesh(new THREE.BoxGeometry(0.035*s,0.30*s,0.035*s),am); beam.position.set(ax*0.08*s,1.32*s,0.44*s); beam.rotation.z=-ax*0.5; g.add(beam);   // beam leans OUTWARD (Ben 07-20: base was mirrored inward, leaving the tines floating off its tip)
         const t1=new THREE.Mesh(new THREE.BoxGeometry(0.03*s,0.16*s,0.03*s),am); t1.position.set(ax*0.16*s,1.42*s,0.42*s); t1.rotation.z=ax*1.1; g.add(t1);
         const t2=new THREE.Mesh(new THREE.BoxGeometry(0.03*s,0.14*s,0.03*s),am); t2.position.set(ax*0.11*s,1.46*s,0.48*s); t2.rotation.x=-0.5; g.add(t2); } }
     g.traverse(o=>{ if(o.isMesh)o.castShadow=true; }); animalGroup.add(g); return g; }
@@ -8319,14 +8328,15 @@ function buildSpawnChest(){ if(_spawnChestDone)return; const sx=spawnX, sz=spawn
   if(!getChunk(sx>>4,sz>>4)) return; const gy=surfaceH(sx,sz); if(gy<=CFG.SEA) return;
   for(let y=gy+1;y<=gy+3;y++){ const b=getBlock(sx,y,sz); if(b===BID.log||b===BID.leaves||b===BID.leaves_core) setBlockWorld(sx,y,sz,AIR,true); }   // clear any stray tree over it
   lootChest(sx, gy+1, sz, STARTER_ITEMS.slice()); _spawnChestDone=true; }
-// level a flat build-pad + a dirt-path ring, and fell tree TRUNKS in a radius (leaves stay so canopy still overhangs).
-// R = grass pad half-width, pathR = outer edge (R..pathR is the dirt path). Call BEFORE placing a structure.
+// level a SMALL flat build-pad only — the footprint + a ~3-block flat ring (Ben 07-20: structures just
+// sit on the ground; no dirt-path ring, no wide tree-felling, no big terrain cuts above or digs below).
+// R = structure half-width(+1) as passed by callers; pad half-width = R+2. pathR is legacy, ignored.
 function groundStructure(cx,cz,gy,R,pathR){
-  for(let dx=-pathR;dx<=pathR;dx++)for(let dz=-pathR;dz<=pathR;dz++){ const wx=cx+dx, wz=cz+dz, cheb=Math.max(Math.abs(dx),Math.abs(dz)), rad=Math.hypot(dx,dz);
-    if(rad<=7){ for(let y=gy+1;y<=gy+20;y++){ if(getBlock(wx,y,wz)===BID.log) setBlockWorld(wx,y,wz,AIR,true); } }   // 7-block no-tree radius: fell trunks only
-    for(let y=gy+1;y<=gy+20;y++){ const b=getBlock(wx,y,wz); if(b!==AIR && isSolid[b]) setBlockWorld(wx,y,wz,AIR,true); }   // shave any high ground/bumps down to ground level
-    for(let y=gy;y>=gy-2;y--){ if(getBlock(wx,y,wz)===AIR) setBlockWorld(wx,y,wz,BID.dirt,true); else break; }               // fill only SMALL dips (max ~2) → clears a flat area at ground level, never a raised pad
-    if(getBlock(wx,gy,wz)!==AIR) setBlockWorld(wx,gy,wz, cheb>R?BID.dirt:BID.grass, true);   // outer ring = dirt path, inner = grass (only cap where there's actually ground)
+  const P=R+2;
+  for(let dx=-P;dx<=P;dx++)for(let dz=-P;dz<=P;dz++){ const wx=cx+dx, wz=cz+dz;
+    for(let y=gy+1;y<=gy+20;y++){ const b=getBlock(wx,y,wz); if(b!==AIR && isSolid[b]) setBlockWorld(wx,y,wz,AIR,true); }   // flatten bumps INSIDE the pad only
+    for(let y=gy;y>=gy-3;y--){ if(getBlock(wx,y,wz)===AIR) setBlockWorld(wx,y,wz,BID.dirt,true); else break; }               // fill only SMALL dips (max ~3) — never dig below grade
+    if(getBlock(wx,gy,wz)!==AIR) setBlockWorld(wx,gy,wz,BID.grass,true);   // grass cap (only where there's actually ground)
   }
 }
 let _cabinDone=false, cabinRifle=null;
@@ -8419,10 +8429,7 @@ function buildVillage(){ if(_villageDone)return;
   let py=0,cnt=0; for(let dx=-8;dx<=8;dx+=2)for(let dz=-8;dz<=8;dz+=2){ py+=surfaceH(vx+dx,vz+dz); cnt++; }
   py=Math.round(py/cnt);                                                                                // sit on the ACTUAL ground — no forced float
   if(py<CFG.SEA+6){ _villageDone=true; return; }                                                        // safety: never build over water
-  for(let dx=-11;dx<=11;dx++)for(let dz=-11;dz<=11;dz++){ if(dx*dx+dz*dz>121)continue;
-    setBlockWorld(vx+dx,py,vz+dz,BID.path,true); for(let y=1;y<=6;y++)setBlockWorld(vx+dx,py+y,vz+dz,AIR,true);
-    for(let y=py-1;y>=py-3;y--){ const b=getBlock(vx+dx,y,vz+dz); if(b===AIR||b===WATER) setBlockWorld(vx+dx,y,vz+dz,BID.dirt,true); } }   // fill under the plateau so it's grounded, not floating
-  [[-8,-6],[6,-7],[-6,6],[7,6],[0,0]].forEach(([ox,oz],i)=>buildCottage(vx+ox,py,vz+oz,i));
+  [[-8,-6],[6,-7],[-6,6],[7,6],[0,0]].forEach(([ox,oz],i)=>{ groundStructure(vx+ox,vz+oz,py,4,0); buildCottage(vx+ox,py,vz+oz,i); });   // per-cottage flat pads — no carved plateau (Ben 07-20: no cut terrain above/below)
   setBlockWorld(vx,py+1,vz,BID.lantern,true);
   _villageDone=true; }
 // ---- LOOKOUT TOWERS: tall wooden watchtowers — corner log posts, an inside spiral stair, a railed platform + a lantern beacon ----
