@@ -3774,10 +3774,24 @@ function netAnimalsTick(){ const snap=NET.anet; if(!snap)return; const seen={};
   for(const k in _netAnimals){ if(!seen[k]){ animalGroup.remove(_netAnimals[k].mesh); delete _netAnimals[k]; } } }
 // the Wretch (on its owner/host) hunts the NEAREST player of everyone connected. In single-player this is just you.
 let huntCam=null, huntLook=null, huntId=0;
-function computeHuntTarget(){ huntId=NET.id||0; huntCam=camera.position; huntLook=lookDir();
+function _setHuntTarget(id){ if(id===(NET.id||0)){ huntId=NET.id||0; huntCam=camera.position; huntLook=lookDir(); return true; }
+  const p=NET.peers&&NET.peers[id]; if(!p||p.dead||p.tied) return false;
+  huntId=+id; huntCam={x:p.x,y:p.y+EYE,z:p.z}; const yaw=p.yaw||0,pit=p.pitch||0,cp=Math.cos(pit); huntLook={x:-Math.sin(yaw)*cp,y:Math.sin(pit),z:-Math.cos(yaw)*cp}; return true; }
+function computeHuntTarget(){
+  // TARGET LOCK / TUNNEL VISION (Ben 07-20): once it is WORKING one specific player — tip-toeing up behind them,
+  // terrorizing them, or in a committed hunt/chase — the target stays FIXED and only that player's gaze registers
+  // (sense() reads huntCam/huntLook, so s.watched is blind to everyone else staring at it). A second player can
+  // watch it creep on their friend and it will not notice, or care. The lock releases when the engagement ends
+  // or the target dies/gets tied; then it reverts to nearest-player targeting.
+  const engaged = wretch.active && (wretch.sneaking || wretch.committed || wretch.state==='HUNT' || wretch.state==='CHASE'
+    || (typeof nav!=='undefined'&&nav.active&&nav.behavior==='terrorize') || (typeof brain!=='undefined'&&brain.mode==='TERRORIZE'));
+  if(!engaged) wretch._lockId=null;
+  else if(wretch._lockId!=null && _setHuntTarget(wretch._lockId)) return;   // hold the locked prey
+  huntId=NET.id||0; huntCam=camera.position; huntLook=lookDir();
   let best=Math.hypot(camera.position.x-wretch.pos.x, camera.position.z-wretch.pos.z);
   if(NET.on){ for(const id in NET.peers){ const p=NET.peers[id]; if(p.dead||p.tied)continue; const d=Math.hypot(p.x-wretch.pos.x,p.z-wretch.pos.z);
-    if(d<best){ best=d; huntId=+id; huntCam={x:p.x,y:p.y+EYE,z:p.z}; const yaw=p.yaw||0,pit=p.pitch||0,cp=Math.cos(pit); huntLook={x:-Math.sin(yaw)*cp,y:Math.sin(pit),z:-Math.cos(yaw)*cp}; } } } }
+    if(d<best){ best=d; huntId=+id; huntCam={x:p.x,y:p.y+EYE,z:p.z}; const yaw=p.yaw||0,pit=p.pitch||0,cp=Math.cos(pit); huntLook={x:-Math.sin(yaw)*cp,y:Math.sin(pit),z:-Math.cos(yaw)*cp}; } } }
+  if(engaged) wretch._lockId=huntId; }   // engagement just began (or the old prey vanished) → lock onto whoever it picked
 
 // ---- TARKOV-STYLE SCOPE — the magnified world is rendered straight ONTO the scope's rear-lens mesh, so the sight
 //      picture is a rigid part of the gun: it sways/recoils/moves WITH the optic and can never float or jump.
@@ -4679,8 +4693,8 @@ function updateWretch(dt){
     const target=watched?0 : Math.min(1, 0.55*behind + 0.28*(1-day) + 0.17*(typeof weather!=='undefined'?(weather.fog||0):0) + 0.20*stare);
     wretch.sneakConf=(wretch.sneakConf||0)+(target-(wretch.sneakConf||0))*Math.min(1,dt*1.5);   // conviction builds/breaks over ~1s, never flickers
     if(wretch._forceSneak){ wretch.sneaking=true; }                                       // QA override
-    else if(!wretch.sneaking){ const rng=wretch.sneakConf>0.8?42:30;                      // SURE it won't be looked at → it starts the walk from clear across the clearing
-      if((st==='STALK'||((st==='HUNT'||st==='CHASE')&&!wretch.committed)) && !watched && near>6 && near<rng && wretch.sneakConf>0.62) wretch.sneaking=true; }
+    else if(!wretch.sneaking){                                                            // activation radius 42 blocks (Ben 07-20)
+      if((st==='STALK'||((st==='HUNT'||st==='CHASE')&&!wretch.committed)) && !watched && near>6 && near<42 && wretch.sneakConf>0.62) wretch.sneaking=true; }
     else if(watched || near<=5.5 || wretch.committed || wretch.sneakConf<0.4 || wretch.fleeing || wretch.routed) wretch.sneaking=false;   // at 5.5 blocks the point-blank commit takes over; caught looking → back to cover rules
     if(wretch.sneaking){ st='STALK'; wretch.state='STALK'; } }                            // the sneak OWNS the approach — it preempts the loud charge while it stays unseen
   const wantDemon = brain.mode==='STARVING' || (wretch.committed&&near<10) || (st==='HUNT'&&(HORROR.tier>=3||reckless)) || wretch.dragging;
@@ -8485,7 +8499,7 @@ function wretchFootfall(amp, gallop, st, force){ window.__ffBeat=(window.__ffBea
   const adv=wretch._advRate||0, S=st||wretch.state;
   const charging=(S==='HUNT'||S==='CHASE');
   const running=charging||gallop||adv>3.0;
-  const R=(force?20 : charging?40 : running?26 : 9)*(wretch.sneaking?1:2);     // hard audibility radius per gait — 2x reach (Ben 07-20); the tip-toe reverts to the old standard
+  const R= force?20 : wretch.sneaking?9 : charging?32 : running?42 : 12;       // hard audibility radius per gait (Ben 07-20): creep 12 / run 42 / charge 32 — the charge stays quiet-reach so the pounce keeps its surprise; the tip-toe treads at the old creep standard
   if(d>R)return;
   const fade=Math.pow(1-d/R,1.35);                                             // TRUE zero at the radius, on top of the panner rolloff
   const w=clamp(amp==null?0.8:amp,0,1)*(0.55+0.45*Math.min(1,adv/8));          // plant weight from the real gait energy
