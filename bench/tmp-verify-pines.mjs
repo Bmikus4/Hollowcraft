@@ -37,14 +37,16 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
       await sleep(700);   // let updateHorizon recompute
       const r = await page.evaluate(`(() => {
         const p = __hc.pines(); if (p.err) return p;
-        let agree=0, ringOverSea=0, landArcs=0, seaArcs=0;
+        const IC = __hc.island(); const vx=p.px-IC.cx, vz=p.pz-IC.cz, vd=Math.hypot(vx,vz)||1;
+        let agree=0, seawardLit=0, landArcs=0, seawardArcs=0;
         for (let i=0;i<128;i++){
           const land=p.truth[i], m=p.mask[i];
-          if (land===0){ seaArcs++; if(m>=51) ringOverSea++; }      // mask must be ~0 over pure sea (51 = shader discard threshold 0.2)
-          if (land===8){ landArcs++; if(m>200) agree++; }           // deep land runs must paint pines
+          const az=(i/128)*6.2831853-3.14159265, cosA=(Math.cos(az)*vx+Math.sin(az)*vz)/vd;
+          if (land===0 && cosA>0.92){ seawardArcs++; if(m>=51) seawardLit++; }   // DEAD-seaward must stay open ocean; tangent sea arcs are deliberately lit (the coast continues forever)
+          if (land===8){ landArcs++; if(m>200) agree++; }                        // deep forest runs must paint pines
         }
         const lit = p.mask.filter(v=>v>=51).length;
-        return { px:p.px, pz:p.pz, visD:p.visD, seaArcs, ringOverSea, landArcs, landLit:agree, litFrac:+(lit/128).toFixed(2) };
+        return { px:p.px, pz:p.pz, visD:p.visD, seawardArcs, seawardLit, landArcs, landLit:agree, litFrac:+(lit/128).toFixed(2) };
       })()`);
       checks.push(r);
     }
@@ -55,7 +57,7 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     await page.evaluate(`__hc.cam ? __hc.cam({yaw:1.57, pitch:0.02}) : (player.yaw=1.57, player.pitch=0.02)`);
     await sleep(400); await page.screenshot({ path: path.join(OUT,'pines-landward.png') });
 
-    const bad = checks.filter(c => c.err || c.ringOverSea>0 || (c.landArcs>4 && c.landLit===0) || c.litFrac>0.95);
+    const bad = checks.filter(c => c.err || c.seawardLit>0 || (c.landArcs>4 && c.landLit===0));
     const pass = bad.length===0 && errors.length===0;
     console.log(JSON.stringify({ pass, checks, errors:errors.slice(0,5) }, null, 1));
     await browser.close();

@@ -1402,6 +1402,11 @@ fogShell.visible=false; scene.add(fogShell);
 //  (world-anchored), and sit behind terrain (depth-tested) so they only paint the far horizon.
 // =====================================================================
 let ISLAND_CENTER=null;
+function islandStats(){ if(ISLAND_CENTER) return ISLAND_CENTER;   // one-time: centroid of the landmass + mean coast radius (drives the coast-continues-forever treeline wrap)
+  let sx=0,sz=0,n=0; for(let gz=-600;gz<=600;gz+=40)for(let gx=-600;gx<=600;gx+=40){ const X=spawnX+gx,Z=spawnZ+gz; if(surfaceH(X,Z)>CFG.SEA){ sx+=X; sz+=Z; n++; } }
+  const cx=n?sx/n:spawnX, cz=n?sz/n:spawnZ; let rs=0;
+  for(let a=0;a<32;a++){ const th=a/32*6.2831853; let rr=140; for(let s=40;s<=720;s+=12){ if(surfaceH(Math.round(cx+Math.cos(th)*s),Math.round(cz+Math.sin(th)*s))>CFG.SEA) rr=s; } rs+=rr; }
+  ISLAND_CENTER={x:cx,z:cz,R:Math.max(140,rs/32)}; return ISLAND_CENTER; }
 const _horizGeo=new THREE.CylinderGeometry(FAR*1.1, FAR*1.1, FAR*2.2, 120, 1, true);   // tall enough that a treeline anchored on high terrain at a LOW render distance (steep elevation angle) never clips at the rim
 const _uWater={value:new THREE.Color(0.08,0.2,0.28)}, _uSky={value:new THREE.Color(0.6,0.68,0.76)};
 const _horizVert='varying vec3 vPos; void main(){ vPos=position; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }';
@@ -1463,11 +1468,18 @@ function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.p
     // is sub-pixel at the horizon → gating this is exact, not approximate. Cost: 128×8 surfaceH calls, occasional.
     if(Math.abs(player.pos.x-_pineLastX)+Math.abs(player.pos.z-_pineLastZ) > 2 || CFG.RENDER_DIST!==_pineLastRD){ _pineLastX=player.pos.x; _pineLastZ=player.pos.z; _pineLastRD=CFG.RENDER_DIST;
       const visD=CFG.RENDER_DIST*CK;   // the fog wall — where rendered terrain ends and the backdrop stands in
+      const IC=islandStats(), vx=player.pos.x-IC.x, vz=player.pos.z-IC.z, vd=Math.hypot(vx,vz)||1;
+      const cf=clamp((vd-IC.R*0.30)/(IC.R*0.35),0,1);   // how COASTAL you are (0 deep inland → 1 at/near the shore): only near the coast does the forever-coast illusion engage
       for(let i=0;i<_PN;i++){ const az=(i/_PN)*6.2831853-3.14159265, dx=Math.cos(az), dz=Math.sin(az);
         let forest=0, hMax=0;   // forest = tree-capable samples (the band real pines grow in, with tolerance); hMax = the tallest forest floor — the ground the silhouette stands on
         for(let s=0;s<8;s++){ const r=visD-12+s*16; const h=surfaceH(Math.round(player.pos.x+dx*r),Math.round(player.pos.z+dz*r));   // band starts just INSIDE the wall so the anchor covers the last rendered trees' own ground
           if(h>CFG.SEA+4 && h<=CFG.SEA+44){ forest++; if(h>hMax) hMax=h; } }   // beach/shore/deep-sea past the wall → no pines hovering where no tree could grow
-        const vis=clamp((forest/8-0.45)/0.4,0,1);   // mostly forest beyond the horizon → pines; sea/beach/thin spits → none (kills the 360° ring over open water)
+        let vis=clamp((forest/8-0.45)/0.4,0,1);   // mostly forest beyond the horizon → pines; open sea straight out → none
+        // THE COAST CONTINUES FOREVER (Ben 07-20): standing near the shore looking seaward, the treeline must run on
+        // along your LEFT and RIGHT periphery to the horizon — the island center says which way is "out to sea";
+        // only a cone around dead-seaward stays open water, every tangent/inland azimuth keeps the coastal forest.
+        const cosA=(dx*vx+dz*vz)/vd, cont=cf*(1-smooth(0.50,0.88,cosA));
+        if(cont>vis){ vis=cont; if(hMax<CFG.SEA+8) hMax=CFG.SEA+8; }   // phantom coastline stands on coastal-forest ground just above the beach
         _pineMaskData[i*4]=Math.round(vis*255); _pineMaskData[i*4+1]=Math.round(clamp(hMax/WH,0,1)*255); }   // G = anchor terrain height → the shader grounds the silhouette on it at the wall distance
       _pineMask.needsUpdate=true; } } }
 function bakeSky(){ if(!USE_SKYCUBE) return; try{ const prevTone=renderer.toneMapping; renderer.toneMapping=THREE.NoToneMapping;   // bake LINEAR (background render tonemaps once, like the old dome)
@@ -9260,6 +9272,7 @@ window.__hc={
   smelt(x,z){ try{ const bx=Math.floor(x), bz=Math.floor(z), by=surfaceH(bx,bz)+1; setBlockWorld(bx,by,bz,BID.furnace,true); furnaces[ckey(bx,by,bz)]={in:{id:'sand',n:2},t:2,out:null}; return {bx,by,bz}; }catch(e){ return {err:e.message}; } },   // QA: place a furnace mid-smelt at (x,z) — cooking-fx visual checks
   chest(x,z){ try{ const bx=Math.floor(x), bz=Math.floor(z), by=surfaceH(bx,bz)+1; setBlockWorld(bx,by,bz,BID.chest,true); openChest(bx,by,bz); return {bx,by,bz}; }catch(e){ return {err:e.message}; } },   // QA: place + OPEN a chest at (x,z) — lid-animation visual checks
   chestClose(){ try{ closeUI(); return true; }catch(e){ return {err:e.message}; } },
+  island(){ try{ const IC=islandStats(); return {cx:+IC.x.toFixed(1), cz:+IC.z.toFixed(1), R:+IC.R.toFixed(1), px:+player.pos.x.toFixed(1), pz:+player.pos.z.toFixed(1)}; }catch(e){ return {err:e.message}; } },   // QA: island centroid/radius driving the forever-coast treeline wrap
   gun(id){ try{ invAdd(id,1); invAdd('rifle_ammo',64); for(let i=0;i<9;i++){ if(inv[i]&&inv[i].id===id){ selSlot=i; break; } } refreshHotbar(); return 'armed '+id; }catch(e){ return e.message; } },   // QA: give + select a gun with reserve ammo
   aim(on){ try{ locked=true; rmbHeld=!!on; return rmbHeld; }catch(e){ return e.message; } },   // QA: hold/release the aim intent (forces the locked flag for headless runs)
   shoot(){ try{ locked=true; return !!fireGun(); }catch(e){ return e.message; } },             // QA: pull the trigger once
