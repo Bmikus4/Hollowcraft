@@ -137,7 +137,10 @@ function buildEyeBand2(opts = {}) {
   const layout = [{ i: 0, x: 0, y: 0, z: CENTRAL_Z, size: CENTRAL_SIZE }];
   for (const sign of [-1, 1]) {
     let x = 0, prev = CENTRAL_SIZE;
-    for (let a = 1; a <= 3; a++) { const s = sizeOf(a); x += (prev + s) * gap; prev = s; layout.push({ i: sign * a, x: sign * x, y: -0.024 * x * x, z: 0.03 * x - 0.05, size: s }); }
+    for (let a = 1; a <= 3; a++) { const s = sizeOf(a); x += (prev + s) * gap; prev = s;
+      // FIX-5 (user spec 07-20): the OUTER TWO eyes each side (|i|>=2) ride ON the mid wing row — same x/y
+      // station, pushed forward onto the wing plane so they read as set INTO the wings, visible through them.
+      layout.push({ i: sign * a, x: sign * x, y: -0.024 * x * x, z: 0.03 * x - 0.05 + (a >= 2 ? 0.48 : 0), size: s }); }
   }
   layout.sort((p, q) => p.i - q.i);                 // -3..3, central at centre
   const N = layout.length;                          // 7
@@ -426,9 +429,10 @@ function buildCoreMass(bodyMat, count = 46, voxLen = 7) {
   // FIX-4 (user spec 07-20): a full ring of SMALL red feathers directly behind the outermost (seed) row…
   for (let i = 0; i < 20; i++) { const th = i / 20 * 6.283 + 0.157;
     spots.push({ th, r: 0.345 * H, len: 0.30, layer: 3, stain: 0.94 }); }
-  // …and MASSIVE red plumes behind that — the outer corona the whole mantle stands on
+  // …and MASSIVE red plumes as an UNDER-FRINGE (user spec 07-20 v2): rooted near the centre so their TIPS poke
+  // just past the inner feathers' tips, and pushed a full layer further back — a great dark layer BEHIND the plumage
   for (let i = 0; i < 12; i++) { const th = (i + 0.5) / 12 * 6.283;
-    spots.push({ th, r: 0.42 * H, len: 1.15, layer: 4, stain: 0.88 }); }
+    spots.push({ th, r: 0.10 * H, len: 1.15, layer: 5, stain: 0.88 }); }
   while (spots.length < n) {                                                                     // the rest fill the inside
     const th = Math.random() * 6.283, rr = Math.sqrt(Math.random());
     spots.push({ th, r: (0.03 + rr * 0.17) * H, len: 0.26 + Math.random() * 0.10, layer: 2, stain: 0.90 });
@@ -549,7 +553,7 @@ export class SeraphimModel {
         const g = wing.group;
         g.position.set(cfg.pos[0], cfg.pos[1], cfg.pos[2]);
         g.quaternion.setFromEuler(new THREE.Euler(0, cfg.rotY, cfg.rotZ, 'YZX'));
-        wing._omegaMul = cfg.omegaMul;
+        wing._omegaMul = cfg.omegaMul; wing.span = S;   // span cached for the adapter's wing hit-spheres
         (side === +1 ? this.core : this.mirrorL).add(g);
         this.wings.push(wing);
       }
@@ -571,6 +575,10 @@ export class SeraphimModel {
     this.eyeBand = buildEyeBand2({});
     this.eyeBand.group.position.set(0, H * 0.06, 0);   // FIX-1: lift the band clear above the hanging core train
     this.core.add(this.eyeBand.group);
+    // FIX-5: the outer two eyes each side are ATTACHED to the mid wing row — cache refs + rest stations so
+    // update() can ride them gently on the wing-beat (the wings deform in-shader; the group is static, so the
+    // ride is a small phase-locked bob that sells the attachment without reparenting the instanced band).
+    this._wingEyes = this.eyeBand.eyes.filter(e => Math.abs(e.l.i) >= 2).map(e => ({ e, y0: e.l.y, z0: e.l.z }));
     this.laserSocket = this.eyeBand.laserSocket;
 
     // ---- fx (beam + embers share ONE additive material = role #4) -----------
@@ -665,7 +673,10 @@ export class SeraphimModel {
     const coreUni = this._coreMat.userData.wingUniforms;
     if (coreUni && coreUni.uTime) coreUni.uTime.value = el;
 
-    // 4) eyes
+    // 4) eyes — wing-mounted outer eyes ride the mid pair's beat (ω×0.6 matches the mid wings' omegaMul)
+    if (this._wingEyes) { const wf = Math.max(0.05, flap), wo = el * Math.max(0.02, v.omega * 0.6 * omegaScale);
+      for (const m of this._wingEyes) { m.e.pivot.position.z = m.z0 + Math.sin(wo + m.e.l.i) * 0.16 * wf;
+        m.e.pivot.position.y = m.y0 + Math.cos(wo * 0.9 + m.e.l.i) * 0.07 * wf; } }
     this.eyeBand.setGazeMode(v.gaze);
     if (this.rig.state === 'death') this.eyeBand.setDeathClose(this.rig.eyeClosePerEye);
     this.eyeBand.update(dt, el);

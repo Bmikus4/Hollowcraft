@@ -144,6 +144,25 @@ export function seraphHideBeam() {
   if (_beam) _beam.setVisible(false);
 }
 
+// WING HITBOXES (user spec 07-20): three spheres along each of the eight wings' spans — a shot that lands
+// here has a 10% chance of wounding (the game rolls it); the EYES remain the 100% targets.
+const _wp2 = new THREE.Vector3();
+export function seraphWingSpheres() {
+  if (!_model || !_model.object3d.visible || !_model.wings) return [];
+  const out = [];
+  for (const w of _model.wings) {
+    const g = w.group; if (!g) continue;
+    g.updateWorldMatrix(true, false);
+    const S = (w.span || 7);   // wing-local leading edge = +X
+    for (const [u, rr] of [[0.30, 0.22], [0.60, 0.20], [0.88, 0.15]]) {
+      _wp2.set(u * S, 0, S * 0.28).applyMatrix4(g.matrixWorld);               // mid-chord: feathers grow +Z, so the mass sits ~0.28S behind the edge
+      const ws = _es.setFromMatrixScale(g.matrixWorld).x;
+      out.push({ x: _wp2.x, y: _wp2.y, z: _wp2.z, r: rr * S * ws });
+    }
+  }
+  return out;
+}
+
 // EVERY EYE IS A HITBOX (user spec 07-20): world-space spheres for the seven-eye band —
 // pivot band-local positions pushed through the band group's live world matrix (the pivots
 // themselves are virtual; only their matrices reach the InstancedMesh). Unit eye sclera
