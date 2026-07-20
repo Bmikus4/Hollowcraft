@@ -739,7 +739,7 @@ function decorate(c){
     const h=surfaceH(wx,wz);
     // SULFUR NODES — yellow-grey blobs on the surface: common along the dry beach band, rare inland. Mine for sulfur powder (→ gunpowder → ammo). Placed BEFORE the tree setback so they populate the beach the trees skip.
     { const near=h-CFG.SEA, sr=tileRng((wx*40503^wz*13007)>>>0)();
-      if(trailDist(wx,wz)>2 && ((near>=0&&near<=3&&sr<0.018) || (near>3&&near<90&&sr<0.0044))) placeSet(c, wx, h+1, wz, BID.sulfur_ore, true); }   // yellow-grey nodes: uncommon on the beach, rare inland (cut 80% now that the flag-fix makes them all render)
+      if(trailDist(wx,wz)>2 && ((near>=0&&near<=3&&sr<0.0072) || (near>3&&near<90&&sr<0.00176))) placeSet(c, wx, h+1, wz, BID.sulfur_ore, true); }   // yellow-grey nodes: uncommon on the beach, rare inland (cut a further 60% by request, 2026-07-19)
     if (h<=CFG.SEA+4 || h>=WH-28) continue;   // COASTAL SETBACK: trees start ≥4 blocks above sea (was +1), so the treeline pulls back off the beach/shore instead of crowding the waterline. Raise this number to push it further inland.
     if (trailDist(wx,wz)<2.6 || inCabin(wx,wz) || nearOpening(wx,wz)) continue;   // keep the dirt trail corridor + cabin footprint + trailhead clearings free of tree bases
     if (!isGrassSurface(wx,wz)) continue;   // pines only on grass → natural treeline; bare rock/snow/ice/beach stay clear (deterministic so border trees still straddle)
@@ -1206,7 +1206,7 @@ let scopeEl=document.createElement('div'); scopeEl.style.cssText='position:fixed
   scopeEl.appendChild(ring); }
 document.body.appendChild(scopeEl);
 
-const FAR = CFG.RD_MAX*CK;   // horizon/fog/pine-backdrop are sized to the MAX render distance, not the current one (else a low RD makes the pine horizon wrap the whole island)
+const FAR = CFG.RD_MAX*CK;   // horizon GEOMETRY (cylinder radius/camera far) is sized to the MAX render distance so the RD slider never clips it; the pine-backdrop MASK deliberately tracks the CURRENT render distance (see updateHorizon) so the treeline stands in for whatever land the live RD can't reach
 // FogExp2 hides the far clip; fog color === background to avoid the cyan-creep artifact
 scene.fog = new THREE.FogExp2(BG.clone(), 1.6/FAR);
 
@@ -1250,10 +1250,12 @@ function injectAtlas(mat, opts={}){
         'diffuseColor.rgb *= _tex.rgb;')
       .replace('#include <lights_fragment_maps>',
         '#include <lights_fragment_maps>\n'+
-        'irradiance *= (0.06 + 0.94*vSky);\n'+   // skylight floor on indirect (caves/interiors dark without a light)
+        'irradiance *= (0.035 + 0.965*pow(vSky,1.7));\n'+   // skylight CONTRAST curve (was linear): interiors/overhangs/caves fall off much harder while open ground stays bright — the dark-vs-light horror contrast, zero cost
         'float _bl = texture(uLight3D, vec3(vLP.x/'+CK.toFixed(1)+', vLP.y/'+WH.toFixed(1)+', vLP.z/'+CK.toFixed(1)+')).r;\n'+   // baked block light 0..1, trilinear (smooth), 0 behind walls (flood-fill is blocked by solids → no bleed)
         'float _fl = 0.90 + 0.10*sin(uTime*7.3 + vLP.x*1.7 + vLP.z*1.3);\n'+   // cheap warm flicker
-        'irradiance += vec3(3.1,1.65,0.66) * _bl * _bl * _fl;');   // warm torch glow added to indirect → lights the actual texture, smooth falloff, ZERO per-frame CPU
+        'irradiance += vec3(3.1,1.65,0.66) * _bl * _bl * _fl;')   // warm torch glow added to indirect → lights the actual texture, smooth falloff, ZERO per-frame CPU
+      .replace('#include <aomap_fragment>',
+        '#include <aomap_fragment>\nreflectedLight.directDiffuse *= (0.12 + 0.88*smoothstep(0.22,0.9,vSky));');   // the SUN can't reach where the sky can't: kills direct light leaking into interiors/caves (and beyond the 46-block shadow radius), so enclosed spaces read genuinely dark
     if(Q.get('albedo')) sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\ngl_FragColor=vec4(_tex.rgb,1.0);');   // DIAGNOSTIC ?albedo: flat raw texture, NO lighting
   };
   mat.userData.atlas = true;   // marks this as a voxel-atlas material → chunks bind their per-chunk light volume to it
@@ -1416,9 +1418,12 @@ const oceanMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, si
   '  float a=smoothstep(0.0,-0.055,elev);',                                        // fade to TRANSPARENT at the waterline → the sky shows through the join, killing the horizon seam
   '  gl_FragColor=vec4(water,a); }'].join('\n') });
 const oceanLayer=new THREE.Mesh(_horizGeo, oceanMat); oceanLayer.frustumCulled=false; oceanLayer.renderOrder=-6; scene.add(oceanLayer);
-// PINE TREELINE — a distant forest silhouette on the horizon, shown ONLY toward azimuths where the island's land runs
-// past the horizon (deep inland). A per-azimuth mask (analytic ray-vs-island-disc, CPU, ~128 samples/frame — no per-pixel
-// terrain raycast) zeroes it wherever you'd be looking out over a shoreline, so pines never sit over the sea.
+// PINE TREELINE — a distant forest silhouette standing in for the land the render distance can't reach. Per-azimuth
+// mask (128 CPU rays, pure analytic ray-vs-island-disc — no terrain sampling, so the silhouette NEVER jumps as you
+// move): R = "land runs past the fog wall" visibility, G = smooth land-run factor that drives a gentle, capped height
+// taper. Anchored to the CURRENT render distance, so the treeline wraps the whole horizon from the interior and covers
+// the sky where the chunks stop. It sits fogged by default and fogs out progressively toward the shore ends of each
+// arc; seaward azimuths stay 0 → the ocean layer shows through.
 const _PN=128, _pineMaskData=new Uint8Array(_PN*4);
 const _pineMask=new THREE.DataTexture(_pineMaskData,_PN,1,THREE.RGBAFormat); _pineMask.wrapS=THREE.RepeatWrapping; _pineMask.minFilter=THREE.LinearFilter; _pineMask.magFilter=THREE.LinearFilter; _pineMask.needsUpdate=true;
 const _uPine={value:new THREE.Color(0.078,0.157,0.071)};   // = the DARKEST textured pixel in the leaf tile, rgb(20,40,18)
@@ -1428,33 +1433,40 @@ const pineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, sid
   'precision highp float; varying vec3 vPos; uniform sampler2D uMask; uniform vec3 uPine, uFogCol; uniform float uFogAmt;',
   'float hash(float n){ return fract(sin(n)*43758.5453); }',
   'float nz(float x){ float i=floor(x),f=fract(x); return mix(hash(i),hash(i+1.0),f*f*(3.0-2.0*f)); }',
-  'float treeline(float az){ float t=nz(az*46.0)*0.5+nz(az*110.0)*0.3+nz(az*210.0)*0.2; float spike=pow(abs(sin(az*260.0)),6.0)*0.02; return 0.012+t*0.05+spike; }',
   'void main(){ vec3 d=normalize(vPos); float elev=d.y; float az=atan(vPos.z,vPos.x);',
-  '  float m=texture2D(uMask, vec2((az+3.14159265)/6.2831853, 0.5)).r; if(m<0.2) discard;',   // this azimuth looks over the sea/shore (or only a shallow land-run) → no pines; the higher cutoff trims faint fringe so the treeline ends cleanly instead of smearing around the horizon
-  '  float tl=treeline(az)*m*1.85;',                                                             // taller pines (canopy stands higher off the horizon)
-  '  float base=-0.028;',                                                                        // ...and dropped ~20px down-screen so the treeline sits just a touch lower
-  '  float top=base+tl, bottom=base-0.16;',                                                      // TIPS fixed at `top`; green skirt extended well down below the waterline
-  '  if(elev>top || elev<bottom) discard;',                                                      // jagged silhouette band; height scales with how much land lies beyond
+  '  vec4 mk=texture2D(uMask, vec2((az+3.14159265)/6.2831853, 0.5)); float m=mk.r; if(m<0.02) discard;',   // this azimuth's coast is inside the render distance → real shoreline, no backdrop
+  '  float hgt=mk.g;',                                                                            // 0..1 smooth land-run factor (analytic, stable under movement)
+  '  float jag=nz(az*46.0)*0.5+nz(az*110.0)*0.3+nz(az*210.0)*0.2;',
+  '  float tl=(0.030+0.095*hgt)*(0.84+0.16*jag) + 0.010*pow(abs(sin(az*260.0)),6.0);',            // gentle capped height, smoothly tapered by land run; jag only ripples the canopy edge
+  '  float base=-0.028;',
+  '  float top=base+tl*m, bottom=base-0.17;',                                                     // arc ends sink smoothly to the waterline; green skirt covers the ocean seam
+  '  if(elev>top || elev<bottom) discard;',
   '  float shade=0.72+nz(az*320.0)*0.28;',
   '  vec3 pine=uPine*shade;',
-  '  float t=clamp((elev-bottom)/max(top-bottom,1e-4),0.0,1.0);',                                // 0 at the fog-bound base → 1 at the tips (which poke a touch clearer of the haze)
-  '  float fog=clamp(uFogAmt*(1.0-0.18*t),0.0,1.0);',                                            // fade the whole silhouette into the SAME fog the terrain fades to (density-driven → matches weather/day)
-  '  gl_FragColor=vec4(mix(pine,uFogCol,fog), m); }'].join('\n') });
+  '  float t=clamp((elev-bottom)/max(top-bottom,1e-4),0.0,1.0);',                                // 0 at the fog-bound base → 1 at the tips
+  '  float fog=clamp(uFogAmt*(1.1-0.35*t) + (1.0-m)*0.55, 0.0, 0.95);',                          // fogged by default; fogs out further as the treeline runs past the shore ends of the arc
+  '  float aa=smoothstep(top, top-0.005, elev);',                                                 // soft anti-aliased canopy edge
+  '  gl_FragColor=vec4(mix(pine,uFogCol,fog), m*aa); }'].join('\n') });
 const pineLayer=new THREE.Mesh(_horizGeo, pineMat); pineLayer.frustumCulled=false; pineLayer.renderOrder=-5; scene.add(pineLayer);   // over the ocean seam
-let _pineLastX=1e9, _pineLastZ=1e9;
+let _pineLastX=1e9, _pineLastZ=1e9, _pineLastRD=-1;
 function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.position.copy(camera.position); const day=globalU.uDay.value;
   _uWater.value.setRGB(lerp(0.04,0.20,day), lerp(0.07,0.29,day), lerp(0.10,0.34,day));         // deep sea grey-blue, matches the real water surface
   _uSky.value.setRGB(lerp(0.12,0.60,day), lerp(0.15,0.68,day), lerp(0.20,0.78,day));            // horizon-band air the water melts into
   { const dim=0.45+0.55*day, base=[0.078,0.157,0.071]; _uPine.value.setRGB(base[0]*dim, base[1]*dim, base[2]*dim);   // darkest-leaf colour, dimmer at night
-    const _wf=(typeof weather!=='undefined'?(weather.fog||0):0); pineMat.uniforms.uFogAmt.value=clamp(0.32 + 0.62*_wf, 0, 0.93);   // horizon treeline fades with WEATHER fog ONLY — decoupled from the render-distance terrain fog, which (now that fog tracks the shrunk current RD) was washing the treeline fully invisible. Clear day → visible; full bank → washed.
-    // the pine-visibility mask depends ONLY on player position (a slow ray-vs-island-disc), not on time, so
-    // recompute the 128 rays + re-upload the DataTexture only when the player has actually moved. At the
-    // horizon's FAR*0.7 softness, <2 blocks of parallax is sub-pixel → gating this is exact, not approximate.
-    if(Math.abs(player.pos.x-_pineLastX)+Math.abs(player.pos.z-_pineLastZ) > 2){ _pineLastX=player.pos.x; _pineLastZ=player.pos.z;
-      const Rland=(ISLE_R-ISLE_EDGE*0.5), ex=player.pos.x-ISLE_X, ez=player.pos.z-ISLE_Z, cc=ex*ex+ez*ez-Rland*Rland, thr=ISLE_R, soft=ISLE_EDGE;   // threshold anchored to ISLAND geometry (NOT the perf render distance). tExit must clear the WHOLE island radius before pines appear → from the interior you see no encircling treeline, and only long land-runs (looking across the island's bulk) paint pines. Raise/lower `thr` to shrink/grow the treeline arc.
-      for(let i=0;i<_PN;i++){ const az=(i/_PN)*6.2831853-3.14159265, dx=Math.cos(az), dz=Math.sin(az); const b=ex*dx+ez*dz, disc=b*b-cc;   // ray-vs-island-disc: distance to the coast in this azimuth
-        const tExit= disc>0 ? (-b+Math.sqrt(disc)) : 0; const vis=clamp((tExit-thr)/soft,0,1);        // land runs far past the horizon → pines; sea/coast in view → none
-        _pineMaskData[i*4]=Math.round(vis*255); }
+    const _wf=(typeof weather!=='undefined'?(weather.fog||0):0); pineMat.uniforms.uFogAmt.value=clamp(0.48 + 0.50*_wf, 0, 0.95);   // fogged by DEFAULT (reads as a distant bank), washes further with weather fog; decoupled from the render-distance terrain fog which would erase it entirely
+    // mask = 128 analytic rays vs the island disc — pure math, no terrain sampling, so the silhouette is perfectly
+    // stable under movement (heights can't jump). Recomputes only when the player moves or the RD slider changes.
+    if(Math.abs(player.pos.x-_pineLastX)+Math.abs(player.pos.z-_pineLastZ)>2 || CFG.RENDER_DIST!==_pineLastRD){
+      _pineLastX=player.pos.x; _pineLastZ=player.pos.z; _pineLastRD=CFG.RENDER_DIST;
+      const visD=CFG.RENDER_DIST*CK;                                                            // where rendered terrain actually ends — the backdrop takes over exactly there
+      const ex=player.pos.x-ISLE_X, ez=player.pos.z-ISLE_Z;
+      const Rland=ISLE_R-ISLE_EDGE*0.5, cc=ex*ex+ez*ez-Rland*Rland;
+      for(let i=0;i<_PN;i++){ const az=(i/_PN)*6.2831853-3.14159265, dx=Math.cos(az), dz=Math.sin(az);
+        const b=ex*dx+ez*dz, disc=b*b-cc, tExit=disc>0?(-b+Math.sqrt(disc)):0;                  // distance to the coast along this azimuth
+        const vis=clamp((tExit-visD*0.9)/(CK*6),0,1);                                           // land outruns the fog wall → backdrop forest, tapering off slowly toward the shore
+        const hgt=clamp((tExit-visD)/(CK*14),0,1);                                              // how far the land runs on — smooth height driver (deep interior = full, near coast = low)
+        _pineMaskData[i*4]=Math.round(vis*255);
+        _pineMaskData[i*4+1]=Math.round(hgt*255); }
       _pineMask.needsUpdate=true; } } }
 function bakeSky(){ if(!USE_SKYCUBE) return; try{ const prevTone=renderer.toneMapping; renderer.toneMapping=THREE.NoToneMapping;   // bake LINEAR (background render tonemaps once, like the old dome)
   skyCubeCam.position.set(0,0,0); skyCubeCam.update(renderer, skyScene); renderer.toneMapping=prevTone; }catch(e){} }
@@ -3155,7 +3167,9 @@ function useFlintSteel(h,slot){ let did=false, fx=player.pos.x, fy=player.pos.y+
     slot.dur=(slot.dur||ITEMS.flint_and_steel.firestarter.dur)-1; if(slot.dur<=0){ inv[selSlot]=null; flashName('your flint & steel wears out'); } refreshHotbar(); }
   else flashName('nothing here to light'); }
 function doPlace(){ const h=raycastVoxel();
-  if(typeof tryTakeCabinRifle==='function' && tryTakeCabinRifle()) return;                 // grab the rifle leaning in the cabin
+  if(typeof tryTakeCabinRifle==='function' && tryTakeCabinRifle()) return;                 // grab the rifle racked in the cabin
+  if(typeof tryTakeDungeonCuffs==='function' && tryTakeDungeonCuffs()) return;             // pick the handcuffs off the dungeon floor
+  if(typeof tryCuffHerobrine==='function' && tryCuffHerobrine()) return;                   // click the held handcuffs onto the surrendered Herobrine's wrists
   { const hs=heldSlot(); if(hs&&ITEMS[hs.id]&&ITEMS[hs.id].gun) return; }                  // holding a gun → right-click = aim down sights (see updateView), never place/use
   { const hs=heldSlot(); if(hs&&ITEMS[hs.id]&&ITEMS[hs.id].firestarter){ useFlintSteel(h,hs); return; } }   // flint & steel → strike a light
   { const hs=heldSlot(); if(hs&&ITEMS[hs.id]&&ITEMS[hs.id].egg){ spawnFromEgg(ITEMS[hs.id].egg, h); if(!player.creative){ hs.n--; if(hs.n<=0)inv[selSlot]=null; refreshHotbar(); } return; } }   // spawn egg → spawn the creature
@@ -5336,6 +5350,12 @@ function endDrag(devoured){ if(devoured||player.tied) player._dragUsed=false;   
   if(devoured){ wretch.hunger=100; die('bound in its dungeon and devoured'); } else { flashName('you tore free'); if(bloomPass)bloomPass.strength=0.55; wretch.thought='It slipped my grasp. No matter — I will run it down.'; wretch._itBucket=null; if(typeof reason!=='undefined')reason.concurrence=''; }   // clear the stale "I have you" thought so the feed stops saying captured
   if(NET.on){ if(!NET.host){ wretch.owner=NET.hostId; netSend({t:'own',owner:NET.hostId}); } else { despawnWretch(true); wretch.owner=NET.id; } }   // co-op: capture over → hand the Wretch back to the host (fresh hunt)
 }
+// the handcuff prop placed on the dungeon's main-room floor — right-click near it to take it (mirrors the cabin rifle)
+let dungeonCuffs=null;
+function tryTakeDungeonCuffs(){ const c=dungeonCuffs; if(!c||c.taken)return false;
+  if(Math.hypot(player.pos.x-c.x,player.pos.z-c.z)>2.6 || Math.abs(player.pos.y-c.y)>3) return false;
+  c.taken=true; if(c.mesh){ scene.remove(c.mesh); _disposeView(c.mesh); } invAdd('handcuffs',1);
+  flashName('you take the handcuffs — cold, and waiting'); return true; }
 // carve the entity's physical dungeon at the lair (the drag destination)
 function buildDungeon(){ if(brain._dungeon===undefined)brain._dungeon=false; if(brain._dungeon)return;
   const L=wretch.lair; if(!L)return; const cx=Math.floor(L.x), cz=Math.floor(L.z);
@@ -5373,7 +5393,12 @@ function buildDungeon(){ if(brain._dungeon===undefined)brain._dungeon=false; if(
   L.b2cx=cx; L.b2cz=cz; L.b2y=b2floor+1; L.b2floor=b2floor; L.b2ceil=b2ceil; L.b2R=b2R;
   L.shX=shX+0.5; L.shZ=shZ+0.5; L.shTopY=fy+1;           // shaft mouth on the main floor
   L.cx=cx; L.cz=cz; L.fy=fy; L.y=fy+1; L.dunR=R; L.dunH=H; decorateDungeon(cx,fy,cz);
-  try{ if(typeof spawnDrop==='function') spawnDrop('handcuffs',1, cx-3.5, fy+1.4, cz+3.5); }catch(e){}   // HANDCUFFS lie on the main-room floor — for cuffing the surrendered Herobrine
+  // HANDCUFFS lie on the main-room floor — for cuffing the surrendered Herobrine. A PLACED prop (not a pooled item
+  // drop — those get evicted once 200 drops exist, which is why they were never found). Resting height = the model's
+  // true lowest edge: the upright chain links reach local y=-0.042, so at ×1.6 the group origin sits 0.0672 over the floor.
+  { const hg=buildHandcuffs(); hg.scale.setScalar(1.6); const hx=cx-3.5, hz=cz+3.5, hy=fy+1+0.042*1.6;
+    hg.position.set(hx,hy,hz); hg.rotation.y=0.7; scene.add(hg);
+    dungeonCuffs={x:hx,y:hy,z:hz,mesh:hg,taken:false}; }
   brain._dungeon=true;
 }
 // RULE: the dungeon is sacred ground — its blocks can never be broken or built over by anyone (player, co-op peer, creative).
@@ -5817,7 +5842,8 @@ function animateWretch(dt, moving){
   if(beat!==(store._beat!=null?store._beat:beat-1) && amp>0.05){ store._beat=beat;
     SS('py').v -= 0.9*S*amp;                                                          // pelvis drop
     SS('sx0').v -= 4*amp; SS('sx1').v -= 3*amp; SS('sx2').v -= 2*amp;                 // spine compression
-    wretch._plantSide=(beat%2)?1:-1; }
+    wretch._plantSide=(beat%2)?1:-1;
+    if(typeof wretchFootfall==='function') wretchFootfall(amp, gallop, st); }         // AUDIO fires on the EXACT plant frame — if it visibly steps, it audibly steps (no separate cadence clock to drift or gate out)
 
   // ============================== L3 — SPINE SPRINGS =========================
   const spNode=[P.spine[0],P.spine[1],P.spine[2]];
@@ -6690,6 +6716,7 @@ function buildHandcuffs(){ const g=new THREE.Group(); const steel=new THREE.Mesh
   for(const sx of [-1,1]){ const ring=new THREE.Mesh(new THREE.TorusGeometry(0.13,0.032,8,18),steel); ring.position.set(sx*0.17,0,0); ring.rotation.x=Math.PI/2; g.add(ring);   // cuff loops rotated 90° (hole now along Y — lie flat/open rather than coaxial)
     const hinge=new THREE.Mesh(new THREE.BoxGeometry(0.03,0.06,0.03),steel); hinge.position.set(sx*0.05,0,0); g.add(hinge); }   // the two cuff loops + their bows
   for(let i=0;i<3;i++){ const link=new THREE.Mesh(new THREE.TorusGeometry(0.03,0.012,6,10),steel); link.position.set((i-1)*0.035,0,0); link.rotation.x=(i%2)?Math.PI/2:0; g.add(link); }   // short connecting chain
+  g.userData.rings=[g.children[0],g.children[2]];   // [-x ring, +x ring] — QA hooks measure these against Herobrine's wrists
   g.traverse(o=>{ if(o.isMesh)o.castShadow=true; }); return g; }
 // procedural 3D MINIGUN — a rotary cluster of 6 barrels on a chunky receiver (muzzle points -z; barrels group spins while firing)
 // M134-pattern rotary minigun — 6-barrel cluster (spins via userData.barrels), rotor housing, gearbox, delrin feed + ammo can, spade grip. Muzzle -z.
@@ -7593,6 +7620,16 @@ function buildHerobrine(){ const g=new THREE.Group();
   herobrine.arms=[armL,armR];
   mk(0.24,0.72,0.26,pants,-0.13,0.5,0); mk(0.24,0.72,0.26,pants,0.13,0.5,0);          // legs
   return g; }
+// hands held OUT IN FRONT, wrists together — the cuffable pose (and the cuffed-walk pose). Euler XYZ applies Rz
+// first (swings the hanging arm inward) then Rx (pitches it forward), so the wrists land at x=±0.17 — exactly the
+// cuff-ring spacing — at local (±0.17, 1.388, 0.59) on the mesh.
+function hbArmsFront(h){ if(!h.arms)return; h.arms[0].rotation.set(-1.35,0,0.334); h.arms[1].rotation.set(-1.35,0,-0.334); }
+function hbResetPose(h){ if(h.arms){ h.arms[0].rotation.set(0,0,0); h.arms[1].rotation.set(0,0,0); } if(h.cuffMesh)h.cuffMesh.visible=false; }
+// snap the cuff model onto the held-out wrists: ring centres (±0.17,0,0) meet the wrist ends; rotation.x=PI/2 turns
+// the ring holes along +z (the forearm direction), +0.209 matches the arms' slight downward pitch.
+function hbAttachCuffs(){ const h=herobrine; if(!h.mesh)return;
+  if(!h.cuffMesh){ h.cuffMesh=buildHandcuffs(); h.cuffMesh.position.set(0,1.388,0.590); h.cuffMesh.rotation.set(Math.PI/2+0.209,0,0); h.mesh.add(h.cuffMesh); }
+  h.cuffMesh.visible=true; hbArmsFront(h); }
 function spawnHerobrine(minD,maxD,preferView){ minD=minD||22; maxD=maxD||38;
   for(let tries=0;tries<10;tries++){ let dirx,dirz;
     if(preferView){ const a=player.yaw+(Math.random()-0.5)*0.8; dirx=-Math.sin(a); dirz=-Math.cos(a); }   // materialise where you're LOOKING
@@ -7600,17 +7637,19 @@ function spawnHerobrine(minD,maxD,preferView){ minD=minD||22; maxD=maxD||38;
     const d=minD+Math.random()*(maxD-minD), x=player.pos.x+dirx*d, z=player.pos.z+dirz*d, gy=groundYAt(x,z);
     if(gy<=CFG.SEA || gy>WH-4) continue;                                               // valid dry ground only
     if(!herobrine.mesh){ herobrine.mesh=buildHerobrine(); scene.add(herobrine.mesh); }
+    hbResetPose(herobrine);                                                            // fresh apparition — arms hang, cuffs hidden (the haunt states re-pose it)
     herobrine.mesh.visible=true; herobrine.x=x; herobrine.y=gy; herobrine.z=z; herobrine.t=0; herobrine.seenT=0; herobrine.active=true; return true; }
   return false; }
 function hbSting(){ try{ if(typeof wretchVoice==='function') wretchVoice('sting',{x:herobrine.x,y:herobrine.y+1.6,z:herobrine.z}); }catch(e){} }   // rare dread stinger on close/in-view appearances
 function startHaunt(){ herobrine.haunting=true; herobrine.dread=0;                     // the Wretch is dead → HE begins, and never truly leaves
   herobrine.owner=(typeof NET!=='undefined'&&NET.on)?NET.id:null;                       // the player who slew the Wretch OWNS the haunt (interaction-based, not host)
+  herobrine.cuffed=false; herobrine.state=''; if(herobrine.mesh)hbResetPose(herobrine); // a fresh haunt never starts pre-cuffed (stale state from an earlier cycle)
   if(herobrine.active){ herobrine.active=false; if(herobrine.mesh)herobrine.mesh.visible=false; } herobrine.appearCd=1.0; }   // first apparition ~1s after the kill
 function despawnHerobrine(){ herobrine.active=false; if(herobrine.mesh)herobrine.mesh.visible=false;
   if(AC){ const p=panAt(herobrine.x,herobrine.y+1.5,herobrine.z); burst(p,0.11,0.16,180,3,55); }         // faint "vwip" as it blinks out
   if(herobrine.haunting) herobrine.appearCd=(5+Math.random()*9)*Math.max(0.3,1-(herobrine.dread||0)*0.09); }   // while haunting it ALWAYS returns — sooner as dread mounts
 function updateHerobrine(dt){ const h=herobrine;
-  if(h.haunting){                                                                       // ===== SURRENDER SEQUENCE: it TWEAKS OUT for 5s, throws its hands up, then you cuff it and lead it to the dungeon =====
+  if(h.haunting){                                                                       // ===== SURRENDER SEQUENCE: it TWEAKS OUT for 5s, holds its wrists out, then you CLICK the cuffs onto it and lead it to the dungeon =====
     if(!h.active){ h.appearCd-=dt; if(h.appearCd<=0){ if(spawnHerobrine(7,12,true)){ h.state='tweak'; h.t=0; hbSting(); } else h.appearCd=0.4; } return; }
     h.t+=dt; const dx=player.pos.x-h.x, dz=player.pos.z-h.z, dist=Math.hypot(dx,dz)||1e-6;
     h.mesh.rotation.y=Math.atan2(dx,dz);
@@ -7622,15 +7661,15 @@ function updateHerobrine(dt){ const h=herobrine;
       h.mesh.rotation.y+=(Math.random()-0.5)*1.6;
       if(h.arms){ h.arms[0].rotation.z=-1+Math.sin(clock.elapsedTime*23)*1.4; h.arms[1].rotation.z=1+Math.cos(clock.elapsedTime*21)*1.4; }   // flailing
       h.mesh.position.set(h.x,h.y,h.z); if(Math.random()<0.06)hbSting();
-      if(h.t>=5){ h.state='surrender'; h.x=player.pos.x-dx/dist*3.5; h.z=player.pos.z-dz/dist*3.5; h.y=groundYAt(h.x,h.z); flashName('It stops. It slowly raises its hands.'); }
+      if(h.t>=5){ h.state='surrender'; h.x=player.pos.x-dx/dist*3.5; h.z=player.pos.z-dz/dist*3.5; h.y=groundYAt(h.x,h.z); flashName('It stops. It slowly holds its wrists out toward you.'); }
       return; }
-    if(h.state==='surrender'){                                                          // frozen, HANDS UP, waiting — cuff it if you have handcuffs and step close
-      if(h.arms){ h.arms[0].rotation.z=-2.7; h.arms[1].rotation.z=2.7; } h.y=groundYAt(h.x,h.z); h.mesh.position.set(h.x,h.y,h.z);
-      if(dist<3 && (typeof invCount==='function') && invCount('handcuffs')>0){ h.state='follow'; h.cuffed=true; flashName('you cuff it — now lead it to the shrine (gold, red torches, a netherite core, netherrack) and light the netherrack'); }
-      else if(dist<3 && (!invCount || invCount('handcuffs')<=0)){ h._nocuff=(h._nocuff||0)+dt; if(h._nocuff>0.05){ h._nocuff=0; flashName('you need handcuffs — there are some in the dungeon'); } }
+    if(h.state==='surrender'){                                                          // frozen, hands OUT IN FRONT, wrists together — it does NOT move until the cuffs are clicked onto it (tryCuffHerobrine)
+      hbArmsFront(h); h.y=groundYAt(h.x,h.z); h.mesh.position.set(h.x,h.y,h.z);
+      if(dist<3){ h._nocuff=(h._nocuff||0)+dt; if(h._nocuff>0.05){ h._nocuff=0;
+        flashName((typeof invCount==='function'&&invCount('handcuffs')>0)?'hold the handcuffs and click them onto its wrists':'you need handcuffs — there are some in the dungeon'); } }
       return; }
-    if(h.state==='follow'){                                                             // cuffed → shuffles after you (hands bound up); lead it into the dungeon to end the haunt
-      if(h.arms){ h.arms[0].rotation.z=-2.4; h.arms[1].rotation.z=2.4; }
+    if(h.state==='follow'){                                                             // CUFFED → shuffles after you, bound hands held out in front; lead it to the shrine to end the haunt
+      hbArmsFront(h);
       if(dist>2.4){ const step=Math.min(4.8,dist*0.9)*dt*(dist>7?1.7:1); h.x+=dx/dist*step; h.z+=dz/dist*step; } h.y=groundYAt(h.x,h.z); h.mesh.position.set(h.x,h.y,h.z);
       return; }   // it follows until you take it to the shrine and light the netherrack (see useFlintSteel → summonBoss)
     return; }
@@ -7648,16 +7687,32 @@ function updateHerobrine(dt){ const h=herobrine;
   if(staring)h.seenT+=dt; else h.seenT=Math.max(0,h.seenT-dt*2.5);
   if(h.seenT>0.4 || dist<7 || h.t>24) despawnHerobrine();
 }
+// CLICK the held handcuffs onto the surrendered Herobrine — right-click while aiming at it within reach. The cuffs
+// leave your hand, the model snaps onto its wrists, and only THEN does it follow (replaces the old walk-near
+// auto-cuff, which put it in follow with no cuffs consumed and none visible).
+function tryCuffHerobrine(){ const h=herobrine, hs=(typeof heldSlot==='function')?heldSlot():null;
+  if(!hs||hs.id!=='handcuffs') return false;
+  if(!(h.haunting && h.active && h.state==='surrender' && h.mesh)) return false;
+  if(h.owner!=null && typeof NET!=='undefined' && h.owner!==NET.id){ flashName('it is not yours to bind'); return true; }   // co-op: only the haunt's leader binds it
+  const L=lookDir(), ox=h.x-camera.position.x, oy=(h.y+1.35)-camera.position.y, oz=h.z-camera.position.z;
+  const t=ox*L.x+oy*L.y+oz*L.z;                                                        // depth along the aim ray to its chest
+  const off=Math.hypot(ox-L.x*t, oy-L.y*t, oz-L.z*t);                                  // how far the crosshair misses it at that depth
+  if(t<0 || t>4.6 || off>1.1){ if(Math.hypot(ox,oz)<6){ flashName('step closer and click ON it'); return true; } return false; }
+  hs.n--; if(hs.n<=0)inv[selSlot]=null; refreshHotbar();                               // the cuffs leave your hand…
+  h.state='follow'; h.cuffed=true; hbAttachCuffs();                                    // …and lock onto its held-out wrists
+  if(AC){ const p=panAt(h.x,h.y+1.4,h.z); burst(p,0.3,0.04,2400,0.8,-600); burst(p,0.22,0.09,1300,0.7,-300); }   // ratchet click-click
+  flashName('you cuff it — now lead it to the shrine (gold, red torches, a netherite core, netherrack) and light the netherrack');
+  return true; }
 // GUEST MIRROR of a haunt owned by ANOTHER player — render Herobrine at the owner's broadcast pose/state (no local AI)
 function hbMirrorTick(dt){ const m=NET.hbnet, h=herobrine; if(!m||!m.a){ if(h.mesh)h.mesh.visible=false; h.active=false; return; }
   if(!h.mesh){ h.mesh=buildHerobrine(); scene.add(h.mesh); }
   h.active=true; h.mesh.visible=true;
   const k=Math.min(1,dt*16); h.x+=(m.x-h.x)*k; h.y+=(m.y-h.y)*k; h.z+=(m.z-h.z)*k;                 // ease toward the owner's authoritative pose
   h.mesh.position.set(h.x,h.y,h.z); h.mesh.rotation.y=m.ry||0; h.state=m.st||''; h.cuffed=!!m.cf;
-  if(h.arms){ if(m.st==='surrender'){ h.arms[0].rotation.z=-2.7; h.arms[1].rotation.z=2.7; }        // hands up
-    else if(m.st==='follow'){ h.arms[0].rotation.z=-2.4; h.arms[1].rotation.z=2.4; }                // cuffed shuffle
-    else if(m.st==='tweak'){ h.arms[0].rotation.z=-1+Math.sin(clock.elapsedTime*23)*1.4; h.arms[1].rotation.z=1+Math.cos(clock.elapsedTime*21)*1.4; }   // flailing
-    else { h.arms[0].rotation.z=0; h.arms[1].rotation.z=0; } }
+  if(h.arms){ if(m.st==='surrender'||m.st==='follow'){ hbArmsFront(h); }                            // wrists held out (bare, or cuffed and led)
+    else if(m.st==='tweak'){ h.arms[0].rotation.set(0,0,-1+Math.sin(clock.elapsedTime*23)*1.4); h.arms[1].rotation.set(0,0,1+Math.cos(clock.elapsedTime*21)*1.4); }   // flailing
+    else { h.arms[0].rotation.set(0,0,0); h.arms[1].rotation.set(0,0,0); } }
+  if(h.cuffed) hbAttachCuffs(); else if(h.cuffMesh) h.cuffMesh.visible=false;                       // mirror the cuff model on/off the wrists
   const f=h.eyeMats&&h.eyeMats[0]; if(f){ const fl=0.7+Math.sin(clock.elapsedTime*13)*0.3; h.eyeMats[0].color.setScalar(fl); h.eyeMats[1].color.setScalar(fl); } }
 
 // ---- WATCHING EYES — random pale eye-pairs that blink in the dark treeline and vanish if you approach.
@@ -7751,10 +7806,19 @@ function buildCabin(){ if(_cabinDone)return; const cx=spawnX+22, cz=spawnZ-14;
   for(let y=by;y<=gy;y++) setBlockWorld(cx+2,y,cz-2,AIR,true);                                            // access shaft (pierces floor & ceiling)
   setBlockWorld(cx,by+1,cz,BID.torch,true);
   lootChest(cx-2,by+1,cz+2,[['iron_ingot',2],['coal',6],['bone',3],['leather',2]]);
-  // the HUNTING RIFLE — leaned UP AGAINST the -x wall, in a soft pool of light
-  { const rg=buildBoltRifle(); rg.scale.setScalar(1.7); const rx=cx-2.62, rz=cz+0.4; rg.position.set(rx,gy+1.15,rz); rg.rotation.set(Math.PI*0.5, 0.12, 0.34); scene.add(rg);   // butt on the floor, muzzle up, resting on the wall
-    const rl=new THREE.PointLight(0xffd9a0, 5, 5.5, 2); rl.position.set(rx+0.5, gy+1.9, rz); scene.add(rl);
-    cabinRifle={x:rx,y:gy+1,z:rz,mesh:rg,taken:false}; }
+  // the HUNTING RIFLE — racked on a wooden GUN RACK on the -x wall: backboard + two U-cradles, rifle laid level in them.
+  // Cradle tops are set to the rifle model's TRUE underside at each contact column (barrel local z=-0.30 → y=0.00; butt-stock local z=0.38 → y=-0.109; ×1.7 scale).
+  { const wallX=cx-2, rz=cz-0.85, ry=gy+2.4;                                                       // inner face of the -x wall; rz clears the window (z≥cz) and the corner log; ry = rifle centreline
+    const rack=new THREE.Group(); scene.add(rack);
+    const rkW=new THREE.MeshLambertMaterial({color:0x4f3a24}), rkD=new THREE.MeshLambertMaterial({color:0x33251a});
+    const board=new THREE.Mesh(new THREE.BoxGeometry(0.05,0.34,1.55),rkW); board.position.set(wallX+0.025, ry-0.1, rz+0.068); rack.add(board);   // backboard plank flat against the wall face
+    const cradles=[{z:rz-0.51, top:ry},{z:rz+0.646, top:ry-0.185}];                                 // fore cradle under the bare barrel, rear under the butt-stock — both kiss the underside
+    for(const c of cradles){ const arm=new THREE.Mesh(new THREE.BoxGeometry(0.34,0.06,0.14),rkD); arm.position.set(wallX+0.17, c.top-0.03, c.z); rack.add(arm);   // shelf arm out from the wall — its top IS the contact plane
+      const prong=new THREE.Mesh(new THREE.BoxGeometry(0.05,0.20,0.14),rkD); prong.position.set(wallX+0.30, c.top+0.07, c.z); rack.add(prong);                     // upturned outer lip of the U
+      const plate=new THREE.Mesh(new THREE.BoxGeometry(0.04,0.34,0.16),rkW); plate.position.set(wallX+0.02, c.top+0.02, c.z); rack.add(plate); }                    // wall plate behind each cradle
+    const rg=buildBoltRifle(); rg.scale.setScalar(1.7); const rx=wallX+0.19; rg.position.set(rx,ry,rz); scene.add(rg);   // level in the cradles, scope up, bolt facing the room
+    const rl=new THREE.PointLight(0xffd9a0, 5, 5.5, 2); rl.position.set(wallX+0.85, ry+0.45, rz); scene.add(rl);
+    cabinRifle={x:rx,y:ry,z:rz,mesh:rg,taken:false,rack,wallX,contacts:cradles}; }
   _cabinDone=true; }
 
 // ---- MINE: sloped entrance + branching underground shafts with ore veins, torches & a loot chest ----
@@ -8063,6 +8127,8 @@ function initAudio(){ if(AC)return; try{
   for(let i=0;i<16;i++){ const p=new PannerNode(AC,{panningModel:'HRTF',distanceModel:'inverse',refDistance:2,maxDistance:64,rolloffFactor:1.3}); p.connect(spatBus); panners.push(p); }
   // voice pool: refDistance small, maxDistance short, rolloff steep → the voice attenuates hard with distance
   for(let i=0;i<4;i++){ const p=new PannerNode(AC,{panningModel:'HRTF',distanceModel:'inverse',refDistance:1.5,maxDistance:24,rolloffFactor:2.8}); p.connect(spatBus); voicePanners.push(p); }
+  // dedicated FOOTSTEP pool for the entity: steeper rolloff than the general pool; the hard fade-to-zero lives in wretchFootfall
+  for(let i=0;i<6;i++){ const p=new PannerNode(AC,{panningModel:'HRTF',distanceModel:'inverse',refDistance:2.5,maxDistance:48,rolloffFactor:1.8}); p.connect(spatBus); stepPanners.push(p); }
   // wind bed
   const wind=AC.createBufferSource(); wind.buffer=noiseBuf(3); wind.loop=true; const wlp=AC.createBiquadFilter(); wlp.type='lowpass'; wlp.frequency.value=420;
   windGain=AC.createGain(); windGain.gain.value=0.12; wind.connect(wlp); wlp.connect(windGain); windGain.connect(ambBus); wind.start();
@@ -8149,7 +8215,8 @@ function tone(dest,o){ if(!AC)return; try{ const t=AC.currentTime+(o.delay||0), 
   const g=AC.createGain(); g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(vol,t+(o.atk||0.004)); g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
   osc.connect(g); g.connect(dest||spatBus); osc.start(t); osc.stop(t+dur+0.03); }catch(e){} }
 const FOOT={ grass:[2400,1.1,0.06,0.32], stone:[1500,6,0.08,0.6], wood:[900,8,0.11,0.5], sand:[1800,0.8,0.07,0.3], water:[700,0.6,0.18,0.4], dirt:[1600,1.5,0.07,0.4] };
-function matUnder(){ const b=getBlock(player.pos.x,player.pos.y-0.2,player.pos.z); if(b===AIR)return 'grass'; if(b===WATER)return 'water'; const n=B[b]?B[b].name:''; if(n==='stone'||n==='cobble'||n==='mossy'||n==='iron_ore'||n==='coal_ore')return 'stone'; if(n==='planks'||n==='log'||n==='bookshelf')return 'wood'; if(n==='sand'||n==='gravel')return 'sand'; if(n==='grass')return 'grass'; return 'dirt'; }
+function matAt(x,y,z){ const b=getBlock(x,y,z); if(b===AIR)return 'grass'; if(b===WATER)return 'water'; const n=B[b]?B[b].name:''; if(n==='stone'||n==='cobble'||n==='mossy'||n==='iron_ore'||n==='coal_ore')return 'stone'; if(n==='planks'||n==='log'||n==='bookshelf')return 'wood'; if(n==='sand'||n==='gravel')return 'sand'; if(n==='grass')return 'grass'; return 'dirt'; }
+function matUnder(){ return matAt(player.pos.x,player.pos.y-0.2,player.pos.z); }
 sfxStep=()=>{ if(!AC)return; const mat=matUnder();
   { const _smp=mat==='dirt'?'grass':mat; if(playSample(_smp, {x:player.pos.x,y:player.pos.y,z:player.pos.z}, _smp==='sand'?0.24:0.32))return; }   // per-material footstep sample takes priority; wet sand plays quieter than grass
   const P=panAt(player.pos.x,player.pos.y,player.pos.z), r=0.9+Math.random()*0.2;
@@ -8159,18 +8226,55 @@ sfxStep=()=>{ if(!AC)return; const mat=matUnder();
   else if(mat==='wood'){ tone(P,{f:205*r,type:'triangle',dur:0.11,vol:0.13,to:150}); burst(P,0.05,0.04,880,4,520); }          // hollow plank knock
   else if(mat==='sand'){ burst(P,0.10,0.07,560*r,0.7,300,'lowpass'); }                              // soft muffled scuff
   else { burst(P,0.075,0.05,1300*r,1.4,600); } };                                                   // dirt
-const WRETCH_HEAR=13;   // blocks — beyond this you do NOT hear the entity's footsteps at all
-function wretchStep(){ if(!AC||!wretch.active)return;
-  const charging=(wretch.state==='HUNT'||wretch.state==='CHASE');
-  const HEAR = charging?36:WRETCH_HEAR;                       // the CHARGE thunders in from far (~36 blocks); creeping stays a close 13-block whisper
-  if(wretch.dist>HEAR)return;
-  const near=0.32+0.68*clamp(1-wretch.dist/HEAR,0,1);         // higher floor so mid-range footfalls are still clearly audible (you HEAR it coming)
-  const sq=1-(wretch.stealth||0)*0.85;                        // stalking/tracking/FLEE tread near-silent; only the committed charge is loud
-  const gain=charging?4.2:1.7;                                // LOUD heavy pounding footfalls on the run-down (you feel it in your chest)
-  const p=panAt(wretch.pos.x,wretch.pos.y+0.15,wretch.pos.z);
-  burst(p, 0.14*near*sq*gain, 0.17, 240+Math.random()*70, 0.7, 140);   // low, damp, heavy thud
-  burst(p, 0.06*near*sq*gain, 0.06, 700+Math.random()*280, 0.6);
-  if(charging) burst(p, 0.16*near, 0.26, 110, 0.9, 90); }            // sub-thump body impact — you FEEL the weight bearing down
+// ===== WRETCH FOOTSTEPS v2 — fired by the ANIMATION layer at the exact frame a foot plants (see the beat
+// hook in the gait code), so if it visibly steps it audibly steps — no separate cadence clock, no state gates
+// silently dropping the sound while it runs. Fixes, by symptom:
+//  · "hear it from too far" — WebAudio's inverse distance model clamps to an audible floor at maxDistance
+//    instead of reaching silence, and the twig/bush brush-crash layer had NO distance gate at all. Now every
+//    layer multiplies a hard fade that reaches TRUE ZERO at a per-gait radius (creep 9 / run 26 / charge 40).
+//  · "not spatial" — the old step was almost pure <700Hz noise; HRTF direction cues live above ~1.5kHz. Every
+//    step now carries a claw/debris transient up there, through a dedicated steeper-rolloff panner pool.
+//  · "sounds like tapping" — layered body: pitch-dropping heel THUD (mass) + the shipped per-material step
+//    sample pitched ~0.5x (a footfall far heavier than a person's) + debris + charge-only sub-thump in close.
+//  · occlusion: solid terrain between you and it muffles the step (lowpass + duck) — thumps through walls.
+let stepPanners=[], sIdx=0;   // pool built in initAudio
+function stepPanAt(x,y,z){ const p=stepPanners[sIdx=(sIdx+1)%stepPanners.length]; if(!p)return spatBus;
+  if(!(Number.isFinite(x)&&Number.isFinite(y)&&Number.isFinite(z))) return p;
+  const t=AC.currentTime; try{ p.positionX.setValueAtTime(x,t); p.positionY.setValueAtTime(y,t); p.positionZ.setValueAtTime(z,t);}catch(e){ try{p.setPosition(x,y,z);}catch(e2){} } return p; }
+function sampleInto(dest,base,vol,rate){ const arr=SFX[base]; if(!arr||!arr.length)return false;   // like playSample but into an arbitrary node (per-step filter chain)
+  const s=AC.createBufferSource(); s.buffer=arr[(Math.random()*arr.length)|0]; s.playbackRate.value=rate||1;
+  const g=AC.createGain(); g.gain.value=vol; s.connect(g); g.connect(dest); s.start(); return true; }
+function stepOcclusion(){ const px=player.pos.x, py=player.pos.y+1.2, pz=player.pos.z, wx=wretch.pos.x, wy=wretch.pos.y+1.0, wz=wretch.pos.z;
+  let hit=0; for(let s=1;s<=5;s++){ const u=s/6; if(solidAt(Math.floor(px+(wx-px)*u), Math.floor(py+(wy-py)*u), Math.floor(pz+(wz-pz)*u))) hit++; }
+  return hit/5; }   // 5 cheap block probes along the sight line → 0 open field .. 1 fully buried
+function wretchFootfall(amp, gallop, st, force){ window.__ffBeat=(window.__ffBeat||0)+1; if(!AC||!audioReady||!wretch.active||wretch.boss)return;
+  const d=Math.hypot(wretch.pos.x-player.pos.x, wretch.pos.z-player.pos.z);   // local listener distance (never trust host-relative wretch.dist on guests)
+  const adv=wretch._advRate||0, S=st||wretch.state;
+  const charging=(S==='HUNT'||S==='CHASE');
+  const running=charging||gallop||adv>3.0;
+  const R= force?20 : charging?40 : running?26 : 9;                            // hard audibility radius per gait
+  if(d>R)return;
+  const fade=Math.pow(1-d/R,1.35);                                             // TRUE zero at the radius, on top of the panner rolloff
+  const w=clamp(amp==null?0.8:amp,0,1)*(0.55+0.45*Math.min(1,adv/8));          // plant weight from the real gait energy
+  const creepMul= running?1 : (1-(wretch.stealth||0)*0.55);                    // a careful tread is QUIET, never silently muted
+  let vol=fade*creepMul*(charging?1.15:running?0.8:0.38)*(0.8+Math.random()*0.35)*(force?1:w);
+  if(vol<0.02)return;
+  const occl=stepOcclusion(); vol*=1-0.5*occl;
+  window.__ffPlay=(window.__ffPlay||0)+1;                                      // QA counter: steps that actually sounded
+  const p=stepPanAt(wretch.pos.x, wretch.pos.y+0.1, wretch.pos.z);
+  const lp=AC.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=5200-4300*occl; lp.connect(p);   // per-step chain: layers → occlusion lowpass → HRTF panner
+  tone(lp,{f:92+Math.random()*18,type:'sine',dur:0.22,vol:0.55*vol,to:36,atk:0.006});                       // L1 heel strike — deep pitch-dropping thud (the mass)
+  { const mat=matAt(wretch.pos.x, wretch.pos.y-0.2, wretch.pos.z), smp=mat==='dirt'?'grass':mat;            // L2 ground material, pitched ~0.5x = something far heavier than a person
+    if(!sampleInto(lp, smp, 0.95*vol, 0.5+Math.random()*0.14)) burst(lp, 0.5*vol, 0.09, 900+Math.random()*300, 1.6, 380); }
+  burst(lp, 0.30*vol, 0.045, 2300+Math.random()*900, 2.2, 1200);                                            // L3 claw-tip/debris transient — the >1.5kHz energy HRTF needs to place it
+  if(running) burst(lp, 0.18*vol, 0.06, 1250+Math.random()*350, 1.4, 600);
+  if(charging && d<18) burst(lp, 0.7*fade, 0.28, 105, 0.9, 80, 'lowpass');                                   // L4 sub-thump in close — you FEEL the weight bearing down
+  if(running && d<30 && typeof surfaceH==='function'){                                                       // L5 crashing through brush — occasional, distance-faded (was ungated + constant)
+    const fx=Math.floor(wretch.pos.x), fz=Math.floor(wretch.pos.z), gb=getBlock(fx,surfaceH(fx,fz),fz), gn=B[gb]?B[gb].name:'';
+    if(gn==='grass'||gn==='dirt'||gn==='leaves'){
+      if(Math.random()<0.30) playSample('twig',wretch.pos,0.7*fade);
+      if(Math.random()<0.22) playSample('bush',{x:wretch.pos.x,y:wretch.pos.y+0.4,z:wretch.pos.z},0.75*fade); } } }
+function wretchStep(){ wretchFootfall(0.9,true,wretch.state,true); }   // drag-haul path (black-screen audio): forced heavy close steps
 // water splash — spatial "sploosh" (entry) or light stroke; used by player and entity
 function sfxSplash(x,y,z,vol){ if(!AC)return; const v=vol||0.5; const p=panAt(x,y,z);
   playSample('water',{x,y,z},v*0.9);             // layer the loaded sample IF present — but no longer swallow the synth (that made splashes silent when the sample was quiet/missing)
@@ -8271,16 +8375,10 @@ _audioFrame=(dt)=>{ if(!AC)return;
   const sp=Math.hypot(player.vel.x,player.vel.z);
   if(player.wading && sp>0.5 && locked){ stepAcc+=sp*dt; if(stepAcc>1.9){ stepAcc=0; sfxSplash(cp.x,cp.y-0.4,cp.z, player.inWater?0.42:0.30); } }   // slosh while wading ANY depth (shallow shore included), louder when deep
   else if(player.onGround && sp>0.6 && locked){ stepAcc+=sp*dt; const gap=player.sprint?1.5:2.1; if(stepAcc>gap){ stepAcc=0; sfxStep(); emitNoise(player.pos.x,player.pos.y,player.pos.z, player.sprint?1.0:player.sneak?0.18:0.55); } } else stepAcc=Math.min(stepAcc,1.9);
-  // entity's own wet footsteps — spatial, so you hear it circling in the dark
-  // only the LOUD charge (HUNT/CHASE, stealth<0.5) makes audible steps — and only while genuinely running on the ground, near you, never while clinging/creeping/captured
-  if(wretch.active && !wretch.dragging && !player.grabbed && !wretch._clingN && (wretch._advRate||0)>1.8 && (wretch.stealth==null||wretch.stealth<0.5)){
-    const d=Math.hypot(wretch.pos.x-(wretch._lx??wretch.pos.x), wretch.pos.z-(wretch._lz??wretch.pos.z)); wretch._lx=wretch.pos.x; wretch._lz=wretch.pos.z; wretch._sa=(wretch._sa||0)+d; if(wretch._sa>1.4){ wretch._sa=0; wretchStep();
-      if((wretch.state==='HUNT'||wretch.state==='CHASE') && typeof surfaceH==='function'){          // CRASHING THROUGH THE BRUSH — a running Wretch on soft ground snaps twigs and thrashes bushes almost constantly
-        const fx=Math.floor(wretch.pos.x), fz=Math.floor(wretch.pos.z), gb=getBlock(fx,surfaceH(fx,fz),fz), gn=B[gb]?B[gb].name:'';
-        if(gn==='grass'||gn==='dirt'||gn==='path'||gn==='tallgrass'||gn==='podzol'||gn==='moss'||gn==='leaves'){
-          if(Math.random()<0.72)playSample('twig',wretch.pos,0.85);                                  // lots of snapping twigs
-          if(Math.random()<0.6)playSample('bush',{x:wretch.pos.x,y:wretch.pos.y+0.4,z:wretch.pos.z},0.9); } } } }   // ~0.9s bush samples overlap into a constant rustle
-  else { wretch._lx=wretch.pos.x; wretch._lz=wretch.pos.z; wretch._sa=0; }
+  // entity footsteps are BEAT-DRIVEN now — wretchFootfall() fires from the animation layer on the exact plant
+  // frame (see the gait footfall hook), with per-gait audibility radii, occlusion, and brush-crash layered inside.
+  // (the old distance-accumulator + stealth<0.5 gate lived here — it silently dropped steps in TRACK/TRAVERSE,
+  //  and its ungated twig/bush layer is why you could hear the entity from across the island)
   // threat from entity proximity/state
   let threat=0; if(wretch.active){ threat=clamp(1-wretch.dist/45,0,1); if(wretch.state==='HUNT')threat=Math.max(threat,0.9); if(wretch.state==='STALK')threat=Math.max(threat,0.5); }
   setThreat(threat);
@@ -8874,12 +8972,50 @@ window.__hc={
   pitch(p){ player.pitch=(p==null?-0.9:p); return player.pitch; },   // QA: aim the camera (e.g. down at the ground)
   summon(){ HORROR._firstNight=true; wretch.debug=false; if(!wretch.active){ wretch.spawnT=0; if(!spawnWretch(Math.random()*360,26)) wretch.spawnT=0.5; } return wretch.active; },
   haunt(){ if(typeof startHaunt==='function')startHaunt(); return {haunting:herobrine.haunting,owner:herobrine.owner}; },   // QA: begin a Herobrine haunt (owned by this player)
+  // ---- PROP-PLACEMENT QA (gun rack / dungeon cuffs / cuffs-on-wrists) — measure the ACTUAL model edges ----
+  tpExact(x,z,y){ player.pos.x=x; player.pos.z=z; player.pos.y=(y!=null)?y:groundYAt(x,z)+1; player.vel.set(0,0,0); return {x:+player.pos.x.toFixed(1),y:+player.pos.y.toFixed(1),z:+player.pos.z.toFixed(1)}; },   // exact-y teleport (tp() ground-snaps — useless inside carved interiors)
+  aimAt(x,y,z){ const dx=x-player.pos.x, dz=z-player.pos.z, dy=y-(player.pos.y+EYE), L=Math.hypot(dx,dy,dz)||1; player.yaw=Math.atan2(-dx,-dz); player.pitch=clamp(Math.asin(dy/L),-1.2,1.2); return {yaw:+player.yaw.toFixed(2),pitch:+player.pitch.toFixed(2)}; },
+  hbPos(){ const h=herobrine; return h.mesh?{x:+h.x.toFixed(2),y:+h.y.toFixed(2),z:+h.z.toFixed(2),state:h.state||'',cuffed:!!h.cuffed}:null; },
+  _visBox(root){ root.updateMatrixWorld(true); const bb=new THREE.Box3(), b=new THREE.Box3();   // Box3 over VISIBLE meshes only (setFromObject would count the hidden muzzle-flash sprite)
+    root.traverse(o=>{ if(!o.isMesh)return; for(let p=o;p;p=p.parent){ if(p.visible===false)return; if(p===root)break; }
+      if(!o.geometry.boundingBox)o.geometry.computeBoundingBox(); b.copy(o.geometry.boundingBox).applyMatrix4(o.matrixWorld); bb.union(b); });
+    return bb; },
+  lairInfo(){ const L=wretch.lair||null; return L?{x:L.x,z:L.z,cx:(L.cx!=null?L.cx:null),cz:(L.cz!=null?L.cz:null),fy:(L.fy!=null?L.fy:null),built:(typeof brain!=='undefined')?!!brain._dungeon:null,cuffs:!!dungeonCuffs}:null; },
+  propsRifle(){ try{ const r=cabinRifle; if(!r) return {err:'cabin not built yet'};
+    const bb=this._visBox(r.mesh); const rc=new THREE.Raycaster();
+    const out={ pos:[+r.x.toFixed(2),+r.y.toFixed(2),+r.z.toFixed(2)], gy:+(r.y-2.4).toFixed(1), wallX:+r.wallX.toFixed(2), minX:+bb.min.x.toFixed(3), wallClear:+(bb.min.x-r.wallX).toFixed(3), spanZ:[+bb.min.z.toFixed(2),+bb.max.z.toFixed(2)], contacts:[] };
+    for(const c of r.contacts){ rc.set(new THREE.Vector3(r.x, c.top-0.6, c.z), new THREE.Vector3(0,1,0)); const hits=rc.intersectObject(r.mesh,true);   // ray UP through the cradle column → first hit = the rifle's true underside there
+      const uy=hits.length?(c.top-0.6+hits[0].distance):null;
+      out.contacts.push({z:+c.z.toFixed(2), cradleTop:+c.top.toFixed(3), underside:uy==null?null:+uy.toFixed(3), gap:uy==null?null:+(uy-c.top).toFixed(3)}); }
+    return out; }catch(e){ return {err:e.message}; } },
+  propsCuffsFloor(){ try{ const c=dungeonCuffs; if(!c) return {err:'dungeon not built yet'};
+    c.mesh.updateMatrixWorld(true); const bb=new THREE.Box3().setFromObject(c.mesh); const L=wretch.lair||{}; const floorTop=(L.fy!=null)?L.fy+1:null;
+    return { pos:[+c.x.toFixed(2),+c.y.toFixed(3),+c.z.toFixed(2)], floorTop, minY:+bb.min.y.toFixed(3), gap:floorTop==null?null:+(bb.min.y-floorTop).toFixed(3),
+      inRoom:(L.cx!=null)?(Math.abs(c.x-L.cx)<12&&Math.abs(c.z-L.cz)<12):null, floorSolid:(L.fy!=null)?!!solidAt(Math.floor(c.x),L.fy,Math.floor(c.z)):null }; }catch(e){ return {err:e.message}; } },
+  qaCuffBrine(){ try{ herobrine.haunting=true; herobrine.owner=null; herobrine.cuffed=false;
+    if(!herobrine.active){ if(!spawnHerobrine(2.8,3.2,true)) return {err:'no spawn spot'}; }
+    herobrine.state='surrender';
+    invAdd('handcuffs',1); let si=-1; for(let i=0;i<9;i++){ if(inv[i]&&inv[i].id==='handcuffs'){si=i;break;} } if(si<0){ inv[selSlot]={id:'handcuffs',n:1}; } else selSlot=si; refreshHotbar();
+    const h=herobrine, dx=h.x-player.pos.x, dz=h.z-player.pos.z, dy=(h.y+1.35)-(player.pos.y+EYE), Ld=Math.hypot(dx,dy,dz)||1;
+    player.yaw=Math.atan2(-dx,-dz); player.pitch=clamp(Math.asin(dy/Ld),-1.2,1.2);                 // aim the crosshair at its chest
+    return {hb:[+h.x.toFixed(1),+h.y.toFixed(1),+h.z.toFixed(1)], dist:+Math.hypot(dx,dz).toFixed(2), held:heldSlot()?heldSlot().id:null}; }catch(e){ return {err:e.message}; } },
+  cuffClick(){ try{ return {consumed:tryCuffHerobrine(), state:herobrine.state, cuffed:!!herobrine.cuffed, held:heldSlot()?heldSlot().id:null}; }catch(e){ return {err:e.message}; } },
+  propsBrine(){ try{ const h=herobrine; if(!h.mesh||!h.cuffMesh) return {err:'not cuffed yet'};
+    h.mesh.updateMatrixWorld(true);
+    const wr=h.arms.map(a=>a.localToWorld(new THREE.Vector3(0,-0.64,0)));                          // wrist point = arm end (arm spans local y 0..-0.72)
+    const rings=h.cuffMesh.userData.rings.map(r=>r.getWorldPosition(new THREE.Vector3()));
+    return { cuffVisible:h.cuffMesh.visible, state:h.state, cuffed:!!h.cuffed,
+      wristL:wr[0].toArray().map(n=>+n.toFixed(3)), ringL:rings[0].toArray().map(n=>+n.toFixed(3)),
+      wristR:wr[1].toArray().map(n=>+n.toFixed(3)), ringR:rings[1].toArray().map(n=>+n.toFixed(3)),
+      misL:+wr[0].distanceTo(rings[0]).toFixed(3), misR:+wr[1].distanceTo(rings[1]).toFixed(3) }; }catch(e){ return {err:e.message}; } },
   boss(o){ o=o||{}; const px=player.pos.x,pz=player.pos.z,gy=groundYAt(px,pz); if(typeof summonBoss==='function')summonBoss(px,gy,pz-(o.dist||14)); if(o.flare)wretch._eyeFlare=1;   // QA: raise the seraph boss in front of the player
     if(o.park){ wretch._park=true; wretch.pos.set(px, gy+(o.up||11), pz-(o.dist||34)); } else wretch._park=false;   // hold it still, elevated & far, for a full-body view
     return {active:wretch.active,boss:wretch.boss,state:wretch.state,feats:wretch._bossWings?wretch._bossWings.userData.feats.length:0,eyes:wretch._eyeRig?wretch._eyeRig.userData.all.length:0,core:!!(wretch._eyeRig&&wretch._eyeRig.userData.core)}; },
   yank(){ if(!wretch.active) this.summon(); if(wretch.group){ wretch.pos.set(player.pos.x+1.4, player.pos.y, player.pos.z); wretch.state='HUNT'; wretch.committed=true; } return wretch.state; },
   set(p){ Object.assign(wretch, p||{}); return wretch.state; },
   cam(o){ o=o||{}; if(o.pitch!=null)player.pitch=o.pitch; if(o.yaw!=null)player.yaw=o.yaw; return {yaw:player.yaw,pitch:player.pitch}; },
+  tp(x,z){ player.pos.x=x; player.pos.z=z; player.pos.y=Math.max(groundYAt(x,z),CFG.SEA)+2; player.vel.set(0,0,0); return {x:+player.pos.x.toFixed(1),y:+player.pos.y.toFixed(1),z:+player.pos.z.toFixed(1)}; },   // QA/bench: teleport, ground-snapped
+  rd(n){ if(n!=null) CFG.RENDER_DIST=Math.max(3,Math.min(CFG.RD_MAX,n|0)); return CFG.RENDER_DIST; },   // QA/bench: get/set render distance
   probe(){ const P=player.pos; return { worldSize:world.size, sea:CFG.SEA, WH, feet:getBlock(Math.floor(P.x),Math.floor(P.y),Math.floor(P.z)), gyHere:groundYAt(P.x,P.z), gy26:groundYAt(P.x+26,P.z), gyN:groundYAt(P.x,P.z-26), chunkHere:!!getChunk(Math.floor(P.x)>>4,Math.floor(P.z)>>4), chunk26:!!getChunk((Math.floor(P.x)+26)>>4,Math.floor(P.z)>>4) }; },
   setBlock(dx,dy,dz,name){ const P=player.pos, wx=Math.floor(P.x)+(dx|0), wy=Math.floor(P.y)+(dy|0), wz=Math.floor(P.z)+(dz|0); const id=name==null?0:(typeof name==='number'?name:BID[name]); if(id===undefined)return 'unknown block: '+name; setBlockWorld(wx,wy,wz,id,true); return {wx,wy,wz,id,queued:{remesh:remeshSet.size,relight:relightSet.size}}; },   // QA/bench: place or clear (name=null) a block relative to the player, RECORDED like a player edit; reports the edit-queue depths
   editQ(){ return {remesh:remeshSet.size, relight:relightSet.size}; },   // QA/bench: watch the edit queues drain
