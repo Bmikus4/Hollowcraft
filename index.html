@@ -1461,9 +1461,11 @@ function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.p
     if(Math.abs(player.pos.x-_pineLastX)+Math.abs(player.pos.z-_pineLastZ) > 2 || CFG.RENDER_DIST!==_pineLastRD){ _pineLastX=player.pos.x; _pineLastZ=player.pos.z; _pineLastRD=CFG.RENDER_DIST;
       const visD=CFG.RENDER_DIST*CK;   // the fog wall — where rendered terrain ends and the backdrop stands in
       for(let i=0;i<_PN;i++){ const az=(i/_PN)*6.2831853-3.14159265, dx=Math.cos(az), dz=Math.sin(az);
-        let land=0, hMax=0; for(let s=0;s<8;s++){ const r=visD+6+s*16; const h=surfaceH(Math.round(player.pos.x+dx*r),Math.round(player.pos.z+dz*r)); if(h>CFG.SEA){ land++; if(h>hMax) hMax=h; } }   // sample the REAL coastline in the 6..118-block band past the wall
-        const vis=clamp((land/8-0.45)/0.4,0,1);   // mostly land beyond the horizon → pines; sea/shore/thin spits → none (kills the 360° ring over open water)
-        _pineMaskData[i*4]=Math.round(vis*255); _pineMaskData[i*4+1]=Math.round(clamp(hMax/WH,0,1)*255); }   // G channel = tallest land in the band → the shader anchors the silhouette to the real horizon terrain
+        let forest=0, bestA=-9, bH=0, bR=visD+6;   // forest = tree-capable samples (same grass band the real pines grow in); best = the sample whose treetop stands steepest above the eye — what actually fronts the silhouette
+        for(let s=0;s<8;s++){ const r=visD+6+s*16; const h=surfaceH(Math.round(player.pos.x+dx*r),Math.round(player.pos.z+dz*r));
+          if(h>CFG.SEA+4 && h<=CFG.SEA+38){ forest++; const a=(h-player.pos.y)/r; if(a>bestA){ bestA=a; bH=h; bR=r; } } }   // beach/shore/bare rock past the wall → no pines hovering where no tree could grow
+        const vis=clamp((forest/8-0.45)/0.4,0,1);   // mostly forest beyond the horizon → pines; sea/beach/thin spits/rock → none (kills the 360° ring over open water)
+        _pineMaskData[i*4]=Math.round(vis*255); _pineMaskData[i*4+1]=Math.round(clamp(bH/WH,0,1)*255); _pineMaskData[i*4+2]=Math.round(clamp((bR-visD)/128,0,1)*255); }   // G = anchor terrain height, B = its distance past the wall → the shader grounds the silhouette exactly where that terrain sits
       _pineMask.needsUpdate=true; } } }
 function bakeSky(){ if(!USE_SKYCUBE) return; try{ const prevTone=renderer.toneMapping; renderer.toneMapping=THREE.NoToneMapping;   // bake LINEAR (background render tonemaps once, like the old dome)
   skyCubeCam.position.set(0,0,0); skyCubeCam.update(renderer, skyScene); renderer.toneMapping=prevTone; }catch(e){} }
@@ -2420,8 +2422,8 @@ function physics(dt){
   if(p.fly){ p.vel.y=((keys.Space?1:0)-((keys.ShiftLeft||keys.ShiftRight)?1:0))*base*0.85; }
   else if(p.inWater || (p.wading && getBlock(p.pos.x, p.pos.y+0.35, p.pos.z)===WATER)){ // buoyant water physics: swim up (Space), dive (Sneak), else float+slow-sink. Waist-deep ALSO swims — previously only a submerged torso did, so holding Space stalled with your eyes at the waterline and you could never break out of the water
     if(keys.Space) p.vel.y = p.inWater?3.8:5.2;   // submerged: steady rise toward the surface; at the surface: a breach hop so you can climb onto the bank
-    else if(p.sneak) p.vel.y=-3.2;
-    else { p.vel.y-=7*dt; if(p.vel.y<-2.6)p.vel.y=-2.6; p.vel.y*=0.9; } }
+    else if(p.sneak) p.vel.y=-9.6;                                                 // deliberate dive still outruns the passive sink
+    else { p.vel.y-=21*dt; if(p.vel.y<-7.8)p.vel.y=-7.8; p.vel.y*=0.9; } }         // 3× sink rate (Ben 07-20): water pulls you DOWN — floating is work now, not the default
   else if(p.onLadder){ // LADDER — cling to the rungs and climb. Horizontal is DAMPED so pressing W (or strafing) can't
     // shove you out of the 1-wide ladder column mid-climb (the old bug: W ejected you off the ladder so you never rose).
     p.vel.x*=0.35; p.vel.z*=0.35;
@@ -3267,9 +3269,16 @@ function updateCookTimers(dt){
 const cookGroup=new THREE.Group(); scene.add(cookGroup); const cookFx={};   // fire GLOW comes from the shared glowPool (visible-toggling dedicated lights recompiled every lit material)
 function _cookDispose(g){ g.traverse(o=>{ if(o.geometry)o.geometry.dispose(); if(o.material&&o.material!==flameMat&&o.material.dispose)o.material.dispose(); }); }
 function makeFurnaceFx(st){ const g=new THREE.Group();
-  const glow=new THREE.Mesh(new THREE.PlaneGeometry(0.42,0.38), new THREE.MeshBasicMaterial({color:0xff6a1e,transparent:true,opacity:0,depthWrite:false,side:THREE.DoubleSide})); glow.position.z=0.005; g.add(glow); g.userData.glow=glow;
-  const fg=buildFlameGeo([{x:0,y:-0.14,z:0,w:0.28,h:0.4,type:3,seed:0.5}]); if(fg){ const fl=new THREE.Mesh(fg,flameMat); fl.frustumCulled=false; fl.renderOrder=6; fl.visible=false; g.add(fl); g.userData.flame=fl; }
-  if(st.in){ const im=itemModel(st.in.id); im.position.set(0,0.03,0.12); g.add(im); g.userData.item=im; }   // pulled proud of the maw so it reads clearly
+  const embers=new THREE.Mesh(new THREE.PlaneGeometry(0.36,0.22), new THREE.MeshBasicMaterial({color:0xff5a14,transparent:true,opacity:0,depthWrite:false,side:THREE.DoubleSide}));
+  embers.rotation.x=-Math.PI/2; embers.position.y=-0.165; g.add(embers); g.userData.glow=embers;   // coal bed lying flat on the firebox floor — the old UPRIGHT glow card is what read as a weird 2D orange plane
+  const fg=buildFlameGeo([
+    {x: 0.00,y:-0.16,z: 0.02,w:0.26,h:0.46,type:3,seed:0.50},
+    {x:-0.11,y:-0.17,z:-0.04,w:0.20,h:0.32,type:3,seed:0.15},
+    {x: 0.11,y:-0.17,z:-0.05,w:0.22,h:0.36,type:3,seed:0.80},
+    {x:-0.06,y:-0.17,z: 0.07,w:0.16,h:0.26,type:3,seed:0.35},
+    {x: 0.07,y:-0.17,z: 0.06,w:0.17,h:0.28,type:3,seed:0.65}]);   // a BED of five staggered crossed-quad flames filling the maw at different depths/heights/phases — reads as fire from every angle, not one card
+  if(fg){ const fl=new THREE.Mesh(fg,flameMat); fl.frustumCulled=false; fl.renderOrder=6; fl.visible=false; g.add(fl); g.userData.flame=fl; }
+  if(st.in){ const im=itemModel(st.in.id); im.position.set(0,0.03,0.12); g.add(im); g.userData.item=im; }   // pulled proud of the maw so it reads clearly (additive flames brighten, never occlude it)
   return g; }
 function makeCampfireFx(st){ const g=new THREE.Group(); const wood=new THREE.MeshLambertMaterial({color:0x5a4028});
   if(st.spit>=1){ const p=new THREE.Mesh(new THREE.CylinderGeometry(0.028,0.028,0.92,5),wood); p.position.set(-0.32,0.46,0); p.rotation.z=0.14; p.castShadow=true; g.add(p); }
@@ -4749,7 +4758,8 @@ function updateWretch(dt){
     if(wretch.repathT<=0){ const a=Math.atan2(ez-cam.z,ex-cam.x); const cov=nearestPlace(['treeline','den'],ex,ez,cam);
       if(cov && Math.hypot(cov.x-cam.x,cov.z-cam.z)>near+4){ aim(cov.x,cov.z); } else { aim(ex+Math.cos(a)*30,ez+Math.sin(a)*30); }          // only flee to cover FURTHER from you, else straight away
       wretch.repathT=0.7+Math.random()*0.5; }
-    if(wretch.dist>58){ wretch.fleeing=false; wretch._fleeScream=false; despawnWretch(true); return; } }                                      // gone into the woods → melt away
+    if(wretch.dist>58){ wretch.fleeing=false; wretch._fleeScream=false; despawnWretch(true); return; }
+    if(wretch.dist>20 && surfaceH(Math.floor(wretch.pos.x),Math.floor(wretch.pos.z))<=CFG.SEA-2){ wretch.fleeing=false; wretch._fleeScream=false; despawnWretch(true); return; } }   // a flee that crosses into DEEP water ends there — it goes under and is GONE (Ben 07-20: no more walking back over the sea); gone into the woods → melt away
   if(st!=='TRACK') wretch.lostT=0;
   if(st!=='TRAVERSE'&&st!=='HUNT'&&st!=='FLEE'&&st!=='CHASE'&&!(st==='STALK'&&near<24)) wretch.crawl=Math.max(0,wretch.crawl-dt*1.6);   // hold the low crawl while stalking close
   if(s.inCave && (st==='HUNT'||st==='CHASE'||st==='STALK'||st==='TRACK')) wretch.crawl=Math.min(1,wretch.crawl+dt*2.2);   // underground → drop to all-fours so it clings to walls/ceilings
@@ -8475,13 +8485,13 @@ function wretchFootfall(amp, gallop, st, force){ window.__ffBeat=(window.__ffBea
   const adv=wretch._advRate||0, S=st||wretch.state;
   const charging=(S==='HUNT'||S==='CHASE');
   const running=charging||gallop||adv>3.0;
-  const R=(force?20 : charging?40 : running?26 : 9)*(wretch.sneaking?1:1.5);   // hard audibility radius per gait — +50% reach (Ben 07-20); the tip-toe reverts to the old standard
+  const R=(force?20 : charging?40 : running?26 : 9)*(wretch.sneaking?1:2);     // hard audibility radius per gait — 2x reach (Ben 07-20); the tip-toe reverts to the old standard
   if(d>R)return;
   const fade=Math.pow(1-d/R,1.35);                                             // TRUE zero at the radius, on top of the panner rolloff
   const w=clamp(amp==null?0.8:amp,0,1)*(0.55+0.45*Math.min(1,adv/8));          // plant weight from the real gait energy
   const creepMul= running?1 : (1-(wretch.stealth||0)*0.55);                    // a careful tread is QUIET, never silently muted
   let vol=fade*creepMul*(charging?1.15:running?0.8:0.38)*(0.8+Math.random()*0.35)*(force?1:w);
-  vol*=(wretch.sneaking?1:1.5);                                              // +50% volume overall (Ben 07-20); the tip-toe treads at the old pre-boost standard — still audible, just unboosted
+  vol*=(wretch.sneaking?1:2);                                                // 2x volume overall (Ben 07-20); the tip-toe treads at the old pre-boost standard — still audible, just unboosted
   if(vol<0.02)return;
   const occl=stepOcclusion(); vol*=1-0.5*occl;
   window.__ffPlay=(window.__ffPlay||0)+1;                                      // QA counter: steps that actually sounded
@@ -9206,8 +9216,8 @@ window.__hc={
   turnPage(){ try{ locked=true; doPlace(); return _bookPage; }catch(e){ return e.message; } },        // QA: the real right-click page-turn path
   pines(){ try{ const m=[], truth=[], visD=CFG.RENDER_DIST*CK;
     for(let i=0;i<_PN;i++){ m.push(_pineMaskData[i*4]); const az=(i/_PN)*6.2831853-3.14159265, dx=Math.cos(az), dz=Math.sin(az);
-      let land=0; for(let s=0;s<8;s++){ const r=visD+6+s*16; if(surfaceH(Math.round(player.pos.x+dx*r),Math.round(player.pos.z+dz*r))>CFG.SEA) land++; } truth.push(land); }
-    return {mask:m, truth, px:+player.pos.x.toFixed(1), pz:+player.pos.z.toFixed(1), visD}; }catch(e){ return {err:e.message}; } },   // QA: horizon-treeline azimuth mask (0=sea beyond the fog wall, 255=deep land) + live ground truth per azimuth
+      let land=0; for(let s=0;s<8;s++){ const r=visD+6+s*16; const h=surfaceH(Math.round(player.pos.x+dx*r),Math.round(player.pos.z+dz*r)); if(h>CFG.SEA+4 && h<=CFG.SEA+38) land++; } truth.push(land); }
+    return {mask:m, truth, px:+player.pos.x.toFixed(1), pz:+player.pos.z.toFixed(1), visD}; }catch(e){ return {err:e.message}; } },   // QA: horizon-treeline azimuth mask (0=no forest beyond the fog wall, 255=deep forest) + live ground truth per azimuth (mirrors the mask's tree-capable grass band)
   // ---- COGNITION QA (V3) ----
   mind(){ try{ return { plan:reason.plan.map(s=>({i:s.intent,p:s.phase||null})), step:reason.step, journal:reason.journal.length, seq:(typeof CTXD!=='undefined')?CTXD.seq:null, thought:reason.liveThought||null, orch:reason.orchTrigger, divertT:+((reason.divertT||0)).toFixed(1), nav:{active:nav.active,beh:nav.behavior,label:nav.label,divert:nav.divert}, lastMutual:+((WILL.lastMutual||0)).toFixed(1), willLog:WILL.log.slice(-6) }; }catch(e){ return {err:e.message}; } },
   stim(k,extra){ try{ reasonEvent(k,extra||{x:Math.round(player.pos.x),z:Math.round(player.pos.z)}); return 'fired '+k; }catch(e){ return e.message; } },
