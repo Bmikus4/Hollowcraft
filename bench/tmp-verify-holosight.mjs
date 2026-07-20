@@ -92,9 +92,18 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     ck('scoped ADS: no holo reticle', !c1.retVis, c1);
     await page.evaluate(`__hc.aim(false)`);
 
-    // ---------- Python: mag 6 + reload anim state ----------
+    // ---------- Python: IRONS ADS (Ben 07-20) + mag 6 + reload anim state ----------
     await page.evaluate(`__hc.gun('revolver')`); await sleep(400);
     let r0=await S(); ck('Python mag = 6', r0.mag===6, r0);
+    await page.evaluate(`__hc.aim(true)`); await sleep(1400);
+    let rA=await S();
+    ck('Python ADS on over irons', rA.ads===true && rA.adsT>0.9, rA);
+    ck('Python ADS: crosshair gone', rA.xhOp<0.05, rA);
+    ck('Python ADS: no holo reticle (irons only)', !rA.retVis, rA);
+    await page.screenshot({ path: path.join(OUT,'python-irons-ads.png') });
+    await page.evaluate(`__hc.shoot()`); await sleep(200);
+    let rB=await S(); ck('Python: fire never breaks ADS', rB.ads===true, rB);
+    await page.evaluate(`__hc.aim(false)`); await sleep(800);
     for(let i=0;i<6;i++){ await page.evaluate(`__hc.shoot()`); await sleep(60); }
     let r1=await S(); ck('Python empty after 6', r1.mag===0, r1);
     await page.evaluate(`__hc.shoot()`); await sleep(200);
