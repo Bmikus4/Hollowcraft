@@ -741,6 +741,9 @@ function decorate(c){
     // SULFUR NODES — yellow-grey blobs on the surface: common along the dry beach band, rare inland. Mine for sulfur powder (→ gunpowder → ammo). Placed BEFORE the tree setback so they populate the beach the trees skip.
     { const near=h-CFG.SEA, sr=tileRng((wx*40503^wz*13007)>>>0)();
       if(trailDist(wx,wz)>2 && ((near>=0&&near<=3&&sr<0.0036) || (near>3&&near<90&&sr<0.00088))) placeSet(c, wx, h+1, wz, BID.sulfur_ore, true); }   // yellow-grey nodes: uncommon on the beach, rare inland (cut 60% then a further 50% by request, 2026-07-19)
+    // PEBBLE CLUSTERS — scattered small stones, SAME rates/bands as sulfur (Ben 07-20: they never spawned at all); pick for flint
+    { const near=h-CFG.SEA, pr=tileRng((wx*68899^wz*24499)>>>0)();
+      if(trailDist(wx,wz)>2 && ((near>=0&&near<=3&&pr<0.0036) || (near>3&&near<90&&pr<0.00088))) placeSet(c, wx, h+1, wz, BID.pebbles, true); }
     if (h<=CFG.SEA+4 || h>=WH-28) continue;   // COASTAL SETBACK: trees start ≥4 blocks above sea (was +1), so the treeline pulls back off the beach/shore instead of crowding the waterline. Raise this number to push it further inland.
     if (trailDist(wx,wz)<2.6 || inCabin(wx,wz) || nearOpening(wx,wz)) continue;   // keep the dirt trail corridor + cabin footprint + trailhead clearings free of tree bases
     if (!isGrassSurface(wx,wz)) continue;   // pines only on grass → natural treeline; bare rock/snow/ice/beach stay clear (deterministic so border trees still straddle)
@@ -1435,10 +1438,10 @@ const pineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, sid
   'void main(){ vec3 d=normalize(vPos); float elev=d.y; float az=atan(vPos.z,vPos.x);',
   '  vec4 msk=texture2D(uMask, vec2((az+3.14159265)/6.2831853, 0.5));',
   '  float m=msk.r; if(m<0.2) discard;',   // this azimuth has no FOREST running on past the wall (sea/beach/bare rock) → no pines; cutoff trims faint fringe so the treeline ends cleanly
-  '  float dist=uVisD+msk.b*128.0;',                                                             // true distance of the anchoring sample (B channel) — heights project at the range they were found, not at the wall
-  '  float hT=msk.g*'+WH.toFixed(1)+'-uCamY;',                                                   // forest terrain top past the fog wall, relative to the eye (per-azimuth, sampled alongside the mask)
-  '  float spike=pow(abs(sin(az*260.0)),6.0)*7.0;',
-  '  float hTree=(10.0+treeline(az)*24.0+spike)*(0.35+0.65*m);',                                 // canopy BLOCKS above that terrain — the same 18..31-block scale as the real pines it stands in for; shrinks only near arc ends
+  '  float dist=uVisD;',                                                                         // project AT the wall: pushing the anchor to its true range made the backdrop angularly SMALLER than the rendered edge canopy in front of it → buried behind the real trees, invisible on flat forest
+  '  float hT=msk.g*'+WH.toFixed(1)+'-uCamY;',                                                   // forest terrain top at/past the fog wall, relative to the eye (per-azimuth, sampled alongside the mask)
+  '  float spike=pow(abs(sin(az*260.0)),6.0)*8.0;',
+  '  float hTree=(24.0+treeline(az)*18.0+spike)*(0.35+0.65*m);',                                 // canopy BLOCKS above that terrain — must CLEAR the real 18..31-block pines at the render edge, or the whole silhouette hides behind them; shrinks only near arc ends
   '  float tip=hT+hTree;',
   '  float base=hT/sqrt(dist*dist+hT*hT), top=tip/sqrt(dist*dist+tip*tip), bottom=base-0.22;',   // WORLD-anchored elevations: the silhouette stands ON the real horizon forest floor instead of a fixed screen angle that hid it below the world edge
   '  if(elev>top || elev<bottom) discard;',                                                      // jagged silhouette band; green skirt extends below the terrain join (terrain in front occludes it)
@@ -1461,11 +1464,11 @@ function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.p
     if(Math.abs(player.pos.x-_pineLastX)+Math.abs(player.pos.z-_pineLastZ) > 2 || CFG.RENDER_DIST!==_pineLastRD){ _pineLastX=player.pos.x; _pineLastZ=player.pos.z; _pineLastRD=CFG.RENDER_DIST;
       const visD=CFG.RENDER_DIST*CK;   // the fog wall — where rendered terrain ends and the backdrop stands in
       for(let i=0;i<_PN;i++){ const az=(i/_PN)*6.2831853-3.14159265, dx=Math.cos(az), dz=Math.sin(az);
-        let forest=0, bestA=-9, bH=0, bR=visD+6;   // forest = tree-capable samples (same grass band the real pines grow in); best = the sample whose treetop stands steepest above the eye — what actually fronts the silhouette
-        for(let s=0;s<8;s++){ const r=visD+6+s*16; const h=surfaceH(Math.round(player.pos.x+dx*r),Math.round(player.pos.z+dz*r));
-          if(h>CFG.SEA+4 && h<=CFG.SEA+38){ forest++; const a=(h-player.pos.y)/r; if(a>bestA){ bestA=a; bH=h; bR=r; } } }   // beach/shore/bare rock past the wall → no pines hovering where no tree could grow
-        const vis=clamp((forest/8-0.45)/0.4,0,1);   // mostly forest beyond the horizon → pines; sea/beach/thin spits/rock → none (kills the 360° ring over open water)
-        _pineMaskData[i*4]=Math.round(vis*255); _pineMaskData[i*4+1]=Math.round(clamp(bH/WH,0,1)*255); _pineMaskData[i*4+2]=Math.round(clamp((bR-visD)/128,0,1)*255); }   // G = anchor terrain height, B = its distance past the wall → the shader grounds the silhouette exactly where that terrain sits
+        let forest=0, hMax=0;   // forest = tree-capable samples (the band real pines grow in, with tolerance); hMax = the tallest forest floor — the ground the silhouette stands on
+        for(let s=0;s<8;s++){ const r=visD-12+s*16; const h=surfaceH(Math.round(player.pos.x+dx*r),Math.round(player.pos.z+dz*r));   // band starts just INSIDE the wall so the anchor covers the last rendered trees' own ground
+          if(h>CFG.SEA+4 && h<=CFG.SEA+44){ forest++; if(h>hMax) hMax=h; } }   // beach/shore/deep-sea past the wall → no pines hovering where no tree could grow
+        const vis=clamp((forest/8-0.45)/0.4,0,1);   // mostly forest beyond the horizon → pines; sea/beach/thin spits → none (kills the 360° ring over open water)
+        _pineMaskData[i*4]=Math.round(vis*255); _pineMaskData[i*4+1]=Math.round(clamp(hMax/WH,0,1)*255); }   // G = anchor terrain height → the shader grounds the silhouette on it at the wall distance
       _pineMask.needsUpdate=true; } } }
 function bakeSky(){ if(!USE_SKYCUBE) return; try{ const prevTone=renderer.toneMapping; renderer.toneMapping=THREE.NoToneMapping;   // bake LINEAR (background render tonemaps once, like the old dome)
   skyCubeCam.position.set(0,0,0); skyCubeCam.update(renderer, skyScene); renderer.toneMapping=prevTone; }catch(e){} }
@@ -1935,6 +1938,7 @@ MODEL_ITEM_BUILDERS.scarecrow=(bd)=>{ const g=new THREE.Group();
   const cone=new THREE.Mesh(cyl(0.02,0.14,0.16,12),hatM); cone.position.y=1.15; g.add(cone);
   for(const sx of [-0.36,0.36]){ const t=new THREE.Mesh(cyl(0.02,0.09,0.14,6),straw); t.position.set(sx,0.66,0); g.add(t); }   // straw tufts at the wrists
   const waist=new THREE.Mesh(cyl(0.1,0.02,0.12,6),straw); waist.position.y=0.34; g.add(waist);   // straw poking out the bottom
+  g.scale.setScalar(1.65);   // a REAL scarecrow: 2 blocks tall (hat tip ~2.0), looming over the crop rows
   return g; };
 // chime — top disk + 5 hanging metal tubes in a circle + central clapper + bottom sail (hangs; recentred by callers)
 MODEL_ITEM_BUILDERS.chime=(bd)=>{ const g=new THREE.Group();
@@ -2137,11 +2141,16 @@ function buildModelBlocks(c,g){
           const apost=box(0.045,0.16,0.045); apost.translate(sx,0.46,0.18); P.push(apost); }             // front post holding the armrest up (was floating unsupported)
         addIM(_mergeGeos(P), wood, 0); continue; }
       if(m==='furnace'){ const stone=new THREE.MeshLambertMaterial({map:tileTex('cobble')}), iron=new THREE.MeshLambertMaterial({color:0x26262c}), dk=new THREE.MeshLambertMaterial({color:0x120e0c});
-        const body=box(0.92,0.72,0.92); body.translate(0,0.36,0); addIM(body, stone, 0);              // stone body
+        // body with a REAL recessed firebox pocket in each face (0.54w × 0.40h opening, 0.18 deep): core + top/bottom
+        // bands + corner pillars leave the maws genuinely open, so fire/glow/item live INSIDE the furnace, not on its skin
+        const core=box(0.56,0.72,0.56); core.translate(0,0.36,0); addIM(core, stone, 0);              // pocket back walls
+        const topB=box(0.92,0.18,0.92); topB.translate(0,0.63,0); addIM(topB, stone, 0);              // lintel band above the maws
+        const botB=box(0.92,0.14,0.92); botB.translate(0,0.07,0); addIM(botB, stone, 0);              // hearth floor under the maws
+        const pil=[]; for(const px2 of [-0.365,0.365]) for(const pz2 of [-0.365,0.365]){ const p=box(0.19,0.4,0.19); p.translate(px2,0.34,pz2); pil.push(p); } addIM(_mergeGeos(pil), stone, 0);   // corner pillars between the maws
         const lip=box(0.98,0.1,0.98); lip.translate(0,0.73,0); addIM(lip, stone, 0);                  // top lip/slab
         const flue=box(0.32,0.3,0.32); flue.translate(0,0.92,-0.22); addIM(flue, stone, 0);           // chimney flue at the back-top
         const bands=[]; for(const by of [0.12,0.6]){ const bb=box(0.96,0.05,0.96); bb.translate(0,by,0); bands.push(bb); } addIM(_mergeGeos(bands), iron, 0);   // iron hoops
-        const ops=[]; for(const [ox,oz,w,d] of [[0,0.45,0.54,0.05],[0,-0.45,0.54,0.05],[0.45,0,0.05,0.54],[-0.45,0,0.05,0.54]]){ const o=box(w,0.4,d); o.translate(ox,0.34,oz); ops.push(o); } addIM(_mergeGeos(ops), dk, 0);   // recessed dark firebox on all four faces (the cooking glow + melting item read from any angle)
+        const dkP=[]; for(const [ox,oz] of [[0,0.29],[0,-0.29],[0.29,0],[-0.29,0]]){ const o=box(ox?0.02:0.5,0.38,ox?0.5:0.02); o.translate(ox,0.335,oz); dkP.push(o); } addIM(_mergeGeos(dkP), dk, 0);   // scorched dark back wall inside each pocket
         const grate=[]; for(let gxi=-1;gxi<=1;gxi++){ const g1=box(0.5,0.03,0.03); g1.translate(0,0.2,0.44+gxi*0); const g2=box(0.03,0.03,0.5); g2.translate(0.44,0.2,0); grate.push(g1,g2); } addIM(_mergeGeos(grate), iron, 0);   // faint front grate bars
         continue; }
       if(m==='fence'){ const col=bd.col!=null?bd.col:(bd.pale?0xb9ad8c:bd.wattle?0x7a5a34:0x8a7048); const fmat=new THREE.MeshLambertMaterial({color:col});
@@ -2419,7 +2428,7 @@ function physics(dt){
   const sy=Math.sin(p.yaw), cy=Math.cos(p.yaw);
   p.sprint = (keys.ShiftLeft||keys.ShiftRight) && !p.fly && fwd>0;
   p.sneak = (keys.ControlLeft||keys.ControlRight) && !p.fly;
-  const base = p.fly?18 : (p.sprint?7.2:(p.sneak?1.9:4.6)) * (p.inWater?(p.sprint?0.78:0.5):1);   // sprint-SWIM is a real speed boost (0.78×) vs a normal swim (0.5×)
+  const base = p.fly?18 : (p.sprint?7.2:(p.sneak?1.9:4.6)) * (p.inWater?(p.sprint?0.26:0.18):(p.wading?0.55:1));   // water DRASTICALLY slows you (Ben 07-20): swim crawls at 0.18× (0.26× sprint), even wading halves you — the sea is not a shortcut
   let mvx=0,mvz=0;
   if(mag>0){ const nx=fwd/mag, ns=str/mag; mvx=(-sy*nx + cy*ns); mvz=(-cy*nx - sy*ns); }
   p.vel.x=mvx*base; p.vel.z=mvz*base;
@@ -3274,25 +3283,30 @@ const cookGroup=new THREE.Group(); scene.add(cookGroup); const cookFx={};   // f
 function _cookDispose(g){ g.traverse(o=>{ if(o.geometry)o.geometry.dispose(); if(o.material&&o.material!==flameMat&&o.material.dispose)o.material.dispose(); }); }
 const _fireboxGlowTex=(()=>{ const c=document.createElement('canvas'); c.width=64; c.height=48; const x=c.getContext('2d');
   const rg=x.createRadialGradient(32,28,3,32,28,30); rg.addColorStop(0,'rgba(255,216,150,1)'); rg.addColorStop(0.45,'rgba(255,120,30,0.85)'); rg.addColorStop(1,'rgba(120,20,0,0)');
-  x.fillStyle=rg; x.fillRect(0,0,64,48); return new THREE.CanvasTexture(c); })();   // hot-coals radial falloff — additive over the dark panel it reads as the INTERIOR glowing, with no visible rectangle edge
+  x.fillStyle=rg; x.fillRect(0,0,64,48); return new THREE.CanvasTexture(c); })();   // hot-coals radial falloff — additive over the scorched back wall the whole pocket reads as glowing, with no rectangle edge
 function makeFurnaceFx(st){ const g=new THREE.Group();
-  const glow=new THREE.Mesh(new THREE.PlaneGeometry(0.5,0.36), new THREE.MeshBasicMaterial({map:_fireboxGlowTex,transparent:true,opacity:0,blending:THREE.AdditiveBlending,depthWrite:false,side:THREE.DoubleSide}));
-  glow.position.set(0,-0.10,0.008); g.add(glow); g.userData.glow=glow;   // FLUSH on the recessed firebox panel (never past the block face) — lights the maw from within
+  const glowM=new THREE.MeshBasicMaterial({map:_fireboxGlowTex,transparent:true,opacity:0,blending:THREE.AdditiveBlending,depthWrite:false,side:THREE.DoubleSide});
+  const glow=new THREE.Mesh(new THREE.PlaneGeometry(0.5,0.37), glowM);
+  glow.position.set(0,-0.10,-0.165); g.add(glow); g.userData.glow=glow;   // ON the scorched back wall INSIDE the pocket — the whole black maw glows from within
+  const coals=new THREE.Mesh(new THREE.PlaneGeometry(0.5,0.17), glowM);
+  coals.rotation.x=-Math.PI/2; coals.position.set(0,-0.29,-0.09); g.add(coals);   // ember bed lying on the hearth floor (shares the glow material → one opacity flicker drives both)
   const fg=buildFlameGeo([
-    {x: 0.00,y:-0.16,z: 0.020,w:0.26,h:0.46,type:3,seed:0.50},
-    {x:-0.11,y:-0.17,z:-0.015,w:0.20,h:0.32,type:3,seed:0.15},
-    {x: 0.11,y:-0.17,z:-0.020,w:0.22,h:0.36,type:3,seed:0.80},
-    {x:-0.06,y:-0.17,z: 0.030,w:0.16,h:0.26,type:3,seed:0.35},
-    {x: 0.07,y:-0.17,z: 0.025,w:0.17,h:0.28,type:3,seed:0.65}]);   // a BED of five staggered crossed-quad flames hugging the maw at different heights/phases — reads as fire from every angle, not one card
+    {x: 0.00,y:-0.30,z:-0.060,w:0.30,h:0.55,type:3,seed:0.50},
+    {x:-0.12,y:-0.31,z:-0.100,w:0.22,h:0.38,type:3,seed:0.15},
+    {x: 0.12,y:-0.31,z:-0.110,w:0.24,h:0.42,type:3,seed:0.80},
+    {x:-0.07,y:-0.31,z:-0.030,w:0.18,h:0.30,type:3,seed:0.35},
+    {x: 0.07,y:-0.31,z:-0.040,w:0.19,h:0.32,type:3,seed:0.65},
+    {x:-0.17,y:-0.31,z:-0.070,w:0.15,h:0.26,type:3,seed:0.25},
+    {x: 0.17,y:-0.31,z:-0.070,w:0.15,h:0.28,type:3,seed:0.90}]);   // SEVEN staggered crossed-quad flames rising off the hearth INSIDE the pocket — a proper blaze filling the maw to its lintel
   if(fg){ const fl=new THREE.Mesh(fg,flameMat); fl.frustumCulled=false; fl.renderOrder=6; fl.visible=false; g.add(fl); g.userData.flame=fl; }
-  if(st.in){ const im=itemModel(st.in.id); im.position.set(0,0.03,0.05); g.add(im); g.userData.item=im; }   // sits IN the maw, half-sunk in the fire (additive flames brighten, never occlude it)
+  if(st.in){ const im=itemModel(st.in.id); im.position.set(0,-0.16,-0.10); g.add(im); g.userData.item=im; }   // sits INSIDE the pocket, in the fire (additive flames brighten, never occlude it)
   return g; }
 function makeCampfireFx(st){ const g=new THREE.Group(); const wood=new THREE.MeshLambertMaterial({color:0x5a4028});
   if(st.spit>=1){ const p=new THREE.Mesh(new THREE.CylinderGeometry(0.028,0.028,0.92,5),wood); p.position.set(-0.32,0.46,0); p.rotation.z=0.14; p.castShadow=true; g.add(p); }
   if(st.spit>=2){ const p=new THREE.Mesh(new THREE.CylinderGeometry(0.028,0.028,0.92,5),wood); p.position.set(0.32,0.46,0); p.rotation.z=-0.14; p.castShadow=true; g.add(p); }
   if(st.spit>=3){ const bar=new THREE.Mesh(new THREE.CylinderGeometry(0.024,0.024,0.82,5),wood); bar.rotation.z=Math.PI/2; bar.position.set(0,0.9,0); bar.castShadow=true; g.add(bar);   // crossbar spans the two side posts (along X)
     const items=st.items||[], n=items.length;                                                    // meat sits ON the bar, spread along it (up to 5)
-    items.forEach((it,i)=>{ const x=n>1?(-0.28+0.56*i/(n-1)):0; const im=itemModel(it.done?(it.out||'cooked_meat'):it.id); im.position.set(x,0.85,0); im.scale.setScalar(0.3);
+    items.forEach((it,i)=>{ const x=n>1?(-0.28+0.56*i/(n-1)):0; const im=itemModel(it.done?(it.out||'cooked_meat'):it.id); im.position.set(x,0.85,0); im.scale.setScalar(0.3); im.rotation.y=Math.PI/2;   // hung meat faces ALONG the crossbar (90° on Y, Ben 07-20)
       if(it.done)im.traverse(o=>{ if(o.material&&o.material.color)o.material.color.multiplyScalar(0.68); }); g.add(im); }); }   // cooked pieces char darker
   return g; }
 function updateCookingFx(dt){ updateCookTimers(dt);
@@ -3306,9 +3320,9 @@ function updateCookingFx(dt){ updateCookTimers(dt);
       const nx=Math.sin(st.face), nz=Math.cos(st.face);
       g.position.set(bx+0.5+nx*0.47, by+0.44, bz+0.5+nz*0.47); g.rotation.y=st.face;
       const prog=st.in?clamp(st.t/COOK_TIME,0,1):0;
-      if(g.userData.item){ g.userData.item.visible=!!st.in; g.userData.item.scale.setScalar(0.44*(1-prog*0.3)); g.userData.item.position.y=0.03-prog*0.1; }
+      if(g.userData.item){ g.userData.item.visible=!!st.in; g.userData.item.scale.setScalar(0.40*(1-prog*0.3)); g.userData.item.position.y=-0.16-prog*0.09; }   // melts DOWN into the hearth fire as it smelts
       if(g.userData.flame) g.userData.flame.visible=!!st.in;
-      if(g.userData.glow) g.userData.glow.material.opacity = st.in? (0.55+Math.sin(t*9+bx)*0.2):0;
+      if(g.userData.glow) g.userData.glow.material.opacity = st.in? (0.82+Math.sin(t*9+bx)*0.18):0;   // BRIGHT — the whole pocket must read as glowing hot, not a faint tint
       if(st.in) glowCand(bx+0.5, by+0.5, bz+0.5, 13+Math.sin(t*12)*3, 9, 0xff8626);   // fire glow via the shared pool
     } else { g.position.set(bx+0.5, by, bz+0.5); }   // campfire meats sit statically on the spit (rebuilt when a piece is added/cooks)
   } };
@@ -3434,7 +3448,7 @@ function survivalTick(dt){ if(player.creative||player.dead)return; hungerTimer+=
   else { waterTimer+=dt*1.15*(player.sprint?1.6:1); if(waterTimer>72){ waterTimer=0; if(player.water>0)player.water--; } }   // +15% thirst depletion
   if(player.water<=0){ if((survivalTick._w=(survivalTick._w||0)+dt)>5){survivalTick._w=0; damage(1,'thirst wrung you dry');} }
   if(player.sick>0){ player.sick-=dt; _sickEl.style.opacity=(0.5+0.5*Math.sin(clock.elapsedTime*1.6)).toFixed(2);   // murky-water sickness: queasy pulse + a slow gut-churn
-    if((survivalTick._sk=(survivalTick._sk||0)+dt)>11){ survivalTick._sk=0; if(player.health>2)damage(1,'the murky water churns your gut'); }
+    if((survivalTick._sk=(survivalTick._sk||0)+dt)>7){ survivalTick._sk=0; if(player.health>1)damage(1,'the murky water churns your gut'); }   // the rot drains you toward 5% health (1/20) — never quite kills, but leaves you a breath from it (Ben 07-20)
     if(player.sick<=0){ player.sick=0; _sickEl.style.opacity=0; flashName('the sickness passes'); } }
   else if(_sickEl.style.opacity!=='0') _sickEl.style.opacity=0;
   // DROWNING: while the head is underwater, breath depletes over ~10s, then it damages you
@@ -4667,7 +4681,8 @@ function updateWretch(dt){
   else if(watched && near<52){ const endure=2.2+(HORROR.rage||0)*4;                     // being LOOKED AT → hold & loom, ENDURING your stare (n1 ~2s → n3 ~6s)…
     if(wretch.observed<=endure) st='STALK';
     else if((HORROR.huntArmed||wretch._summoned) && wretch.wound<=0.4 && day<0.78){ wretch.committed=true; wretch.commitT=0; st=near<6?'HUNT':'CHASE'; }   // …then the STARE-DOWN BREAKS INTO THE CHARGE (armed nights, healthy): it ran up for a reason. Fixes run-up→sit→bolt passivity (Ben 07-20)
-    else st='FLEE'; }                                                                   // grace night / wounded / bright day → outstared, it still bolts
+    else if(!(HORROR.huntArmed||wretch._summoned)){ snuffFx(wretch.pos.x,wretch.pos.y+1.4,wretch.pos.z); despawnWretch(true); return; }   // GRACE NIGHT outstared → it steps back into the dark and is GONE — no craven scamper on the night it's meant to be untouchable
+    else st='FLEE'; }                                                                   // armed but wounded / caught in bright day → outstared, it bolts
   else if(!watched && s.seen && near<26*fogAggro) st='HUNT';                            // close + unseen + in view → CHARGE (fog widens the pounce window)
   else if(!watched && s.seen && near<48*fogAggro) st='CHASE';                           // mid + unseen + in view → run it down
   else if(s.seenAge>3 && (s.scent||s.heard) && s.believedDist<80) st='TRACK';           // lost sight → follow scent/sound
@@ -4941,7 +4956,7 @@ function placeWretch(dt,moving){
   _wm.makeBasis(_wr,wretch.up,_wfn.copy(_wf).negate()); _wq.setFromRotationMatrix(_wm);             // model faces local -Z → world forward (scratch, no per-frame alloc)
   // crawl pitch on the body's LOCAL x-axis (multiply, not premultiply) so it tips
   // forward onto all-fours without ever rotating up into the air
-  _wq.multiply(_qp.setFromAxisAngle(_AXX, -Math.min(wretch.crawl,1)*1.15));
+  _wq.multiply(_qp.setFromAxisAngle(_AXX, -Math.min(wretch.crawl,1)*1.15*clamp((wretch._advRate||0)/2.2,0,1)));   // quadruped pitch only while it actually LOCOMOTES — a stationary all-fours wretch stays a coiled crouch, never a face-planted 90° statue (the "whole body sideways" idle bug)
   if(wretch.boss){ if(wretch._bossPitch)_wq.multiply(_qp.setFromAxisAngle(_AXX, wretch._bossPitch)); if(wretch._bossRoll)_wq.multiply(_qp.setFromAxisAngle(_AXZ, wretch._bossRoll)); }   // BOSS: lean/bank toward the direction it is flying
   g.quaternion.slerp(_wq, 1-Math.exp(-7*dt));
   const S=g.scale.y||1, feetOff=0.05*S;   // v2 rig builds feet at local y≈0 (origin at the feet) → tiny offset. VERIFY on GPU.
@@ -7293,7 +7308,7 @@ function killWretch(){ spawnParticles(wretch.pos.x,wretch.pos.y+1,wretch.pos.z,0
     try{ lootChest(bx, gy, bz, [['angel_wings',1],['minigun',1],['rifle_ammo',64]]); }catch(e){}
     if(typeof herobrine!=='undefined')herobrine.haunting=false;
     try{ const jx=bx+1.5, jz=bz+1.5; let jy=groundYAt(jx,jz); if(jy<=CFG.SEA)jy=CFG.SEA+1;   // …and JESUS is resurrected, risen from the beast's ashes
-      const jm=buildAnimalMesh('jesus',false); jm.position.set(jx,jy,jz); animals.push({type:'jesus',mesh:jm,x:jx,y:jy,z:jz,yaw:0,hp:ANIMALS.jesus.hp,timer:0,flee:0,dead:false});
+      _jesusRisen=1; const jm=buildAnimalMesh('jesus',false); jm.position.set(jx,jy,jz); animals.push({type:'jesus',mesh:jm,x:jx,y:jy,z:jz,yaw:0,hp:ANIMALS.jesus.hp,timer:0,flee:0,dead:false});
       spawnParticles(jx,jy+1.6,jz,0xffe680,44,3.2,2.2); }catch(e){}
     flashName('THE MEGA-WRETCH FALLS — its wings crumple. A chest of its power remains, and JESUS is risen.'); }
   else { wretch.hp=wretch.hpMax;
@@ -7735,7 +7750,7 @@ function spawnAnimal(){ if(animals.length>=8)return;
   const ang=Math.random()*6.283, r=24+Math.random()*24, x=player.pos.x+Math.cos(ang)*r, z=player.pos.z+Math.sin(ang)*r;
   const gy=groundYAt(x,z); if(gy<=CFG.SEA+1)return;
   const sb=getBlock(Math.floor(x),gy-1,Math.floor(z)); if(!B[sb]||B[sb].name!=='grass')return;   // forest/meadow floor only — never the beach/water
-  const types=Object.keys(ANIMALS).filter(t=>t!=='daddy'), type=types[(Math.random()*types.length)|0], spec=ANIMALS[type];   // daddy-long-legs are DUNGEON-ONLY dressing — never the open-world spawner
+  const types=Object.keys(ANIMALS).filter(t=>t!=='daddy' && (t!=='jesus'||_jesusRisen)), type=types[(Math.random()*types.length)|0], spec=ANIMALS[type];   // daddy-long-legs are DUNGEON-ONLY dressing; JESUS never rolls in the wild spawner until he RISES at the boss's death (Ben 07-20)
   const corrupt = HORROR.tier>=4 && type!=='villager' && Math.random()<0.35;   // tier 4+ → some prey come back WRONG: wet-black, motionless, watching
   const mk=(mx,mz)=>{ const gy2=groundYAt(mx,mz); if(gy2<=CFG.SEA+1)return; const mesh=buildAnimalMesh(type,corrupt); mesh.position.set(mx,gy2,mz); animals.push({type,mesh,x:mx,y:gy2,z:mz,yaw:Math.random()*6.283,hp:spec.hp,timer:0,flee:0,dead:false,corrupt}); };
   mk(x,z);
@@ -7770,7 +7785,7 @@ function _grazeTarget(ax,az,water){ for(let k=0;k<16;k++){ const a=Math.random()
   return null; }
 // heading (yaw) toward the NEAREST open water from (x,z) — 24-ray heightfield march; null if no sea within 180 blocks
 function _seaYaw(x,z){ let best=null; for(let k=0;k<24;k++){ const th=k*0.2618; for(let r=10;r<=180;r+=6){ if(surfaceH(Math.round(x+Math.sin(th)*r),Math.round(z+Math.cos(th)*r))<=CFG.SEA){ if(!best||r<best.r)best={th,r}; break; } } } return best?best.th:null; }
-let _jesusIntro=0;
+let _jesusIntro=0, _jesusRisen=0;   // after the intro departure he NEVER returns until the boss's death resurrects him
 function updateAnimalsFrame(dt){
   _animLodTick++;                                                                                // drives far-animal movement LOD (see farLod below)
   if(!_jesusIntro){ try{ const jx=spawnX+2.5, jz=spawnZ+2.0, jy=(typeof groundYAt==='function')?groundYAt(jx,jz):0;
@@ -9318,6 +9333,11 @@ window.__hc={
   spearTest(){ try{ invAdd('rusty_spear',1); for(let i=0;i<9;i++){ if(inv[i]&&inv[i].id==='rusty_spear'){ selSlot=i; break; } } refreshHotbar();   // QA: aim at the wretch and hurl a spear at full power
     this.look(); throwSpear('rusty_spear',1); return {flying:spears.length, stuck:stuckSpears.length}; }catch(e){ return {err:e.message}; } },
   riding(){ try{ return stuckSpears.map(st=>({onW:!!st.onWretch, x:+st.x.toFixed(1), y:+st.y.toFixed(1), z:+st.z.toFixed(1)})); }catch(e){ return {err:e.message}; } },   // QA: stuck-spear roster + live world positions
+  pose(){ try{ const e=new THREE.Euler().setFromQuaternion(wretch.group.quaternion,'YXZ');                     // QA: full body-orientation + behavior snapshot (sideways-bug forensics)
+    return { st:wretch.state, watched:!!(wretch.sense&&wretch.sense.watched), obs:+(wretch.observed||0).toFixed(1), committed:!!wretch.committed, sneak:!!wretch.sneaking,
+      crawl:+(wretch.crawl||0).toFixed(2), adv:+((wretch._advRate||0)).toFixed(1), posture:wretch.posture||'', cling:!!wretch._clingN, treePeek:!!wretch._treePeek, winPeek:!!wretch._winPeek,
+      dist:+(wretch.dist||0).toFixed(1), yaw:+e.y.toFixed(2), pitch:+e.x.toFixed(2), roll:+e.z.toFixed(2), faceLock:!!wretch._faceLock,
+      moveYaw:+Math.atan2(-(wretch.target.x-wretch.pos.x)||0,-(wretch.target.z-wretch.pos.z)||0).toFixed(2) }; }catch(e){ return {err:e.message}; } },
   aimEye(){ try{ const es=seraphEyeSpheres(); const e=es.find(s=>s.central)||es[0]; if(!e)return 'no eyes';   // QA: aim the player dead at the central eye
     const dx=e.x-player.pos.x, dy=e.y-(player.pos.y+EYE), dz=e.z-player.pos.z, L=Math.hypot(dx,dy,dz)||1;
     player.yaw=Math.atan2(-dx,-dz); player.pitch=clamp(Math.asin(dy/L),-1.5,1.5); return {dist:+L.toFixed(1)}; }catch(e){ return e.message; } },
