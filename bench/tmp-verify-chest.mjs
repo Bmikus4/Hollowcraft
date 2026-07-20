@@ -36,6 +36,7 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     const spot = await page.evaluate(`(()=>{ const p=__hc.pines(); return __hc.chest(Math.floor(p.px), Math.floor(p.pz)+4); })()`);
     if(spot.err){ console.log(JSON.stringify({pass:false, err:spot.err})); process.exit(1); }
     await sleep(900);   // lid fully open (anim ~0.3s)
+    await page.evaluate(`document.getElementById('chestui').style.visibility='hidden'`);   // hide the modal DOM only — the lid stays open (closeUI would shut it)
 
     // front (latch side, +z): open lid standing up, static lid hidden underneath
     await page.evaluate(`(()=>{ __hc.tpExact(${spot.bx+0.5}, ${spot.bz+3.4}); __hc.cam({yaw:0, pitch:-0.34}); })()`);
@@ -48,6 +49,8 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     // close → static lid must be back, overlay gone
     await page.evaluate(`__hc.chestClose()`);
     await sleep(900);
+    await page.evaluate(`(()=>{ __hc.tpExact(${spot.bx+0.5}, ${spot.bz+3.4}); __hc.cam({yaw:0, pitch:-0.34}); })()`);
+    await sleep(500);
     await page.screenshot({ path: path.join(OUT, 'chest-closed.png') });
     console.log(JSON.stringify({pass:errors.length===0, spot, errors:errors.slice(0,5)}));
     await browser.close();
