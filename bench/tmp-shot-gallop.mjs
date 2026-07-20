@@ -14,9 +14,9 @@ const waitHttp=u=>new Promise((res,rej)=>{const t0=Date.now();(function poll(){c
     await page.goto('http://127.0.0.1:'+port+'/index.html?debug=1&t=630',{waitUntil:'load',timeout:90000});
     await page.waitForFunction("(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()",{timeout:90000});
     await sleep(1500);
-    await page.evaluate("(()=>{ __hc.freeze(true,true); __hc.studio(true); __hc.frame({dist:10, ang:0, state:'HUNT', crawl:0, adv:8, committed:true, aim:2.4}); __hc.spin(115); __hc.set({dist:5}); })()");
+    await page.evaluate("(()=>{ __hc.freeze(true,true); __hc.studio(true); __hc.frame({dist:10, ang:0, state:'HUNT', crawl:0.45, adv:8, committed:true, aim:2.4}); __hc.spin(115); __hc.set({dist:5}); })()");
     await sleep(1200);
-    await page.screenshot({path:'bench/results/lunge-check.png'});
+    await page.screenshot({path:'bench/results/rise-check.png'});
     const p=await page.evaluate("__hc.pose()"); console.log(JSON.stringify(p));
     await browser.close(); process.exit(0);
   } finally { try{server.kill();}catch(e){} } })().catch(e=>{console.error(e);process.exit(1);});
