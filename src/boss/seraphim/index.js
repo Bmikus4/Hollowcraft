@@ -351,7 +351,9 @@ function wingConfigs() {
     // feathers overlap the eye-band ridge and CLOSE the top gap; (b) inward tilt
     // reduced (rotZ 0.96→0.74) + slightly more outward yaw (rotY 0.52→0.60) so the
     // pair OPENS into a broad V of attached wings instead of two near-vertical blades.
-    { key: 'upper', span: 1.2 * H, pos: [0.06 * H, 0.37 * H, -0.04 * H], rotY: 0.60, rotZ: 0.74, omegaMul: 1.0,
+    // FIX-3 (user spec 07-20): ALL feather planes pulled to ONE depth — the big central eye's midpoint
+    // (CENTRAL_Z = 0.12 = 0.02H in the core frame) — so the eye's front half proudly leads the plumage.
+    { key: 'upper', span: 1.2 * H, pos: [0.06 * H, 0.37 * H, 0.02 * H], rotY: 0.60, rotZ: 0.74, omegaMul: 1.0,
       droopK: 0.12, fanScale: 1.15, variantSeed: 1, voxLen: 7,
       flap: { ampHumerus: 0.60, ampRadius: 0.42, ampCarpus: 0.34, phase: 0.0, phi: 0.6 } },
     // UPPER-MID (A2 playtest addition): NEW 4th pair, sits BELOW the upper V and
@@ -359,13 +361,13 @@ function wingConfigs() {
     // mid(horizontal,yaw ~80°,1.0H): pitch up ~24° (rotZ 0.42), modest yaw (rotY 0.18),
     // span 1.1H, its own desync phase (+π/6, between upper 0 and mid +π/3) and ω
     // (0.8, between 1.0 and 0.6). Slightly lower feather resolution (voxLen 6) per A3.
-    { key: 'uppermid', span: 1.1 * H, pos: [0.22 * H, 0.17 * H, 0.0], rotY: 0.18, rotZ: 0.42, omegaMul: 0.8,
+    { key: 'uppermid', span: 1.1 * H, pos: [0.22 * H, 0.17 * H, 0.02 * H], rotY: 0.18, rotZ: 0.42, omegaMul: 0.8,
       droopK: 0.14, fanScale: 1.05, variantSeed: 4, voxLen: 6,
       flap: { ampHumerus: 0.44, ampRadius: 0.31, ampCarpus: 0.25, phase: Math.PI / 6, phi: 0.6 } },
-    { key: 'mid', span: 1.0 * H, pos: [0.30 * H, 0.0, 0.0], rotY: -0.32, rotZ: -0.17, omegaMul: 0.6,
+    { key: 'mid', span: 1.0 * H, pos: [0.30 * H, 0.0, 0.02 * H], rotY: -0.32, rotZ: -0.17, omegaMul: 0.6,
       droopK: 0.16, fanScale: 1.0, variantSeed: 2, voxLen: 7,
       flap: { ampHumerus: 0.28, ampRadius: 0.20, ampCarpus: 0.16, phase: Math.PI / 3, phi: 0.6 } },
-    { key: 'lower', span: 1.3 * H, pos: [0.12 * H, -0.30 * H, 0.05 * H], rotY: 0.22, rotZ: -1.15, omegaMul: 0.3,
+    { key: 'lower', span: 1.3 * H, pos: [0.12 * H, -0.30 * H, 0.02 * H], rotY: 0.22, rotZ: -1.15, omegaMul: 0.3,
       droopK: 0.30, fanScale: 0.9, variantSeed: 3, voxLen: 7,
       flap: { ampHumerus: 0.12, ampRadius: 0.08, ampCarpus: 0.06, phase: Math.PI / 2, phi: 0.6 } },
   ];
@@ -555,7 +557,7 @@ export class SeraphimModel {
     this._coreMat = coreMat;
     const cm = buildCoreMass(coreMat, this.quality === 'low' ? 32 : 46, 6);   // shorter voxel feathers → hanging plumage, not slabs
     this.coreMass = cm.mesh;
-    this.coreMass.position.set(0, 0, -H * 0.12);   // FIX-2: the mantle plane sits BEHIND the eye band (feathers peek out radially around it, never in front of the eyes)
+    this.coreMass.position.set(0, 0, H * 0.02);   // FIX-3 (user spec 07-20): the mantle SEED plane sits AT the central eye's midpoint (its fill layers still step backward), matching the wing roots — one feather depth, the eyes lead it
     this.core.add(this.coreMass);
     this._coreTris = cm.tris;
 

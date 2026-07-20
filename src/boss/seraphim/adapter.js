@@ -131,6 +131,25 @@ export function seraphHideBeam() {
   if (_beam) _beam.setVisible(false);
 }
 
+// EVERY EYE IS A HITBOX (user spec 07-20): world-space spheres for the seven-eye band —
+// pivot band-local positions pushed through the band group's live world matrix (the pivots
+// themselves are virtual; only their matrices reach the InstancedMesh). Unit eye sclera
+// radius = 1, so world radius = layout size × the band's uniform world scale.
+const _ep = new THREE.Vector3();
+const _es = new THREE.Vector3();
+export function seraphEyeSpheres() {
+  if (!_model || !_model.object3d.visible || !_model.eyeBand) return [];
+  const g = _model.eyeBand.group;
+  g.updateWorldMatrix(true, false);
+  const ws = _es.setFromMatrixScale(g.matrixWorld).x;   // uniform scale end to end
+  const out = [];
+  for (const e of _model.eyeBand.eyes) {
+    _ep.copy(e.pivot.position).applyMatrix4(g.matrixWorld);
+    out.push({ x: _ep.x, y: _ep.y, z: _ep.z, r: e.l.size * ws, central: e.isC });
+  }
+  return out;
+}
+
 // PREWARM — kill the first-summon load hitch. seraphOn() builds the whole model
 // synchronously on the first summon (atlas CanvasTexture gen + all geometry + the
 // first-use shader COMPILE at first render) = one big frame stall right when the
