@@ -266,7 +266,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { seraphOn, seraphOff, seraphAnimate, seraphShowBeam, seraphHideBeam, prewarm as seraphPrewarm } from './src/boss/seraphim/adapter.js';
+import { seraphOn, seraphOff, seraphAnimate, seraphShowBeam, seraphHideBeam, seraphEyeSpheres, prewarm as seraphPrewarm } from './src/boss/seraphim/adapter.js';
 
 const showErr = (m) => { document.getElementById('err').textContent = m; };
 window.addEventListener('error', e => showErr('Error: ' + e.message + ' @' + (e.lineno||'?')));
@@ -1399,7 +1399,7 @@ fogShell.visible=false; scene.add(fogShell);
 //  (world-anchored), and sit behind terrain (depth-tested) so they only paint the far horizon.
 // =====================================================================
 let ISLAND_CENTER=null;
-const _horizGeo=new THREE.CylinderGeometry(FAR*1.1, FAR*1.1, FAR*1.0, 120, 1, true);
+const _horizGeo=new THREE.CylinderGeometry(FAR*1.1, FAR*1.1, FAR*2.2, 120, 1, true);   // tall enough that a treeline anchored on high terrain at a LOW render distance (steep elevation angle) never clips at the rim
 const _uWater={value:new THREE.Color(0.08,0.2,0.28)}, _uSky={value:new THREE.Color(0.6,0.68,0.76)};
 const _horizVert='varying vec3 vPos; void main(){ vPos=position; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }';
 // OPEN-OCEAN HORIZON — a lone island in open sea: one clean 360° water ring that melts into the sky at the waterline,
@@ -1426,18 +1426,21 @@ const _PN=128, _pineMaskData=new Uint8Array(_PN*4);
 const _pineMask=new THREE.DataTexture(_pineMaskData,_PN,1,THREE.RGBAFormat); _pineMask.wrapS=THREE.RepeatWrapping; _pineMask.minFilter=THREE.LinearFilter; _pineMask.magFilter=THREE.LinearFilter; _pineMask.needsUpdate=true;
 const _uPine={value:new THREE.Color(0.078,0.157,0.071)};   // = the DARKEST textured pixel in the leaf tile, rgb(20,40,18)
 const pineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, side:THREE.BackSide, fog:false,
-  uniforms:{ uMask:{value:_pineMask}, uPine:_uPine, uFogCol:{value:scene.fog.color}, uFogAmt:{value:0} },   // uFogCol shares scene.fog.color by reference (mutated in place by updateSky), uFogAmt set per-frame in updateHorizon
+  uniforms:{ uMask:{value:_pineMask}, uPine:_uPine, uFogCol:{value:scene.fog.color}, uFogAmt:{value:0}, uCamY:{value:CFG.SEA+2}, uVisD:{value:CFG.RENDER_DIST*CK} },   // uFogCol shares scene.fog.color by reference (mutated in place by updateSky), uFogAmt/uCamY/uVisD set per-frame in updateHorizon
   vertexShader:_horizVert, fragmentShader:[
-  'precision highp float; varying vec3 vPos; uniform sampler2D uMask; uniform vec3 uPine, uFogCol; uniform float uFogAmt;',
+  'precision highp float; varying vec3 vPos; uniform sampler2D uMask; uniform vec3 uPine, uFogCol; uniform float uFogAmt, uCamY, uVisD;',
   'float hash(float n){ return fract(sin(n)*43758.5453); }',
   'float nz(float x){ float i=floor(x),f=fract(x); return mix(hash(i),hash(i+1.0),f*f*(3.0-2.0*f)); }',
-  'float treeline(float az){ float t=nz(az*46.0)*0.5+nz(az*110.0)*0.3+nz(az*210.0)*0.2; float spike=pow(abs(sin(az*260.0)),6.0)*0.02; return 0.012+t*0.05+spike; }',
+  'float treeline(float az){ return nz(az*46.0)*0.5+nz(az*110.0)*0.3+nz(az*210.0)*0.2; }',       // canopy-height noise 0..1
   'void main(){ vec3 d=normalize(vPos); float elev=d.y; float az=atan(vPos.z,vPos.x);',
-  '  float m=texture2D(uMask, vec2((az+3.14159265)/6.2831853, 0.5)).r; if(m<0.2) discard;',   // this azimuth looks over the sea/shore (or only a shallow land-run) → no pines; the higher cutoff trims faint fringe so the treeline ends cleanly instead of smearing around the horizon
-  '  float tl=treeline(az)*m*1.85;',                                                             // taller pines (canopy stands higher off the horizon)
-  '  float base=-0.028;',                                                                        // ...and dropped ~20px down-screen so the treeline sits just a touch lower
-  '  float top=base+tl, bottom=base-0.16;',                                                      // TIPS fixed at `top`; green skirt extended well down below the waterline
-  '  if(elev>top || elev<bottom) discard;',                                                      // jagged silhouette band; height scales with how much land lies beyond
+  '  vec4 msk=texture2D(uMask, vec2((az+3.14159265)/6.2831853, 0.5));',
+  '  float m=msk.r; if(m<0.2) discard;',   // this azimuth looks over the sea/shore (or only a shallow land-run) → no pines; the higher cutoff trims faint fringe so the treeline ends cleanly instead of smearing around the horizon
+  '  float hT=msk.g*'+WH.toFixed(1)+'-uCamY;',                                                   // terrain top just past the fog wall, relative to the eye (per-azimuth, sampled alongside the mask)
+  '  float spike=pow(abs(sin(az*260.0)),6.0)*7.0;',
+  '  float hTree=(10.0+treeline(az)*24.0+spike)*m;',                                             // canopy BLOCKS above that terrain — the same 18..31-block scale as the real pines it stands in for
+  '  float tip=hT+hTree;',
+  '  float base=hT/sqrt(uVisD*uVisD+hT*hT), top=tip/sqrt(uVisD*uVisD+tip*tip), bottom=base-0.18;',   // WORLD-anchored elevations: the silhouette rides the real terrain height at the render edge (so it stands ABOVE the rendered treeline) instead of a fixed screen angle that hid it below the world edge
+  '  if(elev>top || elev<bottom) discard;',                                                      // jagged silhouette band; green skirt extends below the terrain join (terrain in front occludes it)
   '  float shade=0.72+nz(az*320.0)*0.28;',
   '  vec3 pine=uPine*shade;',
   '  float t=clamp((elev-bottom)/max(top-bottom,1e-4),0.0,1.0);',                                // 0 at the fog-bound base → 1 at the tips (which poke a touch clearer of the haze)
@@ -1450,15 +1453,16 @@ function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.p
   _uSky.value.setRGB(lerp(0.12,0.60,day), lerp(0.15,0.68,day), lerp(0.20,0.78,day));            // horizon-band air the water melts into
   { const dim=0.45+0.55*day, base=[0.078,0.157,0.071]; _uPine.value.setRGB(base[0]*dim, base[1]*dim, base[2]*dim);   // darkest-leaf colour, dimmer at night
     const _wf=(typeof weather!=='undefined'?(weather.fog||0):0); pineMat.uniforms.uFogAmt.value=clamp(0.32 + 0.62*_wf, 0, 0.93);   // horizon treeline fades with WEATHER fog ONLY — decoupled from the render-distance terrain fog, which (now that fog tracks the shrunk current RD) was washing the treeline fully invisible. Clear day → visible; full bank → washed.
+    pineMat.uniforms.uCamY.value=camera.position.y; pineMat.uniforms.uVisD.value=CFG.RENDER_DIST*CK;   // per-frame (jumps/climbs shift the eye between mask recomputes; RD slider moves the wall)
     // the pine-visibility mask depends only on player position + render distance, so recompute the 128 rays +
     // re-upload the DataTexture only when the player has actually moved (or RD changed). <2 blocks of parallax
     // is sub-pixel at the horizon → gating this is exact, not approximate. Cost: 128×8 surfaceH calls, occasional.
     if(Math.abs(player.pos.x-_pineLastX)+Math.abs(player.pos.z-_pineLastZ) > 2 || CFG.RENDER_DIST!==_pineLastRD){ _pineLastX=player.pos.x; _pineLastZ=player.pos.z; _pineLastRD=CFG.RENDER_DIST;
       const visD=CFG.RENDER_DIST*CK;   // the fog wall — where rendered terrain ends and the backdrop stands in
       for(let i=0;i<_PN;i++){ const az=(i/_PN)*6.2831853-3.14159265, dx=Math.cos(az), dz=Math.sin(az);
-        let land=0; for(let s=0;s<8;s++){ const r=visD+6+s*16; if(surfaceH(Math.round(player.pos.x+dx*r),Math.round(player.pos.z+dz*r))>CFG.SEA) land++; }   // sample the REAL coastline in the 6..118-block band past the wall
+        let land=0, hMax=0; for(let s=0;s<8;s++){ const r=visD+6+s*16; const h=surfaceH(Math.round(player.pos.x+dx*r),Math.round(player.pos.z+dz*r)); if(h>CFG.SEA){ land++; if(h>hMax) hMax=h; } }   // sample the REAL coastline in the 6..118-block band past the wall
         const vis=clamp((land/8-0.45)/0.4,0,1);   // mostly land beyond the horizon → pines; sea/shore/thin spits → none (kills the 360° ring over open water)
-        _pineMaskData[i*4]=Math.round(vis*255); }
+        _pineMaskData[i*4]=Math.round(vis*255); _pineMaskData[i*4+1]=Math.round(clamp(hMax/WH,0,1)*255); }   // G channel = tallest land in the band → the shader anchors the silhouette to the real horizon terrain
       _pineMask.needsUpdate=true; } } }
 function bakeSky(){ if(!USE_SKYCUBE) return; try{ const prevTone=renderer.toneMapping; renderer.toneMapping=THREE.NoToneMapping;   // bake LINEAR (background render tonemaps once, like the old dome)
   skyCubeCam.position.set(0,0,0); skyCubeCam.update(renderer, skyScene); renderer.toneMapping=prevTone; }catch(e){} }
