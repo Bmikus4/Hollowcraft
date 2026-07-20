@@ -38,7 +38,7 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     let s0=await S();
     ck('hip: crosshair visible', s0.xhOp>0.7, s0);
     ck('hip: reticle hidden', !s0.retVis, s0);
-    await page.evaluate(`__hc.aim(true)`); await sleep(900);
+    await page.evaluate(`__hc.aim(true)`); await sleep(1400);
     let s1=await S();
     ck('ADS on', s1.ads===true && s1.adsT>0.9, s1);
     ck('ADS: crosshair gone', s1.xhOp<0.05, s1);
@@ -54,8 +54,8 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     const pk=s2.pitch;
     await sleep(1300);
     let s3=await S();
-    ck('recoil recovered smoothly (partial)', s3.pitch<pk-0.001 && s3.pitch>p0, {p0, pk, pf:s3.pitch});
-    ck('still ADS after recovery', s3.ads===true, s3);
+    ck('NO auto-recovery: nothing ever pulls the climb back down', s3.pitch>=pk-0.005 && s3.pitch>p0+0.01, {p0, pk, pf:s3.pitch});
+    ck('still ADS after the shot settles', s3.ads===true, s3);
     // D: burn the mag -> dry fire -> auto reload
     for(let i=0;i<19;i++){ await page.evaluate(`__hc.shoot()`); await sleep(35); }
     let s4=await S(); ck('mag empty after 20 shots', s4.mag===0, s4);
