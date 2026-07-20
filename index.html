@@ -1231,6 +1231,10 @@ const globalU = {
   uSunCol: { value:new THREE.Color(0xffe6c0) },
   uFog:    { value:new THREE.Color(0x0a0f0d) }
 };
+// SHARED HORIZON ANCHOR (painterly rule: converge the VALUES of sky-bottom and sea-top on one dark tone and the
+// line pushes itself into the distance — sky eases DOWN to it, the sea starts AT it and darkens further; nothing
+// at the join is ever lighter than either neighbour). Updated per-frame in updateHorizon.
+const _uHorizonBlend={value:new THREE.Color(0.10,0.14,0.20)};
 
 // (texture-array atlas is built earlier; V handled in shader)
 
@@ -1315,7 +1319,7 @@ const skyMat = new THREE.ShaderMaterial({
   side:THREE.BackSide, depthWrite:false, depthTest:false, fog:false,
   uniforms:{
     uSunDir:globalU.uSunDir, uMoonDir:globalU.uMoonDir, uDay:globalU.uDay, uTime:globalU.uTime,
-    uMoonTex:{value:null}, uHasMoon:{value:0}, uFogCol:{value:scene.fog.color}
+    uMoonTex:{value:null}, uHasMoon:{value:0}, uFogCol:{value:scene.fog.color}, uHorizonBlend:_uHorizonBlend
   },
   vertexShader:`
     varying vec3 vDir;
@@ -1323,7 +1327,7 @@ const skyMat = new THREE.ShaderMaterial({
   fragmentShader:`
     precision highp float;
     varying vec3 vDir;
-    uniform vec3 uSunDir, uMoonDir; uniform float uDay, uTime, uHasMoon; uniform vec3 uFogCol;
+    uniform vec3 uSunDir, uMoonDir; uniform float uDay, uTime, uHasMoon; uniform vec3 uFogCol, uHorizonBlend;
     uniform sampler2D uMoonTex;
     // hash noise
     float h13(vec3 p){ p=fract(p*0.3183099+0.1); p*=17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
@@ -1344,7 +1348,7 @@ const skyMat = new THREE.ShaderMaterial({
       if(dir.y<-0.1) col=mix(col, hor*0.42, clamp(-(dir.y+0.1)*3.2,0.0,1.0));   // ground haze only starts 10% below the midline
       // HORIZON HAZE BAND — blend the LOW sky toward the terrain fog colour so the render edge (and any gap through the
       // last trees) melts into a matching haze instead of showing a bright sky-hole. Fades out by ~9 deg up; upper sky untouched.
-      col=mix(col, uFogCol*(0.3+0.7*uDay), (1.0-smoothstep(0.0,0.16,dir.y))*0.9*(0.25+0.75*uDay));   // at NIGHT the haze band darkens hard toward the night sky (Ben 07-20: no pale strip over the sea after dark); daytime behaviour unchanged
+      col=mix(col, uHorizonBlend, (1.0-smoothstep(0.0,0.10,dir.y))*0.85);   // VALUE CONVERGENCE (painterly horizon rule): the lowest sky eases DOWN onto the shared dark horizon anchor — the join with the sea is a meeting of near-equal dark values, never a brighter haze band
       // dusk/dawn Mie: blood-orange near sun on horizon
       float sd=max(dot(dir,uSunDir),0.0);
       float dusk=pow(1.0-abs(uSunDir.y),2.0);
@@ -1419,14 +1423,14 @@ const _horizVert='varying vec3 vPos; void main(){ vPos=position; gl_Position=pro
 // OPEN-OCEAN HORIZON — a lone island in open sea: one clean 360° water ring that melts into the sky at the waterline,
 // so you never see the chunk edge/void. No distant islands, no treeline, no mountain silhouettes.
 const oceanMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, side:THREE.BackSide, fog:false,
-  uniforms:{ uWater:_uWater, uSky:_uSky, uTime:globalU.uTime },
+  uniforms:{ uWater:_uWater, uSky:_uSky, uHorizonBlend:_uHorizonBlend, uTime:globalU.uTime },
   vertexShader:_horizVert, fragmentShader:[
-  'precision highp float; varying vec3 vPos; uniform vec3 uWater, uSky; uniform float uTime;',
+  'precision highp float; varying vec3 vPos; uniform vec3 uWater, uSky, uHorizonBlend; uniform float uTime;',
   'float hash(float n){ return fract(sin(n)*43758.5453); }',
   'float nz(float x){ float i=floor(x),f=fract(x); return mix(hash(i),hash(i+1.0),f*f*(3.0-2.0*f)); }',
   'void main(){ vec3 d=normalize(vPos); float elev=d.y; if(elev>=0.0) discard;',   // paint only at/below the waterline; the sky shows above
   '  float az=atan(vPos.z,vPos.x);',
-  '  vec3 water=uWater;',                                                          // PURE deep sea colour to the very waterline (Ben 07-20: no strip — the sky fades straight into the deep blue ocean)
+  '  vec3 water=mix(uHorizonBlend, uWater, smoothstep(-0.015,-0.24,elev));',       // sea-top starts AT the shared horizon anchor (the exact value the sky eased down to) and DARKENS toward the deep — the painterly reversal: the sea grows darker as it recedes, and the join can never brighten
   '  float shim=nz(az*90.0+uTime*0.25)*0.5+nz(az*220.0-uTime*0.4)*0.5;',           // drifting swell mottle, tinted from the water itself (no bright band)
   '  water*=1.0+0.05*shim*smoothstep(-0.2,-0.02,elev);',
   '  float a=smoothstep(0.0,-0.006,elev);',                                        // solid essentially at the waterline
@@ -1466,8 +1470,13 @@ const pineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, sid
 const pineLayer=new THREE.Mesh(_horizGeo, pineMat); pineLayer.frustumCulled=false; pineLayer.renderOrder=-5; scene.add(pineLayer);   // over the ocean seam
 let _pineLastX=1e9, _pineLastZ=1e9, _pineLastRD=0;
 function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.position.copy(camera.position); const day=globalU.uDay.value;
-  _uWater.value.setRGB(lerp(0.018,0.135,day), lerp(0.032,0.185,day), lerp(0.065,0.27,day));    // deep slate grey-blue by day; at NIGHT it sinks to the night sky's own deep blue (horN match — Ben 07-20 rev3)
-  _uSky.value.setRGB(lerp(0.12,0.60,day), lerp(0.15,0.68,day), lerp(0.20,0.78,day));            // horizon-band air the water melts into
+  { const fc=scene.fog.color;   // PERFECT MATCH BY CONSTRUCTION (Ben 07-20): the backdrop ring's deep colour = exactly what the REAL water fogs to at its far edge (same formula as waterMat's fog target) — the seam cannot mismatch in any weather/time
+    _uWater.value.setRGB(fc.r*0.5, fc.g*0.5+0.012, fc.b*0.5+0.028);
+    _uHorizonBlend.value.setRGB(   // shared sky/sea anchor: the ring's own value pulled 25% toward the sky's horizon tone — always ≥ the sea, ≤ the low sky
+      _uWater.value.r*0.75+lerp(0.02,0.62,day)*0.25,
+      _uWater.value.g*0.75+lerp(0.035,0.74,day)*0.25,
+      _uWater.value.b*0.75+lerp(0.07,0.88,day)*0.25); }
+  _uSky.value.setRGB(lerp(0.12,0.60,day), lerp(0.15,0.68,day), lerp(0.20,0.78,day));            // horizon-band air (legacy uniform)
   { const dim=0.10+0.90*day, base=[0.050,0.102,0.046]; _uPine.value.setRGB(base[0]*dim, base[1]*dim, base[2]*dim);   // DARK forest green matching the real edge trees (Ben 07-20 rev3); at NIGHT it goes near-BLACK silhouette
     { const _ef=1-Math.exp(-Math.pow(CFG.RENDER_DIST*CK*scene.fog.density,2)); pineMat.uniforms.uFogAmt.value=clamp(_ef*0.93,0,0.97);   // MATCH the farthest rendered chunks' fog wash exactly (exp2 at the wall distance — includes weather + day/night via density), held a hair under so the tip-gradient still reads
       _uPineFog.copy(scene.fog.color).lerp(_stormBlue, 0.55).multiplyScalar(0.14+0.86*day); }   // …and the fade lands on a DARK STORMY BLUE pulled from the live fog color — scaled to the night sky's deep blue after dark, else the fully-fogged taper sections paint a pale strip across the dark horizon (Ben's 10:32+10:39 night screenshots; bisected to this layer)
@@ -4868,7 +4877,7 @@ function updateWretch(dt){
   else if(st==='CHASE'){ wretch.stealth=0.4; speed=(reckless?13:11)*(1+(HORROR.rage||0)*0.25); wretch.crawl=Math.min(1,wretch.crawl+dt*3.0); aim(cam.x,cam.z);   // RUN IT DOWN — faster on angrier nights
     if(Math.random()<0.02)wretchVoice&&wretchVoice('close_clicks',wretch.pos); }
   else if(st==='HUNT'){ wretch.stealth=0.2; speed=(reckless?20:16)*(1+(HORROR.rage||0)*0.25); if(near<4.6)speed*=0.5; if(near<2.4)speed*=0.6;
-    if(near<6){ const tgt=clamp((near-3.4)/2.6,0,1); wretch.crawl+=(tgt-wretch.crawl)*Math.min(1,dt*8); }   // THE FINAL SIX BLOCKS (Ben 07-20): the rise is DISTANCE-DRIVEN — it slowly uncurls out of the gallop as it closes, fully upright by grab range (3.4), arms out for you
+    if(near<10){ const tgt=clamp((near-3.4)/6.6,0,1); wretch.crawl+=(tgt-wretch.crawl)*Math.min(1,dt*8); }   // THE FINAL TEN BLOCKS (Ben 07-20): the rise is DISTANCE-DRIVEN — it slowly uncurls out of the gallop as it closes, fully upright by grab range (3.4), arms out for you
     else wretch.crawl=Math.min(1,wretch.crawl+dt*3.5);
     aim(cam.x,cam.z);   // brake earlier (and harder at point-blank) so a fast lunge plants in the grab window instead of blowing past you
     const _gp=(huntCam||player.pos), _gLOS=(typeof losBlocked==='function') ? !losBlocked(ex,wretch.pos.y+1.2,ez, _gp.x,_gp.y+1.0,_gp.z) : true;   // must actually SEE you — no reaching through walls/floors
@@ -5922,7 +5931,7 @@ function animateWretch(dt, moving){
   const scramble = (st==='HUNT'||st==='CHASE'||st==='FLEE'||st==='TRACK') && moving;
   const gallop   = st==='HUNT'||st==='CHASE'||st==='FLEE';
   const adv      = Math.max(0, wretch._advRate||0);
-  const reaching = (st==='HUNT'||st==='CHASE') && adv>0.45 && (cr>0.5 || (wretch.dist<6.5 && wretch.committed));   // grasping arms on the all-fours gallop AND the final upright lunge (<6 blocks, risen, arms out for the grab) — a far-away upright charge-start still never runs arms-in-air
+  const reaching = (st==='HUNT'||st==='CHASE') && adv>0.45 && (cr>0.5 || (wretch.dist<7.5 && wretch.committed));   // grasping arms on the all-fours gallop AND the whole distance-driven rise (crawl crosses 0.5 near 6.7 on the 10-block uncurl) — a far-away upright charge-start still never runs arms-in-air
   const fleeing  = (st==='FLEE'||wretch.routed) && moving;
   const stalking = st==='STALK'||st==='SCOUT';
   const peeking  = stalking && wretch.dist<38 && wretch.sense && !wretch.sense.seen && !wretch._clingN;
