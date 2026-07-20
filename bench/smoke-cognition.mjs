@@ -70,6 +70,7 @@ const check = (name, ok, detail) => { results.push({ name, ok, detail }); consol
     browser = await chromium.launch({ executablePath: findBrowser(), headless: true, args: ['--enable-gpu', '--ignore-gpu-blocklist', '--use-angle=d3d11', '--mute-audio', '--autoplay-policy=no-user-gesture-required'] });
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 720 } });
     await ctx.addInitScript(INIT);
+    await ctx.addInitScript(`try{ localStorage.setItem('hollowcraft_mind','1'); }catch(e){}`);   // the mind HUD is opt-in now (off by default) — this harness tests it, so opt in
     const page = await ctx.newPage();
     page.on('pageerror', e => errors.push(String(e.message || e).slice(0, 300)));
     await page.goto('http://127.0.0.1:' + port + '/index.html?debug=1&t=630', { waitUntil: 'load', timeout: 90000 });

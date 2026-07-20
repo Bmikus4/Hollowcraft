@@ -181,6 +181,8 @@
     <h1>HOLLOWCRAFT</h1>
     <div class="sub">you built a cottage in a forest that was already occupied</div>
     <div class="menucol" id="mainmenu">
+      <div class="menurow" id="continue-row" style="display:none;gap:8px"><button class="menubtn" id="mb-continue" style="flex:1">Continue</button><button class="menubtn ghost" id="mb-delsave" title="delete the saved world" style="flex:0 0 auto;padding:0 14px;border-color:#5a2a2a;color:#c89a9a">&times;</button></div>
+      <div class="dim" id="continue-info" style="display:none;font-size:12px;opacity:.6;margin:-6px 0 2px"></div>
       <button class="menubtn" id="mb-solo">Enter the Wood</button>
       <label class="flab" style="display:flex;align-items:center;gap:8px;justify-content:center;cursor:pointer;opacity:0.85"><input type="checkbox" id="mb-creative" style="width:16px;height:16px;cursor:pointer"> Creative mode <span class="dim">— fly &amp; all items (survival locks both)</span></label>
       <button class="menubtn" id="mb-multi">Multiplayer</button>
@@ -193,6 +195,7 @@
         <div id="lan-list" class="lanlist"><div class="landim">looking for games on your network…</div></div>
       </div>
       <div class="menurow"><button class="menubtn" id="mb-host">Host a game</button></div>
+      <div class="pnote" id="host-resume-note" style="display:none">You have a saved world — hosting will restore it. Delete the save on the main menu for a fresh island.</div>
       <div class="pnote">Same network or Hamachi. Click <b>Host</b> and your friends will see your game in their list.</div>
       <details class="mpadv"><summary>Join by address</summary>
         <input class="field" id="mp-code" placeholder="ws://25.x.x.x:8788  (or leave blank for this server)" maxlength="64" autocomplete="off">
@@ -223,6 +226,7 @@
     <div class="keys" id="pausesettings"></div>
     <div class="menucol" style="width:300px;gap:10px">
       <button class="menubtn" id="resumebtn">Resume</button>
+      <button class="menubtn" id="savebtn">Save Game</button>
       <button class="menubtn ghost" id="exitbtn" style="border-color:#5a2a2a;color:#c89a9a">Exit to Menu</button>
     </div>
   </div>
@@ -266,7 +270,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { seraphOn, seraphOff, seraphAnimate, seraphShowBeam, seraphHideBeam, seraphEyeSpheres, seraphWingSpheres, prewarm as seraphPrewarm } from './src/boss/seraphim/adapter.js';
+import { seraphOn, seraphOff, seraphAnimate, seraphShowBeam, seraphHideBeam, seraphEyeSpheres, seraphWingSpheres, seraphFold, prewarm as seraphPrewarm } from './src/boss/seraphim/adapter.js';
 
 const showErr = (m) => { document.getElementById('err').textContent = m; };
 window.addEventListener('error', e => showErr('Error: ' + e.message + ' @' + (e.lineno||'?')));
@@ -2493,6 +2497,8 @@ function aabbHits(x,y,z){
 }
 const keys={};
 function physics(dt){
+  if(_resumeHold){ const c=getChunk(Math.floor(player.pos.x)>>4,Math.floor(player.pos.z)>>4);   // resumed game — hold still until the ground under you exists
+    if(!c||!c.generated||!c.meshed){ player.vel.set(0,0,0); return; } _resumeHold=false; }
   const p=player; p._gliding=false;
   if(p.grabbed) return;                                       // captured (jumpscare/haul/pull/tied) → the drag sequence owns your position; no input-movement
   if(p.seat){ if(keys.KeyW||keys.KeyA||keys.KeyS||keys.KeyD||keys.Space||keys.ControlLeft||keys.ControlRight){ p.seat=null; }   // SITTING (rocking chair) — any movement input stands you up
@@ -3048,6 +3054,96 @@ let openUI=null, cursor=null, craftSize=2; const craftGrid=new Array(9).fill(nul
 const localChests=new Set();   // structure LOOT chests — deterministic from the seed, so each player loots their OWN copy (never synced); only player-placed storage chests sync
 const boot=document.getElementById('boot'), pause=document.getElementById('pause');
 function requestLock(){ const pr=canvas.requestPointerLock({unadjustedMovement:true}); if(pr&&pr.catch)pr.catch(()=>{ const p2=canvas.requestPointerLock(); if(p2&&p2.catch)p2.catch(()=>{}); }); }
+// =====================================================================
+//  LOCAL SAVE / LOAD — the host's world persists in this browser.
+//  The terrain is deterministic from CFG.SEED, so a save is just the
+//  edits delta (the exact payload the co-op late-join sync ships) plus
+//  the player, clocks, chests and ground items. Loading replays it over
+//  freshly-generated terrain the same way a joining client applies sync.
+// =====================================================================
+const SAVE_KEY='hollowcraft_save';
+let _resumeHold=false;   // after a load, physics freezes the player until the chunk under their boots is meshed (no falling through a still-streaming world)
+function saveGame(){
+  if(NET.on && !NET.host){ flashName('only the host can save the world'); return false; }
+  if(player.dead){ flashName('the dead keep no journals'); return false; }
+  const s={ v:1, seed:CFG.SEED, savedAt:Date.now(), worldTime, spawnX, spawnZ,
+    player:{ x:player.pos.x, y:player.pos.y, z:player.pos.z, yaw:player.yaw, pitch:player.pitch,
+      health:player.health, hunger:player.hunger, water:player.water, sat:player.sat,
+      creative:player.creative, blessT:player.blessT||0, sick:player.sick||0 },
+    selSlot, inv, armor, edits, chests, localChests:[...localChests], furnaces, campfires,
+    drops: drops.filter(d=>d&&!d.dead).slice(0,150).map(d=>({id:d.id,n:d.n,x:+d.x.toFixed(2),y:+d.y.toFixed(2),z:+d.z.toFixed(2)})),
+    horror:{ nightsSurvived:HORROR.nightsSurvived, tier:HORROR.tier, menace:HORROR.menace } };
+  try{ localStorage.setItem(SAVE_KEY, JSON.stringify(s)); }
+  catch(e){ flashName('save failed — browser storage is full'); return false; }
+  return true; }
+function readSave(){ try{ const r=localStorage.getItem(SAVE_KEY); if(!r)return null; const s=JSON.parse(r); return (s&&s.v===1&&s.edits&&s.player)?s:null; }catch(e){ return null; } }
+function wipeSave(){ try{ localStorage.removeItem(SAVE_KEY); }catch(e){} }
+function applySave(s){
+  if(s.seed!==CFG.SEED) flashName('this save used a different seed — the land may not match it');
+  beginBulk();   // world delta — mirrors the co-op sync apply: generated chunks patch now, the rest bake in applyEdits as they stream in
+  try{ for(const k in s.edits){ const b=s.edits[k]; edits[k]=b; const p=k.split(','), wx=+p[0],wy=+p[1],wz=+p[2];
+    editIndexPut(wx,wy,wz,b); const c=getChunk(wx>>4,wz>>4); if(c&&c.generated) setBlockWorld(wx,wy,wz,b,false); } }
+  finally{ endBulk(); }
+  if(s.worldTime!=null) worldTime=s.worldTime;
+  if(s.spawnX!=null){ spawnX=s.spawnX; spawnZ=s.spawnZ; }
+  for(const k in (s.chests||{})) chests[k]=s.chests[k];
+  (s.localChests||[]).forEach(k=>localChests.add(k));
+  Object.assign(furnaces, s.furnaces||{}); Object.assign(campfires, s.campfires||{});
+  if(s.horror){ HORROR.nightsSurvived=s.horror.nightsSurvived|0; HORROR.tier=s.horror.tier||1; HORROR.menace=s.horror.menace||0; }
+  const P=s.player;
+  player.pos.set(P.x,P.y,P.z); player.vel.set(0,0,0); player.yaw=P.yaw||0; player.pitch=P.pitch||0;
+  player.health=Math.max(1,P.health!=null?P.health:20); player.hunger=P.hunger!=null?P.hunger:20;
+  player.water=P.water!=null?P.water:20; player.sat=P.sat||0; player.blessT=P.blessT||0; player.sick=P.sick||0;
+  player.creative=!!P.creative; window._allowCreative=!!P.creative;   // the save's mode wins on resume — survival worlds stay survival
+  for(let i=0;i<INV_N;i++) inv[i]=(s.inv&&s.inv[i])||null;
+  for(let i=0;i<4;i++) armor[i]=(s.armor&&s.armor[i])||null;
+  selSlot=Math.min(8,Math.max(0,s.selSlot|0)); refreshHotbar();
+  (s.drops||[]).forEach(d=>{ try{ spawnDrop(d.id,d.n,d.x,d.y,d.z); }catch(e){} });
+  _resumeHold=true; return true; }
+// =====================================================================
+//  ACHIEVEMENTS — 15, persisted in this browser, toasted in the corner.
+//  Ten are earned. Five are for the things you were not supposed to do.
+// =====================================================================
+const ACH_KEY='hollowcraft_ach';
+const ACHIEVEMENTS=[
+ {id:'first_night', name:'First Light',              desc:'survive your first night'},
+ {id:'crafted',     name:'Handmade',                 desc:'craft something with your own hands'},
+ {id:'slept',       name:'Something Like Home',      desc:'sleep through the night'},
+ {id:'iron',        name:'Into the Fire',            desc:'smelt an iron ingot'},
+ {id:'diamond',     name:'Deep Delver',              desc:'mine a diamond from the dark'},
+ {id:'lair',        name:'The Hollow Below',         desc:'descend into its lair'},
+ {id:'church',      name:'Pilgrim',                  desc:'find the chapel on the far shore'},
+ {id:'blessed',     name:'Blessed',                  desc:'drink holy water from the font'},
+ {id:'golgotha',    name:'The Place of the Skull',   desc:'climb to the crosses on the summit'},
+ {id:'seraph',      name:'It Had Three Lives',       desc:'cast down the seraph'},
+ {id:'murky',   egg:true, name:'Tastes Like Regret', desc:'drink the murky water anyway'},
+ {id:'bell',    egg:true, name:'You Rang?',          desc:'ring the bell. you knew what it does.'},
+ {id:'fists',   egg:true, name:'Questionable Valor', desc:'punch the Wretch with your bare hands'},
+ {id:'rocking', egg:true, name:'Front Row Seat',     desc:'rock in your chair while it hunts you'},
+ {id:'jesus',   egg:true, name:'Instantly Forgiven', desc:'shoot Jesus'},
+];
+const achGot=(()=>{ try{ return JSON.parse(localStorage.getItem(ACH_KEY))||{}; }catch(e){ return {}; } })();
+let _achWrap=null;
+function _achToast(a){
+  if(!_achWrap){ _achWrap=document.createElement('div'); _achWrap.style.cssText='position:fixed;right:18px;bottom:18px;z-index:60;display:flex;flex-direction:column;gap:10px;pointer-events:none;'; document.body.appendChild(_achWrap); }
+  const t=document.createElement('div');
+  t.style.cssText='min-width:250px;max-width:350px;padding:12px 16px;background:linear-gradient(180deg,rgba(16,20,14,.96),rgba(8,10,7,.96));border:1px solid #a9812f;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.7),inset 0 0 26px rgba(0,0,0,.5);font:13px Georgia,serif;color:#cbd8bd;opacity:0;transform:translateX(30px);transition:opacity .45s,transform .45s;text-align:left;';
+  t.innerHTML='<div style="font-size:10px;letter-spacing:3px;color:#c0a050;margin-bottom:4px">ACHIEVEMENT UNLOCKED</div><div style="font-size:15px;color:#e8e2d4">'+a.name+'</div><div style="opacity:.65;font-style:italic;margin-top:2px">'+a.desc+'</div>';
+  _achWrap.appendChild(t); requestAnimationFrame(()=>{ t.style.opacity='1'; t.style.transform='translateX(0)'; });
+  setTimeout(()=>{ t.style.opacity='0'; t.style.transform='translateX(30px)'; setTimeout(()=>{ try{t.remove();}catch(e){} },600); }, 6000);
+  if(AC && typeof tone==='function' && typeof master!=='undefined' && master){ try{ tone(master,{f:1046,type:'sine',dur:0.5,vol:0.12,atk:0.01}); tone(master,{f:1568,type:'sine',dur:0.8,vol:0.10,atk:0.01,delay:0.12}); }catch(e){} } }
+function achUnlock(id){ if(achGot[id] || !started || player.creative) return; const a=ACHIEVEMENTS.find(x=>x.id===id); if(!a)return;
+  achGot[id]=Date.now(); try{ localStorage.setItem(ACH_KEY,JSON.stringify(achGot)); }catch(e){}
+  _achToast(a); }
+let _achT=0;
+function achPoll(dt){ _achT+=dt; if(_achT<0.7)return; _achT=0; if(player.creative)return;   // location/state checks — cheap, twice a second
+  const px=player.pos.x, pz=player.pos.z;
+  if(!achGot.first_night && HORROR.nightsSurvived>=1) achUnlock('first_night');
+  if(!achGot.blessed && (player.blessT||0)>0) achUnlock('blessed');
+  if(!achGot.church && typeof _churchSpot!=='undefined' && _churchSpot && Math.hypot(px-_churchSpot.x,pz-_churchSpot.z)<16) achUnlock('church');
+  if(!achGot.golgotha && typeof _golgothaSpot!=='undefined' && _golgothaSpot && Math.hypot(px-_golgothaSpot.x,pz-_golgothaSpot.z)<14) achUnlock('golgotha');
+  if(!achGot.lair && typeof inDungeon==='function' && wretch.lair && inDungeon(px,player.pos.y,pz)) achUnlock('lair');
+  if(!achGot.rocking && player.seat && wretch.active && (wretch.state==='HUNT'||wretch.state==='CHASE') && (wretch.dist||99)<24) achUnlock('rocking'); }
 (function(){ const $b=id=>document.getElementById(id);
   const main=$b('mainmenu'), mp=$b('mp-panel'), setp=$b('set-panel');
   const show=el=>{ [main,mp,setp].forEach(e=>e.style.display='none'); el.style.display='flex'; };
@@ -3055,7 +3151,10 @@ function requestLock(){ const pr=canvas.requestPointerLock({unadjustedMovement:t
   function startGame(mode,room){ try{ const ork=$b('orkey'); if(ork&&ork.value.trim())localStorage.setItem('hollowcraft_or_key',ork.value.trim()); }catch(e){}
     try{ const pn=$b('playername'); playerName=(pn&&pn.value.trim())||('player'+(NET.id||Math.floor(Math.random()*99))); localStorage.setItem('hollowcraft_name',playerName); }catch(e){}
     try{ const cc=$b('mb-creative'); window._allowCreative=!!(cc&&cc.checked); player.creative=window._allowCreative; }catch(e){ window._allowCreative=false; player.creative=false; }   // CREATIVE only if enabled at the start; SURVIVAL locks fly + creative menu
-    window._mp={mode:mode||'solo',room:room||null}; boot.style.display='none'; started=true; if(typeof _dio!=='undefined'&&_dio)_dio.visible=false; requestLock(); if(typeof startIntro==='function')startIntro();   // cinematic flythrough → wake on the beach; drop the menu dungeon diorama
+    window._mp={mode:mode||'solo',room:room||null}; boot.style.display='none'; started=true; if(typeof _dio!=='undefined'&&_dio)_dio.visible=false; requestLock();
+    const RES=window._resume; window._resume=null;
+    if(RES){ try{ applySave(RES); flashName('the wood remembers you'); }catch(e){ console.error('resume failed',e); if(typeof startIntro==='function')startIntro(); } }   // resume a saved world — no intro, wake exactly where you saved
+    else if(typeof startIntro==='function')startIntro();   // cinematic flythrough → wake on the beach; drop the menu dungeon diorama
     // PREWARM the seraph boss off the summon path (build model + compile shaders during
     // the intro flythrough) so the first summon doesn't stall a frame. Idempotent; no AI.
     try{ (window.requestIdleCallback||((f)=>setTimeout(f,800)))(()=>{ try{ seraphPrewarm({scene,camera,renderer}); }catch(e){} }); }catch(e){}
@@ -3087,19 +3186,35 @@ function requestLock(){ const pr=canvas.requestPointerLock({unadjustedMovement:t
     const el=$b('lan-list'),st=$b('lan-status'); if(el)el.innerHTML='<div class="landim">Open the game through <b>Hollowcraft-LAN.bat</b> (the local server) to browse LAN games.</div>'; if(st)st.textContent=' — offline'; }); }
   function lanStart(){ lanPoll(); if(!_lanTimer)_lanTimer=setInterval(lanPoll,2000); }
   function lanStop(){ if(_lanTimer){ clearInterval(_lanTimer); _lanTimer=null; } }
+  // ---- CONTINUE — a saved world in this browser resumes exactly where the host left it ----
+  function refreshContinue(){ const s=readSave(), crow=$b('continue-row'), cinfo=$b('continue-info'), hn=$b('host-resume-note');
+    if(crow)crow.style.display=s?'flex':'none'; if(hn)hn.style.display=s?'block':'none';
+    if(cinfo){ cinfo.style.display=s?'block':'none';
+      if(s){ const n=(s.horror&&s.horror.nightsSurvived)|0; cinfo.textContent='saved '+new Date(s.savedAt||0).toLocaleString()+' — '+Object.keys(s.edits).length+' edits, '+n+' night'+(n===1?'':'s')+' survived'; } } }
+  refreshContinue();
+  $b('mb-continue').addEventListener('click',()=>{ const s=readSave(); if(!s){ refreshContinue(); return; } lanStop(); window._resume=s; startGame('solo'); });
+  let _delArm=0;   // two-click delete — first click arms, second within 2.5s wipes
+  $b('mb-delsave').addEventListener('click',()=>{ const now=Date.now();
+    if(now-_delArm>2500){ _delArm=now; $b('mb-delsave').textContent='sure?'; setTimeout(()=>{ try{ $b('mb-delsave').innerHTML='&times;'; }catch(e){} },2600); return; }
+    wipeSave(); refreshContinue(); });
   $b('mb-solo').addEventListener('click',()=>{ lanStop(); startGame('solo'); });
   $b('mb-multi').addEventListener('click',()=>{ show(mp); lanStart(); });
   $b('mb-settings').addEventListener('click',()=>{ lanStop(); show(setp); });
   $b('mb-host').addEventListener('click',()=>{ const nm=(($b('playername')&&$b('playername').value.trim())||'Hollowcraft')+'’s wood';   // announce this game on the LAN, then host
-    try{ fetch('/advertise?on=1&name='+encodeURIComponent(nm)); }catch(e){} lanStop(); startGame('host'); });
+    try{ fetch('/advertise?on=1&name='+encodeURIComponent(nm)); }catch(e){} lanStop(); const s=readSave(); if(s)window._resume=s; startGame('host'); });   // the host's saved world comes back; joiners receive it via the normal sync
   $b('mb-join').addEventListener('click',()=>{ lanStop(); startGame('join',($b('mp-code').value||'').trim()); });
   document.querySelectorAll('#boot [data-back]').forEach(b=>b.addEventListener('click',()=>{ lanStop(); show(main); }));
   // SHARED-LINK auto-join: a friend clicking  <url>/?join  (or ?host) skips the menu and connects straight to the
   // relay that served the page (same-origin tunnel/Vercel). ?join=CODE / ?host=CODE picks a room (for PartyKit).
   const _am = Q.get('join')!=null ? 'join' : (Q.get('host')!=null ? 'host' : null);
-  if(_am) setTimeout(()=>{ startGame(_am, Q.get(_am)||Q.get('room')||''); if(pause)pause.style.display='flex'; }, 120);   // auto-join can't grab the mouse (browsers need a click) → show the Resume prompt so the player clicks to lock
+  if(_am) setTimeout(()=>{ if(_am==='host'){ const s=readSave(); if(s)window._resume=s; } startGame(_am, Q.get(_am)||Q.get('room')||''); if(pause)pause.style.display='flex'; }, 120);   // auto-join can't grab the mouse (browsers need a click) → show the Resume prompt so the player clicks to lock; an auto-HOST restores their save like the menu path
 })();
 document.getElementById('resumebtn').addEventListener('click',requestLock);
+document.getElementById('savebtn').addEventListener('click',()=>{ const b=document.getElementById('savebtn');   // host-only local save (solo counts as host)
+  if(NET.on && !NET.host){ b.textContent='host only'; }
+  else if(saveGame()) b.textContent='Saved';
+  else b.textContent='save failed';
+  clearTimeout(b._t); b._t=setTimeout(()=>b.textContent='Save Game',1400); });
 // click anywhere in the game to (re)capture the mouse — covers auto-join, alt-tab, Esc, etc. (browsers only lock on a real gesture)
 canvas.addEventListener('mousedown',()=>{ if(started && !locked && !openUI && !player.dead) requestLock(); });
 document.getElementById('exitbtn').addEventListener('click',()=>{ try{document.exitPointerLock&&document.exitPointerLock();}catch(e){} location.reload(); });   // back to the actual start menu (full reset)
@@ -3117,7 +3232,7 @@ function applyFps(){ _fpsEl.style.display=_fpsOn?'block':'none'; }
 const _mindEl=document.createElement('div');
 _mindEl.style.cssText='position:fixed;left:14px;top:44px;width:min(46vw,560px);z-index:29;text-align:left;pointer-events:none;display:none;';   // reasoning HUD — top-left, always-on data panel
 document.body.appendChild(_mindEl);
-let _mindOn=(()=>{ try{ const v=localStorage.getItem('hollowcraft_mind'); return v==null?true:v==='1'; }catch(e){ return true; } })();
+let _mindOn=(()=>{ try{ const v=localStorage.getItem('hollowcraft_mind'); return v==null?false:v==='1'; }catch(e){ return false; } })();   // OFF by default (Ben 07-20) — opt in from Settings
 function applyMind(){ _mindEl.style.display=_mindOn?'block':'none'; if(!_mindOn)_mindEl.innerHTML=''; }
 let _mindAcc=0;
 function _esc(s){ return (''+s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -3225,10 +3340,17 @@ function buildPauseSettings(){ const el=document.getElementById('pausesettings')
     c.onchange=()=>{ _fpsOn=c.checked; applyFps(); try{localStorage.setItem('hollowcraft_fps',_fpsOn?'1':'0');}catch(e){} }; d.appendChild(l); d.appendChild(c); el.appendChild(d); }
   { const d=document.createElement('div'); d.style.cssText='display:flex;align-items:center;justify-content:space-between;font:13px Georgia;color:#cbb98f;';
     const l=document.createElement('span'); l.textContent='Show creature’s mind'; const c=document.createElement('input'); c.type='checkbox'; c.checked=_mindOn; c.style.cssText='width:18px;height:18px;accent-color:#8a6';
-    c.onchange=()=>{ _mindOn=c.checked; applyMind(); try{localStorage.setItem('hollowcraft_mind',_mindOn?'1':'0');}catch(e){} }; d.appendChild(l); d.appendChild(c); el.appendChild(d); } }
+    c.onchange=()=>{ _mindOn=c.checked; applyMind(); try{localStorage.setItem('hollowcraft_mind',_mindOn?'1':'0');}catch(e){} }; d.appendChild(l); d.appendChild(c); el.appendChild(d); }
+  { const got=Object.keys(achGot).length, det=document.createElement('details');   // ACHIEVEMENTS ledger — collapsed count line, open for the list; unfound easter eggs stay hidden as ? ? ?
+    det.style.cssText='text-align:left;font:13px Georgia;color:#cbb98f;border-top:1px solid rgba(130,150,115,.14);padding-top:9px;';
+    const sum=document.createElement('summary'); sum.style.cssText='cursor:pointer;letter-spacing:2px;color:#c0a050;font-size:11px;'; sum.textContent='ACHIEVEMENTS  '+got+' / '+ACHIEVEMENTS.length; det.appendChild(sum);
+    const box=document.createElement('div'); box.style.cssText='max-height:200px;overflow-y:auto;margin-top:6px;padding-right:4px;';
+    box.innerHTML=ACHIEVEMENTS.map(a=>{ const g=!!achGot[a.id], hid=a.egg&&!g;
+      return '<div style="opacity:'+(g?'1':'.42')+';margin:3px 0;font-size:12px"><span style="color:'+(g?'#e0c070':'#9aa588')+'">'+(hid?'? ? ?':a.name)+'</span> <span style="opacity:.7;font-style:italic">— '+(hid?'you will know it when you do it':a.desc)+'</span></div>'; }).join('');
+    det.appendChild(box); el.appendChild(det); } }
 applyFps(); applyMind(); buildPauseSettings();
 document.getElementById('respawnbtn').addEventListener('click',()=>{ respawn(); requestLock(); });
-document.addEventListener('pointerlockchange',()=>{ locked=document.pointerLockElement===canvas; if(locked){ pause.style.display='none'; audioResume&&audioResume(); } else if(started && !player.dead && !openUI && !player.grabbed){ pause.style.display='flex'; for(const k in keys)delete keys[k]; lmbHeld=false; rmbHeld=false; } });   // no pause overlay mid-capture either — the jumpscare/haul owns the screen
+document.addEventListener('pointerlockchange',()=>{ locked=document.pointerLockElement===canvas; if(locked){ pause.style.display='none'; audioResume&&audioResume(); } else if(started && !player.dead && !openUI && !player.grabbed){ buildPauseSettings(); pause.style.display='flex'; for(const k in keys)delete keys[k]; lmbHeld=false; rmbHeld=false; } });   // no pause overlay mid-capture either — the jumpscare/haul owns the screen; settings rebuild so the achievements ledger stays current
 let _lookDX=0,_lookDY=0;   // raw mouse deltas accumulate here; applyLook() eases them out over a few frames → SMOOTHED looking
 let _cine=null;            // CERAPHIM arrival cutscene state (declared early — applyLook reads it every frame; built by bossCutscene far below)
 document.addEventListener('mousemove',e=>{ if(!locked)return; _lookDX+=e.movementX; _lookDY+=e.movementY; });
@@ -3287,7 +3409,7 @@ function drink(s,it){ if(player.water>=20 && !it.drink.bless){ flashName('not th
 const _sickEl=document.createElement('div');   // queasy green vignette while sick
 _sickEl.style.cssText='position:fixed;inset:0;z-index:18;pointer-events:none;opacity:0;transition:opacity .6s;background:radial-gradient(ellipse at center, rgba(0,0,0,0) 42%, rgba(58,84,26,0.55) 100%);';
 document.body.appendChild(_sickEl);
-function drinkMurky(){ player.water=Math.min(20,(player.water||0)+8); player.sick=Math.max(player.sick||0,120);   // slakes thirst but 2 min of sickness
+function drinkMurky(){ achUnlock('murky'); player.water=Math.min(20,(player.water||0)+8); player.sick=Math.max(player.sick||0,120);   // slakes thirst but 2 min of sickness
   flashName('you cup the murky water and drink — it tastes of rot'); if(AC)burst(panAt(player.pos.x,player.pos.y+0.5,player.pos.z),0.22,0.3,300,0.6,-180); }
 function lookingAtWater(){ const d=lookDir(), ox=player.pos.x, oy=player.pos.y+EYE, oz=player.pos.z; for(let t=0.4;t<=5;t+=0.4){ if(getBlock(Math.floor(ox+d.x*t),Math.floor(oy+d.y*t),Math.floor(oz+d.z*t))===WATER) return true; } return false; }
 function doBreak(){ const h=raycastVoxel(); if(!h||h.y<=0||B[h.b].hard<0)return;
@@ -3445,7 +3567,7 @@ function ringBellAt(h){ let bx=null,by=null,bz=null;
 function ringBell(x,y,z){
   if(AC){ for(let i=0;i<3;i++) setTimeout(()=>{ const o=panAt(x,y,z); burst(o,1.5,0.02,620,1.6,-540); burst(o,1.1,0.06,240,2.4,-70); }, i*1400); }   // three deep bronze tolls, island-wide
   spawnParticles(x,y,z,0xd8c060,8,1.6,0.9);
-  flashName('THE BELL TOLLS — something in the wood turns toward it');
+  flashName('THE BELL TOLLS — something in the wood turns toward it'); achUnlock('bell');
   emitNoise(x,y,z,12);                                                                       // the loudest sound on the island — it WILL be heard
   const dxp=x-player.pos.x, dzp=z-player.pos.z, dist=Math.hypot(dxp,dzp), bearing=Math.atan2(dxp,dzp)*180/Math.PI;
   HORROR._firstNight=true;
@@ -3476,7 +3598,7 @@ function useFurnace(h){ const k=ckey(h.x,h.y,h.z); const f=furnaces[k]||(furnace
     if(!f.in){ f.in={id:s.id,n:1}; f.t=0; } else f.in.n++;
     s.n--; if(s.n<=0)inv[selSlot]=null; refreshHotbar(); flashName('smelting '+ITEMS[s.id].name);
     if(AC)burst(panAt(h.x+0.5,h.y+0.5,h.z+0.5),0.2,0.35,480,1,160); return; }
-  if(f.out){ invAdd(f.out.id,f.out.n); flashName('took '+f.out.n+'x '+ITEMS[f.out.id].name); f.out=null; refreshHotbar(); if(typeof sfxPickup==='function')sfxPickup(); return; }
+  if(f.out){ if(f.out.id==='iron_ingot')achUnlock('iron'); invAdd(f.out.id,f.out.n); flashName('took '+f.out.n+'x '+ITEMS[f.out.id].name); f.out=null; refreshHotbar(); if(typeof sfxPickup==='function')sfxPickup(); return; }
   flashName('hold ore / meat / sand to smelt'); }
 function useCampfire(h){ const k=ckey(h.x,h.y,h.z); const c=campfires[k]||(campfires[k]={spit:0,items:[]});
   if(!c.items) c.items=[];
@@ -4138,7 +4260,7 @@ function loop(){
   updateSky(dt);
   updateWeather(dt);                                                       // rain/overcast/lightning + fog banks (after sky so it can dim the fresh light values)
   updateSubmerge();                                                        // murky underwater view (overrides fog while the eye is submerged)
-  if(started && locked && !player.dead && !intro.active){ physics(dt); survivalTick(dt);         // intro cinematic owns the camera → no player control until you wake
+  if(started && locked && !player.dead && !intro.active){ physics(dt); survivalTick(dt); achPoll(dt);         // intro cinematic owns the camera → no player control until you wake
     updateMining(dt);                                                       // left-hold = timed dig (see WORLD ENTITIES)
     if(lmbHeld){ const _hg=heldSlot(), _gi=_hg&&ITEMS[_hg.id]; if(_gi&&_gi.gun&&_gi.auto&&performance.now()>=nextShot){ if(fireGun())view.swing=1.2; nextShot=performance.now()+(_gi.rof||60); } }   // FULL-AUTO: hold left-click → repeat-fire at the gun's rate
     if(rmbHeld && performance.now()>=nextAct){ doPlace(); nextAct=performance.now()+240; } }   // right-hold = repeat place
@@ -6515,7 +6637,7 @@ function renderInvUI(){ document.querySelectorAll('#invui .islot, #chestui .islo
   renderCursor(); refreshHotbar(); }
 function updateCraftOut(){ const r=craftMatch(craftGrid.slice(0,craftSize*craftSize),craftSize); craftOut=r?{id:r.id,n:r.n}:null; }
 function takeOutput(all){ let guard=0;
-  do{ const r=craftMatch(craftGrid.slice(0,craftSize*craftSize),craftSize); if(!r)break;
+  do{ const r=craftMatch(craftGrid.slice(0,craftSize*craftSize),craftSize); if(!r)break; achUnlock('crafted');
     if(all){ invAdd(r.id,r.n); } else { if(cursor){ if(cursor.id!==r.id||cursor.n+r.n>itMax(r.id))break; cursor.n+=r.n; } else cursor={id:r.id,n:r.n}; }
     for(let i=0;i<craftSize*craftSize;i++){ const s=craftGrid[i]; if(s){ s.n--; if(s.n<=0)craftGrid[i]=null; } }
   } while(all && guard++<640);
@@ -6951,6 +7073,7 @@ function breakBlock(h){
   if(inDungeon(h.x,h.y,h.z)) return;                                                            // foolproof: nothing breaks a dungeon block, ever (covers creative-instant too)
   if(h.b===BID.door||h.b===BID.door_top||h.b===BID.door_open||h.b===BID.door_top_open){ const by=(h.b===BID.door||h.b===BID.door_open)?h.y:h.y-1;   // door: remove both halves, drop one
     if(!player.creative) spawnDrop('door',1,h.x+0.5,h.y+0.5,h.z+0.5); setBlockWorld(h.x,by,h.z,AIR,true); setBlockWorld(h.x,by+1,h.z,AIR,true); netEdit(h.x,by,h.z,AIR); netEdit(h.x,by+1,h.z,AIR); spawnParticles(h.x+0.5,h.y+0.5,h.z+0.5,0x8a7048,8,1.8,1.2); return; }
+  if(h.b===BID.diamond_ore)achUnlock('diamond');
   if(B[h.b].use==='chest'){ const key=h.x+','+h.y+','+h.z, cd=chests[key]; if(cd){ for(const s of cd) if(s) spawnDrop(s.id,s.n,h.x+0.5,h.y+0.6,h.z+0.5); delete chests[key]; } }
   const drop=dropFor(h.b);
   if(!player.creative){ if(drop) spawnDrop(drop,1,h.x+0.5,h.y+0.5,h.z+0.5); if(h.b===BID.leaves&&Math.random()<0.06) spawnDrop('sapling',1,h.x+0.5,h.y+0.5,h.z+0.5); }
@@ -7620,7 +7743,7 @@ function fireGun(){ const held=heldSlot(), it=held?ITEMS[held.id]:null, bolt = i
 function meleeAttack(){ const d=lookDir(), ox=player.pos.x, oy=player.pos.y+EYE, oz=player.pos.z;
   const held=heldSlot(); const it=held?ITEMS[held.id]:null; const dmg=(it&&it.tool)?WEAPON_DMG(it.tool):1;   // empty hand = 1
   const reach=3.6 + ((it&&it.tool&&it.tool.kind==='spear')?1.8:0);   // the spear jabs from further out
-  if(wretch.active && !wretch.dragging){ const wx=wretch.pos.x-ox, wz=wretch.pos.z-oz, wd=Math.hypot(wx,wz); if(wd<reach && (d.x*wx+d.z*wz)/(wd||1)>0.4){ hurtWretch(it&&it.tool?(5+Math.random()*3):2); return; } }   // any tool/sword = 5–8, fist = 2
+  if(wretch.active && !wretch.dragging){ const wx=wretch.pos.x-ox, wz=wretch.pos.z-oz, wd=Math.hypot(wx,wz); if(wd<reach && (d.x*wx+d.z*wz)/(wd||1)>0.4){ if(!(it&&it.tool))achUnlock('fists'); hurtWretch(it&&it.tool?(5+Math.random()*3):2); return; } }   // any tool/sword = 5–8, fist = 2
   let best=null,bd=reach; for(const a of animals){ if(a.dead)continue; const ax=a.x-ox, az=a.z-oz, ad=Math.hypot(ax,az); if(ad<bd && (d.x*ax+d.z*az)/(ad||1)>0.35){ bd=ad; best=a; } }
   if(best) hurtAnimal(best,dmg); }
 function hurtWretch(dmg){ if(wretch.hp==null){ wretch.hpMax=2700; wretch.hp=2700; }   // BOSS-tier: 2700 HP (melee chips it; the gun is the real weapon)
@@ -7703,7 +7826,7 @@ function killWretch(){ spawnParticles(wretch.pos.x,wretch.pos.y+1,wretch.pos.z,0
     try{ const jx=bx+1.5, jz=bz+1.5; let jy=groundYAt(jx,jz); if(jy<=CFG.SEA)jy=CFG.SEA+1;   // …and JESUS is resurrected, risen from the beast's ashes
       _jesusRisen=1; const jm=buildAnimalMesh('jesus',false); jm.position.set(jx,jy,jz); animals.push({type:'jesus',mesh:jm,x:jx,y:jy,z:jz,yaw:0,hp:ANIMALS.jesus.hp,timer:0,flee:0,dead:false});
       spawnParticles(jx,jy+1.6,jz,0xffe680,44,3.2,2.2); }catch(e){}
-    flashName('THE CERAPHIM FALLS — all three lives spent. A chest of its power remains, and JESUS is risen.'); }
+    achUnlock('seraph'); flashName('THE CERAPHIM FALLS — all three lives spent. A chest of its power remains, and JESUS is risen.'); }
   else { wretch.hp=wretch.hpMax;
     try{ lootChest(bx, gy, bz, [['ar15',1],['rifle_ammo',64],['rifle_ammo',64],['gold_block',9],['red_torch',4],['netherite_block',1],['netherrack',4],['flint_and_steel',1]]); }catch(e){}   // relics to raise the shrine
     startHaunt();                                                        // …and HE begins to haunt — cuff him and bring him to the shrine
@@ -7941,38 +8064,74 @@ function _ripPath(ctx,W,Hh,open,sd,t){ const cx=W/2, cy=Hh/2, hh=Hh*0.34*(0.22+0
     const xx=cx+s*Math.sin(ang)*hw*jag, yy=cy-Math.cos(ang)*hh;
     (s>0&&i===0)?ctx.moveTo(xx,yy):ctx.lineTo(xx,yy); }
   ctx.closePath(); }
-function _drawRip(t){ const c=_cine; if(!c)return; const ctx=c.ctx, W=c.cv.width, Hh=c.cv.height;
+// THE RIP IS NOW A PHYSICAL OBJECT IN THE WORLD (Ben 07-20): the exact liked 2D tear visuals are painted
+// onto an offscreen canvas that TEXTURES a 30x62m double-sided plane standing at the summon point — a real
+// tear in the world's skin, with additive halo layers, a blazing interior, edge embers, and a light that
+// spills from it. The creature is parked BEHIND the plane and physically flies OUT through the aperture.
+function _drawRipTex(t){ const c=_cine; if(!c)return; const ctx=c.ctx, W=c.cv.width, Hh=c.cv.height;
   ctx.clearRect(0,0,W,Hh);
-  const veil = t<1.2? 0.68*(t/1.2) : t<4.0? 0.68 : Math.max(0, 0.68*(1-(t-4.0)/0.9));   // the world dims while the tear is open, releases as it finishes
-  ctx.fillStyle='rgba(3,0,8,'+veil.toFixed(3)+')'; ctx.fillRect(0,0,W,Hh);
-  const open = t<0.9? 0.015+0.05*(t/0.9) : t<1.6? 0.065+0.29*((t-0.9)/0.7) : t<4.05? 0.355+0.03*Math.sin(t*9) : 0.355+Math.pow((t-4.05)/0.95,2)*3.4;   // hairline crack → torn open → blown out past the frame
-  if(t>0.55&&t<4.1){ ctx.save(); ctx.globalAlpha=0.16+0.10*Math.sin(t*17); ctx.strokeStyle='#cfe0ff'; ctx.lineWidth=1;   // spacetime streaking INTO the tear
-    for(let i=0;i<18;i++){ const a=(i/18)*6.283+t*0.05, r1=Math.max(W,Hh)*0.75, r0=Math.min(W,Hh)*(0.16+0.1*c.sd[i%14]);
-      ctx.beginPath(); ctx.moveTo(W/2+Math.cos(a)*r1, Hh/2+Math.sin(a)*r1); ctx.lineTo(W/2+Math.cos(a)*r0, Hh/2+Math.sin(a)*r0); ctx.stroke(); }
-    ctx.restore(); }
-  ctx.save(); ctx.globalCompositeOperation='destination-out'; _ripPath(ctx,W,Hh,open,c.sd,t); ctx.fill(); ctx.restore();   // the tear is a HOLE — the world (and the arriving Ceraphim) shows through it
-  if(open<2.2) for(const rim of [['rgba(255,70,44,0.85)',3,8],['rgba(96,150,255,0.85)',-3,8],['#ffffff',0,4]]){ ctx.save(); ctx.translate(rim[1],0);   // white-hot rim with cheap chromatic fringe
-    _ripPath(ctx,W,Hh,open,c.sd,t); ctx.strokeStyle=rim[0]; ctx.lineWidth=rim[2]; ctx.shadowColor='#fff'; ctx.shadowBlur=30; ctx.stroke(); ctx.restore(); } }
+  const open = t<0.9? 0.015+0.05*(t/0.9) : t<1.6? 0.065+0.29*((t-0.9)/0.7) : t<4.3? 0.355+0.03*Math.sin(t*9) : Math.max(0.01, 0.355*(1-(t-4.3)/0.45));   // hairline crack → torn open → SLAMS shut
+  c.open=open; const o3=Math.min(1.05,open*2.8);                                          // world-space aperture: the 2D curve was tuned for a fullscreen canvas — widen ~3x so the tear gapes wide enough for the body to force through
+  ctx.save(); _ripPath(ctx,W,Hh,o3,c.sd,t);                                               // INTERIOR: the blinding white void on the far side
+  const g=ctx.createLinearGradient(0,0,0,Hh); g.addColorStop(0,'#fff'); g.addColorStop(0.45,'#fff6e4'); g.addColorStop(1,'#ffffff');
+  ctx.fillStyle=g; ctx.shadowColor='#fff'; ctx.shadowBlur=26; ctx.fill(); ctx.restore();
+  const glowMul=open<0.12? 2.2 : 1;                                                       // the HAIRLINE phase must still burn — fatten the rim glow while the crack is a sliver
+  for(const rim of [['rgba(255,70,44,0.85)',3,8],['rgba(96,150,255,0.85)',-3,8],['#ffffff',0,4]]){ ctx.save(); ctx.translate(rim[1],0);   // white-hot rim with cheap chromatic fringe (the liked look, verbatim)
+    _ripPath(ctx,W,Hh,Math.max(o3,0.05),c.sd,t); ctx.strokeStyle=rim[0]; ctx.lineWidth=rim[2]*glowMul; ctx.shadowColor='#fff'; ctx.shadowBlur=30*glowMul; ctx.stroke(); ctx.restore(); }
+  c.tex.needsUpdate=true; }
 function bossCutscene(x,y,z,isSummoner){ if(_cine)return;
   const gy=groundYAt(x,z);
+  // thin DOM layer: only the darkening veil + the compositor-thread white flash (the build-hitch hider) remain 2D
   const wrap=document.createElement('div'); wrap.style.cssText='position:fixed;inset:0;z-index:30;pointer-events:none;';
-  const cv=document.createElement('canvas'); cv.width=innerWidth; cv.height=innerHeight; cv.style.cssText='position:absolute;inset:0;width:100%;height:100%';
+  const veil=document.createElement('div'); veil.style.cssText='position:absolute;inset:0;background:#03000a;opacity:0;transition:opacity .8s;';
   const flash=document.createElement('div'); flash.style.cssText='position:absolute;inset:0;background:#fff;opacity:0;';
   const st=document.createElement('style'); st.textContent='@keyframes _cineFlash{0%{opacity:0}8%{opacity:1}30%{opacity:1}100%{opacity:0}}';
-  wrap.appendChild(cv); wrap.appendChild(flash); document.head.appendChild(st); document.body.appendChild(wrap);
+  wrap.appendChild(veil); wrap.appendChild(flash); document.head.appendChild(st); document.body.appendChild(wrap);
   const sd=[]; for(let i=0;i<14;i++)sd.push(Math.random());
-  _cine={x, y:gy+10, z, wrap, cv, ctx:cv.getContext('2d'), flash, st, sd, built:false, shake:0, isSummoner};
-  if(typeof playSample==='function') playSample('seraph_toll',{x,y:gy,z},1.0);   // something leans against the skin of the world
+  // the WORLD-PLACED tear: canvas → texture → core plane + two additive halos + a spilling light
+  const cv=document.createElement('canvas'); cv.width=384; cv.height=768;
+  const tex=new THREE.CanvasTexture(cv); tex.colorSpace=THREE.SRGBColorSpace;
+  const grp=new THREE.Group();
+  const core=new THREE.Mesh(new THREE.PlaneGeometry(44,64), new THREE.MeshBasicMaterial({map:tex,transparent:true,side:THREE.DoubleSide,depthWrite:false,fog:false,toneMapped:false})); core.renderOrder=6; grp.add(core);
+  for(const [s,o] of [[1.07,0.5],[1.16,0.22]]){ const h=new THREE.Mesh(core.geometry, new THREE.MeshBasicMaterial({map:tex,transparent:true,opacity:o,side:THREE.DoubleSide,depthWrite:false,fog:false,toneMapped:false,blending:THREE.AdditiveBlending})); h.scale.setScalar(s); h.position.z=-0.3*s; h.renderOrder=5; grp.add(h); }   // glow bleed
+  const ripLight=new THREE.PointLight(0xfff2dd, 0, 110, 2); ripLight.position.set(0,4,3); grp.add(ripLight);
+  grp.position.set(x, gy+30, z);
+  grp.rotation.y=Math.atan2(player.pos.x-x, player.pos.z-z);                             // the tear faces the summoner
+  scene.add(grp);
+  _cine={x, y:gy+26, z, wrap, cv, ctx:cv.getContext('2d'), tex, grp, ripLight, veil, flash, st, sd, built:false, shake:0, open:0, isSummoner, gy};
+  if(typeof playSample==='function') playSample('seraph_toll',{x,y:gy,z},1.0);           // something leans against the skin of the world
+  if(AC){ burst(master,0.5,1.2,300,0.6,3200); tone(master,{f:52,type:'sine',dur:1.4,vol:0.3,to:30}); }   // the first CRACK — glass-and-thunder
   flashName('the air begins to split—');
-  const t0=performance.now();
-  (function tick(){ if(!_cine)return; const t=(performance.now()-t0)/1000;
-    if(t>=1.15 && !_cine.built){ _cine.built=true; _cine.flash.style.animation='_cineFlash 1.1s linear forwards';
+  if(typeof seraphSay==='function')seraphSay('arrive1');
+  let _lastT=performance.now(); _cine.t=0;
+  (function tick(){ if(!_cine)return; const c=_cine, _now=performance.now();
+    c.t += Math.min(0.05,(_now-_lastT)/1000); _lastT=_now; const t=c.t;   // STALL-PROOF clock: a hitched frame advances the show ≤50ms — the beats can never be skipped
+    c.veil.style.opacity = t<4.0? '0.55' : '0';
+    if(t>=1.15 && !c.built){ c.built=true; c.flash.style.animation='_cineFlash 1.1s linear forwards';
       setTimeout(()=>{ if(!_cine)return; try{ if(_cine.isSummoner) summonBoss(x,gy+1,z); else guestBossBuild(x,z); }catch(e){}   // the hitch lands INSIDE the flash
-        flashName('THE CERAPHIM TEARS THROUGH.'); },90); }
-    _cine.shake = t<1.15?0 : Math.max(0, 1-Math.max(0,t-2.0)/1.3);
-    _drawRip(t);
-    if(t<5.0) requestAnimationFrame(tick); else endBossCutscene(); })(); }
-function endBossCutscene(){ const c=_cine; if(!c)return; _cine=null; try{ c.wrap.remove(); c.st.remove(); }catch(e){} }
+        if(wretch.group){ wretch._park=true; const fx=Math.sin(_cine.grp.rotation.y), fz=Math.cos(_cine.grp.rotation.y);
+          wretch.pos.set(x - fx*18, gy+26, z - fz*18); if(typeof seraphFold==='function')seraphFold(0.92); }   // it waits FURLED behind the tear — unseen until it comes through
+        flashName('THE CERAPHIM TEARS THROUGH.'); if(typeof seraphSay==='function')seraphSay('arrive2'); },90); }
+    c.shake = t<1.15?0 : Math.max(0, 1-Math.max(0,t-2.0)/1.3);
+    _drawRipTex(t);
+    c.ripLight.intensity = Math.max(t>0.15&&t<4.6?34:0, Math.min(2.2,c.open)*160);        // light spills as it opens (a burning seam even at hairline), dies as it seals
+    if(Math.random()<0.5 && c.open>0.06 && c.open<1.5){ const a=Math.random()*6.283, hh=26*Math.min(1,c.open*2.6);   // edge embers crawl the rim
+      const ex=x+Math.sin(grp.rotation.y+1.5708)*(Math.random()-0.5)*8, ez=z+Math.cos(grp.rotation.y+1.5708)*(Math.random()-0.5)*8;
+      spawnParticles(ex, gy+30+Math.cos(a)*hh, ez, Math.random()<0.5?0xff4630:0x99b8ff, 2, 1.2, 0.5); }
+    // THE EMERGENCE (owner drives; guests mirror via the 20Hz w packets): parked behind the plane, it flies
+    // forward THROUGH the aperture, wings furled then unfurling as it clears the tear
+    if(c.isSummoner && c.built && wretch.group && t>2.2){ const u=clamp((t-2.2)/2.2,0,1), e=u*u*(3-2*u);
+      const fx=Math.sin(grp.rotation.y), fz=Math.cos(grp.rotation.y);                    // plane's facing (toward player)
+      wretch.pos.set(x - fx*(18-30*e), gy+26 - 6*e, z - fz*(18-30*e));                   // 18 behind → 12 in front
+      if(typeof seraphFold==='function')seraphFold(u>=1?null:0.92*(1-e));                // furled → spread as it clears
+      if(u>=1 && wretch._park){ wretch._park=false; }                                    // released to the fight
+    }
+    if(t<5.2) requestAnimationFrame(tick); else endBossCutscene(); })(); }
+function endBossCutscene(){ const c=_cine; if(!c)return; _cine=null;
+  try{ spawnParticles(c.x, c.gy+30, c.z, 0xffffff, 40, 8, 2.0); }catch(e){}              // the seal — the last light shatters off the seam
+  try{ if(c.grp){ scene.remove(c.grp); c.grp.traverse(o=>{ if(o.material&&o.material.dispose)o.material.dispose(); if(o.geometry&&o.geometry.dispose&&o.geometry!==c.grp.children[0].geometry)o.geometry.dispose(); }); c.grp.children[0].geometry.dispose(); c.tex.dispose(); } }catch(e){}
+  try{ if(typeof seraphFold==='function')seraphFold(null); if(wretch._park)wretch._park=false; }catch(e){}
+  try{ c.wrap.remove(); c.st.remove(); }catch(e){} }
 function guestBossBuild(x,z){ if(wretch.boss)return;   // the owner's ticks may have raced us here — then the rig already exists and there is nothing to mask
   if(!wretch.group){ const b=buildWretch(); wretch.group=b.group; wretch.P=b.P; }
   wretch.active=true; wretch.group.visible=true; wretch.pos.set(x, groundYAt(x,z)+3, z);
@@ -8073,9 +8232,11 @@ const ANIMALS={
   villager:{color:0x6a7ea0,h:1.9,        hp:10,drops:[['leather',0,1]], village:true},   // humanoid; roams the mountain village, flees the Wretch (not you)
   jesus: {color:0xf0ece0,h:1.95,         hp:10,drops:[['bread',1,2],['wine',1,2]], walksWater:true},   // robed figure — serenely walks ON water; drops bread & wine, never flees
 };
-function lootChest(x,y,z,items){ setBlockWorld(x,y,z,BID.chest,true); const arr=new Array(27).fill(null);
+function lootChest(x,y,z,items){ setBlockWorld(x,y,z,BID.chest,true); const key=x+','+y+','+z;
+  if(chests[key]){ localChests.add(key); return; }   // resumed world — the saved contents (already looted or not) win over a fresh refill
+  const arr=new Array(27).fill(null);
   if(!items.some(it=>it[0]==='rifle_ammo')) items=items.concat([['rifle_ammo', 1+(Math.random()<0.5?1:0)]]);   // every stashed chest carries 1-2 rifle cartridges → ammo is found all over the map
-  items.forEach((it,i)=>arr[i]={id:it[0],n:it[1]}); const key=x+','+y+','+z; chests[key]=arr; localChests.add(key); }   // pre-fill a chest for structures (LOCAL — each player loots their own)
+  items.forEach((it,i)=>arr[i]={id:it[0],n:it[1]}); chests[key]=arr; localChests.add(key); }   // pre-fill a chest for structures (LOCAL — each player loots their own)
 // procedural per-species SKIN — fur grain + tonal blotches + a species accent (dapple / wool / feathers).
 // Baked to a small canvas texture and applied as the body material's map (was a flat solid color).
 const _animalTexCache={};
@@ -8190,7 +8351,7 @@ function killAnimal(a){ if(a.dead)return; if(a.type==='jesus'){ spawnParticles(a
   spawnParticles(a.x,a.y+0.4,a.z,0xcc2018,10,2,1.2); }
 function sfxHurt(pos){ if(!AC)return; const p=panAt(pos.x,pos.y,pos.z); burst(p,0.4,0.14,420,1.2,180); burst(p,0.2,0.08,900,0.8,300); }   // short grunt (procedural fallback)
 function hurtAnimal(a,dmg){
-  if(a.type==='jesus'){ const now=clock.elapsedTime; if(now-(a._provT||-9)>1.0){ a._provT=now; if(typeof spawnDrop==='function')spawnDrop(Math.random()<0.5?'bread':'wine',1,a.x,a.y+0.7,a.z); spawnParticles(a.x,a.y+1.7,a.z,0xffe680,10,1.6,0.9); flashName('he provides'); } return; }   // JESUS CANNOT DIE — struck, he yields bread & wine instead
+  if(a.type==='jesus'){ { const hs=heldSlot(); if(hs&&ITEMS[hs.id]&&ITEMS[hs.id].gun)achUnlock('jesus'); } const now=clock.elapsedTime; if(now-(a._provT||-9)>1.0){ a._provT=now; if(typeof spawnDrop==='function')spawnDrop(Math.random()<0.5?'bread':'wine',1,a.x,a.y+0.7,a.z); spawnParticles(a.x,a.y+1.7,a.z,0xffe680,10,1.6,0.9); flashName('he provides'); } return; }   // JESUS CANNOT DIE — struck, he yields bread & wine instead
   a.hp-=dmg; a.flee=6; spawnParticles(a.x,a.y+0.4,a.z,0xcc2018,5,1.5,1.1);
   const hp={x:a.x,y:a.y+0.4,z:a.z}; if(!playSample('hurt',hp,0.7)) sfxHurt(hp);                                    // Minecraft-style animal hurt sample if present, else grunt
   if(a.hp<=0) killAnimal(a); }
@@ -8952,7 +9113,7 @@ function updateBlockFx(dt){
 let sfxCreak=null;
 function trySleep(){ if(globalU.uDay.value>0.3){ flashName('you can only sleep at night'); return; }
   if(HORROR.tier>=3 && wretch.active && wretch.dist<60){ flashName('you cannot sleep — it is too close'); wretchVoice&&wretchVoice('close_clicks',wretch.pos); return; }
-  worldTime=CFG.DAY_LEN*0.27; player.health=Math.min(20,player.health+4); HORROR._wasNight=true; flashName('you slept. dawn breaks.');
+  worldTime=CFG.DAY_LEN*0.27; player.health=Math.min(20,player.health+4); HORROR._wasNight=true; flashName('you slept. dawn breaks.'); achUnlock('slept');
   // the skipped night passes for the BEAST too — it hungered and parched through the dark, and the turn of the light re-fires its dawn tip-off + half-day plan
   if(typeof wretch!=='undefined'){ wretch.hunger=Math.max(4, wretch.hunger-25); wretch.thirst=Math.min(100,(wretch.thirst||0)+35); }
   if(typeof reason!=='undefined') reason._lastPhase=true; }   // was night → guarantees the sunrise transition (tip-off + re-plan) fires on waking
@@ -9821,6 +9982,20 @@ function updateReasoning(dt){
 if(DEBUG){ boot.style.display='none'; started=true; if(Q.get('wretch')){ wretch.debug=true; wretch.spawnT=0.3; director.directive.bearing=270; player.pitch=-0.12; } }
 // headless introspection + entity render harness hook
 window.__hc={
+  save(){ try{ return saveGame() ? 'saved '+Object.keys(edits).length+' edits' : 'save refused'; }catch(e){ return e.message; } },
+  saveInfo(){ try{ const s=readSave(); return s?{savedAt:s.savedAt,edits:Object.keys(s.edits).length,pos:[s.player.x,s.player.y,s.player.z].map(v=>Math.round(v*10)/10),inv:s.inv.filter(Boolean).length,nights:(s.horror&&s.horror.nightsSurvived)|0}:null; }catch(e){ return e.message; } },
+  wipe(){ try{ wipeSave(); return 'wiped'; }catch(e){ return e.message; } },
+  ach(){ try{ return {got:Object.keys(achGot),total:ACHIEVEMENTS.length}; }catch(e){ return e.message; } },
+  achToast(id){ try{ const a=ACHIEVEMENTS.find(x=>x.id===id)||ACHIEVEMENTS[0]; _achToast(a); return 'toasted '+a.id; }catch(e){ return e.message; } },
+  achReset(){ try{ for(const k in achGot)delete achGot[k]; localStorage.removeItem(ACH_KEY); return 'reset'; }catch(e){ return e.message; } },
+  achFire(id){ try{ achUnlock(id); return Object.keys(achGot); }catch(e){ return e.message; } },
+  loadNow(){ try{ const s=readSave(); if(!s)return 'no save'; applySave(s); return 'loaded '+Object.keys(s.edits).length+' edits'; }catch(e){ return e.message; } },
+  editCount(){ try{ return Object.keys(edits).length; }catch(e){ return e.message; } },
+  blockAt(x,y,z){ try{ return getBlock(x,y,z); }catch(e){ return e.message; } },
+  setBlockAt(x,y,z,id){ try{ setBlockWorld(x,y,z,typeof id==='string'?BID[id]:id,true); return getBlock(x,y,z); }catch(e){ return e.message; } },
+  giveItem(id,n){ try{ invAdd(id,n||1); refreshHotbar(); return invCount(id); }catch(e){ return e.message; } },
+  invList(){ try{ return inv.filter(Boolean).map(s=>s.id+':'+s.n); }catch(e){ return e.message; } },
+  pos(){ try{ return {x:player.pos.x,y:player.pos.y,z:player.pos.z,yaw:player.yaw,pitch:player.pitch}; }catch(e){ return e.message; } },
   st(){ try{ return {started, grabbed:player.grabbed, gp:wretch.grabPhase, ws:wretch.state, wa:wretch.active, dist:+(wretch.dist||0).toFixed(2), watched:!!(wretch.sense&&wretch.sense.watched), seen:!!(wretch.sense&&wretch.sense.seen), obs:+(wretch.observed||0).toFixed(1), form:wretch.form, wy:+wretch.pos.y.toFixed(1), py:+player.pos.y.toFixed(1), day:+globalU.uDay.value.toFixed(2), fps:Math.round(fpsAvg) }; }catch(e){ return {err:e.message}; } },
   perf(){ try{ if(window.__benchInfoSnap) return window.__benchInfoSnap; return {calls:renderer.info.render.calls, tris:renderer.info.render.triangles, geoms:renderer.info.memory.geometries, tex:renderer.info.memory.textures, progs:(renderer.info.programs||[]).length}; }catch(e){ return {err:e.message}; } },
   fauna(){ try{ return animals.map(a=>({t:a.type,x:+a.x.toFixed(1),y:+a.y.toFixed(1),z:+a.z.toFixed(1),intro:!!a.introJesus,leaving:!!a._leaving,pd:+Math.hypot(a.x-player.pos.x,a.z-player.pos.z).toFixed(1),overWater:surfaceH(Math.floor(a.x),Math.floor(a.z))<=CFG.SEA})); }catch(e){ return {err:e.message}; } },   // QA: live animal roster (intro-Jesus departure + spawner checks)
@@ -9992,7 +10167,7 @@ window.__hc={
   deepWater(){ for(let r=30;r<260;r+=6)for(let a=0;a<12;a++){ const th=a*0.5236, x=player.pos.x+Math.cos(th)*r, z=player.pos.z+Math.sin(th)*r;   // QA: nearest genuinely deep sea spot
     if(surfaceH(Math.round(x),Math.round(z))<=CFG.SEA-5) return {x:+x.toFixed(1),z:+z.toFixed(1),sea:CFG.SEA}; } return null; },
   water(){ return {y:+player.pos.y.toFixed(2), inWater:player.inWater, wading:player.wading}; },   // QA: swim state
-  cine(){ return {active:!!_cine, built:!!(_cine&&_cine.built), boss:wretch.boss, shake:+((_cine&&_cine.shake)||0).toFixed(2)}; },   // QA: cutscene state
+  cine(){ return {active:!!_cine, built:!!(_cine&&_cine.built), boss:wretch.boss, shake:+((_cine&&_cine.shake)||0).toFixed(2), t:+(((_cine&&_cine.t)||0)).toFixed(2)}; },   // QA: cutscene state + stall-proof show clock
   ripTest(){ const d=lookDir(); const x=player.pos.x+d.x*18, z=player.pos.z+d.z*18; beginBossSummon(x,groundYAt(x,z),z); return this.cine(); },   // QA: run the full summon cutscene in front of the player
   carveTest(){ const d=lookDir(), ox=player.pos.x, oy=player.pos.y+14, oz=player.pos.z, tx=ox+d.x*40, tz=oz+d.z*40, gy=groundYAt(tx,tz);   // QA: erect a stone pillar straddling the beam path, fire one carve, confirm the pillar is eaten
     const mx=Math.floor(ox+d.x*20), mz=Math.floor(oz+d.z*20), my=Math.floor(oy+(gy+0.3-oy)*0.5);

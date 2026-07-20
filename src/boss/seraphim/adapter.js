@@ -144,6 +144,9 @@ export function seraphHideBeam() {
   if (_beam) _beam.setVisible(false);
 }
 
+// Wing-fold override for the emergence choreography (null releases to the rig's preset).
+export function seraphFold(v) { if (_model) _model._foldOverride = (v == null ? null : v); }
+
 // WING HITBOXES (user spec 07-20): three spheres along each of the eight wings' spans — a shot that lands
 // here has a 10% chance of wounding (the game rolls it); the EYES remain the 100% targets.
 const _wp2 = new THREE.Vector3();
