@@ -1418,9 +1418,9 @@ const oceanMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, si
   '  float a=smoothstep(0.0,-0.055,elev);',                                        // fade to TRANSPARENT at the waterline → the sky shows through the join, killing the horizon seam
   '  gl_FragColor=vec4(water,a); }'].join('\n') });
 const oceanLayer=new THREE.Mesh(_horizGeo, oceanMat); oceanLayer.frustumCulled=false; oceanLayer.renderOrder=-6; scene.add(oceanLayer);
-// PINE TREELINE — a distant forest silhouette on the horizon, shown ONLY toward azimuths where the island's land runs
-// past the horizon (deep inland). A per-azimuth mask (analytic ray-vs-island-disc, CPU, ~128 samples/frame — no per-pixel
-// terrain raycast) zeroes it wherever you'd be looking out over a shoreline, so pines never sit over the sea.
+// PINE TREELINE — a distant forest silhouette on the horizon, shown ONLY toward azimuths where REAL land continues
+// past the fog wall. A per-azimuth mask samples the actual terrain heightfield (surfaceH, pure noise — no chunks needed)
+// in the band just beyond the render edge; sea/shore/thin spits in that band → no pines. Recomputed only on movement.
 const _PN=128, _pineMaskData=new Uint8Array(_PN*4);
 const _pineMask=new THREE.DataTexture(_pineMaskData,_PN,1,THREE.RGBAFormat); _pineMask.wrapS=THREE.RepeatWrapping; _pineMask.minFilter=THREE.LinearFilter; _pineMask.magFilter=THREE.LinearFilter; _pineMask.needsUpdate=true;
 const _uPine={value:new THREE.Color(0.078,0.157,0.071)};   // = the DARKEST textured pixel in the leaf tile, rgb(20,40,18)
@@ -1443,19 +1443,20 @@ const pineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, sid
   '  float fog=clamp(uFogAmt*(1.0-0.18*t),0.0,1.0);',                                            // fade the whole silhouette into the SAME fog the terrain fades to (density-driven → matches weather/day)
   '  gl_FragColor=vec4(mix(pine,uFogCol,fog), m); }'].join('\n') });
 const pineLayer=new THREE.Mesh(_horizGeo, pineMat); pineLayer.frustumCulled=false; pineLayer.renderOrder=-5; scene.add(pineLayer);   // over the ocean seam
-let _pineLastX=1e9, _pineLastZ=1e9;
+let _pineLastX=1e9, _pineLastZ=1e9, _pineLastRD=0;
 function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.position.copy(camera.position); const day=globalU.uDay.value;
   _uWater.value.setRGB(lerp(0.04,0.20,day), lerp(0.07,0.29,day), lerp(0.10,0.34,day));         // deep sea grey-blue, matches the real water surface
   _uSky.value.setRGB(lerp(0.12,0.60,day), lerp(0.15,0.68,day), lerp(0.20,0.78,day));            // horizon-band air the water melts into
   { const dim=0.45+0.55*day, base=[0.078,0.157,0.071]; _uPine.value.setRGB(base[0]*dim, base[1]*dim, base[2]*dim);   // darkest-leaf colour, dimmer at night
     const _wf=(typeof weather!=='undefined'?(weather.fog||0):0); pineMat.uniforms.uFogAmt.value=clamp(0.32 + 0.62*_wf, 0, 0.93);   // horizon treeline fades with WEATHER fog ONLY — decoupled from the render-distance terrain fog, which (now that fog tracks the shrunk current RD) was washing the treeline fully invisible. Clear day → visible; full bank → washed.
-    // the pine-visibility mask depends ONLY on player position (a slow ray-vs-island-disc), not on time, so
-    // recompute the 128 rays + re-upload the DataTexture only when the player has actually moved. At the
-    // horizon's FAR*0.7 softness, <2 blocks of parallax is sub-pixel → gating this is exact, not approximate.
-    if(Math.abs(player.pos.x-_pineLastX)+Math.abs(player.pos.z-_pineLastZ) > 2){ _pineLastX=player.pos.x; _pineLastZ=player.pos.z;
-      const Rland=(ISLE_R-ISLE_EDGE*0.5), ex=player.pos.x-ISLE_X, ez=player.pos.z-ISLE_Z, cc=ex*ex+ez*ez-Rland*Rland, thr=ISLE_R, soft=ISLE_EDGE;   // threshold anchored to ISLAND geometry (NOT the perf render distance). tExit must clear the WHOLE island radius before pines appear → from the interior you see no encircling treeline, and only long land-runs (looking across the island's bulk) paint pines. Raise/lower `thr` to shrink/grow the treeline arc.
-      for(let i=0;i<_PN;i++){ const az=(i/_PN)*6.2831853-3.14159265, dx=Math.cos(az), dz=Math.sin(az); const b=ex*dx+ez*dz, disc=b*b-cc;   // ray-vs-island-disc: distance to the coast in this azimuth
-        const tExit= disc>0 ? (-b+Math.sqrt(disc)) : 0; const vis=clamp((tExit-thr)/soft,0,1);        // land runs far past the horizon → pines; sea/coast in view → none
+    // the pine-visibility mask depends only on player position + render distance, so recompute the 128 rays +
+    // re-upload the DataTexture only when the player has actually moved (or RD changed). <2 blocks of parallax
+    // is sub-pixel at the horizon → gating this is exact, not approximate. Cost: 128×8 surfaceH calls, occasional.
+    if(Math.abs(player.pos.x-_pineLastX)+Math.abs(player.pos.z-_pineLastZ) > 2 || CFG.RENDER_DIST!==_pineLastRD){ _pineLastX=player.pos.x; _pineLastZ=player.pos.z; _pineLastRD=CFG.RENDER_DIST;
+      const visD=CFG.RENDER_DIST*CK;   // the fog wall — where rendered terrain ends and the backdrop stands in
+      for(let i=0;i<_PN;i++){ const az=(i/_PN)*6.2831853-3.14159265, dx=Math.cos(az), dz=Math.sin(az);
+        let land=0; for(let s=0;s<8;s++){ const r=visD+6+s*16; if(surfaceH(Math.round(player.pos.x+dx*r),Math.round(player.pos.z+dz*r))>CFG.SEA) land++; }   // sample the REAL coastline in the 6..118-block band past the wall
+        const vis=clamp((land/8-0.45)/0.4,0,1);   // mostly land beyond the horizon → pines; sea/shore/thin spits → none (kills the 360° ring over open water)
         _pineMaskData[i*4]=Math.round(vis*255); }
       _pineMask.needsUpdate=true; } } }
 function bakeSky(){ if(!USE_SKYCUBE) return; try{ const prevTone=renderer.toneMapping; renderer.toneMapping=THREE.NoToneMapping;   // bake LINEAR (background render tonemaps once, like the old dome)
@@ -8961,6 +8962,10 @@ window.__hc={
   st(){ try{ return {started, grabbed:player.grabbed, gp:wretch.grabPhase, ws:wretch.state, wa:wretch.active, dist:+(wretch.dist||0).toFixed(2), watched:!!(wretch.sense&&wretch.sense.watched), seen:!!(wretch.sense&&wretch.sense.seen), obs:+(wretch.observed||0).toFixed(1), form:wretch.form, wy:+wretch.pos.y.toFixed(1), py:+player.pos.y.toFixed(1), fps:Math.round(fpsAvg) }; }catch(e){ return {err:e.message}; } },
   perf(){ try{ if(window.__benchInfoSnap) return window.__benchInfoSnap; return {calls:renderer.info.render.calls, tris:renderer.info.render.triangles, geoms:renderer.info.memory.geometries, tex:renderer.info.memory.textures, progs:(renderer.info.programs||[]).length}; }catch(e){ return {err:e.message}; } },
   fauna(){ try{ return animals.map(a=>({t:a.type,x:+a.x.toFixed(1),y:+a.y.toFixed(1),z:+a.z.toFixed(1),intro:!!a.introJesus,leaving:!!a._leaving,pd:+Math.hypot(a.x-player.pos.x,a.z-player.pos.z).toFixed(1),overWater:surfaceH(Math.floor(a.x),Math.floor(a.z))<=CFG.SEA})); }catch(e){ return {err:e.message}; } },   // QA: live animal roster (intro-Jesus departure + spawner checks)
+  pines(){ try{ const m=[], truth=[], visD=CFG.RENDER_DIST*CK;
+    for(let i=0;i<_PN;i++){ m.push(_pineMaskData[i*4]); const az=(i/_PN)*6.2831853-3.14159265, dx=Math.cos(az), dz=Math.sin(az);
+      let land=0; for(let s=0;s<8;s++){ const r=visD+6+s*16; if(surfaceH(Math.round(player.pos.x+dx*r),Math.round(player.pos.z+dz*r))>CFG.SEA) land++; } truth.push(land); }
+    return {mask:m, truth, px:+player.pos.x.toFixed(1), pz:+player.pos.z.toFixed(1), visD}; }catch(e){ return {err:e.message}; } },   // QA: horizon-treeline azimuth mask (0=sea beyond the fog wall, 255=deep land) + live ground truth per azimuth
   // ---- COGNITION QA (V3) ----
   mind(){ try{ return { plan:reason.plan.map(s=>({i:s.intent,p:s.phase||null})), step:reason.step, journal:reason.journal.length, seq:(typeof CTXD!=='undefined')?CTXD.seq:null, thought:reason.liveThought||null, orch:reason.orchTrigger, divertT:+((reason.divertT||0)).toFixed(1), nav:{active:nav.active,beh:nav.behavior,label:nav.label,divert:nav.divert}, lastMutual:+((WILL.lastMutual||0)).toFixed(1), willLog:WILL.log.slice(-6) }; }catch(e){ return {err:e.message}; } },
   stim(k,extra){ try{ reasonEvent(k,extra||{x:Math.round(player.pos.x),z:Math.round(player.pos.z)}); return 'fired '+k; }catch(e){ return e.message; } },
