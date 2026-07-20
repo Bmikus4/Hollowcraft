@@ -1426,11 +1426,10 @@ const oceanMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, si
   'float nz(float x){ float i=floor(x),f=fract(x); return mix(hash(i),hash(i+1.0),f*f*(3.0-2.0*f)); }',
   'void main(){ vec3 d=normalize(vPos); float elev=d.y; if(elev>=0.0) discard;',   // paint only at/below the waterline; the sky shows above
   '  float az=atan(vPos.z,vPos.x);',
-  '  vec3 water=mix(uWater, uSky, smoothstep(-0.15,0.0,elev)*0.94);',              // deep grey-blue → melts into the sky band at the waterline (no hard seam)
-  '  float shim=nz(az*90.0+uTime*0.25)*0.5+nz(az*220.0-uTime*0.4)*0.5;',           // drifting swell glitter
-  '  water += (uSky-water)*0.06*shim*smoothstep(-0.10,-0.005,elev);',
-  '  water += vec3(0.9,0.95,1.0)*0.05*pow(max(0.0,shim-0.62),2.0)*smoothstep(-0.05,-0.004,elev);',   // faint waterline sparkle
-  '  float a=smoothstep(0.0,-0.055,elev);',                                        // fade to TRANSPARENT at the waterline → the sky shows through the join, killing the horizon seam
+  '  vec3 water=uWater;',                                                          // PURE deep sea colour to the very waterline (Ben 07-20: no strip — the sky fades straight into the deep blue ocean)
+  '  float shim=nz(az*90.0+uTime*0.25)*0.5+nz(az*220.0-uTime*0.4)*0.5;',           // drifting swell mottle, tinted from the water itself (no bright band)
+  '  water*=1.0+0.05*shim*smoothstep(-0.2,-0.02,elev);',
+  '  float a=smoothstep(0.0,-0.006,elev);',                                        // solid essentially at the waterline
   '  gl_FragColor=vec4(water,a); }'].join('\n') });
 const oceanLayer=new THREE.Mesh(_horizGeo, oceanMat); oceanLayer.frustumCulled=false; oceanLayer.renderOrder=-6; scene.add(oceanLayer);
 // PINE TREELINE — a distant forest silhouette on the horizon, shown ONLY toward azimuths where REAL land continues
@@ -1467,7 +1466,7 @@ const pineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, sid
 const pineLayer=new THREE.Mesh(_horizGeo, pineMat); pineLayer.frustumCulled=false; pineLayer.renderOrder=-5; scene.add(pineLayer);   // over the ocean seam
 let _pineLastX=1e9, _pineLastZ=1e9, _pineLastRD=0;
 function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.position.copy(camera.position); const day=globalU.uDay.value;
-  _uWater.value.setRGB(lerp(0.04,0.20,day), lerp(0.07,0.29,day), lerp(0.10,0.34,day));         // deep sea grey-blue, matches the real water surface
+  _uWater.value.setRGB(lerp(0.04,0.16,day), lerp(0.07,0.23,day), lerp(0.10,0.30,day));         // deep slate grey-blue tuned against the REAL rendered water (Ben 07-20 screenshot match)
   _uSky.value.setRGB(lerp(0.12,0.60,day), lerp(0.15,0.68,day), lerp(0.20,0.78,day));            // horizon-band air the water melts into
   { const dim=0.10+0.90*day, base=[0.050,0.102,0.046]; _uPine.value.setRGB(base[0]*dim, base[1]*dim, base[2]*dim);   // DARK forest green matching the real edge trees (Ben 07-20 rev3); at NIGHT it goes near-BLACK silhouette
     { const _ef=1-Math.exp(-Math.pow(CFG.RENDER_DIST*CK*scene.fog.density,2)); pineMat.uniforms.uFogAmt.value=clamp(_ef*0.93,0,0.97);   // MATCH the farthest rendered chunks' fog wash exactly (exp2 at the wall distance — includes weather + day/night via density), held a hair under so the tip-gradient still reads
@@ -2464,7 +2463,10 @@ function physics(dt){
   p.vel.x=mvx*base; p.vel.z=mvz*base;
   if(p.fly){ p.vel.y=((keys.Space?1:0)-((keys.ShiftLeft||keys.ShiftRight)?1:0))*base*0.85; }
   else if(p.inWater || (p.wading && getBlock(p.pos.x, p.pos.y+0.35, p.pos.z)===WATER)){ // buoyant water physics: swim up (Space), dive (Sneak), else float+slow-sink. Waist-deep ALSO swims — previously only a submerged torso did, so holding Space stalled with your eyes at the waterline and you could never break out of the water
-    if(keys.Space) p.vel.y = p.inWater?3.8:5.2;   // submerged: steady rise toward the surface; at the surface: a breach hop so you can climb onto the bank
+    if(keys.Space){ if(p.inWater) p.vel.y=3.8;    // submerged: steady rise toward the surface
+      else { const ld=lookDir(), bx=Math.floor(p.pos.x+ld.x*1.15), bz=Math.floor(p.pos.z+ld.z*1.15), fy=Math.floor(p.pos.y);   // at the surface: the breach hop fires ONLY against a bank in front — held Space over open water just treads (it was a walk-on-water exploit, Ben 07-20)
+        const bank=solidAt(bx,fy,bz)||solidAt(bx,fy+1,bz)||solidAt(bx,fy-1,bz);
+        p.vel.y = bank?5.2:2.6; } }
     else if(p.sneak) p.vel.y=-9.6;                                                 // deliberate dive still outruns the passive sink
     else { p.vel.y-=21*dt; if(p.vel.y<-7.8)p.vel.y=-7.8; p.vel.y*=0.9; } }         // 3× sink rate (Ben 07-20): water pulls you DOWN — floating is work now, not the default
   else if(p.onLadder){ // LADDER — cling to the rungs and climb. Horizontal is DAMPED so pressing W (or strafing) can't
@@ -8655,10 +8657,12 @@ function wretchFootfall(amp, gallop, st, force){ window.__ffBeat=(window.__ffBea
   window.__ffPlay=(window.__ffPlay||0)+1;                                      // QA counter: steps that actually sounded
   const p=stepPanAt(wretch.pos.x, wretch.pos.y+0.1, wretch.pos.z);
   const lp=AC.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=5200-4300*occl; lp.connect(p);   // per-step chain: layers → occlusion lowpass → HRTF panner
-  tone(lp,{f:92+Math.random()*18,type:'sine',dur:0.22,vol:0.55*vol,to:36,atk:0.006});                       // L1 heel strike — deep pitch-dropping thud (the mass)
-  { const mat=matAt(wretch.pos.x, wretch.pos.y-0.2, wretch.pos.z), smp=mat==='dirt'?'grass':mat;            // L2 ground material, pitched ~0.5x = something far heavier than a person
-    if(!sampleInto(lp, smp, 0.95*vol, 0.5+Math.random()*0.14)) burst(lp, 0.5*vol, 0.09, 900+Math.random()*300, 1.6, 380); }
-  burst(lp, 0.30*vol, 0.045, 2300+Math.random()*900, 2.2, 1200);                                            // L3 claw-tip/debris transient — the >1.5kHz energy HRTF needs to place it
+  tone(lp,{f:92+Math.random()*18,type:'sine',dur:0.30,vol:0.9*vol,to:36,atk:0.006});                        // L1 heel strike — deep pitch-dropping thud (the mass) — the LEAD layer at every volume
+  { const mat=matAt(wretch.pos.x, wretch.pos.y-0.2, wretch.pos.z);                                          // L2 ground material, pitched ~0.5x = something far heavier than a person
+    let smp=mat==='dirt'?'grass':mat==='wood'?'stone':mat==='water'?'sand':mat;                             // every surface maps to a REAL sample (wood→stone knock, water→muffled sand)
+    if(!SFX[smp]||!SFX[smp].length)smp='grass';
+    if(!sampleInto(lp, smp, 1.5*vol, 0.5+Math.random()*0.14)) burst(lp, 0.5*vol, 0.16, 320+Math.random()*120, 0.8, 160, 'lowpass'); }   // last-resort fallback is a LOW scuff, never a click
+  burst(lp, 0.10*vol, 0.045, 1400+Math.random()*400, 2.2, 700);                                             // L3 claw-tip/debris transient — quiet, just enough >1kHz energy for HRTF to place it (was the "ticking instead of footsteps": 3x louder at 2.3-3.2kHz, it drowned the thud at stalk volumes)
   if(running) burst(lp, 0.18*vol, 0.06, 1250+Math.random()*350, 1.4, 600);
   if(charging && d<18) burst(lp, 0.7*fade, 0.28, 105, 0.9, 80, 'lowpass');                                   // L4 sub-thump in close — you FEEL the weight bearing down
   if(running && d<30 && typeof surfaceH==='function'){                                                       // L5 crashing through brush — occasional, distance-faded (was ungated + constant)
