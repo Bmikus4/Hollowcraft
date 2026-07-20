@@ -37,17 +37,17 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     if(L.ok){
       // A: stands in the outside cell (one block past the pane from the player), on the ground
       const dxp=Math.abs(L.pos.x-L.lurk.gx), dzp=Math.abs(L.pos.z-L.lurk.gz);
-      ck('stands one block outside the pane', dxp+dzp>0.4 && dxp+dzp<=2.2, {dxp, dzp, L});   // diagonal normals put the outside cell one block off on BOTH axes — still adjacent
+      ck('stands two cells outside the pane', dxp+dzp>1.2 && dxp+dzp<=4.4, {dxp, dzp, L});   // 2-out placement (diagonal normals go one further on both axes)
       // B: FACES the glass — facing vector (-sin yaw, -cos yaw) toward the pane
       const fdx=-Math.sin(L.yaw), fdz=-Math.cos(L.yaw);
       const tx=L.lurk.gx-L.pos.x, tz=L.lurk.gz-L.pos.z, td=Math.hypot(tx,tz)||1;
       ck('faces the window (was backwards)', (fdx*tx/td+fdz*tz/td)>0.85, {yaw:L.yaw, dot:+(fdx*tx/td+fdz*tz/td).toFixed(2)});
-      // C: the face goes to the glass — head within a block of the pane centre after the pose settles
-      await sleep(1400);
+      // C: the servo folds the face to just below the pane centre, one block of air off the glass
+      await sleep(1600);
       const H = await page.evaluate(`__hc.headPos()`);
-      const paneY=L.lurk.gy+0.5;
-      ck('face AT the pane vertically (±1.1)', Math.abs(H.y-paneY)<1.1, {headY:H.y, paneY});
-      ck('face AT the pane horizontally (<1.4)', Math.hypot(H.x-L.lurk.gx,H.z-L.lurk.gz)<1.4, {H, gx:L.lurk.gx, gz:L.lurk.gz});
+      const tgtY=L.lurk.gy+0.5-0.4;
+      ck('face servos to just below the pane centre (±0.9)', Math.abs(H.y-tgtY)<0.9, {headY:H.y, tgtY});
+      ck('face a block off the glass (0.8-3.2)', (()=>{const d=Math.hypot(H.x-L.lurk.gx,H.z-L.lurk.gz); return d>0.8&&d<3.2;})(), {H, gx:L.lurk.gx, gz:L.lurk.gz});
       // D: the player's view through the window
       await page.screenshot({ path: path.join(OUT,'winpeek-through-glass.png') });
     }
