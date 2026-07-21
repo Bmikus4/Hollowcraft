@@ -139,8 +139,9 @@ function buildEyeBand2(opts = {}) {
     let x = 0, prev = CENTRAL_SIZE;
     for (let a = 1; a <= 3; a++) { const s = sizeOf(a); x += (prev + s) * gap; prev = s;
       // FIX-5 (user spec 07-20): the OUTER TWO eyes each side (|i|>=2) ride ON the mid wing row — same x/y
-      // station, pushed forward onto the wing plane so they read as set INTO the wings, visible through them.
-      layout.push({ i: sign * a, x: sign * x, y: -0.024 * x * x, z: 0.03 * x - 0.05 + (a >= 2 ? 0.48 : 0), size: s }); }
+      // FIX-5b (Ben 07-20): the outer two eyes each side (|i|>=2) were buried BEHIND the mid wing feathers.
+      // Push them far forward (well past the feather mass ~1.7 deep) and up onto the wing so they read clearly.
+      layout.push({ i: sign * a, x: sign * x, y: -0.024 * x * x + (a >= 2 ? 0.55 : 0), z: 0.03 * x - 0.05 + (a >= 2 ? 2.9 : 0), size: s }); }
   }
   layout.sort((p, q) => p.i - q.i);                 // -3..3, central at centre
   const N = layout.length;                          // 7

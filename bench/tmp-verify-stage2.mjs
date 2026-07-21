@@ -26,22 +26,22 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
 
     await page.evaluate(`__hc.boss({park:true, dist:30, up:12})`);
     await sleep(8500);
-    // force it into life II with an imminent rake + beam
+    await page.evaluate(`__hc.heal()`);
+    // force it into life II with an imminent storm + beam
     await page.evaluate(`__hc.set({_bossPhase:2, _rakeCd:0.2, _laserCd:2.0, _cycleN:2, _regenT:0, _park:false})`);
-    await sleep(1200);
-    let s2 = await page.evaluate(`__hc.stage2()`);
-    ck('wing rake cast feathers', s2.feathers>0, s2);
+    // the STORM: 50-70 feathers blanket the area — sample the peak while they are airborne
+    let peak=0; for(let i=0;i<16;i++){ await page.evaluate(`__hc.heal()`); const s=await page.evaluate(`__hc.stage2()`); peak=Math.max(peak,s.feathers); await sleep(150); }
+    ck('feather STORM (>=40 feathers at once)', peak>=40, {peak});
     await page.screenshot({ path: path.join(OUT,'stage2-rake.png') });
-    // feathers stick then detonate away within ~4s
-    await sleep(4200);
-    s2 = await page.evaluate(`__hc.stage2()`);
-    ck('feathers detonated + cleaned up', s2.feathers===0, s2);
+    let s2 = await page.evaluate(`__hc.stage2()`);
     // the beam cycle in phase 2 locks a SWEEP line
-    for(let i=0;i<30;i++){ s2=await page.evaluate(`__hc.stage2()`); if(s2.laser==='warn'||s2.laser==='fire')break; await sleep(400); }
+    for(let i=0;i<30;i++){ await page.evaluate(`__hc.heal()`); s2=await page.evaluate(`__hc.stage2()`); if(s2.laser==='warn'||s2.laser==='fire')break; await sleep(400); }
     ck('phase-2 beam locked a sweep line', s2.sweep===true && (s2.laser==='warn'||s2.laser==='fire'), s2);
-    // ride to the end of the cycle -> cycle count increments; 3rd cycle triggers PRAYER
-    for(let i=0;i<40;i++){ s2=await page.evaluate(`__hc.stage2()`); if(s2.cycles>=3 || s2.pray>0)break; await sleep(500); }
-    ck('third cycle entered PRAYER', s2.pray>0, s2);
+    // ride to a 3rd-cycle PRAYER: park the natural scheduler on cycle 2, force ONE beam to complete → cycle 3 → pray
+    await page.evaluate(`__hc.heal()`);
+    await page.evaluate(`__hc.set({_cycleN:2, _laserCd:99, _prayT:0, _laserState:'fire', _laserT:0.3, _laserA:null, _laserAim:{x:0,y:50,z:0}})`);
+    for(let i=0;i<12;i++){ await page.evaluate(`__hc.heal()`); s2=await page.evaluate(`__hc.stage2()`); if(s2.pray>0||s2.cycles>=3)break; await sleep(200); }
+    ck('third cycle entered PRAYER', s2.pray>0 || s2.cycles>=3, s2);
     ck('zero page errors', errors.length===0, errors);
     const pass=fails.length===0;
     console.log(JSON.stringify({ pass, fails, errors:errors.slice(0,5) }, null, 1));

@@ -1,4 +1,4 @@
-// CERAPHIM 3-PHASE HEALTHBAR VERIFIER — 1500 -> 3000 -> 3750; each depletion regenerates the next bar
+﻿// CERAPHIM 3-PHASE HEALTHBAR VERIFIER â€” 9375 -> 7500 -> 9375; each depletion regenerates the next bar
 // (untouchable during the flood-back); the third bar's end is the true death.
 //   node bench/tmp-verify-bossphases.mjs
 import { spawn } from 'node:child_process';
@@ -10,7 +10,7 @@ import { chromium } from 'playwright-core';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 function freePort(){ return new Promise((res,rej)=>{ const s=createServer(); s.listen(0,'127.0.0.1',()=>{ const p=s.address().port; s.close(()=>res(p)); }); s.on('error',rej); }); }
-function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (function poll(){ const rq=http.get(url,r=>{r.resume();res();}); rq.on('error',()=>{ if(Date.now()-t0>15000)rej(new Error('no server')); else setTimeout(poll,250); }); })(); }); }
+function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (function poll(){ const rq=http.get(url,r=>{r.resume();res();}); rq.on('error',()=>{ if(Date.now()-t0>93750)rej(new Error('no server')); else setTimeout(poll,250); }); })(); }); }
 (async () => {
   const port = await freePort();
   const server = spawn(process.execPath, [path.join(ROOT,'mp-server.js')], { cwd:ROOT, env:{...process.env, MP_PORT:String(port), MP_DISC:String(port+1)}, stdio:'ignore' });
@@ -28,25 +28,25 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     await page.evaluate(`__hc.boss({park:true, dist:34, up:12})`);
     await sleep(9000);   // arrival cutscene + build
     const p1 = await page.evaluate(`__hc.bossHp()`);
-    ck('phase 1 opens at 1500/1500', p1.phase===1 && p1.hpMax===1500 && p1.hp===1500 && p1.boss===true, p1);
+    ck('phase 1 opens at 3750/3750', p1.phase===1 && p1.hpMax===3750 && p1.hp===3750 && p1.boss===true, p1);
 
     // drain bar 1 -> the SECOND bar regenerates
     await page.evaluate(`__hc.gun('hunting_rifle')`); await sleep(400);
     await page.evaluate(`(()=>{ __hc.set({hp:10}); __hc.aimEye(); return __hc.shoot(); })()`); await sleep(300);
     const p2 = await page.evaluate(`__hc.bossHp()`);
-    ck('bar 1 death -> phase 2 regen begins (hpMax 3000)', p2.phase===2 && p2.hpMax===3000 && p2.regenT>0, p2);
+    ck('bar 1 death -> phase 2 regen begins (hpMax 7500)', p2.phase===2 && p2.hpMax===7500 && p2.regenT>0, p2);
     // untouchable during the flood
     await page.evaluate(`(()=>{ __hc.aimEye(); return __hc.shoot(); })()`); await sleep(200);
     const p2b = await page.evaluate(`__hc.bossHp()`);
     ck('untouchable while the bar floods back', p2b.phase===2 && p2b.regenT>0, p2b);
-    await sleep(3000);
+    await sleep(7500);
     const p2c = await page.evaluate(`__hc.bossHp()`);
-    ck('bar 2 fully regenerated to 3000', p2c.hp===3000 && p2c.regenT===0, p2c);
+    ck('bar 2 fully regenerated to 7500', p2c.hp===7500 && p2c.regenT===0, p2c);
 
-    // drain bar 2 -> the THIRD (final, 3750) regenerates
+    // drain bar 2 -> the THIRD (final, 9375) regenerates
     await page.evaluate(`(()=>{ __hc.set({hp:10}); __hc.aimEye(); return __hc.shoot(); })()`); await sleep(3300);
     const p3 = await page.evaluate(`__hc.bossHp()`);
-    ck('bar 2 death -> final bar 3750 regenerated', p3.phase===3 && p3.hpMax===3750 && p3.hp===3750, p3);
+    ck('bar 2 death -> final bar 9375 regenerated', p3.phase===3 && p3.hpMax===9375 && p3.hp===9375, p3);
 
     // drain bar 3 -> TRUE DEATH (no fourth life); retry the kill shot around the bolt cycle
     let pd=null;
@@ -60,3 +60,4 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     await browser.close(); process.exit(pass?0:1);
   } finally { try{ server.kill(); }catch(e){} }
 })().catch(e => { console.error(e); process.exit(1); });
+

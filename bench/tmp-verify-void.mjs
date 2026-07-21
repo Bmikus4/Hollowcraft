@@ -25,18 +25,22 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     await sleep(2000);
     const fails=[]; const ck=(n,c,i)=>{ if(!c) fails.push(n+' :: '+JSON.stringify(i)); };
 
-    await page.evaluate(`__hc.boss({park:true, dist:26, up:12})`);
-    await sleep(8500);
-    // drive to phase 3 via the real surge path: phase 2 -> hp 10 -> eye shot
-    await page.evaluate(`__hc.set({_bossPhase:2, _regenT:0, hp:10, _park:false})`);
-    await page.evaluate(`__hc.gun('hunting_rifle')`); await sleep(300);
-    await page.evaluate(`(()=>{ __hc.aimEye(); return __hc.shoot(); })()`);
-    await sleep(4200);   // surge + void entry at +0.45s + regen 2.6s
-    let v = await page.evaluate(`__hc.void3()`);
-    ck('phase 3 entered the WHITE VOID', v.on===true && v.clouds>0, v);
+    await page.evaluate(`__hc.boss({park:true, dist:26, up:12, phase:2})`);
+    await sleep(9000);
+    await page.evaluate(`__hc.set({_bossPhase:2, _regenT:0, hpMax:7500, hp:5000, _park:false})`);
+    await page.evaluate(`__hc.heal()`);
+    // Stage II halfway: the world begins to PEEL — corroded-paint strips flutter off reality
+    await page.evaluate(`__hc.peel({begin:0.5})`);
+    let pk=null; for(let i=0;i<20;i++){ await page.evaluate(`__hc.heal()`); pk=await page.evaluate(`__hc.peel()`); if(pk.on&&pk.flakes>0)break; await sleep(200); }
+    ck('the world PEELS mid-Stage-II', pk.on===true && pk.flakes>0, pk);
+    await page.screenshot({ path: path.join(OUT,'peel-half.png') });
+    // the third life finishes stripping reality -> the pure void
+    await page.evaluate(`__hc.peel({begin:1, rate:0.6})`);
+    let v=null; for(let i=0;i<50;i++){ await page.evaluate(`__hc.heal()`); v=await page.evaluate(`__hc.void3()`); if(v.on&&v.clouds>0)break; await sleep(250); }
+    ck('the peel completed into the WHITE VOID', v.on===true && v.clouds>0, v);
     await page.screenshot({ path: path.join(OUT,'void-entry.png') });
     // fractal comes online ~3s in, morphs over 6
-    await sleep(5500);
+    for(let i=0;i<24;i++){ await page.evaluate(`__hc.heal()`); await sleep(250); }
     v = await page.evaluate(`__hc.void3()`);
     ck('fractal raymarch is the sky (RT background)', v.fractal===true && v.bgIsRT===true && v.morph>0.4, v);
     await page.screenshot({ path: path.join(OUT,'void-fractal.png') });
@@ -50,11 +54,10 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     for(let i=0;i<60 && (await page.evaluate(`__hc.void3()`)).bound;i++){ await page.evaluate(`__hc.set({_mash:4})`); await sleep(150); }
     v = await page.evaluate(`__hc.void3()`);
     ck('mash escaped the bind (through the tease)', v.bound===false && v.teased===true, v);
-    // boss death exits the void and restores the world
-    await page.evaluate(`(()=>{ __hc.set({hp:5}); __hc.aimEye(); return __hc.shoot(); })()`);
-    await sleep(2500);
-    v = await page.evaluate(`__hc.void3()`);
-    ck('death restored the world', v.on===false && v.bgIsRT===false, v);
+    // on the FINAL life, death exits the void and restores the world (real hurtWretch->killWretch->exitVoid path)
+    await page.evaluate(`__hc.killBoss()`);
+    await sleep(800); v = await page.evaluate(`__hc.void3()`);
+    ck('final death restored the world', v.on===false && v.bgIsRT===false, v);
     ck('zero page errors', errors.length===0, errors);
     const pass=fails.length===0;
     console.log(JSON.stringify({ pass, fails, errors:errors.slice(0,5) }, null, 1));
