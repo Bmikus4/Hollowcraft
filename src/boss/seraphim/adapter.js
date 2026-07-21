@@ -190,7 +190,7 @@ export function buildSeraphStoneProto(ctx = {}) {
     try { m.setFold && m.setFold(0.15); m.update(0.016, 0); } catch (e) {}
     const o = m.object3d;
     const stone = new THREE.MeshLambertMaterial({ color: 0x8f9299 });
-    o.traverse(x => { if (x.isMesh || x.isInstancedMesh) { x.material = stone; x.castShadow = true; x.receiveShadow = true; x.visible = true; } });
+    o.traverse(x => { x.visible = true; if (x.isMesh || x.isInstancedMesh) { x.material = stone; x.castShadow = true; x.receiveShadow = true; x.frustumCulled = false; } });   // EVERY node visible (hidden subgroups otherwise blank the statue) + no instanced-cull
     o.visible = true; o.scale.setScalar(1); o.position.set(0, 0, 0); o.quaternion.identity();
     o.updateMatrixWorld(true);
     return o;
