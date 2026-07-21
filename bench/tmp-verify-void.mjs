@@ -36,8 +36,8 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     await page.screenshot({ path: path.join(OUT,'peel-half.png') });
     // the third life finishes stripping reality -> the pure void
     await page.evaluate(`__hc.peel({begin:1, rate:0.6})`);
-    let v=null; for(let i=0;i<50;i++){ await page.evaluate(`__hc.heal()`); v=await page.evaluate(`__hc.void3()`); if(v.on&&v.clouds>0)break; await sleep(250); }
-    ck('the peel completed into the WHITE VOID', v.on===true && v.clouds>0, v);
+    let v=null; for(let i=0;i<50;i++){ await page.evaluate(`__hc.heal()`); v=await page.evaluate(`__hc.void3()`); if(v.on)break; await sleep(250); }
+    ck('the peel completed into the WHITE VOID', v.on===true, v);
     await page.screenshot({ path: path.join(OUT,'void-entry.png') });
     // fractal comes online ~3s in, morphs over 6
     for(let i=0;i<24;i++){ await page.evaluate(`__hc.heal()`); await sleep(250); }

@@ -1,4 +1,3 @@
-// render the peel + persistent cosmos portal + block-surface flakes
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import http from 'node:http';
@@ -18,26 +17,14 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     const browser = await chromium.launch({ executablePath:'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', headless:true, args:['--enable-gpu','--ignore-gpu-blocklist','--use-angle=d3d11','--mute-audio'] });
     const page = await (await browser.newContext({ viewport:{width:1280,height:720} })).newPage();
     const errors=[]; page.on('pageerror', e=>errors.push(String(e.message||e).slice(0,200)));
-    await page.goto('http://127.0.0.1:'+port+'/index.html?debug=1&t=630', { waitUntil:'load', timeout:90000 });
+    await page.goto('http://127.0.0.1:'+port+'/index.html?debug=1&t=210', { waitUntil:'load', timeout:90000 });
     await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true; } catch(e){ return false; } })()`, { timeout:90000 });
     await sleep(1500);
-    // summon boss through the real rip so the portal persists, then start the peel and watch it work
-    await page.evaluate(`__hc.ripTest && __hc.ripTest()`);
-    await sleep(6500);
-    await page.evaluate(`__hc.heal && __hc.heal()`);
-    await page.evaluate(`__hc.peel && __hc.peel({begin:0.5})`);
-    for(let i=0;i<14;i++){ await page.evaluate(`__hc.heal && __hc.heal()`); await sleep(300); }
-    await page.evaluate(`__hc.cam && __hc.cam({pitch:0.05})`);
-    await page.screenshot({ path: path.join(OUT,'peel-blocks.png') });
-    // now drive to the pure-white void and shoot it (aim down to prove no visible ground)
-    await page.evaluate(`__hc.peel({begin:1, rate:0.6})`);
-    for(let i=0;i<40;i++){ await page.evaluate(`__hc.heal && __hc.heal()`); const v=await page.evaluate(`__hc.void3()`); if(v.on)break; await sleep(250); }
-    for(let i=0;i<24;i++){ await page.evaluate(`__hc.heal && __hc.heal()`); await sleep(250); }   // let the fractal well up + morph full
-    await page.evaluate(`__hc.cam && __hc.cam({pitch:0.05,yaw:0})`); await sleep(300); await page.screenshot({ path: path.join(OUT,'void-fractal-fwd.png') });
-    await page.evaluate(`__hc.cam && __hc.cam({pitch:-1.3})`); await sleep(300); await page.screenshot({ path: path.join(OUT,'void-fractal-down.png') });
-    await page.evaluate(`__hc.cam && __hc.cam({pitch:1.3})`); await sleep(300); await page.screenshot({ path: path.join(OUT,'void-fractal-up.png') });
-    const pk=await page.evaluate(`__hc.peel()`); const st=await page.evaluate(`(()=>{ try{ return {portal:typeof PORTAL!=='undefined'&&PORTAL.on, flakes:pk} }catch(e){ return {e:e.message} } })()`).catch(()=>({}));
-    console.log(JSON.stringify({ peel:pk, errors }));
+    // drop 3 crows on the ground a few blocks ahead, then aim the camera down at them
+    const info = await page.evaluate(`__hc.crow('crow')`);
+    await sleep(600);
+    await page.screenshot({ path: path.join(OUT,'crow-ground.png') });
+    console.log(JSON.stringify({ crows:info, errors }));
     await browser.close(); process.exit(errors.length?1:0);
   } finally { try{ server.kill(); }catch(e){} }
 })().catch(e=>{ console.error(e); process.exit(1); });
