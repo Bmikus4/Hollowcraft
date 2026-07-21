@@ -2545,6 +2545,7 @@ function physics(dt){
     if(!c||!c.generated||!c.meshed){ player.vel.set(0,0,0); return; } _resumeHold=false; }
   const p=player; p._gliding=false;
   if(p.grabbed) return;                                       // captured (jumpscare/haul/pull/tied) → the drag sequence owns your position; no input-movement
+  if(p.riding){ p.vel.set(0,0,0); return; }                   // RIDING THE GHOST — updateGhost owns the position (runs before the camera); driving input handled there
   if(p.seat){ if(keys.KeyW||keys.KeyA||keys.KeyS||keys.KeyD||keys.Space||keys.ControlLeft||keys.ControlRight){ p.seat=null; }   // SITTING (rocking chair) — any movement input stands you up
     else { p.seat.t=(p.seat.t||0)+dt; const rk=Math.sin(p.seat.t*1.8), ry=p.seat.ry||0;   // gentle rock: fore-aft sway + a small lift at each end of the arc — along the CHAIR'S OWN fore-aft axis (Ben 07-20)
       p.pos.set(p.seat.x+Math.sin(ry)*rk*0.16, p.seat.y+Math.abs(rk)*0.06, p.seat.z+Math.cos(ry)*rk*0.16); p.vel.set(0,0,0); return; } }
@@ -2921,6 +2922,83 @@ const inv=new Array(INV_N).fill(null);
 const armor=[null,null,null,null];   // equipped: 0=helmet 1=chestplate 2=leggings 3=boots
 const decoys=[];                     // placed scarecrows — false leads the Wretch investigates (buys you time)
 const chimes=[];                     // placed wind chimes — emit soft procedural tones from their position
+// ============================================================================
+//  THE GHOST (Halo Covenant anti-grav craft) — a placeable item that drops a
+//  free-flying hover vehicle: forward = -Z (matches player yaw). Sittable, FAST,
+//  floats a fixed height over any terrain/water. Model + entity + hover physics
+//  + mount/drive/dismount all here.
+// ============================================================================
+function buildGhost(){ const g=new THREE.Group();   // forward = -Z, ~2.3 long × 1.8 wide × 1.0 tall
+  const hull =new THREE.MeshPhongMaterial({color:0x453258, shininess:70, specular:0x9a78c0});   // eggplant Covenant shell
+  const dark =new THREE.MeshPhongMaterial({color:0x241d30, shininess:40, specular:0x40364e});   // charcoal underplate
+  const seatM=new THREE.MeshLambertMaterial({color:0x181320});
+  const glow =new THREE.MeshBasicMaterial({color:0x35f0dd, fog:false});                          // teal plasma/anti-grav energy
+  const box=(w,h,d,m,x,y,z,rx,ry,rz)=>{ const e=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m); e.position.set(x,y,z); if(rx)e.rotation.x=rx; if(ry)e.rotation.y=ry; if(rz)e.rotation.z=rz; e.castShadow=true; g.add(e); return e; };
+  // central fuselage — tapered spine, nose to the front (-Z)
+  box(0.46,0.40,1.5, hull, 0,0.58,0.12);
+  box(0.30,0.28,0.7, hull, 0,0.58,-0.78);                                   // narrowing nose
+  box(0.16,0.16,0.5, dark, 0,0.58,-1.15);                                   // nose spar between the cannons
+  // two forward-swept side pods (toe-out), each with a plasma cannon at the front tip + a boost vent at the rear
+  for(const s of [-1,1]){ const pod=new THREE.Group(); pod.position.set(s*0.66,0.52,0.0); pod.rotation.y=s*0.20; g.add(pod);
+    const pm=new THREE.Mesh(new THREE.BoxGeometry(0.36,0.44,1.6),hull); pm.castShadow=true; pod.add(pm);
+    const nose=new THREE.Mesh(new THREE.BoxGeometry(0.26,0.30,0.5),hull); nose.position.set(0,0,-1.0); pod.add(nose);   // pod nose taper
+    const barrel=new THREE.Mesh(new THREE.CylinderGeometry(0.06,0.075,0.5,8),dark); barrel.rotation.x=Math.PI/2; barrel.position.set(0,0,-1.32); pod.add(barrel);   // plasma cannon
+    const tip=new THREE.Mesh(new THREE.CylinderGeometry(0.09,0.05,0.14,8),glow); tip.rotation.x=Math.PI/2; tip.position.set(0,0,-1.6); pod.add(tip);                 // glowing muzzle
+    const vent=new THREE.Mesh(new THREE.BoxGeometry(0.30,0.34,0.14),glow); vent.position.set(0,0,0.86); pod.add(vent);                                               // boost vent (teal)
+    // outrigger wing joining pod → fuselage
+    const wing=new THREE.Mesh(new THREE.BoxGeometry(0.34,0.10,0.7),dark); wing.position.set(-s*0.34,0.0,0.0); wing.rotation.y=s*0.20; pod.add(wing); }
+  // open saddle seat + low backrest + twin handlebars (driver sits here)
+  box(0.36,0.16,0.56, seatM, 0,0.80,0.34);
+  box(0.36,0.28,0.12, seatM, 0,0.94,0.62);                                  // backrest
+  for(const s of [-1,1]){ box(0.05,0.14,0.05, dark, s*0.20,0.92,0.02); box(0.11,0.045,0.05, dark, s*0.20,0.99,0.02); }   // handlebar posts + grips
+  // belly anti-grav glow disc (the hover shimmer, seen from below/side)
+  const disc=new THREE.Mesh(new THREE.CircleGeometry(0.7,20), new THREE.MeshBasicMaterial({color:0x2bd8ea,transparent:true,opacity:0.5,fog:false,side:THREE.DoubleSide}));
+  disc.rotation.x=-Math.PI/2; disc.position.y=0.20; g.add(disc); g.userData.disc=disc;
+  return g; }
+const ghost={ active:false, x:0,y:0,z:0, yaw:0, vx:0,vz:0, spd:0, bob:0, bank:0, pitch:0, mesh:null, gl:null };
+const GHOST_HOVER=1.5, GHOST_TOP=27, GHOST_ACCEL=34, GHOST_TURN=2.4;   // FAST: ~27 m/s top (sprint is 7.2), snappy accel, brisk heading turn
+function ghostTopY(x,z){ return Math.max(groundYAt(x,z, ghost.y+4), CFG.SEA+1); }   // hover over the higher of terrain / sea surface
+function placeGhost(x,y,z){ if(!ghost.mesh){ ghost.mesh=buildGhost(); scene.add(ghost.mesh);
+    ghost.gl=new THREE.PointLight(0x35f0dd, 3.0, 9, 2); scene.add(ghost.gl); }   // its own teal running-light
+  ghost.active=true; ghost.mesh.visible=true; ghost.x=x+0.5; ghost.z=z+0.5; ghost.yaw=player.yaw; ghost.vx=ghost.vz=ghost.spd=0;
+  ghost.y=ghostTopY(ghost.x,ghost.z)+GHOST_HOVER; flashName('the Ghost hums awake — right-click to ride'); }
+function mountGhost(){ player.riding=true; player.vel.set(0,0,0); player.seat=null; flashName('riding the Ghost — WASD to fly, Space to boost, Ctrl to dismount'); }
+function dismountGhost(){ player.riding=false;   // step off onto solid ground beside it
+  const gx=ghost.x-Math.sin(ghost.yaw+1.4)*1.6, gz=ghost.z-Math.cos(ghost.yaw+1.4)*1.6, gy=groundYAt(gx,gz,ghost.y+2);
+  player.pos.set(gx, gy, gz); player.vel.set(0,0,0); flashName('dismounted'); }
+function pickupGhost(){ ghost.active=false; if(ghost.mesh)ghost.mesh.visible=false; if(player.riding)dismountGhost();
+  invAdd('ghost',1); refreshHotbar(); flashName('picked up the Ghost'); }
+function ghostNear(){ if(!ghost.active)return false; const dx=ghost.x-player.pos.x, dz=ghost.z-player.pos.z; return dx*dx+dz*dz < 12.25; }   // within 3.5 blocks
+function updateGhost(dt){ if(!ghost.active)return; const t=clock.elapsedTime;
+  ghost.bob = Math.sin(t*2.0)*0.09;                                                        // idle anti-grav bob
+  if(player.riding){
+    const fwd=(keys.KeyW?1:0)-(keys.KeyS?1:0), str=(keys.KeyD?1:0)-(keys.KeyA?1:0);
+    // heading eases toward where you LOOK (mouse steers); the craft banks into the turn
+    let dyaw=player.yaw-ghost.yaw; while(dyaw>Math.PI)dyaw-=6.283; while(dyaw<-Math.PI)dyaw+=6.283;
+    ghost.yaw += clamp(dyaw, -GHOST_TURN*dt, GHOST_TURN*dt);
+    const boost = keys.Space?1.5:1;
+    const sy=Math.sin(ghost.yaw), cy=Math.cos(ghost.yaw);
+    // thrust: W/S along facing, A/D lateral — target velocity, eased (momentum)
+    const tvx=(-sy*fwd + cy*str)*GHOST_TOP*boost, tvz=(-cy*fwd - sy*str)*GHOST_TOP*boost;
+    ghost.vx += (tvx-ghost.vx)*Math.min(1,dt*GHOST_ACCEL/GHOST_TOP);
+    ghost.vz += (tvz-ghost.vz)*Math.min(1,dt*GHOST_ACCEL/GHOST_TOP);
+    if(!fwd&&!str){ ghost.vx*=Math.pow(0.06,dt); ghost.vz*=Math.pow(0.06,dt); }             // coast to a stop when hands off
+    ghost.x += ghost.vx*dt; ghost.z += ghost.vz*dt;
+    ghost.spd = Math.hypot(ghost.vx,ghost.vz);
+    ghost.bank += ((clamp(dyaw*2.4,-0.5,0.5) + str*-0.25) - ghost.bank)*Math.min(1,dt*6);   // roll into turns + strafe
+    ghost.pitch += (((-fwd)*0.12) - ghost.pitch)*Math.min(1,dt*5);                          // nose dips forward under accel
+    if(keys.ControlLeft||keys.ControlRight){ dismountGhost(); }
+  } else { ghost.vx*=Math.pow(0.02,dt); ghost.vz*=Math.pow(0.02,dt); ghost.bank+=(0-ghost.bank)*Math.min(1,dt*4); ghost.pitch+=(0-ghost.pitch)*Math.min(1,dt*4); }
+  // HOVER: rise/fall toward a fixed height over whatever is below — floats over hills, water, cliffs
+  const ty=ghostTopY(ghost.x,ghost.z)+GHOST_HOVER;
+  ghost.y += (ty-ghost.y)*Math.min(1,dt*7);
+  const my=ghost.y+ghost.bob;
+  ghost.mesh.position.set(ghost.x, my, ghost.z); ghost.mesh.rotation.set(ghost.pitch, ghost.yaw, ghost.bank);
+  if(ghost.gl){ ghost.gl.position.set(ghost.x, my+0.4, ghost.z); }
+  if(ghost.mesh.userData.disc) ghost.mesh.userData.disc.material.opacity = 0.35 + 0.2*Math.sin(t*9) + 0.25*Math.min(1,ghost.spd/GHOST_TOP);   // shimmer stronger under thrust
+  if(player.riding){ player.pos.set(ghost.x, my+0.2, ghost.z); player.vel.set(0,0,0);   // slave the rider to the seat → the camera rides
+    if(ghost.spd>2 && AC && (updateGhost._h=(updateGhost._h||0)+dt)>0.05){ updateGhost._h=0; } }   // (engine hum hook — kept light)
+}
 // ---- WIND CHIME PHYSICS (Ben 07-20): each placed chime's hanging body is a damped pendulum. Wind rocks it
 // (outdoors only), the player brushing through it shoves it, the Wretch passing slams it — and hard swings RING.
 const _chimeFx2={};
@@ -3511,6 +3589,14 @@ function useFlintSteel(h,slot){ let did=false, fx=player.pos.x, fy=player.pos.y+
     slot.dur=(slot.dur||ITEMS.flint_and_steel.firestarter.dur)-1; if(slot.dur<=0){ inv[selSlot]=null; flashName('your flint & steel wears out'); } refreshHotbar(); }
   else flashName('nothing here to light'); }
 function doPlace(){ if(player.grabbed)return;   // no right-click interactions while it has you (no chests, no eating, no placing)
+  if(player.riding) return;                     // already aboard the Ghost → right-click does nothing (Ctrl dismounts)
+  { const hs0=heldSlot(); const holdingGhost=hs0&&ITEMS[hs0.id]&&ITEMS[hs0.id].ghost;
+    if(ghostNear() && !holdingGhost){ if(keys.ShiftLeft||keys.ShiftRight){ pickupGhost(); } else { mountGhost(); } return; }   // near the parked Ghost: sneak+click = pick it up, plain click = ride
+    if(holdingGhost){ const hh=raycastVoxel(); let px,pz;
+        if(hh&&hh.face){ px=hh.x+hh.face[0]; pz=hh.z+hh.face[2]; }                                  // the cell in front of the aimed face…
+        else { const d=lookDir(); px=Math.floor(player.pos.x+d.x*3); pz=Math.floor(player.pos.z+d.z*3); }   // …or 3 blocks ahead if aiming at the sky
+        const py=groundYAt(px+0.5,pz+0.5,player.pos.y+3);
+        placeGhost(px,py,pz); if(!player.creative){ hs0.n--; if(hs0.n<=0)inv[selSlot]=null; refreshHotbar(); } return; } }
   const h=raycastVoxel();
   if(typeof tryTakeCabinRifle==='function' && tryTakeCabinRifle()) return;                 // grab the rifle racked in the cabin
   if(typeof tryTakeDungeonCuffs==='function' && tryTakeDungeonCuffs()) return;             // pick the handcuffs off the dungeon floor
@@ -4340,6 +4426,7 @@ function loop(){
     if(lmbHeld){ const _hg=heldSlot(), _gi=_hg&&ITEMS[_hg.id]; if(_gi&&_gi.gun&&_gi.auto&&performance.now()>=nextShot){ if(fireGun())view.swing=1.2; nextShot=performance.now()+(_gi.rof||60); } }   // FULL-AUTO: hold left-click → repeat-fire at the gun's rate
     if(rmbHeld && performance.now()>=nextAct){ doPlace(); nextAct=performance.now()+240; } }   // right-hold = repeat place
   if(started && !player.dead && !intro.active){ if(!NET.on||NET.host)updateBrain(dt); updateWretch(dt); if(NET.on&&!NET.host)netAnimalsTick(); else updateAnimals(dt); if(typeof updateHerobrine==='function'){ if(NET.on && herobrine.haunting && herobrine.owner!=null && herobrine.owner!==NET.id) hbMirrorTick(dt); else updateHerobrine(dt); } }   // co-op: director + animals run on the host; the HAUNT runs on its interactor, others mirror
+  if(started && !player.dead && !intro.active) updateGhost(dt);            // hover vehicle — must run BEFORE the camera so a rider's slaved position is current this frame
   if(!started){ updateMenuCam(dt); }                                       // menu cinematic owns the camera until you press play
   else { if(!intro.active) applyLook(dt); if(intro.active) updateIntro(dt); else updateCamera(dt); }
   applyWaterFog();
@@ -4361,7 +4448,7 @@ function loop(){
   const t1=performance.now();
   if(USE_SKYCUBE){ let da=Math.abs(worldTime-_skyBakeAng); if(da>CFG.DAY_LEN*0.5)da=CFG.DAY_LEN-da; if(!_skyBaked || da>CFG.DAY_LEN*0.0005){ _skyBakeAng=worldTime; _skyBaked=true; bakeSky(); } }   // rebake ~3x/sec → the sky gradient shifts smoothly through dawn/dusk instead of stepping
   else skyDome.position.copy(camera.position);
-  updateHighlight(); updateBars(); updateMinimap(dt); updateBossRegen(dt); updatePeel(dt); updateVoid(dt); updateWretchBar();
+  updateHighlight(); updateBars(); updateMinimap(dt); updateBossRegen(dt); updatePeel(dt); if(typeof updatePortal==='function')updatePortal(dt); if(typeof updateBossCorpse==='function')updateBossCorpse(dt); updateVoid(dt); updateWretchBar();
   if(gradePass){ gradePass.uniforms.uTime.value=clock.elapsedTime; gradePass.uniforms.uDark.value=1-globalU.uDay.value; }   // grain+vignette rise as it darkens
   if(godrayPass){ camera.updateMatrixWorld();                                            // project the sky-sun direction to screen space for the god-ray origin
     _sunProj.copy(camera.position).addScaledVector(globalU.uSunDir.value, 2000).project(camera);
@@ -7897,15 +7984,16 @@ function dropWretchCorpse(){ const g=wretch.group, P=wretch.P; if(!g||!P) return
 function killWretch(){ spawnParticles(wretch.pos.x,wretch.pos.y+1,wretch.pos.z,0x3a0608,36,3.2,1.6); wretchVoice&&wretchVoice('scream',wretch.pos);
   const bx=Math.floor(wretch.pos.x), bz=Math.floor(wretch.pos.z), gy=groundYAt(bx+0.5,bz+0.5,Math.floor(wretch.pos.y)+4), wasBoss=!!wretch.boss;
   if(wasBoss && NET.on && typeof netSend==='function') netSend({t:'bossdead',x:+wretch.pos.x.toFixed(1),y:+wretch.pos.y.toFixed(1),z:+wretch.pos.z.toFixed(1)});   // tell every client the seraph is slain
-  dropWretchCorpse();                                                    // its body stays where it fell
+  if(wasBoss){ clearBossCorpse(); _startBossCorpse(); }                   // the FULL seraph tumbles from the sky (captured BEFORE despawn); no small wretch corpse
+  else dropWretchCorpse();                                               // the ordinary wretch body stays where it fell
   if(wretch.dragging) endDrag(false); despawnWretch(true); wretch.everHurt=false; HORROR.encounters=0;
-  if(wasBoss){ wretch.boss=false; wretch.hpMax=2700; wretch.hp=2700; if(wretch.group)wretch.group.scale.setScalar(WRETCH_BASE_SCALE); if(typeof playSample==='function')playSample('seraph_toll',wretch.pos,1.0);   // the MEGA-WRETCH is slain — a vast holy toll; reset, no haunt
-    if(typeof wretchMat!=='undefined' && wretchMat.emissive){ wretchMat.emissive.setRGB(0,0,0); wretchMat.emissiveIntensity=0; } if(wretch._bossWings)wretch._bossWings.visible=false;   // red glow off, wings gone
-    if(typeof wretchMat!=='undefined'){ wretchMat.map=wretch._prevSkinMap||null; wretchMat.needsUpdate=true; }   // restore the ordinary wretch skin — no leaked boss hide
-    if(wretch._eyeRig)wretch._eyeRig.visible=false; if(wretch._bossCore)wretch._bossCore.visible=false; if(wretch.P&&wretch.P.head)wretch.P.head.visible=true; if(wretch.P&&wretch.P.pelvis)wretch.P.pelvis.visible=true;   // the eye-wheel & core close; the true body returns
+  if(wasBoss){ wretch.boss=false; wretch.hpMax=2700; wretch.hp=2700; if(typeof playSample==='function')playSample('seraph_toll',wretch.pos,1.0);   // the CERAPHIM is slain — a vast holy toll; reset, no haunt
+    if(typeof wretchMat!=='undefined' && wretchMat.emissive){ wretchMat.emissive.setRGB(0,0,0); wretchMat.emissiveIntensity=0; }   // red glow off (the corpse keeps the adapter's own materials)
+    if(typeof wretchMat!=='undefined'){ wretchMat.map=wretch._prevSkinMap||null; wretchMat.needsUpdate=true; }   // restore the ordinary wretch skin for the NEXT wretch — the corpse is detached & unaffected
     if(typeof hideBossRing==='function')hideBossRing(); if(typeof hideBossBeam==='function')hideBossBeam(); wretch._laserState=null; wretch._bossPitch=0; wretch._bossRoll=0; wretch._faceLock=false;
     if(typeof clearRakeFeathers==='function')clearRakeFeathers(); wretch._prayT=0; wretch._laserA=null; if(typeof seraphFold==='function')seraphFold(null);
     if(typeof exitVoid==='function')exitVoid(); if(typeof endPeel==='function')endPeel();   // the white void collapses with its master; any half-peeled world snaps back
+    if(typeof closePortal==='function')closePortal();   // and THE TEAR SEALS — a cosmic boom, the cosmos winks out, reality is whole
     try{ lootChest(bx, gy, bz, [['angel_wings',1],['minigun',1],['rifle_ammo',64]]); }catch(e){}
     if(typeof herobrine!=='undefined')herobrine.haunting=false;
     try{ const jx=bx+1.5, jz=bz+1.5; let jy=groundYAt(jx,jz); if(jy<=CFG.SEA)jy=CFG.SEA+1;   // …and JESUS is resurrected, risen from the beast's ashes
@@ -8129,7 +8217,8 @@ function applyBossVisual(on){ if(!wretch.group)return;
     if(wretch.P&&wretch.P.pelvis)wretch.P.pelvis.visible=true; if(wretch.P&&wretch.P.head)wretch.P.head.visible=true; } }
 // SERAPH RIG ANIMATION — wing travelling-wave flap + cone-clamped eye tracking/blink/flare. Runs on the owner AND on guests (mirrored flare) so the boss is alive on every screen.
 function animateBossRig(dt){ seraphAnimate(dt,{wretch,camera,elapsed:clock.elapsedTime}); }   // maps mirrored signals (_bossMode→flap, _eyeFlare→central-eye charge) + lookAt + update on the SeraphimModel
-function summonBoss(x,y,z){ if(!wretch.group){ const b=buildWretch(); wretch.group=b.group; wretch.P=b.P; }
+function summonBoss(x,y,z){ if(typeof clearBossCorpse==='function')clearBossCorpse();   // one god's body at a time — clear any prior fallen corpse
+  if(!wretch.group){ const b=buildWretch(); wretch.group=b.group; wretch.P=b.P; }
   wretch.active=true; wretch.group.visible=true; wretch.pos.set(x, groundYAt(x,z)+3, z);
   wretch.boss=true; wretch.owner=(typeof NET!=='undefined'&&NET.on)?NET.id:null;   // the player who lit the shrine OWNS the boss (interaction-based, not host)
   wretch._bossPhase=1; wretch._regenT=0; wretch.hpMax=BOSS_PHASES[0]; wretch.hp=BOSS_PHASES[0]; wretch.everHurt=true; wretch.encDmg=0; wretch.routed=false; wretch.committed=true; wretch._dunHunt=false; wretch._cryptRetreat=false; wretch.dragging=false; wretch.grabPhase='none'; wretch._faceLock=false;
@@ -8163,9 +8252,69 @@ function _drawRipTex(t){ const c=_cine; if(!c)return; const ctx=c.ctx, W=c.cv.wi
   const g=ctx.createLinearGradient(0,0,0,Hh); g.addColorStop(0,'#fff'); g.addColorStop(0.45,'#fff6e4'); g.addColorStop(1,'#ffffff');
   ctx.fillStyle=g; ctx.shadowColor='#fff'; ctx.shadowBlur=26; ctx.fill(); ctx.restore();
   const glowMul=open<0.12? 2.2 : 1;                                                       // the HAIRLINE phase must still burn — fatten the rim glow while the crack is a sliver
-  for(const rim of [['rgba(255,70,44,0.85)',3,8],['rgba(96,150,255,0.85)',-3,8],['#ffffff',0,4]]){ ctx.save(); ctx.translate(rim[1],0);   // white-hot rim with cheap chromatic fringe (the liked look, verbatim)
-    _ripPath(ctx,W,Hh,Math.max(o3,0.05),c.sd,t); ctx.strokeStyle=rim[0]; ctx.lineWidth=rim[2]*glowMul; ctx.shadowColor='#fff'; ctx.shadowBlur=30*glowMul; ctx.stroke(); ctx.restore(); }
+  for(const rim of [['rgba(232,192,112,0.95)',3,9],['rgba(255,216,138,0.8)',-2,7],['#ffffff',0,4]]){ ctx.save(); ctx.translate(rim[1],0);   // WHITE + GOLD rim (Ben 07-20)
+    _ripPath(ctx,W,Hh,Math.max(o3,0.05),c.sd,t); ctx.strokeStyle=rim[0]; ctx.lineWidth=rim[2]*glowMul; ctx.shadowColor='#ffe8b0'; ctx.shadowBlur=30*glowMul; ctx.stroke(); ctx.restore(); }
   c.tex.needsUpdate=true; }
+// THE PORTAL PERSISTS: after the Ceraphim tears through, the rip does NOT close — it hangs open in the world
+// for the whole fight (white + gold), and the peeling world + wind-torn leaves stream back INTO it.
+const PORTAL={ on:false, grp:null, tex:null, ctx:null, cv:null, sd:null, x:0,y:0,z:0, t:0, light:null, pos:new THREE.Vector3() };
+function _portalStars(){ if(PORTAL._stars)return PORTAL._stars; const s=[]; for(let i=0;i<220;i++)s.push([Math.random(),Math.random(),0.4+Math.random()*1.6,Math.random()*6.283]); return PORTAL._stars=s; }
+function _drawPortalTex(){ const ctx=PORTAL.ctx, W=PORTAL.cv.width, Hh=PORTAL.cv.height, t=PORTAL.t; ctx.clearRect(0,0,W,Hh);
+  const k=PORTAL.closing!=null?Math.max(0,PORTAL.closing/PORTAL.closeDur):1;             // 1 open → 0 sealed (the cosmic shut)
+  const open=(0.34+0.03*Math.sin(t*1.3))*k;                                              // held open, breathing gently — then cinches to a seam on death
+  // A WINDOW INTO ANOTHER DIMENSION (Ben 07-20): deep COSMOS inside — nebula, drifting stars, a slow galaxy swirl —
+  // framed by a clean glowing white/gold border. Everything clipped to the tear so it reads as real depth.
+  ctx.save(); _ripPath(ctx,W,Hh,open,PORTAL.sd,t); ctx.clip();
+  const bg=ctx.createRadialGradient(W*0.5,Hh*0.5,10,W*0.5,Hh*0.5,Hh*0.6); bg.addColorStop(0,'#141033'); bg.addColorStop(0.6,'#0a0620'); bg.addColorStop(1,'#05030f'); ctx.fillStyle=bg; ctx.fillRect(0,0,W,Hh);   // deep space
+  ctx.globalCompositeOperation='lighter';
+  for(const [nx,ny,hue,drift] of [[0.42,0.35,'rgba(120,60,200,',0.5],[0.6,0.62,'rgba(40,120,180,',-0.4],[0.5,0.5,'rgba(200,150,90,',0.3]]){   // drifting NEBULA clouds
+    const cx=W*(nx+0.05*Math.sin(t*drift)), cy=Hh*(ny+0.04*Math.cos(t*drift*1.3)), R=Hh*0.34;
+    const ng=ctx.createRadialGradient(cx,cy,4,cx,cy,R); ng.addColorStop(0,hue+'0.28)'); ng.addColorStop(0.5,hue+'0.10)'); ng.addColorStop(1,hue+'0)'); ctx.fillStyle=ng; ctx.beginPath(); ctx.arc(cx,cy,R,0,6.283); ctx.fill(); }
+  const sw=t*0.18; ctx.save(); ctx.translate(W*0.5,Hh*0.5); ctx.rotate(sw); ctx.scale(1,0.5);   // faint galaxy swirl
+  const gg=ctx.createRadialGradient(0,0,6,0,0,Hh*0.42); gg.addColorStop(0,'rgba(230,220,255,0.16)'); gg.addColorStop(0.5,'rgba(150,120,220,0.06)'); gg.addColorStop(1,'rgba(0,0,0,0)'); ctx.fillStyle=gg; ctx.beginPath(); ctx.arc(0,0,Hh*0.42,0,6.283); ctx.fill(); ctx.restore();
+  for(const st of _portalStars()){ const x=st[0]*W, y=st[1]*Hh, tw=0.55+0.45*Math.sin(t*2+st[3]); ctx.fillStyle='rgba(255,255,255,'+(tw*0.9).toFixed(2)+')'; ctx.beginPath(); ctx.arc(x,y,st[2]*tw,0,6.283); ctx.fill(); }   // twinkling stars
+  ctx.restore();
+  // CLEAN GLOWING BORDER outside — white core + gold bloom
+  for(const rim of [['rgba(255,255,255,0.98)',0,5],['rgba(255,224,150,0.9)',0,11],['rgba(232,192,112,0.5)',0,20]]){ ctx.save(); _ripPath(ctx,W,Hh,open,PORTAL.sd,t); ctx.strokeStyle=rim[0]; ctx.lineWidth=rim[2]; ctx.shadowColor='#ffe8b0'; ctx.shadowBlur=26; ctx.stroke(); ctx.restore(); }
+  PORTAL.tex.needsUpdate=true; }
+function updatePortal(dt){ if(!PORTAL.on||!PORTAL.grp)return; PORTAL.t+=dt;
+  if((PORTAL._draw=(PORTAL._draw||0)+dt)>0.045){ PORTAL._draw=0; _drawPortalTex(); }       // FLOWING shimmer at ~22fps
+  PORTAL.grp.quaternion.copy(camera.quaternion);                                          // billboard — always presents its face, never a flat card edge-on (reads 3D from anywhere)
+  if(PORTAL.closing!=null){ PORTAL.closing-=dt; const k=Math.max(0,PORTAL.closing/PORTAL.closeDur);   // THE SEAL: a bright in-rush flare, then the tear cinches to nothing and winks out
+    if(PORTAL.light) PORTAL.light.intensity=180+520*(1-k);                                // light SURGES as it swallows the last of reality…
+    if(PORTAL._flood) PORTAL._flood.intensity=120+400*(1-k);
+    if(PORTAL.closing<=0){ _disposePortal(); }
+    return; }
+  if(PORTAL.light) PORTAL.light.intensity=180+40*Math.sin(PORTAL.t*2.2); }
+function sndPortalClose(){ if(!AC)return;                                                 // A COSMIC SEAL — a long reverse-swell sucking inward, then a deep boom + shimmering aftertail
+  burst(master,0.55,1.2,180,0.6,4200,'highpass'); tone(master,{f:60,type:'sine',dur:1.2,vol:0.35,to:520,atk:1.0});   // the in-rush: everything drawn up into the tear
+  setTimeout(()=>{ if(!AC)return; burst(master,1.0,0.05,3200,0.5,700); burst(master,0.8,0.6,240,0.9,60,'lowpass');   // THE BOOM as it snaps shut
+    tone(master,{f:110,type:'sine',dur:1.6,vol:0.5,to:24,atk:0.005});
+    for(const f of [523,784,1046,1568]) tone(master,{f,type:'sine',dur:2.6,vol:0.10,atk:0.02,detune:Math.random()*10-5});   // a vast bell aftertail ringing into the silence
+    if(typeof playSample==='function')playSample('seraph_toll',null,0.8); }, 1200); }
+function closePortal(){ if(!PORTAL.on || PORTAL.closing!=null)return; PORTAL.closeDur=1.6; PORTAL.closing=1.6; sndPortalClose(); }   // animate shut (updatePortal disposes at 0)
+// ===== THE CERAPHIM'S FALL (Ben 07-20): the slain seraph keeps its FULL body and RAGDOLLS out of the sky with
+// collision physics — a dead weight tumbling down to crash on the ground, where it lies whole. =====
+let BOSSCORPSE=null;
+function _startBossCorpse(){ if(!wretch.group)return; const g=wretch.group;
+  // steal the whole live model — detach it from the wretch so a future spawn builds fresh (the seraph singleton
+  // rides the corpse until another boss is ever summoned; the normal wretch that respawns is a clean new rig).
+  BOSSCORPSE={ g, x:wretch.pos.x, y:wretch.pos.y, z:wretch.pos.z, vx:(Math.random()-0.5)*3, vy:2, vz:(Math.random()-0.5)*3,
+    sx:(Math.random()-0.5)*2.2, sy:(Math.random()-0.5)*1.4, sz:(Math.random()-0.5)*2.2, settled:false, scale:g.scale.x };
+  wretch.group=null; wretch.P=null; wretch._bossWings=null; wretch._eyeRig=null; wretch._bossCore=null; }   // hand-off complete
+function updateBossCorpse(dt){ const C=BOSSCORPSE; if(!C||C.settled)return; if(dt>0.06)dt=0.06;
+  C.vy-=22*dt; C.x+=C.vx*dt; C.y+=C.vy*dt; C.z+=C.vz*dt;                                   // gravity + drift
+  C.g.position.set(C.x,C.y,C.z); C.g.rotation.x+=C.sx*dt; C.g.rotation.y+=C.sy*dt; C.g.rotation.z+=C.sz*dt;   // tumble
+  const gy=groundYAt(C.x,C.z)+3.0*C.scale;                                                 // the big body rests with its mass above the floor
+  if(C.y<=gy && C.vy<0){ C.y=gy; C.g.position.y=gy; C.settled=true;                        // CRASH — it hits the earth and lies still
+    C.g.rotation.set(C.g.rotation.x*0.15+ (Math.random()-0.5)*0.3, C.g.rotation.y, C.g.rotation.z*0.15+ (Math.random()-0.5)*0.3);   // flops mostly flat
+    spawnParticles(C.x,gy,C.z,0x8a8578,60,7,2.4); spawnParticles(C.x,gy,C.z,0xf1e7d9,30,5,2.0);              // a great dust plume + a burst of holy light
+    if(AC){ burst(master,1.0,0.06,220,0.6,50,'lowpass'); tone(master,{f:70,type:'sine',dur:1.4,vol:0.5,to:26,atk:0.004}); }   // the HEAVY thud of a god hitting the ground
+    if(typeof playSample==='function')playSample('seraph_toll',{x:C.x,y:gy,z:C.z},1.0); } }
+function clearBossCorpse(){ if(!BOSSCORPSE)return; try{ scene.remove(BOSSCORPSE.g); }catch(e){} BOSSCORPSE=null; }
+function _disposePortal(){ PORTAL.on=false;
+  try{ if(PORTAL.grp){ scene.remove(PORTAL.grp); PORTAL.grp.traverse(o=>{ if(o.material&&o.material.dispose)o.material.dispose(); }); if(PORTAL.grp.children[0])PORTAL.grp.children[0].geometry.dispose(); } if(PORTAL.tex)PORTAL.tex.dispose(); }catch(e){}
+  PORTAL.grp=null; PORTAL.tex=null; PORTAL.light=null; PORTAL._flood=null; PORTAL.closing=null; }
 function bossCutscene(x,y,z,isSummoner){ if(_cine)return;
   const gy=groundYAt(x,z);
   // thin DOM layer: only the darkening veil + the compositor-thread white flash (the build-hitch hider) remain 2D
@@ -8215,8 +8364,12 @@ function bossCutscene(x,y,z,isSummoner){ if(_cine)return;
     }
     if(t<5.2) requestAnimationFrame(tick); else endBossCutscene(); })(); }
 function endBossCutscene(){ const c=_cine; if(!c)return; _cine=null;
-  try{ spawnParticles(c.x, c.gy+30, c.z, 0xffffff, 40, 8, 2.0); }catch(e){}              // the seal — the last light shatters off the seam
-  try{ if(c.grp){ scene.remove(c.grp); c.grp.traverse(o=>{ if(o.material&&o.material.dispose)o.material.dispose(); if(o.geometry&&o.geometry.dispose&&o.geometry!==c.grp.children[0].geometry)o.geometry.dispose(); }); c.grp.children[0].geometry.dispose(); c.tex.dispose(); } }catch(e){}
+  // THE PORTAL STAYS: hand the rip mesh to the persistent PORTAL — it hangs open, white+gold, the whole fight,
+  // and floods the world with a BIG white light. (Only closePortal() at the boss's death removes it.)
+  try{ if(c.grp){ PORTAL.on=true; PORTAL.grp=c.grp; PORTAL.tex=c.tex; PORTAL.ctx=c.ctx; PORTAL.cv=c.cv; PORTAL.sd=c.sd; PORTAL.x=c.x; PORTAL.y=c.gy+30; PORTAL.z=c.z; PORTAL.t=0; PORTAL.pos.set(c.x,c.gy+30,c.z);
+      if(c.ripLight){ c.ripLight.color.setRGB(1,1,1); c.ripLight.intensity=200; c.ripLight.distance=340; PORTAL.light=c.ripLight; }   // a huge white sun pouring out of the tear
+      const flood=new THREE.PointLight(0xffffff, 120, 220, 2); flood.position.set(0,0,6); c.grp.add(flood); PORTAL._flood=flood;
+      _drawPortalTex(); } }catch(e){}
   try{ if(typeof seraphFold==='function')seraphFold(null); if(wretch._park)wretch._park=false; }catch(e){}
   try{ c.wrap.remove(); c.st.remove(); }catch(e){} }
 function guestBossBuild(x,z){ if(wretch.boss)return;   // the owner's ticks may have raced us here — then the rig already exists and there is nothing to mask
@@ -8378,12 +8531,13 @@ function sndBeamImpact(x,y,z){ if(!AC)return; const p=panAt(x,y+0.5,z);
 // dense blanket — nearly unavoidable — sticking then detonating in a rolling wave. Instanced (one draw call).
 const _rakeFeathers=[]; const _RAKE_CAP=200; let _featherGeoC=null, _featherMatC=null, _stormMesh=null;
 const _rkM=new THREE.Matrix4(), _rkP=new THREE.Vector3(), _rkQ=new THREE.Quaternion(), _rkS=new THREE.Vector3(1,1,1), _rkUp=new THREE.Vector3(0,1,0), _rkHide=new THREE.Matrix4().makeScale(0,0,0);
-function _rakeAssets(){ if(_stormMesh)return; _featherGeoC=new THREE.BoxGeometry(0.16,0.04,2.2); _featherMatC=new THREE.MeshPhongMaterial({color:0x9a1616,emissive:0x5a0a0a,emissiveIntensity:0.6,shininess:30});
-  _stormMesh=new THREE.InstancedMesh(_featherGeoC,_featherMatC,_RAKE_CAP); _stormMesh.frustumCulled=false; _stormMesh.count=_RAKE_CAP; for(let i=0;i<_RAKE_CAP;i++)_stormMesh.setMatrixAt(i,_rkHide); _stormMesh.instanceMatrix.needsUpdate=true; scene.add(_stormMesh); }
-function _stormAround(cx,cz,oy,n){ for(let i=0;i<n && _rakeFeathers.length<_RAKE_CAP;i++){       // blanket a target: dense ring+fill, nearly no gaps
+function _rakeAssets(){ if(_stormMesh)return; _featherGeoC=new THREE.BoxGeometry(0.12,0.04,1.9);   // a thin SHARD
+  _featherMatC=new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:0.95,blending:THREE.AdditiveBlending,depthWrite:false});   // GLOWING WHITE (Ben 07-20) — unlit, additive
+  _stormMesh=new THREE.InstancedMesh(_featherGeoC,_featherMatC,_RAKE_CAP); _stormMesh.frustumCulled=false; _stormMesh.renderOrder=4; _stormMesh.count=_RAKE_CAP; for(let i=0;i<_RAKE_CAP;i++)_stormMesh.setMatrixAt(i,_rkHide); _stormMesh.instanceMatrix.needsUpdate=true; scene.add(_stormMesh); }
+function _stormAround(cx,cz,oy,n){ for(let i=0;i<n && _rakeFeathers.length<_RAKE_CAP;i++){       // blanket the target: a dense field of shards RAINING straight down, all PARALLEL
     const a=Math.random()*6.283, r=Math.sqrt(Math.random())*8.5, tx=cx+Math.cos(a)*r, tz=cz+Math.sin(a)*r, gy=groundYAt(tx,tz);
-    const fl=0.9+Math.random()*0.5, sx=wretch.pos.x+(Math.random()-0.5)*2, sz=wretch.pos.z+(Math.random()-0.5)*2;
-    _rakeFeathers.push({ idx:_rakeFeathers.length, x:sx,y:oy,z:sz, vx:(tx-sx)/fl, vy:(gy+0.4-oy)/fl+18*fl*0.5, vz:(tz-sz)/fl, stuck:-1, det:0.5+Math.random()*0.9, dead:false }); } }
+    const sy=gy+24+Math.random()*10;                                                             // spawn high, directly above the landing spot
+    _rakeFeathers.push({ idx:_rakeFeathers.length, x:tx,y:sy,z:tz, vx:0, vy:-(9+Math.random()*4), vz:0, stuck:-1, det:0.5+Math.random()*0.9, dead:false }); } }
 function bossWingStorm(){ _rakeAssets(); sndWingRake(); if(typeof seraphSay==='function')seraphSay(Math.random()<0.5?'rake1':'rake2');
   const oy=wretch.pos.y+3, N=50+((Math.random()*21)|0);                                          // 50-70 total, split across every player
   const targets=[{x:player.pos.x,z:player.pos.z}]; if(NET.on)for(const _pid in NET.peers){ const _pp=NET.peers[_pid]; if(_pp&&!_pp.dead)targets.push({x:_pp.x,z:_pp.z}); }
@@ -8393,7 +8547,7 @@ function updateRakeFeathers(dt){ if(!_stormMesh)return; let live=false;
   for(let k=_rakeFeathers.length-1;k>=0;k--){ const f=_rakeFeathers[k];
     if(f.stuck<0){ f.vy-=18*dt; f.x+=f.vx*dt; f.y+=f.vy*dt; f.z+=f.vz*dt;
       _rkP.set(f.x,f.y,f.z); _rkQ.setFromUnitVectors(_rkUp,_rkP2(f.vx,f.vy,f.vz)); _rkM.compose(_rkP,_rkQ,_rkS); _stormMesh.setMatrixAt(f.idx,_rkM);
-      const gy=groundYAt(f.x,f.z); if(f.y<=gy+0.3){ f.stuck=0; f.y=gy+0.3; f.qx=-1.2+Math.random()*0.3; f.qy=Math.random()*6.28; if(Math.random()<0.25)sndFeatherStick(f.x,f.y,f.z);
+      const gy=groundYAt(f.x,f.z); if(f.y<=gy+0.9){ f.stuck=0; f.y=gy+0.9; f.qx=Math.PI/2+(Math.random()-0.5)*0.12; f.qy=Math.random()*6.28; if(Math.random()<0.25)sndFeatherStick(f.x,f.y,f.z);   // embed STANDING — all vertical, parallel
         _rkP.set(f.x,f.y,f.z); _rkQ.setFromEuler(new THREE.Euler(f.qx,f.qy,0)); _rkM.compose(_rkP,_rkQ,_rkS); _stormMesh.setMatrixAt(f.idx,_rkM); } live=true; }
     else { f.stuck+=dt;
       if(f.stuck>=f.det){ if(Math.random()<0.3)sndFeatherDet(f.x,f.y,f.z,(f.idx%7),7); bossBlast(f.x,f.y,f.z,1.5); spawnParticles(f.x,f.y+0.5,f.z,0xffb040,10,3,1.0); spawnParticles(f.x,f.y+0.5,f.z,0xe8c070,5,2,0.8);
@@ -8438,49 +8592,76 @@ function _cloudTex(){ const S=128, cv=document.createElement('canvas'); cv.width
 // peel off like corroded paint in a harsh wind — a leading edge lifts, the strip curls back, tears free,
 // tumbles downwind, bleaches white and breaks apart — while the white void bleeds in behind. By the time
 // Stage III opens the world is ~half gone; the third life finishes stripping it and we enter the pure void.
-const PEEL={ on:false, p:0, target:0, rate:0.02, flakes:[], cap:56, wind:new THREE.Vector3(1,0,0.3),
-  prevFogC:null, prevFogD:0, prevBg:null, spawnAcc:0, mat:null, geo:null };
+const PEEL={ on:false, p:0, target:0, rate:0.02, flakes:[], cap:90, wind:new THREE.Vector3(1,0,0.3),
+  prevFogC:null, prevFogD:0, prevBg:null, spawnAcc:0, leafAcc:0, geoBase:null, geoYs:null, W:1.1, L:2.2, mats:null,
+  patch:null, patchN:0, PATCH_CAP:480 };
+const _peelHideM=new THREE.Matrix4().makeScale(0,0,0);
 function _peelTex(top){ const S=64, cv=document.createElement('canvas'); cv.width=cv.height=S; const c=cv.getContext('2d');
   c.fillStyle=top; c.fillRect(0,0,S,S*0.32); for(let k=0;k<80;k++){ c.fillStyle='rgba(0,0,0,'+(Math.random()*0.12).toFixed(2)+')'; c.fillRect(Math.random()*S,Math.random()*S*0.32,2,2); }
   c.fillStyle='#5a4326'; c.fillRect(0,S*0.32,S,S*0.68); for(let k=0;k<160;k++){ c.fillStyle=Math.random()<0.5?'rgba(40,26,12,0.5)':'rgba(120,92,54,0.4)'; c.fillRect(Math.random()*S,S*0.32+Math.random()*S*0.68,2,2+Math.random()*3); }
   const t=new THREE.CanvasTexture(cv); t.colorSpace=THREE.SRGBColorSpace; return t; }
-function _peelAssets(){ if(PEEL.geo)return; PEEL.geo=new THREE.PlaneGeometry(3.0,7.0,1,5);            // a segmented carpet-strip so it can visibly CURL
-  PEEL.geo.translate(0,3.5,0);                                                                        // pivot at the leading edge (curl/peel rotates about here)
-  PEEL.matGrass=new THREE.MeshLambertMaterial({map:_peelTex('#4f7a34'),side:THREE.DoubleSide}); PEEL.matSand=new THREE.MeshLambertMaterial({map:_peelTex('#cabb86'),side:THREE.DoubleSide}); PEEL.matStone=new THREE.MeshLambertMaterial({map:_peelTex('#8a8a90'),side:THREE.DoubleSide}); }
-function _peelSurfaceMat(x,z){ const gy=groundYAt(x,z), b=getBlock(Math.floor(x),gy,Math.floor(z)), n=(B[b]&&B[b].name)||''; return /sand|gravel/.test(n)?PEEL.matSand : /stone|cobble|rock/.test(n)?PEEL.matStone : PEEL.matGrass; }
-function beginPeel(target){ _peelAssets(); if(!PEEL.on){ PEEL.on=true; PEEL.p=0; PEEL.spawnAcc=0;
-    PEEL.prevFogC=scene.fog.color.clone(); PEEL.prevFogD=scene.fog.density; PEEL.prevBg=scene.background;
-    const a=Math.random()*6.283; PEEL.wind.set(Math.cos(a),0,Math.sin(a)); }
+function _peelAssets(){ if(PEEL.geoBase)return;
+  // a SMALL thin strip (~1/8 of a block deep, ~1 wide, ~2 long) along local +Y from the leading edge at y=0
+  const W=PEEL.W, L=PEEL.L, SEG=8; const g=new THREE.PlaneGeometry(W,L,1,SEG); g.translate(0,L/2,0);
+  const p=g.attributes.position, ys=new Float32Array(p.count); for(let i=0;i<p.count;i++)ys[i]=p.getY(i);   // store the length-param per vertex for the curl
+  PEEL.geoBase=g; PEEL.geoYs=ys; PEEL.matCache={};
+  PEEL.mats={ leaf:new THREE.MeshLambertMaterial({color:0x3f6a2a,side:THREE.DoubleSide}),
+    sky:new THREE.MeshBasicMaterial({color:0x2a3a66,side:THREE.DoubleSide,fog:false}) };   // the SKY peels too — deep-blue heaven-shards curling away
+  const pg=new THREE.PlaneGeometry(1.5,1.5); pg.rotateX(-Math.PI/2);                                        // the WHITE revealed under-ground, laid as flat patches where strips tear free
+  PEEL.patch=new THREE.InstancedMesh(pg, new THREE.MeshBasicMaterial({color:0xf7f3ec,fog:false}), PEEL.PATCH_CAP);
+  PEEL.patch.frustumCulled=false; PEEL.patch.count=PEEL.PATCH_CAP; PEEL.patch.renderOrder=-1;
+  for(let i=0;i<PEEL.PATCH_CAP;i++)PEEL.patch.setMatrixAt(i,_peelHideM); PEEL.patch.instanceMatrix.needsUpdate=true; scene.add(PEEL.patch); }
+// the strip wears the ACTUAL surface block's top face (real atlas tile), repeated so it reads as a row of BLOCK
+// SURFACES peeling off reality — not painted carpet (Ben 07-20).
+function _peelSurfaceMat(x,z){ const gy=groundYAt(x,z), b=getBlock(Math.floor(x),gy,Math.floor(z)), bd=B[b];
+  const tile=(bd&&bd.t&&bd.t[0])||(bd&&bd.tile)||'dirt'; let m=PEEL.matCache[tile];
+  if(!m){ const tx=(typeof tileTex==='function')?tileTex(tile, Math.max(1,Math.round(PEEL.L))):null;
+    m=new THREE.MeshLambertMaterial({map:tx||null, color:tx?0xffffff:0x6a5a3a, side:THREE.DoubleSide}); PEEL.matCache[tile]=m; }
+  return m; }
+const _peelM=new THREE.Matrix4(), _peelQI=new THREE.Quaternion(), _peelSc=new THREE.Vector3();
+function _bendFlake(f,curl){ const g=f.g.children[0].geometry, pos=g.attributes.position, ys=PEEL.geoYs, L=PEEL.L, Phi=curl*4.2;   // wrap the tail up and over the leading edge — a paint curl, not a flat tilt
+  if(Phi<0.02){ for(let i=0;i<pos.count;i++)pos.setXYZ(i,pos.getX(i),ys[i],0); }
+  else { const R=L/Phi; for(let i=0;i<pos.count;i++){ const s=ys[i],phi=s/R; pos.setXYZ(i,pos.getX(i),R*Math.sin(phi),R*(1-Math.cos(phi))); } }
+  pos.needsUpdate=true; }
+function _peelPatch(x,y,z){ const s=1.1+Math.random()*0.8; _peelSc.set(s,1,s); _peelQI.setFromAxisAngle(_rkUp,Math.random()*6.283); _peelM.compose(_rkP.set(x,y+0.03,z),_peelQI,_peelSc); PEEL.patch.setMatrixAt(PEEL.patchN%PEEL.PATCH_CAP,_peelM); PEEL.patchN++; PEEL.patch.instanceMatrix.needsUpdate=true; }
+function beginPeel(target){ _peelAssets(); if(!PEEL.on){ PEEL.on=true; PEEL.p=0; PEEL.spawnAcc=0; PEEL.leafAcc=0; PEEL.patchN=0;
+    for(let i=0;i<PEEL.PATCH_CAP;i++)PEEL.patch.setMatrixAt(i,_peelHideM); PEEL.patch.instanceMatrix.needsUpdate=true;
+    PEEL.prevFogC=scene.fog.color.clone(); PEEL.prevFogD=scene.fog.density; PEEL.prevBg=scene.background; }
   PEEL.target=Math.max(PEEL.target,target); }
-function _spawnFlake(){ if(PEEL.flakes.length>=PEEL.cap)return;
-  const a=Math.random()*6.283, r=6+Math.random()*Math.max(10, CFG.RENDER_DIST*CK*0.7*(0.4+PEEL.p));           // ring expands outward as the peel deepens
-  const x=player.pos.x+Math.cos(a)*r, z=player.pos.z+Math.sin(a)*r, gy=groundYAt(x,z); if(gy<=CFG.SEA-2)return;
-  const g=new THREE.Group(); const m=new THREE.Mesh(PEEL.geo,_peelSurfaceMat(x,z)); g.add(m);
-  g.position.set(x,gy+0.05,z); g.rotation.y=Math.random()*6.283; g.rotation.x=-Math.PI/2;                     // lying flat on the ground
-  scene.add(g); PEEL.flakes.push({g,m, t:0, peel:0, free:false, vx:0,vy:0,vz:0, wob:Math.random()*6.283, spin:new THREE.Vector3((Math.random()-0.5)*3,(Math.random()-0.5)*3,(Math.random()-0.5)*3), op:1}); }
+function _peelPortal(){ return PORTAL.on?PORTAL.pos:_rkP.set(player.pos.x,player.pos.y+40,player.pos.z); }   // everything flies HOME to the tear (fallback: straight up)
+function _spawnFlake(kind){ if(PEEL.flakes.length>=PEEL.cap)return; const leaf=kind==='leaf', sky=kind==='sky';
+  const a=Math.random()*6.283, r=5+Math.random()*Math.max(9, CFG.RENDER_DIST*CK*0.7*(0.35+PEEL.p));
+  const x=player.pos.x+Math.cos(a)*r, z=player.pos.z+Math.sin(a)*r, gy=groundYAt(x,z); if(!sky && gy<=CFG.SEA-2)return;
+  const clone=!(leaf||sky); const geo=clone?PEEL.geoBase.clone():PEEL.geoBase; const g=new THREE.Group();
+  const m=new THREE.Mesh(geo, leaf?PEEL.mats.leaf:sky?PEEL.mats.sky:_peelSurfaceMat(x,z));
+  const sc=leaf?(0.4+Math.random()*0.3):sky?(1.4+Math.random()*1.4):(0.7+Math.random()*0.6); g.scale.setScalar(sc); g.add(m);
+  const y=leaf?gy+1+Math.random()*4 : sky?(player.pos.y+38+Math.random()*55) : gy+0.04;
+  g.position.set(x,y,z); g.rotation.y=Math.random()*6.283; g.rotation.x=sky?(Math.PI/2):(-Math.PI/2);   // sky shards hang overhead (face down), ground strips lie flat
+  scene.add(g); PEEL.flakes.push({g,m,geo:clone?geo:null, t:0, peel:(leaf||sky)?1:0, free:!!(leaf||sky), leaf, sky, wob:Math.random()*6.283, spin:new THREE.Vector3((Math.random()-0.5)*4,(Math.random()-0.5)*4,(Math.random()-0.5)*4), op:1, gy});
+  if(!leaf&&!sky)_peelPatch(x,gy,z); }                                                                       // reveal the white the instant a ground strip lifts
 function updatePeel(dt){ if(!PEEL.on)return;
-  const inVoid=VOID.on;
-  if(!inVoid){ PEEL.p += clamp(PEEL.target-PEEL.p, -1, 1)*Math.min(1,dt*PEEL.rate*18);                        // ease toward the target fraction (frozen once the void owns the sky)
-    const w=clamp(PEEL.p,0,1); scene.fog.color.copy(PEEL.prevFogC).lerp(_VWHITE,w*0.96); scene.fog.density=PEEL.prevFogD+(0.020-PEEL.prevFogD)*w;   // bleach the world to white from the edges in
-    if(w>0.15) scene.background=_VWHITE;
-    PEEL.spawnAcc+=dt*(3+30*w); while(PEEL.spawnAcc>=1){ PEEL.spawnAcc-=1; _spawnFlake(); } }
-  else if(!PEEL.flakes.length){ PEEL.on=false; return; }                                                     // void open + all flakes flown → peel is done
-  const wind=PEEL.wind;
+  if(!VOID.on){ PEEL.p += clamp(PEEL.target-PEEL.p,-1,1)*Math.min(1,dt*PEEL.rate*18);
+    const w=clamp(PEEL.p,0,1); scene.fog.color.copy(PEEL.prevFogC).lerp(_VWHITE,w*0.85); scene.fog.density=PEEL.prevFogD+(0.014-PEEL.prevFogD)*w;
+    if(w>0.2) scene.background=_VWHITE;
+    PEEL.spawnAcc+=dt*(6+48*w); while(PEEL.spawnAcc>=1){ PEEL.spawnAcc-=1; _spawnFlake('ground'); }           // MANY small ground strips
+    PEEL.leafAcc+=dt*(4+10*w); while(PEEL.leafAcc>=1){ PEEL.leafAcc-=1; _spawnFlake('leaf'); }                // leaves torn loose, streaming home
+    PEEL.skyAcc=(PEEL.skyAcc||0)+dt*(3+16*w); while(PEEL.skyAcc>=1){ PEEL.skyAcc-=1; _spawnFlake('sky'); } }  // the SKY peels too — heaven-shards curl off overhead (Ben 07-20)
+  else if(!PEEL.flakes.length){ PEEL.on=false; return; }
+  const P=_peelPortal();
   for(let k=PEEL.flakes.length-1;k>=0;k--){ const f=PEEL.flakes[k]; f.t+=dt;
-    if(!f.free){ f.peel=Math.min(1,f.peel+dt*0.7);                                                            // CURL: the strip rears back off its leading edge
-      f.g.rotation.x=-Math.PI/2 + f.peel*2.6; f.g.position.y+=dt*0.4*f.peel;
-      if(f.peel>=1){ f.free=true; f.vx=wind.x*(3+Math.random()*4); f.vz=wind.z*(3+Math.random()*4); f.vy=2+Math.random()*3; if(Math.random()<0.3&&AC){ const p=panAt(f.g.position.x,f.g.position.y,f.g.position.z); burst(p,0.25,0.3,600,0.6,180,'lowpass'); } } }
-    else { f.vy-=2.4*dt; f.wob+=dt*6; f.g.position.x+=(f.vx+Math.sin(f.wob)*2)*dt; f.g.position.y+=f.vy*dt; f.g.position.z+=(f.vz+Math.cos(f.wob*0.8)*2)*dt;   // TUMBLE downwind, fluttering
+    if(!f.free){ f.peel=Math.min(1,f.peel+dt*0.8); _bendFlake(f,f.peel); f.g.position.y+=dt*0.25*f.peel;      // CURL up like paint (real geometry roll)
+      if(f.peel>=1){ f.free=true; if(Math.random()<0.25&&AC){ const p=panAt(f.g.position.x,f.g.position.y,f.g.position.z); burst(p,0.2,0.3,600,0.6,180,'lowpass'); } } }
+    else { const px=f.g.position, dx=P.x-px.x, dy=P.y-px.y, dz=P.z-px.z, d=Math.hypot(dx,dy,dz)||1;          // the WIND takes it home to the portal
+      const pull=(6+22*(1-Math.min(1,d/60)))*dt; f.wob+=dt*7;
+      px.x+=dx/d*pull+Math.sin(f.wob)*1.2*dt; px.y+=dy/d*pull*0.9+0.6*dt; px.z+=dz/d*pull+Math.cos(f.wob*0.8)*1.2*dt;
       f.g.rotation.x+=f.spin.x*dt; f.g.rotation.y+=f.spin.y*dt; f.g.rotation.z+=f.spin.z*dt;
-      f.g.scale.multiplyScalar(1-dt*0.35); f.op-=dt*0.5;                                                      // shrink + bleach to white then gone
-      if(f.m.material!==_peelWhiteMat && f.op<0.6){ f.m.material=_peelWhiteMat; }
-      if(f.op<=0 || f.g.position.y>groundYAt(f.g.position.x,f.g.position.z)+40){ spawnParticles(f.g.position.x,f.g.position.y,f.g.position.z,0xffffff,4,2,0.6); scene.remove(f.g); PEEL.flakes.splice(k,1); } } }
-  if(PEEL.p>=0.995 && !VOID.on) enterVoid();                                                                 // the last of the skin is gone → the pure void
-}
-const _VWHITE=new THREE.Color(0xf5f1ea), _peelWhiteMat=new THREE.MeshBasicMaterial({color:0xffffff,side:THREE.DoubleSide,transparent:true,opacity:0.9,fog:false});
-function endPeel(){ if(!PEEL.on)return; PEEL.on=false; PEEL.p=0; PEEL.target=0;
-  for(const f of PEEL.flakes){ try{ scene.remove(f.g); }catch(e){} } PEEL.flakes.length=0;
-  if(!VOID.on){ if(PEEL.prevFogC)scene.fog.color.copy(PEEL.prevFogC); scene.fog.density=PEEL.prevFogD; if(PEEL.prevBg)scene.background=PEEL.prevBg; }   // if the void never opened (boss died mid-peel), restore the sky
+      if(d<6){ if(!f.leaf)spawnParticles(px.x,px.y,px.z,0xffffff,3,2,0.5); scene.remove(f.g); if(f.geo&&f.geo!==PEEL.geoBase)f.geo.dispose(); PEEL.flakes.splice(k,1); } } }
+  if(PEEL.p>=0.995 && !VOID.on) enterVoid(); }
+const _VWHITE=new THREE.Color(0xf5f1ea);
+function endPeel(){ if(!PEEL.on){ if(PEEL.patch){ for(let i=0;i<PEEL.PATCH_CAP;i++)PEEL.patch.setMatrixAt(i,_peelHideM); PEEL.patch.instanceMatrix.needsUpdate=true; } return; } PEEL.on=false; PEEL.p=0; PEEL.target=0;
+  for(const f of PEEL.flakes){ try{ scene.remove(f.g); if(f.geo&&f.geo!==PEEL.geoBase)f.geo.dispose(); }catch(e){} } PEEL.flakes.length=0;
+  if(PEEL.patch){ for(let i=0;i<PEEL.PATCH_CAP;i++)PEEL.patch.setMatrixAt(i,_peelHideM); PEEL.patch.instanceMatrix.needsUpdate=true; }
+  if(!VOID.on){ if(PEEL.prevFogC)scene.fog.color.copy(PEEL.prevFogC); scene.fog.density=PEEL.prevFogD; if(PEEL.prevBg)scene.background=PEEL.prevBg; }
   PEEL.prevFogC=null; PEEL.prevBg=null; }
 function enterVoid(){ if(VOID.on)return; VOID.on=true; VOID.center.copy(player.pos);
   VOID.prev={ bg:scene.background, fogCol:scene.fog.color.clone(), fogD:scene.fog.density,
@@ -8576,9 +8757,8 @@ function updateVoid(dt){ if(!VOID.on){ if(player.bound)_voidUnbind(); return; }
     U.uR2.value.set(1,0,0, 0,Math.cos(_r2),Math.sin(_r2), 0,-Math.sin(_r2),Math.cos(_r2));
     renderer.setRenderTarget(VOID.rt); renderer.render(VOID.fscene,VOID.fcam); renderer.setRenderTarget(null);
     scene.background=VOID.rt.texture; }
-  // chain cadence + flight + bind
-  VOID.chainCd=(VOID.chainCd==null?6:VOID.chainCd)-dt;
-  if(VOID.chainCd<=0 && !VOID.chain && !player.bound){ VOID.chainCd=9+Math.random()*3; voidChainFire(); }
+  // chain cadence + flight + bind — DISABLED for now (Ben 07-20): the gold chains are shelved. voidChainFire()
+  // and the whole bind system remain intact below for when we bring them back.
   const C=VOID.chain;
   if(C){ C.t+=dt;
     const u=C.hit?1:Math.min(1,C.t/0.35), tp=_chP.set(player.pos.x,player.pos.y+1.2,player.pos.z);
@@ -8608,10 +8788,10 @@ function updateVoid(dt){ if(!VOID.on){ if(player.bound)_voidUnbind(); return; }
 //   I  THE HERALD   — the measured fight: slow wheels, ~15s beam cadence
 //   II THE ZEALOT   — faster, hungrier: swoops doubled, beam tracks harder, shorter gaps
 //   III WILL-NOT-DIE — relentless: near-continuous fire, low brutal passes, the eye never sleeps
-const BOSS_FIGHT=[
-  {cd:10.5, warn:1.5, fire:3.0, trk:1.0,  spd:1.0,  swoopP:0.12, swoopAlt:18, blast:3,   dmg:4, flareFloor:0},
-  {cd:8.0,  warn:1.0, fire:3.8, trk:1.6,  spd:1.35, swoopP:0.34, swoopAlt:13, blast:4,   dmg:6, flareFloor:0.15},   // ZEALOT (Ben 07-20): beam ~every 8s, faster/lower, tracks hard, bigger craters — a real wall of danger
-  {cd:4.5,  warn:0.8, fire:4.2, trk:2.0,  spd:1.5,  swoopP:0.45, swoopAlt:9,  blast:4,   dmg:6, flareFloor:0.35},
+const BOSS_FIGHT=[   // flareFloor 0 everywhere (Ben 07-20): between lasers the central eye is a NORMAL eye — it only ignites to fire
+  {cd:10.5, warn:1.5, fire:3.0, trk:1.0,   spd:1.0,  swoopP:0.12, swoopAlt:18, blast:3,   dmg:4, flareFloor:0},
+  {cd:8.0,  warn:1.0, fire:3.8, trk:1.05,  spd:1.35, swoopP:0.34, swoopAlt:13, blast:4,   dmg:6, flareFloor:0},   // ZEALOT: beam ~every 8s + storm; tracking stage-1 gentle, only 5% faster (dodge stays fair)
+  {cd:4.5,  warn:0.8, fire:4.2, trk:1.05,  spd:1.5,  swoopP:0.45, swoopAlt:9,  blast:4,   dmg:6, flareFloor:0},   // same gentle tracking on the final life
 ];
 const _bf=()=>BOSS_FIGHT[Math.min(wretch._bossPhase||1,3)-1];
 function bossUpdate(dt){ wretch.phase+=dt*1.4; const F=_bf();
@@ -8662,7 +8842,7 @@ function bossUpdate(dt){ wretch.phase+=dt*1.4; const F=_bf();
       if(NET.on)for(const _pid in NET.peers){ const _pp=NET.peers[_pid]; if(_pp && Math.hypot(_ax-_pp.x,_az-_pp.z)<_br) netSend({t:'dmg',to:+_pid,v:F.dmg,c:'the seraph bathes you in searing light'}); } }   // beam burns whichever players stand in it
     if(wretch._laserT<=0){ wretch._laserState=null; hideBossRing(); hideBossBeam(); wretch._laserCd=F.cd+Math.random()*1.5;
       if(wretch._bossPhase===2){ wretch._cycleN=(wretch._cycleN||0)+1;                                            // the zealot's rhythm: every 3rd beam cycle ends in PRAYER
-        if(wretch._cycleN%3===0){ wretch._prayT=4.6; sndPrayer(); if(typeof seraphFold==='function')seraphFold(0.75); if(typeof seraphSay==='function')seraphSay(Math.random()<0.5?'prayer1':'prayer2'); } } } }   // life I ~15s start-to-start → life III barely pauses
+        if(wretch._cycleN%3===0){ wretch._prayT=4.6; sndPrayer(); if(typeof seraphSay==='function')seraphSay(Math.random()<0.5?'prayer1':'prayer2'); } } } }   // PRAYER pause (no wing-fold — Ben 07-20: the fold read wrong); life I ~15s start-to-start → life III barely pauses
   else { wretch._eyeFlare=Math.max(F.flareFloor,(wretch._eyeFlare||0)-dt*2); wretch._laserCd=(wretch._laserCd==null?6:wretch._laserCd)-dt;   // on the final life the eye NEVER fully sleeps
     if(wretch._laserCd<=0 && dist<130 && !(wretch._prayT>0)){ wretch._laserState='warn'; wretch._laserT=F.warn; wretch._laserAim={x:gp.x,y:gp.y,z:gp.z};
       if(wretch._bossPhase===2){ const pv=Math.hypot(player.vel.x,player.vel.z), lead=pv>1.2;                     // SWEEP LOCK: a line through where you are, aimed down where you're GOING

@@ -44,16 +44,7 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     v = await page.evaluate(`__hc.void3()`);
     ck('fractal raymarch is the sky (RT background)', v.fractal===true && v.bgIsRT===true && v.morph>0.4, v);
     await page.screenshot({ path: path.join(OUT,'void-fractal.png') });
-    // force a chain -> bind -> mash with the tease -> release
-    await page.evaluate(`__hc.void3({chainNow:true})`);
-    await sleep(1600);
-    v = await page.evaluate(`__hc.void3()`);
-    ck('chain fired and BOUND the player', v.chain===true && v.bound===true, v);
-    await page.screenshot({ path: path.join(OUT,'void-chain.png') });
-    await page.evaluate(`__hc.void3({meter:0.78})`);
-    for(let i=0;i<60 && (await page.evaluate(`__hc.void3()`)).bound;i++){ await page.evaluate(`__hc.set({_mash:4})`); await sleep(150); }
-    v = await page.evaluate(`__hc.void3()`);
-    ck('mash escaped the bind (through the tease)', v.bound===false && v.teased===true, v);
+    // (chains are shelved for now — no bind mechanic in the void this build)
     // on the FINAL life, death exits the void and restores the world (real hurtWretch->killWretch->exitVoid path)
     await page.evaluate(`__hc.killBoss()`);
     await sleep(800); v = await page.evaluate(`__hc.void3()`);
