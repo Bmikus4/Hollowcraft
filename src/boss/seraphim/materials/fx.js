@@ -99,8 +99,8 @@ export function createFxMaterial() {
   return new THREE.ShaderMaterial({
     uniforms: {
       uTime:   { value: 0 },
-      uCore:   { value: new THREE.Color(0xfff0c4) },   // bright warm-gold core (Ben 07-21)
-      uSheath: { value: new THREE.Color(0xffc233) },   // deep gold glow sheath
+      uCore:   { value: new THREE.Color(0xffffff) },   // default WHITE-hot core (stage 2 tints it gold via seraphBeamGold)
+      uSheath: { value: new THREE.Color(0x9fd8ff) },   // default cold sheath
       uEmber:  { value: new THREE.Color(0xd9902f) },
     },
     vertexShader: FX_VERT,

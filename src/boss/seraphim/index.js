@@ -140,8 +140,11 @@ function buildEyeBand2(opts = {}) {
     for (let a = 1; a <= 3; a++) { const s = sizeOf(a); x += (prev + s) * gap; prev = s;
       // FIX-5 (user spec 07-20): the OUTER TWO eyes each side (|i|>=2) ride ON the mid wing row — same x/y
       // FIX-5b (Ben 07-20): the outer two eyes each side (|i|>=2) were buried BEHIND the mid wing feathers.
-      // Push them far forward (well past the feather mass ~1.7 deep) and up onto the wing so they read clearly.
-      layout.push({ i: sign * a, x: sign * x, y: -0.024 * x * x + (a >= 2 ? 0.55 : 0), z: 0.03 * x - 0.05 + (a >= 2 ? 2.9 : 0), size: s }); }
+      // FIX-5c (Ben 07-21): ONE outer eye still read as "missing" — buried in the plumage on one side. Push the
+      // outer eyes MORE proud (z 2.9→3.4) + higher (y +0.55→+0.78) and give the tiny outermost (a===3) an extra
+      // forward/up bias so BOTH sides' flanks clear the feather mass and all seven read. Symmetric → no asymmetry.
+      const proudZ = a >= 2 ? (a === 3 ? 3.85 : 3.4) : 0, proudY = a >= 2 ? (a === 3 ? 0.95 : 0.78) : 0;
+      layout.push({ i: sign * a, x: sign * x, y: -0.024 * x * x + proudY, z: 0.03 * x - 0.05 + proudZ, size: s }); }
   }
   layout.sort((p, q) => p.i - q.i);                 // -3..3, central at centre
   const N = layout.length;                          // 7
@@ -561,10 +564,8 @@ export class SeraphimModel {
     }
     this._wingBaseTris = wingTris;
 
-    // ---- core feather mass --------------------------------------------------
-    // HEAVENLY (Ben 07-21): the core mass was a solid GOLD/rust slab reading as a weird gold layer. It's now a soft
-    // ivory-WHITE self-glowing mass, and a light bloom sits over the whole seraph so it reads as radiant, not fleshy.
-    const coreMat = new THREE.MeshStandardMaterial({ color: 0xf2eee5, roughness: 0.86, metalness: 0.0, emissive: 0xf5f1e9, emissiveIntensity: 0.30 });
+    // ---- core feather mass (the INNER FEATHERS — keep them; they were wrongly gutted earlier) ----------------
+    const coreMat = buildBodyMaterial({ atlas: this.atlas, renderer: this.renderer, emberStrength: 0.08, sssStrength: 0.28 });   // low ember (0.3→0.08) so the inner feathers read as feathers, NOT a solid gold slab
     coreMat.userData.seraphRole = 'body';
     this._bodyMats.push(coreMat);
     this._coreMat = coreMat;
@@ -573,14 +574,6 @@ export class SeraphimModel {
     this.coreMass.position.set(0, 0, H * 0.02);   // FIX-3 (user spec 07-20): the mantle SEED plane sits AT the central eye's midpoint (its fill layers still step backward), matching the wing roots — one feather depth, the eyes lead it
     this.core.add(this.coreMass);
     this._coreTris = cm.tris;
-    { // soft HEAVENLY light bloom over the seraph (additive, faint) — replaces the old solid-gold read with a glow
-      const S = 64, cv = document.createElement('canvas'); cv.width = cv.height = S; const c = cv.getContext('2d');
-      const g = c.createRadialGradient(S/2, S/2, 0, S/2, S/2, S/2); g.addColorStop(0, 'rgba(255,252,244,0.95)'); g.addColorStop(0.5, 'rgba(255,248,232,0.35)'); g.addColorStop(1, 'rgba(255,248,232,0)');
-      c.fillStyle = g; c.fillRect(0, 0, S, S);
-      const tex = new THREE.CanvasTexture(cv);
-      const bloom = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, color: 0xfff4e2, transparent: true, opacity: 0.55, depthWrite: false, blending: THREE.AdditiveBlending, fog: false }));
-      bloom.scale.setScalar(H * 1.6); bloom.position.set(0, H * 0.12, H * 0.04); this.core.add(bloom); this._coreBloom = bloom;
-    }
 
     // ---- eye band (5 dc, central folded in) ---------------------------------
     this.eyeBand = buildEyeBand2({});

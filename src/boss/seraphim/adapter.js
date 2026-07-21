@@ -129,6 +129,15 @@ export function seraphAnimate(dt, opts = {}) {
   // bossUpdate. See setLaserCharge contract in index.js.
   _model.setLaserCharge((wretch && wretch._eyeFlare) || 0);
 
+  // tick timed eye-seals (shoot-to-close): hold the lid shut while a timer runs; reopen when it lapses (unless permanently wounded)
+  if (_closeTimers.size && _model.eyeBand) {
+    for (const [i, t] of _closeTimers) {
+      const nt = t - (dt || 0.016);
+      if (nt <= 0) { _closeTimers.delete(i); const e = _model.eyeBand.eyes.find(x => x.l.i === i); if (e && !_wounds.has(i)) e.deathClose = 0; }
+      else { _closeTimers.set(i, nt); const e = _model.eyeBand.eyes.find(x => x.l.i === i); if (e) e.deathClose = 1; }
+    }
+  }
+
   _model.update(dt, _elapsed);
 }
 
@@ -144,6 +153,35 @@ export function seraphHideBeam() {
   if (_beam) _beam.setVisible(false);
 }
 
+// GOLD beam is a STAGE 2 thing only (Ben 07-21): tint the shared fx material gold in stage 2, white-hot otherwise.
+export function seraphBeamGold(on) {
+  if (!_beam || !_beam.material || !_beam.material.uniforms) return;
+  const u = _beam.material.uniforms;
+  if (on) { u.uCore.value.setHex(0xfff0c4); u.uSheath.value.setHex(0xffc233); }
+  else    { u.uCore.value.setHex(0xffffff); u.uSheath.value.setHex(0x9fd8ff); }
+}
+
+// HEAVENLY BLOOM (Ben 07-21): a soft additive halo around the whole seraph — STAGE 3 ONLY (the game gates it on
+// VOID.on). Kept gentle + behind the body (renderOrder −1, modest opacity) so it NEVER hides the fractal geometry.
+let _bloom = null;
+function _bloomTex() {
+  const S = 256, cv = document.createElement('canvas'); cv.width = cv.height = S;
+  const c = cv.getContext('2d'); const g = c.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+  g.addColorStop(0, 'rgba(255,250,232,0.9)'); g.addColorStop(0.30, 'rgba(255,240,200,0.4)');
+  g.addColorStop(0.62, 'rgba(255,232,180,0.12)'); g.addColorStop(1, 'rgba(255,232,180,0)');
+  c.fillStyle = g; c.beginPath(); c.arc(S / 2, S / 2, S / 2, 0, 6.283); c.fill();
+  const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+export function seraphBloom(on) {
+  if (!_model) return;
+  if (on && !_bloom) {
+    _bloom = new THREE.Sprite(new THREE.SpriteMaterial({ map: _bloomTex(), color: 0xfff2cc, transparent: true, opacity: 0.36, depthWrite: false, depthTest: true, blending: THREE.AdditiveBlending, fog: false, toneMapped: false }));
+    _bloom.scale.setScalar(17); _bloom.position.set(0, 1.2, -1.2); _bloom.renderOrder = -1;   // behind the body → haloes the wing disc, never occludes the fractal
+    _model.object3d.add(_bloom);
+  }
+  if (_bloom) _bloom.visible = !!on;
+}
+
 // Wing-fold override for the emergence choreography (null releases to the rig's preset).
 export function seraphFold(v) { if (_model) _model._foldOverride = (v == null ? null : v); }
 
@@ -157,6 +195,15 @@ export function seraphCorpseMode() {
   try { if (_model.setLaserCharge) _model.setLaserCharge(0); } catch (e) {}
   try { if (_model.fxRoot) _model.fxRoot.visible = false; } catch (e) {}
   try { if (_beam) _beam.setVisible(false); } catch (e) {}
+  try { if (_bloom) _bloom.visible = false; } catch (e) {}   // no heavenly bloom on the corpse (and it would inflate the ragdoll bbox)
+  // NEUTRALIZE THE LOOK-AT TILT (Ben 07-21): the seraph's visual facing is driven by object3d.lookAt(camera) each
+  // frame — that child rotation defeated the ragdoll's flat-lay (the corpse "floated"). Reset it to identity so the
+  // ragdoll's quaternion on wretch.group is the SOLE orientation: the wing-disc (feathers face +Z) then lays truly flat.
+  try { _model.object3d.quaternion.identity(); _model.object3d.updateMatrix(); } catch (e) {}
+  // FOLD THE WINGS SHUT (Ben 07-21): a slain god CRUMPLES — folding collapses the ~39m wingspan so the ragdoll's
+  // bounding box shrinks further. setFold is instant per update(); a few pumps bake the folded pose into the instance matrices.
+  try { if (_model.setFold) { _model.setFold(1); for (let k = 0; k < 3; k++) _model.update(0.05, _elapsed); } } catch (e) {}
+  try { _model.object3d.updateWorldMatrix(true, true); } catch (e) {}
 }
 
 // BLOODY EYE HOLES (user spec 07-20): when a chain tears out of eye i (layout index, never 0/central),
@@ -227,9 +274,37 @@ export function seraphEyeSpheres() {
   const out = [];
   for (const e of _model.eyeBand.eyes) {
     _ep.copy(e.pivot.position).applyMatrix4(g.matrixWorld);
-    out.push({ x: _ep.x, y: _ep.y, z: _ep.z, r: e.l.size * ws, central: e.isC });
+    out.push({ x: _ep.x, y: _ep.y, z: _ep.z, r: e.l.size * ws, central: e.isC, i: e.l.i, closed: (_closeTimers.get(e.l.i) || 0) > 0 || _wounds.has(e.l.i) });
   }
   return out;
+}
+
+// SHOOT-TO-CLOSE (Ben 07-21): a shot to any non-central eye seals it for `secs` seconds. In stage 3 a sealed
+// eye can't fire its burst laser (the game filters seraphEyeSpheres by `.closed`). Timers tick in seraphAnimate.
+const _closeTimers = new Map();   // layout index i -> seconds remaining
+export function seraphEyeClose(i, secs) {
+  if (!_model || !_model.eyeBand || i === 0) return false;     // central eye never seals
+  const e = _model.eyeBand.eyes.find(x => x.l.i === i && !x.isC);
+  if (!e) return false;
+  _closeTimers.set(i, Math.max(_closeTimers.get(i) || 0, secs || 90));
+  e.deathClose = 1;                                            // lids clamp shut immediately (visible in all stages)
+  return true;
+}
+export function seraphEyesReset() { _closeTimers.clear(); }    // fresh fight → all timed seals cleared
+
+// BODY-ONLY CLAMP BOX (Ben 07-21): the ragdoll's no-sink clamp uses the FULL bounding box, which for the seraph is
+// dominated by the ~39m wingspan → it held the corpse dozens of metres up ("floating in the sky"). This returns the
+// COMPACT eye-band (the face/body) box so the corpse can rest its body on the ground while the wings splay around it.
+// Called by pushRagdoll while the corpse mesh is at origin/identity → the returned world box IS the mesh-local box.
+const _bodyBox = new THREE.Box3();
+export function seraphBodyBox() {
+  if (!_model || !_model.eyeBand || !_model.eyeBand.group) return null;
+  try {
+    _model.object3d.updateWorldMatrix(true, true);
+    _bodyBox.makeEmpty(); _bodyBox.expandByObject(_model.eyeBand.group);
+    if (_bodyBox.isEmpty()) return null;
+    return { min: { x: _bodyBox.min.x, y: _bodyBox.min.y, z: _bodyBox.min.z }, max: { x: _bodyBox.max.x, y: _bodyBox.max.y, z: _bodyBox.max.z } };
+  } catch (e) { return null; }
 }
 
 // PREWARM — kill the first-summon load hitch. seraphOn() builds the whole model
