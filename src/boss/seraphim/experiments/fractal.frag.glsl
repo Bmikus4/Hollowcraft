@@ -58,7 +58,7 @@ uniform vec3  uEmber;
 uniform vec3  uFog;
 uniform float uTime;
 
-const int   HARD_MAX  = 128;   // >= any uMaxSteps
+const int   HARD_MAX  = 96;    // >= any uMaxSteps (Ben 07-21 perf: was 128 — the real march cap; the fog-washed gold field doesn't need more)
 const int   FOLD_MAX  = 16;    // >= any uIter / uBulbIter
 const float PI2       = 6.28318530718;
 
@@ -195,7 +195,7 @@ vec3 calcNormal(vec3 p) {
 // DE-cone soft shadow
 float softShadow(vec3 ro, vec3 rd) {
   float res = 1.0, t = 0.02;
-  for (int i = 0; i < 20; i++) {
+  for (int i = 0; i < 12; i++) {   // Ben 07-21 perf: 20→12 — soft shadows are barely visible on the fog-washed gold field
     float h = mapDist(ro + rd * t);
     res = min(res, uShadowK * h / t);
     t += clamp(h, 0.01, 0.30);
