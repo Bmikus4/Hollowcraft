@@ -245,6 +245,15 @@ export function seraphCorpseMode() {
   // frame — that child rotation defeated the ragdoll's flat-lay (the corpse "floated"). Reset it to identity so the
   // ragdoll's quaternion on wretch.group is the SOLE orientation: the wing-disc (feathers face +Z) then lays truly flat.
   try { _model.object3d.quaternion.identity(); _model.object3d.updateMatrix(); } catch (e) {}
+  // OUTER WING-EYES → TUCK INTO THE WINGS (Ben 07-21): the live boss shoves the outer eyes far PROUD out onto the
+  // wing tips; frozen on the ragdoll they read as detached, floating off the face. Pull them back onto (and slightly
+  // into) the wing plane — the same inset the stone trophy uses to un-float its eyes — so the outer two per side sit
+  // INSIDE the wings instead of hanging in the air.
+  try {
+    if (_model._wingEyes) for (const we of _model._wingEyes) { const l = we.e.l; we.z0 = 0.03 * l.x - 0.09; we.y0 = -0.024 * l.x * l.x; if (we.e.pivot) we.e.pivot.position.set(l.x, we.y0, we.z0); }
+    if (_model.eyeBand && _model.eyeBand.eyes) for (const e of _model.eyeBand.eyes) { if (Math.abs(e.l.i) >= 2 && e.pivot) e.pivot.position.set(e.l.x, -0.024 * e.l.x * e.l.x, 0.03 * e.l.x - 0.09); }
+    if (_model.eyeBand && _model.eyeBand.refresh) _model.eyeBand.refresh();
+  } catch (e) {}
   // DEFAULT WING POSE (Ben 07-21): the slain god settles into its NATURAL/default wing pose — NOT fanned wide and
   // NOT clamped shut. Release the fold override back to the rig preset, still the beat, and pump a few updates so the
   // default pose fully bakes into the instance matrices (the old ONE-pump setFold(1) froze the wings mid-fold, which

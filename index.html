@@ -1732,9 +1732,9 @@ const GodrayShader={
 };
 // final grade: vivid saturation + contrast + film grain + vignette (runs in sRGB after OutputPass)
 const GradeShader={
-  uniforms:{ tDiffuse:{value:null}, uTime:{value:0}, uSat:{value:1.3}, uGrain:{value:0.06}, uDark:{value:0}, uResolution:{value:new THREE.Vector2(innerWidth,innerHeight)}, uFXAA:{value:CFG.quality==='Low'?0:1} },   // grain +20% (Ben 07-21): 0.05→0.06
+  uniforms:{ tDiffuse:{value:null}, uTime:{value:0}, uSat:{value:1.3}, uGrain:{value:0.06}, uDark:{value:0}, uResolution:{value:new THREE.Vector2(innerWidth,innerHeight)}, uFXAA:{value:CFG.quality==='Low'?0:1}, uWhiteVoid:{value:0} },   // grain +20% (Ben 07-21): 0.05→0.06; uWhiteVoid = stage-3 pure-white glow override
   vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
-  fragmentShader:`varying vec2 vUv; uniform sampler2D tDiffuse; uniform float uTime,uSat,uGrain,uDark,uFXAA; uniform vec2 uResolution;
+  fragmentShader:`varying vec2 vUv; uniform sampler2D tDiffuse; uniform float uTime,uSat,uGrain,uDark,uFXAA,uWhiteVoid; uniform vec2 uResolution;
     float h21(vec2 p){ return fract(sin(dot(p,vec2(12.9898,78.233)))*43758.5453); }
     // FXAA 3.11 (console variant) — cheap edge AA on the final sRGB image; luma-driven, 5+4 taps
     vec3 fxaa(sampler2D tex, vec2 uv, vec2 res){
@@ -1757,9 +1757,11 @@ const GradeShader={
     void main(){ vec3 c = uFXAA>0.5 ? fxaa(tDiffuse,vUv,uResolution) : texture2D(tDiffuse,vUv).rgb;
       float l=dot(c,vec3(0.299,0.587,0.114)); c=mix(vec3(l),c,uSat);       // vivid
       c=mix(c, c*c*(3.0-2.0*c), 0.18);                                     // gentle S-curve contrast that ANCHORS black at 0 (the old (c-0.5)*1.07+0.5 mapped the bottom ~3% to negative → clamped to pure black → the hard black ring in the torch falloff). Now light fades smoothly to dark.
+      if(uWhiteVoid>0.001){ float _lum=dot(c,vec3(0.299,0.587,0.114)); float _mx=max(c.r,max(c.g,c.b)),_mn=min(c.r,min(c.g,c.b)); float _sat=_mx>0.001?(_mx-_mn)/_mx:0.0;
+        float _bg=smoothstep(0.5,0.9,_lum)*(1.0-smoothstep(0.05,0.2,_sat)); c=mix(c, vec3(1.0), uWhiteVoid*_bg); }   // VOID WHITEOUT (Ben 07-21): bright + near-grey BACKGROUND pixels → PURE white glow; the coloured/darker ceraphim + shaded fractal creases stay intact (post-AgX, so it's true 1.0 white)
       float g=h21(vUv*vec2(1900.0,1070.0)+fract(uTime)*97.0)-0.5; float gl=dot(c,vec3(0.299,0.587,0.114));
       c+=g*uGrain*(1.0+0.2*uDark)*smoothstep(0.015,0.16,gl);   // film grain — FADED OUT toward black so it never punches near-dark falloff pixels to pure black (that was the "black pixels" in the torch's outer glow)
-      float v=smoothstep(0.88,0.24,distance(vUv,vec2(0.5))); c*=mix(0.52-0.08*uDark,1.0,v);       // always-on vignette — deep, smooth edge darkening (stronger at dusk/night), shader-side so it never bands
+      float v=smoothstep(0.88,0.24,distance(vUv,vec2(0.5))); v=mix(v,1.0,uWhiteVoid); c*=mix(0.52-0.08*uDark,1.0,v);       // always-on vignette — deep, smooth edge darkening (stronger at dusk/night), shader-side so it never bands; LIFTED in the void so the white reaches the frame edges
       // OUTPUT DITHER (TPDF, ±1 LSB): breaks up 8-bit quantization in dark gradients so the torch falloff fades SMOOTHLY instead of banding into black-speckle pixels
       float d1=fract(sin(dot(gl_FragCoord.xy,vec2(12.9898,78.233))+uTime)*43758.5453);
       float d2=fract(sin(dot(gl_FragCoord.xy,vec2(39.3468,11.135))+uTime)*24634.6345);
@@ -2729,7 +2731,7 @@ function damage(n,cause){ if(player.creative||player.dead)return;
     for(let i=0;i<4;i++){ const a=armor[i]; if(a&&ITEMS[a.id]&&ITEMS[a.id].armor){ a.dur=(a.dur==null?ITEMS[a.id].armor.dur:a.dur)-1; if(a.dur<=0){ armor[i]=null; flashName(ITEMS[a.id].name+' broke'); if(typeof updateArmorView==='function')updateArmorView(); } } } }   // armor wears down, then snaps
   player.health=Math.max(0,player.health-n); flashDmg(); if(typeof brainEvent==='function')brainEvent('damaged'); if(player.health<=0) die(cause); }
 function die(cause){ player.dead=true; document.getElementById('deathmsg').textContent=cause||'the wood keeps what it takes'; document.getElementById('death').style.display='flex'; document.exitPointerLock&&document.exitPointerLock();
-  if((wretch.boss||(typeof _seraphRagdoll!=='undefined'&&_seraphRagdoll)) && typeof _allPlayersDead==='function' && _allPlayersDead() && typeof bossWipe==='function')bossWipe(); }   // solo death (or the last co-op player) mid-fight → the god + its wounds vanish
+  if((wretch.boss||(typeof _seraphRagdoll!=='undefined'&&_seraphRagdoll)) && typeof _allPlayersDead==='function' && _allPlayersDead())_pendingBossWipe=true; }   // solo death (or the last co-op player) mid-fight → the god + its wounds vanish. DEFERRED (Ben 07-21): die() is called from INSIDE updateWretch (the laser's damage()), so running bossWipe here nulls wretch.group mid-AI-tick and the rest of the boss code derefs it → the RAF loop throws = game freeze. The loop runs it at a safe point.
 
 // =====================================================================
 //  VOXEL DDA — block targeting + highlight
@@ -2793,8 +2795,8 @@ function updateSky(dt){
     const wR=1.0, wG=lerp(0.74,0.96,gz), wB=lerp(0.52,0.88,gz);                      // warm key color; oranger near the horizon
     sunLight.color.setRGB(lerp(0.36,wR,day), lerp(0.44,wG,day), lerp(0.74,wB,day));  // deeper moon-blue → warm sun, driven by `day`
     sunLight.intensity=lerp(0.55,3.4,day); }                                         // DARKNESS-FIRST night: the moon is a faint blue key, not a second sun (was 0.9)
-  hemi.intensity=lerp(0.24,0.62,day);                                                // night ambient floor RAISED 0.10→0.24 (Ben 07-20: whole chunks read as void-black at night — moonlight must keep open ground dimly readable); interiors/caves stay dark via the skylight-contrast curve, true black lives at the fog wall
-  ambient.intensity=lerp(0.055,0.32,day);
+  hemi.intensity=lerp(0.42,0.92,day);                                                // fill RAISED again (Ben 07-21: "dark faces 24/7" — surfaces not catching direct sun/torch fell to ~5% night / ~15% day and read pure-black on dark textures; night 0.24→0.42, day 0.62→0.92 lifts every sky-lit face to readable); interiors/caves stay dark via the skylight-contrast curve, true black lives at the fog wall
+  ambient.intensity=lerp(0.11,0.42,day);
   // NIGHT SHADOW KILL — in deep night the realtime shadow pass buys nothing the baked light volume +
   // low ambient don't already sell, and it costs a full caster-scene re-render every SHADOW_EVERY frames
   // plus a shadow-map fetch in every lit fragment, all night long. Hysteresis so dusk doesn't flap.
@@ -4706,6 +4708,7 @@ function updateScopeRT(){ const heldBolt=!!(ITEMS[view.id]&&ITEMS[view.id].gun==
 let profT={};
 function loop(){
   const dt=Math.min(0.05,clock.getDelta());
+  if(_pendingBossWipe){ _pendingBossWipe=false; try{ if(typeof bossWipe==='function')bossWipe(); }catch(e){} }   // deferred boss cleanup (see die()) — run at loop top, OUTSIDE updateWretch, so nulling the boss can't crash the AI tick mid-frame
   globalU.uTime.value=clock.elapsedTime;
   updateSky(dt);
   updateWeather(dt);                                                       // rain/overcast/lightning + fog banks (after sky so it can dim the fresh light values)
@@ -4739,7 +4742,7 @@ function loop(){
   if(USE_SKYCUBE){ let da=Math.abs(worldTime-_skyBakeAng); if(da>CFG.DAY_LEN*0.5)da=CFG.DAY_LEN-da; if(!_skyBaked || da>CFG.DAY_LEN*0.0005){ _skyBakeAng=worldTime; _skyBaked=true; bakeSky(); } }   // rebake ~3x/sec → the sky gradient shifts smoothly through dawn/dusk instead of stepping
   else skyDome.position.copy(camera.position);
   updateHighlight(); updateBars(); updateMinimap(dt); updateBossRegen(dt); updatePeel(dt); if(typeof updatePortal==='function')updatePortal(dt); if(typeof updateBossCorpse==='function')updateBossCorpse(dt); updateVoid(dt); updateWretchBar();
-  if(gradePass){ gradePass.uniforms.uTime.value=clock.elapsedTime; gradePass.uniforms.uDark.value=1-globalU.uDay.value; }   // grain+vignette rise as it darkens
+  if(gradePass){ gradePass.uniforms.uTime.value=clock.elapsedTime; gradePass.uniforms.uDark.value=1-globalU.uDay.value; gradePass.uniforms.uWhiteVoid.value=(typeof VOID!=='undefined'&&VOID.on)?1:0; }   // grain+vignette rise as it darkens; force a PURE white glow in the stage-3 void
   if(godrayPass){ camera.updateMatrixWorld();                                            // project the sky-sun direction to screen space for the god-ray origin
     _sunProj.copy(camera.position).addScaledVector(globalU.uSunDir.value, 2000).project(camera);
     const front = _sunProj.z<1.0, day=globalU.uDay.value;
@@ -8688,7 +8691,7 @@ function useAtlas(){
 // THE PLAYERS FALL (Ben 07-21): when the lone player — or, in co-op, EVERY player — dies during the fight, the seraph
 // withdraws entirely: the god + all its artifacts vanish and the world's wounds unwrite (a clean slate for the next attempt).
 function _allPlayersDead(){ if(!player.dead)return false; if(typeof NET!=='undefined'&&NET.on){ for(const id in NET.peers){ const p=NET.peers[id]; if(p && !p.dead)return false; } } return true; }
-let _bossWiped=false;
+let _bossWiped=false, _pendingBossWipe=false;   // _pendingBossWipe: die() sets it; the loop runs bossWipe() OUTSIDE updateWretch (see die())
 function bossWipe(){ if(_bossWiped)return; if(!(wretch.boss || (typeof _seraphRagdoll!=='undefined'&&_seraphRagdoll)))return; _bossWiped=true;
   // dissolve the ceraphim + every artifact
   wretch.boss=false; wretch.active=false; wretch.dragging=false;
@@ -8702,7 +8705,7 @@ function bossWipe(){ if(_bossWiped)return; if(!(wretch.boss || (typeof _seraphRa
   try{ if(typeof stopBossMusic==='function')stopBossMusic(); }catch(e){}
   // unwrite ALL the boss's terrain damage (same journal the Atlas uses)
   if(bossScar && bossScar.size){ const scar=bossScar; bossScar=null; if(typeof beginBulk==='function')beginBulk();
-    try{ for(const [k,orig] of scar){ const p=k.split(','), x=+p[0],y=+p[1],z=+p[2]; setBlockWorld(x,y,z,orig,true); if(typeof netEdit==='function')netEdit(x,y,z,orig); } } finally{ if(typeof endBulk==='function')endBulk(); } }
+    try{ for(const [k,orig] of scar){ try{ const p=k.split(','), x=+p[0],y=+p[1],z=+p[2]; setBlockWorld(x,y,z,orig,true); if(typeof netEdit==='function')netEdit(x,y,z,orig); }catch(e){} } } finally{ if(typeof endBulk==='function')endBulk(); } }   // per-cell catch: one unloaded/out-of-range cell must NEVER abort the whole revert (or crash the wipe)
   if(typeof WHITEN_DONE!=='undefined')WHITEN_DONE.clear();
   if(typeof flashName==='function')flashName('the god withdraws; the land forgets its wounds.'); }
 function bossBlast(cx,cy,cz,r){ const R=Math.ceil(r), r2=r*r, fx=Math.floor(cx),fy=Math.floor(cy),fz=Math.floor(cz); let n=0;
@@ -8818,7 +8821,7 @@ function summonBoss(x,y,z){ if(typeof clearBossCorpse==='function')clearBossCorp
   bossScar=new Map();   // fresh fight → start journalling every block the boss destroys, for the Atlas to unwrite
   if(typeof WHITEN_DONE!=='undefined')WHITEN_DONE.clear();   // fresh fight → the beam repaints the world white from scratch
   if(typeof seraphEyesReset==='function')seraphEyesReset();   // fresh fight → clear any timed eye-seals from the last god
-  _bossWiped=false;   // arm the all-players-dead wipe for this fight
+  _bossWiped=false; _pendingBossWipe=false;   // arm the all-players-dead wipe for this fight
   if(typeof _voidFractalPrewarm==='function')try{ _voidFractalPrewarm(); }catch(e){}   // fetch+build+LINK the stage-3 fractal NOW (during phases 1-2) so the void entry is instant, not a ~3s freeze (Ben 07-21 perf)
   if(typeof _peelAssets==='function')try{ _peelAssets(); }catch(e){}   // build the peel geometry + 1400-instance patch mesh NOW, not mid-combat at 50% HP (Ben 07-21 perf)
   if(!wretch.group){ const b=buildWretch(); wretch.group=b.group; wretch.P=b.P; }
@@ -10512,11 +10515,24 @@ function buildChurch(){ if(_churchDone)return;
 // ===== MOUNT ATHOS CATHEDRAL (Ben 07-21) — a MASSIVE stone cruciform church on the far-EAST highland, opposite the
 // west-coast spawn. Cobble/mossy walls, columned nave, tall stained glass, a gold Byzantine dome over the crossing,
 // twin west bell-towers, a rounded apse + altar. Built once when the player streams near it.
-let _cathedralDone=false;
+let _cathedralDone=false, _cathedralSpot=null;
+function _cathedralFindSpot(){ if(_cathedralSpot)return _cathedralSpot; let best=null,bs=-1;   // highest, flattish, DRY ground on the far-EAST arc of the island
+  // a COASTAL PROMONTORY on the far EAST rim (Mount Athos): high dry ground with open OCEAN just seaward → a clear
+  // sea backdrop, no mountain to bury it. Scan the east arc from the coast inward.
+  for(let a=-0.95;a<=0.95;a+=0.05)for(let r=470;r>=300;r-=8){ const c=Math.cos(a), s=Math.sin(a);
+    const x=Math.round(ISLE_X+c*r), z=Math.round(ISLE_Z+s*r), h=surfaceH(x,z);
+    if(h<CFG.SEA+7 || h>CFG.SEA+46)continue;                                 // dry shelf/cliff, not a towering peak
+    let sea=false; for(let d=10;d<=30;d+=10){ if(surfaceH(Math.round(x+c*d),Math.round(z+s*d))<=CFG.SEA){ sea=true; break; } }   // ocean just seaward
+    if(!sea)continue;
+    const score=h + r*0.06; if(score>bs){ bs=score; best={x,z}; } }
+  _cathedralSpot=best; return best; }
 function buildCathedral(){ if(_cathedralDone)return;
-  const cx=ISLE_X+300, cz=ISLE_Z;                                          // far-east interior highland
-  if(!_sReady(cx,cz,40))return;
-  const gy=surfaceH(cx,cz); if(gy<=CFG.SEA+2){ _cathedralDone=true; return; }
+  const spot=_cathedralFindSpot(); if(!spot){ _cathedralDone=true; return; }
+  const cx=spot.x, cz=spot.z;
+  if(!_sReady(cx,cz,28))return;
+  const gy0=surfaceH(cx,cz); if(gy0<=CFG.SEA+2){ _cathedralDone=true; return; }
+  let _top=gy0; for(let tx=-24;tx<=17;tx++)for(let tz=-16;tz<=16;tz++){ const th=surfaceH(cx+tx,cz+tz); if(th>_top)_top=th; }
+  const gy=Math.min(_top+1, gy0+14);   // floor rides above the local high point → the cathedral stands PROUD on a terrace, not buried in the slope
   const M=(x,y,z,id)=>{ const yy=gy+y; if(yy<1||yy>=WH)return; setBlockWorld(cx+x,yy,cz+z,id,true); };
   const B=(x0,x1,y0,y1,z0,z1,id)=>{ for(let x=x0;x<=x1;x++)for(let y=y0;y<=y1;y++)for(let z=z0;z<=z1;z++)M(x,y,z,id); };
   const CO=BID.cobble, MO=BID.mossy, ST=BID.stone, GL=BID.stained_glass, GD=BID.gold_block, PW=BID.planks, LOG=BID.log;
@@ -10526,13 +10542,14 @@ function buildCathedral(){ if(_cathedralDone)return;
   const inApse=(x,z)=>{ const ex=x-9; return ex>=0&&ex<=5 && (ex*ex*0.7 + z*z)<=24; };
   const inside=(x,z)=> inNave(x,z)||inTran(x,z)||inApse(x,z);
   const X0=-24,X1=17,Z0=-16,Z1=16, WHt=17;
-  // ---- foundation plinth (down to terrain, capped) + clear the volume above ----
-  for(let x=X0;x<=X1;x++)for(let z=Z0;z<=Z1;z++){ let near=inside(x,z);
-    if(!near)for(const [ox,oz] of [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]])if(inside(x+ox,z+oz)){near=true;break;}
-    if(!near)continue;
-    const gs=surfaceH(cx+x,cz+z), base=Math.max(-18, Math.min(-1, gs-gy-1));
-    for(let y=base;y<=0;y++) M(x,y,z, y===0?CO:ST);
-    for(let y=1;y<=36;y++){ if(getBlock(cx+x,gy+y,cz+z)!==AIR)M(x,y,z,AIR); } }
+  // ---- SITE: shear the burying terrain off a wide apron + raise a stone TERRACE the cathedral stands on ----
+  const AP=9;
+  for(let x=X0-AP;x<=X1+AP;x++)for(let z=Z0-AP;z<=Z1+AP;z++){
+    for(let wy=gy+1; wy<=gy+38; wy++){ if(getBlock(cx+x,wy,cz+z)!==AIR)setBlockWorld(cx+x,wy,cz+z,AIR,true); }   // shear anything above the terrace
+    const gs=surfaceH(cx+x,cz+z), base=Math.max(gy-22, Math.min(gy-1, gs-1));
+    for(let wy=base; wy<=gy; wy++) setBlockWorld(cx+x,wy,cz+z, wy===gy?CO:ST); }   // terrace + plinth filled down to the terrain
+  // clear any TREES (trunks + canopy) leaning over the site in a wider ring — no forest buries the cathedral
+  for(let x=X0-20;x<=X1+20;x++)for(let z=Z0-20;z<=Z1+20;z++)for(let wy=gy+1; wy<=gy+40; wy++){ const b=getBlock(cx+x,wy,cz+z); if(b===BID.log||b===BID.leaves||b===BID.leaves_core)setBlockWorld(cx+x,wy,cz+z,AIR,true); }
   // ---- floor (checker) + walls (banded stone) ----
   for(let x=X0;x<=X1;x++)for(let z=Z0;z<=Z1;z++){
     if(inside(x,z)){ M(x,0,z,((x+z)&1)?CO:MO); continue; }
@@ -11750,9 +11767,11 @@ window.__hc={
   placeTrophy(which){ try{ const id=(which==='wretch')?BID.wretch_trophy:BID.ceraphim_trophy; const px=Math.floor(player.pos.x)+3, pz=Math.floor(player.pos.z), py=groundYAt(px,pz,player.pos.y);
     setBlockWorld(px,py,pz,id,true); const c=getChunk(px>>4,pz>>4); if(c){ c.dirty=true; buildChunkMeshes(c); }
     player.pos.set(px-5, py+3, pz); player.vel.set(0,0,0); player.yaw=Math.PI/2; player.pitch=-0.15; return { placed:[px,py,pz], block:getBlock(px,py,pz) }; }catch(e){ return {err:e.message, stack:(e.stack||'').slice(0,200)}; } },
-  goCathedral(dx,dy,dz){ try{ const cx=(typeof ISLE_X!=='undefined'?ISLE_X:500)+300, cz=(typeof ISLE_Z!=='undefined'?ISLE_Z:0); const gy=surfaceH(cx,cz);   // QA: fly to the far-east cathedral (streams chunks → buildCathedral fires)
+  goCathedral(dx,dy,dz){ try{ const s=(typeof _cathedralFindSpot==='function')?_cathedralFindSpot():null; const cx=s?s.x:((typeof ISLE_X!=='undefined'?ISLE_X:500)+300), cz=s?s.z:(typeof ISLE_Z!=='undefined'?ISLE_Z:0); const gy=surfaceH(cx,cz);   // QA: fly to the far-east cathedral (streams chunks → buildCathedral fires)
     player.pos.set(cx+(dx==null?-34:dx), gy+(dy==null?12:dy), cz+(dz==null?0:dz)); player.vel.set(0,0,0); player.fly=true; player.yaw=(dx!=null&&dx>0)?Math.PI:0; player.pitch=-0.12;
     return { cx,cz,gy, done:_cathedralDone }; }catch(e){ return {err:e.message}; } },
+  cathedralDiag(){ try{ const s=(typeof _cathedralFindSpot==='function')?_cathedralFindSpot():null; if(!s)return{spot:null}; return { spot:s, ready:_sReady(s.x,s.z,28), gy:surfaceH(s.x,s.z), sea:CFG.SEA, done:_cathedralDone, ppos:[player.pos.x|0,player.pos.z|0] }; }catch(e){ return {err:e.message}; } },
+  forceCathedral(){ try{ if(typeof buildCathedral==='function'){ for(let i=0;i<3;i++)_bulkRun(buildCathedral); } return { done:_cathedralDone, spot:_cathedralSpot }; }catch(e){ return {err:e.message}; } },   // QA: force the cathedral build now (bypasses the 1/frame rotation)
   qaCine(on){ try{ if(typeof applyCine==='function')applyCine(!!on); return { cineMode, hudOn:_hudOn, handVisible:!!(view.group&&view.group.visible) }; }catch(e){ return {err:e.message}; } },   // QA: toggle cinematic mode
   qaHud(on){ try{ _hudOn=!!on; applyHud(); return { hudOn:_hudOn }; }catch(e){ return {err:e.message}; } },   // QA: toggle hide-HUD setting
   lightProbe(){ try{ const px=Math.floor(player.pos.x), pz=Math.floor(player.pos.z), gy=groundYAt(px,pz,player.pos.y);
