@@ -9,7 +9,7 @@
 // The world is deterministic from the shared seed, so this only forwards messages and picks
 // the authoritative HOST (first player in the room) — identical contract to the Node relay.
 
-const ALLOWED = new Set(['p','b','bb','tree','drop','drops','dpick','an','w','own','grab','rescue','sync','time','chest','dmg','bossdead','hb','shot','hw','han']);   // 'bb'/'drops' = per-frame batches (parity with mp-server.js); backpressure is Cloudflare's problem here. dmg/bossdead/hb/shot/hw/han = boss+Herobrine+gun sync
+const ALLOWED = new Set(['p','b','bb','tree','drop','drops','dpick','an','w','own','grab','rescue','sync','time','chest','dmg','bossdead','hb','shot','hw','han','wretchdead']);   // 'bb'/'drops' = per-frame batches (parity with mp-server.js); backpressure is Cloudflare's problem here. dmg/bossdead/hb/shot/hw/han = boss+Herobrine+gun sync
 const MAX_CLIENTS = 12;
 
 export default class HollowcraftParty {
