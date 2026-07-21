@@ -562,7 +562,9 @@ export class SeraphimModel {
     this._wingBaseTris = wingTris;
 
     // ---- core feather mass --------------------------------------------------
-    const coreMat = buildBodyMaterial({ atlas: this.atlas, renderer: this.renderer, emberStrength: 0.3, sssStrength: 0.28 });
+    // HEAVENLY (Ben 07-21): the core mass was a solid GOLD/rust slab reading as a weird gold layer. It's now a soft
+    // ivory-WHITE self-glowing mass, and a light bloom sits over the whole seraph so it reads as radiant, not fleshy.
+    const coreMat = new THREE.MeshStandardMaterial({ color: 0xf2eee5, roughness: 0.86, metalness: 0.0, emissive: 0xf5f1e9, emissiveIntensity: 0.30 });
     coreMat.userData.seraphRole = 'body';
     this._bodyMats.push(coreMat);
     this._coreMat = coreMat;
@@ -571,6 +573,14 @@ export class SeraphimModel {
     this.coreMass.position.set(0, 0, H * 0.02);   // FIX-3 (user spec 07-20): the mantle SEED plane sits AT the central eye's midpoint (its fill layers still step backward), matching the wing roots — one feather depth, the eyes lead it
     this.core.add(this.coreMass);
     this._coreTris = cm.tris;
+    { // soft HEAVENLY light bloom over the seraph (additive, faint) — replaces the old solid-gold read with a glow
+      const S = 64, cv = document.createElement('canvas'); cv.width = cv.height = S; const c = cv.getContext('2d');
+      const g = c.createRadialGradient(S/2, S/2, 0, S/2, S/2, S/2); g.addColorStop(0, 'rgba(255,252,244,0.95)'); g.addColorStop(0.5, 'rgba(255,248,232,0.35)'); g.addColorStop(1, 'rgba(255,248,232,0)');
+      c.fillStyle = g; c.fillRect(0, 0, S, S);
+      const tex = new THREE.CanvasTexture(cv);
+      const bloom = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, color: 0xfff4e2, transparent: true, opacity: 0.55, depthWrite: false, blending: THREE.AdditiveBlending, fog: false }));
+      bloom.scale.setScalar(H * 1.6); bloom.position.set(0, H * 0.12, H * 0.04); this.core.add(bloom); this._coreBloom = bloom;
+    }
 
     // ---- eye band (5 dc, central folded in) ---------------------------------
     this.eyeBand = buildEyeBand2({});

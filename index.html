@@ -4209,6 +4209,7 @@ function _retargetFps(dt){ if(dt>0.003 && dt<_minDt) _minDt=dt;
   const refresh=1/_minDt, target=Math.min(70, refresh*0.94);
   _fpsShed=target*0.94; _fpsRestore=Math.min(refresh-2, target*1.06); }
 let shadowTick=0; let SHADOW_EVERY = CFG.quality==='Ultra'?3:4;   // re-render the shadow map 1-in-N frames (sun/dapple barely moves); higher N → the canopy godray-shadow pass costs less. adaptive quality can raise N under load
+let _editShadowT=-1;   // >=0 → a block was just edited; the loop forces a shadow refresh (see loop) so lighting responds to breaking/placing even mid-stream
 // motion-blur reprojection state
 const _curVP=new THREE.Matrix4(), _prevVP=new THREE.Matrix4(), _mbW=new THREE.Vector3(), _prevMbW=new THREE.Vector3(), _mbV4=new THREE.Vector4(), _mbPV4=new THREE.Vector4();
 const _sunProj=new THREE.Vector3();   // scratch: sun sky-direction projected to NDC for the god-ray origin
@@ -4668,7 +4669,8 @@ function loop(){
   }
   cullChunks();                                                                        // occlusion + frustum BFS: hide chunks we can't see (also keeps them out of the shadow pass)
   // cadence-gated shadow refresh — but NEVER on a frame that just meshed a chunk (that would stack two big costs → the streaming spike). The sun barely moves, so deferring a frame or two is invisible.
-  if((shadowTick=(shadowTick+1)%SHADOW_EVERY)===0 && !_streamMeshed) sunLight.shadow.needsUpdate=true;
+  if(_editShadowT>=0){ _editShadowT++; if(!_streamMeshed || _editShadowT>4){ sunLight.shadow.needsUpdate=true; _editShadowT=-1; } }   // a block edit changed geometry: refresh the shadow map on the first non-meshing frame (or force after 4) so lighting RESPONDS to breaking/placing — the plain cadence below is gated on !_streamMeshed, so continuous mining (every frame meshes) would otherwise freeze the shadows forever ("lighting stops working when I break blocks", Ben 07-21)
+  else if((shadowTick=(shadowTick+1)%SHADOW_EVERY)===0 && !_streamMeshed) sunLight.shadow.needsUpdate=true;
   if(typeof updateScopeRT==='function') updateScopeRT();                   // render the magnified scope image to the lens texture BEFORE the main pass draws (and samples) the gun
   if(_mbMode){ renderer.setRenderTarget(_sceneRT); renderer.render(scene, camera); renderer.setRenderTarget(null); }   // scene → our depth-carrying target (feeds motionPass); classic path renders inside composer
   composer.render();
@@ -9152,10 +9154,10 @@ function updateVoid(dt){ if(!VOID.on){ if(player.bound)_voidUnbind(); return; }
     U.uMorph.value=VOID.morph; U.uTime.value=now*0.001;
     const e=camera.matrixWorld.elements, S=0.02;   // very slight follow — the fractal stays put + MASSIVE all around, not drifting to the sparse origin
     U.uCamRight.value.set(e[0],e[1],e[2]); U.uCamUp.value.set(e[4],e[5],e[6]); U.uCamFwd.value.set(-e[8],-e[9],-e[10]);
-    U.uCamPos.value.set(0.0+(camera.position.x-VOID.center.x)*S, 0.55+(camera.position.y-VOID.center.y)*S, 0.14+(camera.position.z-VOID.center.z)*S);   // inside the shell (uInvR ~2.35) → it WRAPS 360° as a massive, out-of-reach backdrop
+    U.uCamPos.value.set(0.0+(camera.position.x-VOID.center.x)*S, 1.4+(camera.position.y-VOID.center.y)*S, 0.32+(camera.position.z-VOID.center.z)*S);   // parked AT the dense shell radius (Ben 07-21) → the fractal ALWAYS wraps the view, massive; near-origin parking left it sparse/black
     U.uAspect.value=innerWidth/innerHeight; U.uTanHalfFov.value=Math.tan((camera.fov*0.5)*Math.PI/180);
     // CONSTANTLY, RAPIDLY CHANGING (Ben 07-21): faster sacred rotation + the shell breathes big and the folds churn, so it's always massive and never static
-    if(U.uInvR) U.uInvR.value = 2.35 + 0.55*Math.sin(now*0.00035);
+    if(U.uInvR) U.uInvR.value = 1.7 + 0.3*Math.sin(now*0.00035);   // shell breathes 1.4..2.0 around the parked eye (1.4) → always immersed in the dense fractal, never the sparse black centre
     if(U.uS) U.uS.value = 2.10 + 0.28*Math.sin(now*0.00026 + 1.7);
     const _r1=now*0.00017, _r2=now*0.00011;
     U.uR1.value.set(Math.cos(_r1),0,Math.sin(_r1), 0,1,0, -Math.sin(_r1),0,Math.cos(_r1));
@@ -11276,6 +11278,12 @@ window.__hc={
     else if(mode==='emissive'){ if(typeof leafMat!=='undefined'){ leafMat.emissive=new THREE.Color(0x224018); leafMat.needsUpdate=true; } }
     else if(mode==='doubleSide'){ if(typeof leafMat!=='undefined'){ leafMat.side=THREE.DoubleSide; leafMat.needsUpdate=true; } }
     return { mode, touched:n, sunShadow:sunLight.castShadow, leafShadowSide:(typeof leafMat!=='undefined')?leafMat.shadowSide:null }; }catch(e){ return {err:e.message}; } },
+  breakTest(){ try{ const px=Math.floor(player.pos.x), pz=Math.floor(player.pos.z);   // QA: break a solid ground block near the player (real edit path) and report
+    let by=-1; for(let y=WH-1;y>1;y--){ if(isOpaque[getBlock(px+2,y,pz)]){ by=y; break; } }
+    if(by<0) return {err:'no solid block found'};
+    const before=getBlock(px+2,by,pz);
+    setBlockWorld(px+2,by,pz,AIR,true);
+    return { broke:{x:px+2,y:by,z:pz}, wasBlock:before, now:getBlock(px+2,by,pz) }; }catch(e){ return {err:e.message, stack:(e.stack||'').slice(0,240)}; } },
   canopydbg(){ try{ const pcx=Math.floor(player.pos.x)>>4, pcz=Math.floor(player.pos.z)>>4;
     const RD=CFG.RENDER_DIST, fogCheb=Math.max(2, Math.ceil(2.146/Math.max(1e-6,scene.fog.density)/CK));
     const near=[]; world.forEach(c=>{ if(!c.group)return; const cheb=Math.max(Math.abs(c.cx-pcx),Math.abs(c.cz-pcz)); if(cheb>3)return;
@@ -11517,6 +11525,7 @@ window.__hc={
     wretch.boss=true; wretch.active=true; wretch.hp=100; wretch.hpMax=100; wretch._bossPhase=3; if(!VOID.on)enterVoid(); VOID.floor=Math.round(player.pos.y); VOID.floored=true;
     player.pos.y=VOID.floor+9; player.vel.set(0,-1,0); return { on:VOID.on, floor:+VOID.floor.toFixed(2), floored:VOID.floored, startY:+player.pos.y.toFixed(2) }; }catch(e){ return {err:e.message}; } },
   voidFloorState(){ try{ return { on:VOID.on, floored:VOID.floored, floor:VOID.floor, py:+player.pos.y.toFixed(2), onGround:!!player.onGround, restDelta:+(player.pos.y-(VOID.floor||0)).toFixed(3) }; }catch(e){ return {err:e.message}; } },
+  voidState(){ try{ return { on:VOID.on, fmat:!!VOID.fmat, morph:+((VOID.morph||0)).toFixed(2), floored:!!VOID.floored, bgIsRT:!!(VOID.rt&&scene.background===VOID.rt.texture), fetching:!!VOID.fetching }; }catch(e){ return {err:e.message}; } },   // QA: fractal-void state
   beamTest(){ try{ if(!wretch.group){ const b=buildWretch(); wretch.group=b.group; wretch.P=b.P; scene.add(wretch.group); }   // QA: raise the seraph (compiles the fx beam shader) + show the gold spiral beam
     wretch.active=true; wretch.boss=true; if(typeof applyBossVisual==='function')applyBossVisual(true);
     const ax=player.pos.x, az=player.pos.z, ay=groundYAt(ax,az), ex=player.pos.x, ey=player.pos.y+10, ez=player.pos.z;

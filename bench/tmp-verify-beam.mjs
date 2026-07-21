@@ -27,10 +27,12 @@ const ev=(p,e)=>p.evaluate(e);
     await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
     await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
     await ev(page,`__hc.setTime(0.4)`); await sleep(700);
-    const b = await ev(page,`__hc.beamTest()`);
-    await sleep(800);
-    // aim the camera at the beam impact just in front
-    const pp=await ev(page,`__hc.pos()`); await ev(page,`__hc.tp(${pp.x},${pp.y},${pp.z},${pp.yaw},-0.2)`); await sleep(300);
+    // raise the seraph in FRONT at a distance so we can see the whole body (gold-overlay / heavenly check)
+    const b = await ev(page,`(()=>{ try{ if(typeof __hc.arm==='function')__hc.arm(); const r=__hc.boss?__hc.boss({dist:26}):'no boss'; return { r, wy:+wretch.pos.y.toFixed(1), boss:!!wretch.boss }; }catch(e){ return {err:e.message}; } })()`);
+    await sleep(1500);
+    const info=await ev(page,`(()=>{ try{ return { wx:+wretch.pos.x.toFixed(1), wy:+wretch.pos.y.toFixed(1), wz:+wretch.pos.z.toFixed(1) }; }catch(e){ return {err:e.message}; } })()`);
+    if(info && info.wx!=null){ await ev(page,`__hc.tp(${info.wx}, ${info.wy+2}, ${info.wz+24}, 0, 0.06)`); }
+    await sleep(600);
     await page.screenshot({ path: path.join(OUT,'vis-beam.png') });
     console.log(JSON.stringify({ pageErrors:errors, b }, null, 1));
     await browser.close();

@@ -30,8 +30,8 @@ const ev=(p,e)=>p.evaluate(e);
     const portal = await ev(page,`__hc.forcePortal()`);
     await sleep(800);
     const vf = await ev(page,`__hc.voidFloorTest()`);           // enters the void → fetches + compiles the modified fractal glsl + renders it
-    await sleep(4000);
-    const vstate = await ev(page,`(()=>{ try{ return { voidOn:VOID.on, fmat:!!VOID.fmat, morph:+VOID.morph.toFixed(2), floored:VOID.floored }; }catch(e){ return {err:e.message}; } })()`);
+    await sleep(5000);
+    const vstate = await ev(page,`__hc.voidState()`);
     await page.screenshot({ path: path.join(OUT,'vis-void-fractal.png') });
     console.log(JSON.stringify({ pageErrors:errors, portal:{on:portal.on,cosmos:portal.cosmos}, vf, vstate }, null, 1));
     await browser.close();
