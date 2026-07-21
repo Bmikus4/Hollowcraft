@@ -147,6 +147,18 @@ export function seraphHideBeam() {
 // Wing-fold override for the emergence choreography (null releases to the rig's preset).
 export function seraphFold(v) { if (_model) _model._foldOverride = (v == null ? null : v); }
 
+// CORPSE MODE (Ben 07-21): the boss is dead and now ragdolls. Animation stops, so the eyes freeze mid-bob and
+// (on the far wings) read as "detached", and the transparent beam/ember FX keep paying overdraw for nothing.
+// Close every eye (dark sockets — a dead god), kill the laser charge, and hide the FX root. Keeps the FULL body.
+export function seraphCorpseMode() {
+  if (!_model) return;
+  try { if (_model.eyeBand && _model.eyeBand.eyes) { for (const e of _model.eyeBand.eyes) e.deathClose = 1;
+    const g = _model.eyeBand.group; if (g) g.updateWorldMatrix(true, false); if (_model.eyeBand.refresh) _model.eyeBand.refresh(); } } catch (e) {}
+  try { if (_model.setLaserCharge) _model.setLaserCharge(0); } catch (e) {}
+  try { if (_model.fxRoot) _model.fxRoot.visible = false; } catch (e) {}
+  try { if (_beam) _beam.setVisible(false); } catch (e) {}
+}
+
 // BLOODY EYE HOLES (user spec 07-20): when a chain tears out of eye i (layout index, never 0/central),
 // the lids clamp shut over the socket (existing per-eye deathClose channel) and a dark-red wound disc is
 // mounted at the pivot station. Returns the eye's current world position (the chain's origin) or null.
