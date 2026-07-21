@@ -455,6 +455,7 @@ paintTile('torch',     (x,y,r)=>{ if(x>=7&&x<=8){ if(y>=4&&y<=13){const v=jit(r,
 paintTile('lantern',   (x,y,r)=>{ if(x<2||x>13||y<1||y>14)return[0,0,0,0]; if(x<4||x>11||y<3||y>12)return[60,48,32,255]; return[255,206+jit(r,0,20),120,255]; });
 // entity / misc solid
 paintTile('white',     ()=>[220,220,220,255]);
+paintTile('vantawhite',(x,y,r)=>{ const v=jit(r,0,4); return [250+v*0.2,250+v*0.2,253,255]; });   // pure flat white — the erased-reality block the ceraphim's beam paints the world into
 const ATLAS_COUNT = _tileCursor;
 
 // ---- DataArrayTexture: one layer per tile → zero atlas bleed + per-layer mipmaps ----
@@ -598,6 +599,7 @@ block('bellflower',{cat:'cross', tile:'bellflower', opaque:false, solid:false })
 block('berry',  { cat:'cross', tile:'berry', opaque:false, solid:false, use:'harvest' });
 block('sapling',{ cat:'cross', tile:'sapling', opaque:false, solid:false });
 block('trellis',{ cat:'cross', tile:'trellis', opaque:false, solid:true });
+block('vantawhite',{ cat:'solid', t:['vantawhite','vantawhite','vantawhite'], hard:0.6, tool:null, drop:null });   // reality painted white by the ceraphim's beam — a real, breakable, SOLID block (so it can never float like a decal)
 
 // defaults + fast lookup arrays
 const N_BLOCKS = _bid;
@@ -7648,8 +7650,9 @@ function buildHoloSight(){ const g=new THREE.Group();
   { const fg=new THREE.Mesh(new THREE.PlaneGeometry(0.038,0.0395), new THREE.MeshPhongMaterial({color:0x2a1035,transparent:true,opacity:0.42,shininess:260,specular:0xcc88ff,side:THREE.DoubleSide,depthWrite:false}));
     fg.position.set(0,0.0158,-0.043); fg.rotation.x=-0.10; g.add(fg);                        // glass spans the FULL interior channel (walls ±0.019, base -0.004 to roof 0.0355) — no floating pane
     const rg=new THREE.Mesh(new THREE.PlaneGeometry(0.038,0.0395), new THREE.MeshPhongMaterial({color:0x0e1620,transparent:true,opacity:0.12,shininess:200,specular:0x9ab8d8,side:THREE.DoubleSide,depthWrite:false}));
-    rg.position.set(0,0.0158,0.038); g.add(rg); }
+    rg.position.set(0,0.0158,0.038); g.add(rg); g.userData.rearGlass=rg; }                    // rearGlass = the aperture the aimed eye looks THROUGH (used to clip the reticle to the glass)
   g.userData.axisY=0.017;                                                                     // optical-centre height in sight-local space — mounts add this to their rail offset for dotY
+  g.userData.apHalf={x:0.017,y:0.0175};                                                        // aperture half-extents (walls ±0.019, base~-0.004→roof 0.0355) minus a hair of margin → the reticle fades out right at the visible glass rim
   g.traverse(o=>{ if(o.isMesh && !o.material.transparent)o.castShadow=true; });
   return g; }
 function buildMinigun(dot,suppressed){ const g=new THREE.Group();
@@ -7939,8 +7942,7 @@ function updateView(dt){ updateRecoil(dt);                                      
       aPx=swx*0.4; aPy=-dy + swy*0.5 + b*0.12; aPz=-0.30; aRx=swy*0.5; aRy=swx*0.5; aRz=0; }
     view.group.position.set(hPx+(aPx-hPx)*e, hPy+(aPy-hPy)*e, hPz+(aPz-hPz)*e);
     view.group.rotation.set(hRx+(aRx-hRx)*e, hRy+(aRy-hRy)*e, hRz+(aRz-hRz)*e);
-    if(view.gunKick){ view.group.position.z+=view.gunKick*0.09; view.group.rotation.x-=view.gunKick*0.5;      // viewmodel bucks: rearward shove + muzzle rise, springs back independent of the camera
-      if(isDotG){ view.group.position.y+=view.gunKick*0.055; view.group.rotation.x-=view.gunKick*0.42; } }     // the HOLOSIGHT climbs HARDER than the camera-locked reticle → under high recoil the glass lifts clean off the dot and the reticle rides OUT the bottom of the window (not clamped in) (Ben 07-21)
+    if(view.gunKick){ view.group.position.z+=view.gunKick*0.09; view.group.rotation.x-=view.gunKick*0.5; }   // viewmodel bucks: rearward shove + muzzle rise, springs back independent of the camera (the glass climbing off the camera-locked reticle is what carries the dot out of the glass — the reticle is now clipped to the aperture so it VANISHES at the rim, see holoRet below)
     // ---- RELOAD ANIMATION (minimal realism): gun drops toward the chest + tilts inward while the hands work the action ----
     if(view.reloadT>0 && view.reloadDur){ const u=clamp(1-view.reloadT/view.reloadDur,0,1), ez=Math.sin(u*Math.PI);
       view.group.position.y-=ez*0.07; view.group.position.z+=ez*0.05; view.group.position.x-=ez*0.03;
@@ -7982,7 +7984,22 @@ function updateView(dt){ updateRecoil(dt);                                      
   { const on=isGun && isDotG && (view.adsT||0)>0.28 && !(view.reloadT>0);
     view.holoRet.visible=on;
     if(on){ const o=clamp(((view.adsT||0)-0.35)/0.5,0,1);                                   // alignment fade — off-axis shows glass, no floating reticle
-      view.holoRet.material.opacity=o*o*(0.92+Math.sin(clock.elapsedTime*47)*0.03); } }     // faint holographic flicker
+      // CLIP TO THE GLASS: the reticle only shows where the camera's forward axis still passes THROUGH the sight's aperture.
+      // Under recoil the glass climbs off the camera-locked dot → the dot fades out AT THE RIM (you "lose the dot") instead of
+      // floating out of bounds on-screen. (Ben 07-21)
+      let apFade=1;
+      if(view._holoFor!==view.mesh){ view._holoFor=view.mesh; view._holoHs=null; if(view.mesh)view.mesh.traverse(ch=>{ if(ch.userData&&ch.userData.rearGlass)view._holoHs=ch; }); }
+      const hs=view._holoHs, ap=hs&&hs.userData.rearGlass;
+      if(ap){ const wp=view._apWP||(view._apWP=new THREE.Vector3()), cp=view._camWP||(view._camWP=new THREE.Vector3());
+        ap.getWorldPosition(wp); camera.getWorldPosition(cp); wp.sub(cp); const q=camera.quaternion;
+        const fwd=(view._fwd||(view._fwd=new THREE.Vector3())).set(0,0,-1).applyQuaternion(q);
+        const up =(view._up ||(view._up =new THREE.Vector3())).set(0,1,0).applyQuaternion(q);
+        const rt =(view._rt ||(view._rt =new THREE.Vector3())).set(1,0,0).applyQuaternion(q);
+        const f=wp.dot(fwd);
+        if(f>0.05){ const oy=wp.dot(up)/f, ox=wp.dot(rt)/f, hy=hs.userData.apHalf.y/f, hx=hs.userData.apHalf.x/f;
+          const edge=Math.max(Math.abs(ox)/hx, Math.abs(oy)/hy); apFade=clamp((1-edge)/0.18,0,1); }   // full inside the aperture; fades to 0 across the last 18% up to the rim
+        else apFade=0; }
+      view.holoRet.material.opacity=o*o*(0.92+Math.sin(clock.elapsedTime*47)*0.03)*apFade; } }   // faint holographic flicker, gated by the aperture clip
   // muzzle flash decay (gun): show the sprite + pulse the world light for ~0.06s after firing
   view.flashT=Math.max(0,view.flashT-dt);
   const fl=view.mesh&&view.mesh.userData.flash;
@@ -8337,6 +8354,14 @@ function bossBeamCarve(ox,oy,oz,tx,ty,tz){ const dx=tx-ox,dy=ty-oy,dz=tz-oz, L=M
   } finally { if(doBulk)endBulk(); }
   if(n>6) spawnParticles(ox+ux*L*0.5, oy+uy*L*0.5, oz+uz*L*0.5, 0xff5a20, 8, 3.5, 0.8);
   return n; }
+// THE BEAM WHITENS: every surface within its impact becomes vantawhite. Real blocks (breakable) — so when the beam
+// ALSO breaks blocks nothing can float; craters reveal white walls, not raw dirt. A block whitens once (deduped).
+const WHITEN_DONE=new Set();
+function whitenAround(cx,cz,r){ const V=BID.vantawhite; if(V==null)return 0; const R2=r*r; let n=0; const doBulk=(typeof beginBulk==='function'); if(doBulk)beginBulk();
+  try{ for(let dx=-r;dx<=r;dx++)for(let dz=-r;dz<=r;dz++){ if(dx*dx+dz*dz>R2)continue; const bx=Math.floor(cx)+dx, bz=Math.floor(cz)+dz, gy=Math.floor(groundYAt(bx+0.5,bz+0.5));
+    for(let d=0; d<5; d++){ const by=gy-1-d; if(by<1)break; const b=getBlock(bx,by,bz); if(b===AIR||b===WATER||b===V||!isSolid[b]||(B[b]&&B[b].hard<0)||inDungeon(bx,by,bz))continue;
+      const key=bx+'|'+by+'|'+bz; if(WHITEN_DONE.has(key))continue; WHITEN_DONE.add(key); setBlockWorld(bx,by,bz,V,true); if(typeof netEdit==='function')netEdit(bx,by,bz,V); if(++n>=120){ dx=r+1; dz=r+1; break; } } }
+  } finally { if(doBulk)endBulk(); } return n; }
 // TARGETING RING — a ground decal marking where a laser will land; it tracks the player, then LOCKS in the final beat so you can juke out
 let bossAimRing=null;
 function ensureBossRing(){ if(bossAimRing)return bossAimRing; const g=new THREE.Group();
@@ -8367,6 +8392,7 @@ function applyBossVisual(on){ if(!wretch.group)return;
 // SERAPH RIG ANIMATION — wing travelling-wave flap + cone-clamped eye tracking/blink/flare. Runs on the owner AND on guests (mirrored flare) so the boss is alive on every screen.
 function animateBossRig(dt){ seraphAnimate(dt,{wretch,camera,elapsed:clock.elapsedTime}); }   // maps mirrored signals (_bossMode→flap, _eyeFlare→central-eye charge) + lookAt + update on the SeraphimModel
 function summonBoss(x,y,z){ if(typeof clearBossCorpse==='function')clearBossCorpse();   // one god's body at a time — clear any prior fallen corpse
+  if(typeof WHITEN_DONE!=='undefined')WHITEN_DONE.clear();   // fresh fight → the beam repaints the world white from scratch
   if(!wretch.group){ const b=buildWretch(); wretch.group=b.group; wretch.P=b.P; }
   wretch.active=true; wretch.group.visible=true; wretch.pos.set(x, groundYAt(x,z)+3, z);
   wretch.boss=true; wretch.owner=(typeof NET!=='undefined'&&NET.on)?NET.id:null;   // the player who lit the shrine OWNS the boss (interaction-based, not host)
@@ -9046,20 +9072,17 @@ function bossUpdate(dt){ wretch.phase+=dt*1.4; const F=_bf();
       if(wretch._rakeCd<=0 && dist<90 && !wretch._laserState){ wretch._rakeCd=6+Math.random()*2.5; bossWingStorm(); } } }   // a 50-70 feather STORM every ~7s, interleaved with the 8s beam — relentless
   if(_rakeFeathers.length) updateRakeFeathers(dt);
   if(wretch._laserState==='warn'){ wretch._eyeFlare=1; wretch._laserT-=dt;
-    if(wretch._bossPhase===2 && wretch._laserA){ const u=(1-(wretch._laserT/F.warn))*1.4%1;                       // SWEEP telegraph: the ring MARCHES the locked line A→B, again and again
-      wretch._laserAim.x=wretch._laserA.x+(wretch._laserB.x-wretch._laserA.x)*u; wretch._laserAim.z=wretch._laserA.z+(wretch._laserB.z-wretch._laserA.z)*u; wretch._laserAim.y=gp.y; }
-    else { wretch._laserAim.x+=(gp.x-wretch._laserAim.x)*Math.min(1,dt*2.25*F.trk); wretch._laserAim.z+=(gp.z-wretch._laserAim.z)*Math.min(1,dt*2.25*F.trk); wretch._laserAim.y=gp.y; }   // ring drifts toward the NEAREST player (MP-correct) — harder each life
+    { const kw=Math.min(1,dt*(wretch._bossPhase===2?3.4:2.25)*F.trk); wretch._laserAim.x+=(gp.x-wretch._laserAim.x)*kw; wretch._laserAim.z+=(gp.z-wretch._laserAim.z)*kw; wretch._laserAim.y=gp.y; }   // the ring HUNTS the nearest player — stage II tracks HARD (Ben 07-21)
     showBossRing(wretch._laserAim, Math.max(0.85,wretch._laserT+0.8));
     if(wretch._laserT<=0){ wretch._laserState='fire'; wretch._laserT=F.fire; wretchVoice&&wretchVoice('scream',wretch.pos); if(typeof playSample==='function')playSample('seraph_beam',{x:_ex,y:_eyH,z:_ez},1.0); } }   // searing eye-beam discharge from the central eye (longer each life)
   else if(wretch._laserState==='fire'){ wretch._eyeFlare=1; wretch._laserT-=dt;
-    if(wretch._bossPhase===2 && wretch._laserA){ const u=clamp(1-(wretch._laserT/F.fire),0,1);                    // THE SWEEP: the beam DRAGS the locked line A→B — no tracking; cut perpendicular or jump it
-      wretch._laserAim.x=wretch._laserA.x+(wretch._laserB.x-wretch._laserA.x)*u; wretch._laserAim.z=wretch._laserA.z+(wretch._laserB.z-wretch._laserA.z)*u; wretch._laserAim.y=gp.y;
-      wretch._dragSnd=(wretch._dragSnd||0)-dt; if(wretch._dragSnd<=0){ wretch._dragSnd=0.15; sndBeamDrag(wretch._laserAim.x,groundYAt(wretch._laserAim.x,wretch._laserAim.z),wretch._laserAim.z,u); } }
-    else { wretch._laserAim.x+=(gp.x-wretch._laserAim.x)*Math.min(1,dt*0.825*F.trk); wretch._laserAim.z+=(gp.z-wretch._laserAim.z)*Math.min(1,dt*0.825*F.trk); wretch._laserAim.y=gp.y; }   // beam tracks the NEAREST player — sluggish on life I, insistent by life III
+    { const kf=Math.min(1,dt*(wretch._bossPhase===2?1.7:0.825)*F.trk); wretch._laserAim.x+=(gp.x-wretch._laserAim.x)*kf; wretch._laserAim.z+=(gp.z-wretch._laserAim.z)*kf; wretch._laserAim.y=gp.y;   // RELENTLESS homing in stage II — almost impossible (but possible) to escape with a hard perpendicular juke + distance
+      wretch._dragSnd=(wretch._dragSnd||0)-dt; if(wretch._dragSnd<=0){ wretch._dragSnd=0.15; sndBeamDrag(wretch._laserAim.x,groundYAt(wretch._laserAim.x,wretch._laserAim.z),wretch._laserAim.z,0.5); } }
     const _gyA=groundYAt(wretch._laserAim.x,wretch._laserAim.z); showBossRing(wretch._laserAim,0.5); showBossBeam(_ex,_eyH,_ez, wretch._laserAim.x,_gyA+0.3,wretch._laserAim.z);
     spawnParticles(wretch._laserAim.x,_gyA+0.4,wretch._laserAim.z, 0xff5a20, 3, 2.2, 0.4);
     wretch._laserTick=(wretch._laserTick||0)-dt; if(wretch._laserTick<=0){ wretch._laserTick=0.5; bossBlast(wretch._laserAim.x,_gyA,wretch._laserAim.z,F.blast); sndBeamImpact(wretch._laserAim.x,_gyA,wretch._laserAim.z);   // EXPLODE blocks where it lands (bigger craters each life)
       bossBeamCarve(_ex,_eyH,_ez, wretch._laserAim.x,_gyA+0.3,wretch._laserAim.z);   // ...and RAZE everything the beam passes through on the way down
+      whitenAround(wretch._laserAim.x, wretch._laserAim.z, (F.blast|0)+2);           // EVERY surface it touches becomes vantawhite (real breakable blocks → nothing floats even as it craters)
       const _ax=wretch._laserAim.x,_az=wretch._laserAim.z, _br=F.blast-0.1;
       if(Math.hypot(_ax-player.pos.x,_az-player.pos.z)<_br && typeof damage==='function')damage(F.dmg,'the seraph bathes you in searing light');
       if(NET.on)for(const _pid in NET.peers){ const _pp=NET.peers[_pid]; if(_pp && Math.hypot(_ax-_pp.x,_az-_pp.z)<_br) netSend({t:'dmg',to:+_pid,v:F.dmg,c:'the seraph bathes you in searing light'}); } }   // beam burns whichever players stand in it
@@ -9068,10 +9091,7 @@ function bossUpdate(dt){ wretch.phase+=dt*1.4; const F=_bf();
         if(wretch._cycleN%3===0){ wretch._prayT=4.6; sndPrayer(); if(typeof seraphSay==='function')seraphSay(Math.random()<0.5?'prayer1':'prayer2'); } } } }   // PRAYER pause (no wing-fold — Ben 07-20: the fold read wrong); life I ~15s start-to-start → life III barely pauses
   else { wretch._eyeFlare=Math.max(F.flareFloor,(wretch._eyeFlare||0)-dt*2); wretch._laserCd=(wretch._laserCd==null?6:wretch._laserCd)-dt;   // on the final life the eye NEVER fully sleeps
     if(wretch._laserCd<=0 && dist<130 && !(wretch._prayT>0)){ wretch._laserState='warn'; wretch._laserT=F.warn; wretch._laserAim={x:gp.x,y:gp.y,z:gp.z};
-      if(wretch._bossPhase===2){ const pv=Math.hypot(player.vel.x,player.vel.z), lead=pv>1.2;                     // SWEEP LOCK: a line through where you are, aimed down where you're GOING
-        const dx2=lead?player.vel.x/pv:Math.sin(Math.random()*6.283), dz2=lead?player.vel.z/pv:Math.cos(Math.random()*6.283);
-        wretch._laserA={x:gp.x-dx2*7, z:gp.z-dz2*7}; wretch._laserB={x:gp.x+dx2*15, z:gp.z+dz2*15}; }
-      else wretch._laserA=null;
+      wretch._laserA=null;   // stage II is no longer a locked A→B sweep — it HOMES on you (see the warn/fire tracking above)
       sndBeamChargeLayer(F.warn); wretchVoice&&wretchVoice('sting',wretch.pos); if(typeof playSample==='function')playSample('seraph_charge',wretch.pos,0.9); } }   // rising energy whine before the beam (shorter warning each life)
   animateBossRig(dt);   // wing flap + cone-clamped eye tracking/blink/flare (shared: owner AND guests)
   if(Math.abs(dy)<4){ wretch._atkCd=(wretch._atkCd||0)-dt; if(wretch._atkCd<=0){ let _hit=false;   // melee rends WHICHEVER player(s) stand within reach — local or remote
@@ -11272,9 +11292,9 @@ window.__hc={
     const mesh=buildAnimalMesh(type); mesh.position.set(x,y,z); animalGroup.add(mesh);
     const a={type,mesh,x,y,z,yaw:0,hp:1,timer:0,flee:0,dead:false}; animals.push(a); killAnimal(a);
     return { x:+x.toFixed(2), z:+z.toFixed(2), gy:+groundYAt(x,z,y).toFixed(2), n:_ragdolls.length }; },
-  corpseKill(boss){ if(!wretch.group){ const b=buildWretch(); wretch.group=b.group; wretch.P=b.P; scene.add(wretch.group); }   // QA: drop the wretch (boss=false) or seraph (boss=true) ragdoll
+  corpseKill(boss,up){ if(!wretch.group){ const b=buildWretch(); wretch.group=b.group; wretch.P=b.P; scene.add(wretch.group); }   // QA: drop the wretch (boss=false) or seraph (boss=true) ragdoll; `up` elevates the wretch to test the FALL path
     const x=player.pos.x+(boss?-8:6), z=player.pos.z+(boss?4:0), gy=groundYAt(x,z,player.pos.y);
-    wretch.pos.set(x, boss?gy+10:gy, z); wretch.yaw=0.4; wretch.active=true; wretch.boss=!!boss;
+    wretch.pos.set(x, gy+(boss?10:(up||0)), z); wretch.yaw=0.4; wretch.active=true; wretch.boss=!!boss;
     if(boss) _startBossCorpse(); else dropWretchCorpse();
     wretch.active=false;   // mimic killWretch's despawnWretch(true) — otherwise active+null group derefs every frame (real game never leaves this window open)
     const rd=boss?_seraphRagdoll:_wretchCorpse;
@@ -11319,6 +11339,10 @@ window.__hc={
     wretch.boss=true; wretch.active=true; wretch.hp=100; wretch.hpMax=100; wretch._bossPhase=3; if(!VOID.on)enterVoid(); VOID.floor=Math.round(player.pos.y); VOID.floored=true;
     player.pos.y=VOID.floor+9; player.vel.set(0,-1,0); return { on:VOID.on, floor:+VOID.floor.toFixed(2), floored:VOID.floored, startY:+player.pos.y.toFixed(2) }; }catch(e){ return {err:e.message}; } },
   voidFloorState(){ try{ return { on:VOID.on, floored:VOID.floored, floor:VOID.floor, py:+player.pos.y.toFixed(2), onGround:!!player.onGround, restDelta:+(player.pos.y-(VOID.floor||0)).toFixed(3) }; }catch(e){ return {err:e.message}; } },
+  whitenTest(){ try{ const V=BID.vantawhite; if(V==null)return{err:'no vantawhite block'}; const x=player.pos.x, z=player.pos.z;   // QA: run the beam-whiten around the player, confirm REAL vantawhite blocks appear (can't float)
+    const n=whitenAround(x,z,5); let cnt=0; for(let dx=-6;dx<=6;dx++)for(let dz=-6;dz<=6;dz++){ const bx=Math.floor(x)+dx,bz=Math.floor(z)+dz,gy=Math.floor(groundYAt(bx+0.5,bz+0.5)); for(let d=0;d<6;d++){ if(getBlock(bx,gy-1-d,bz)===V)cnt++; } }
+    const n2=whitenAround(x,z,5);   // second pass should convert ~0 (deduped)
+    return { vantawhiteId:V, solid:!!isSolid[V], breakable:(B[V].hard>0), converted:n, secondPass:n2, whiteBlocksNearby:cnt, player:+player.pos.y.toFixed(1) }; }catch(e){ return {err:e.message}; } },
   ripShot(t){ try{ const cv=document.createElement('canvas'); cv.width=384; cv.height=768; const ctx=cv.getContext('2d'); const sd=[]; for(let i=0;i<14;i++)sd.push(0.35+0.45*Math.abs(Math.sin(i*1.7)));   // QA: dump the OPENING rip look at time t (the RAF cutscene stalls headless)
     const save=_cine; _cine={ctx, cv, sd, tex:{needsUpdate:false}, open:0, _stars:null}; try{ _drawRipTex(t); }catch(e){ _cine=save; return {err:e.message}; } const url=cv.toDataURL('image/png'); _cine=save; return url; }catch(e){ return {err:e.message}; } },
   portalInfo(){ try{ return { on:PORTAL.on, open:+((PORTAL.open!=null?PORTAL.open:-1)).toFixed(3), target:PORTAL.openTarget, pos:[+PORTAL.pos.x.toFixed(1),+PORTAL.pos.y.toFixed(1),+PORTAL.pos.z.toFixed(1)], cosmos:!!_portalScene, rt:!!_portalRT, mat:(PORTAL.grp&&PORTAL.grp.children[0])?PORTAL.grp.children[0].material.type:null, rotY:PORTAL.grp?+PORTAL.grp.rotation.y.toFixed(2):null, cine:!!_cine }; }catch(e){ return {err:e.message}; } },   // QA: portal state
