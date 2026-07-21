@@ -292,6 +292,7 @@ const CFG = {
 };
 const Q = new URLSearchParams(location.search);
 if (Q.get('rd')) CFG.RENDER_DIST = Math.max(2, Math.min(16, +Q.get('rd')));
+try{ const sq=localStorage.getItem('hollowcraft_q'); if(sq&&['Low','Medium','High','Ultra'].indexOf(sq)>=0) CFG.quality=sq; }catch(e){}   // restore the chosen quality tier (a ?q override still wins below)
 if (Q.get('q')) CFG.quality = Q.get('q');
 CFG.RD_MAX = 12;   // ceiling for the slider + RING + FAR + camera far. Decoupled from the boot default so the slider/adaptive can climb to 12 without the low default locking the ceiling.
 CFG.RENDER_DIST = Math.min(CFG.RENDER_DIST, CFG.RD_MAX);   // a ?rd override still can't exceed the ceiling
@@ -1373,13 +1374,21 @@ const skyMat = new THREE.ShaderMaterial({
       float dusk=pow(1.0-abs(uSunDir.y),2.0);
       col += vec3(0.95,0.42,0.16)*dusk*pow(sd,4.0)*(1.0-up)*1.2;
       col += vec3(1.0,0.9,0.75)*pow(sd,900.0)*8.0;          // sun disc (day)
-      // moon
+      // moon — a real disc with a cratered face: project the view ray onto the tangent plane at the
+      // moon direction, so the texture maps ACROSS the disc (the old fract(muv*3) sampled ~one texel flat).
       float md=dot(dir,uMoonDir);
-      if(md>0.9995){
-        vec3 mc;
-        if(uHasMoon>0.5){ vec2 muv=vec2(atan(dir.x,dir.z),acos(dir.y)); mc=texture2D(uMoonTex, fract(muv*3.0)).rgb; }
-        else mc=vec3(0.9,0.9,0.86);
-        col = mix(col, mc*1.6, smoothstep(0.9995,0.99975,md));
+      if(md>0.9993){
+        vec3 mdir=normalize(uMoonDir);
+        vec3 mtx=normalize(cross(mdir, vec3(0.0,1.0,0.0)));
+        vec3 mty=cross(mdir, mtx);
+        vec2 duv=vec2(dot(dir,mtx), dot(dir,mty))/0.037;      // disc-local coords, ~unit at the rim
+        float rr=length(duv);
+        if(rr<1.0){
+          vec3 mc = (uHasMoon>0.5) ? texture2D(uMoonTex, duv*0.5+0.5).rgb : vec3(0.9,0.9,0.86);
+          float z=sqrt(max(0.0,1.0-rr*rr));                    // sphere normal.z → a gentle terminator so it reads round, not a flat coin
+          float lam=clamp(0.45+0.55*z,0.0,1.0);
+          col = mix(col, mc*1.7*lam, smoothstep(1.0,0.86,rr));
+        }
       }
       col += vec3(0.75,0.8,0.95)*pow(max(md,0.0),140.0)*(1.0-uDay)*0.7;  // moon halo
       // stars
@@ -1402,6 +1411,24 @@ const skyMat = new THREE.ShaderMaterial({
 });
 const skyDome = new THREE.Mesh(skyGeo, skyMat);
 skyDome.renderOrder = -10; skyDome.frustumCulled=false;
+// PROCEDURAL MOON FACE — bake a cratered/maria disc to a canvas (the spec's fallback for the NASA LRO texture,
+// which needs a TIFF decoder + survives CORS). Grey highlands, darker maria blotches, scattered rim-lit craters.
+(function bakeMoon(){ try{
+  const S=256, cv=document.createElement('canvas'); cv.width=cv.height=S; const g=cv.getContext('2d');
+  const seed=(n=>()=>((n=(n*1103515245+12345)&0x7fffffff)/0x7fffffff))(20260720);   // deterministic pseudo-random (no Math.random at load)
+  g.fillStyle='#b9b7ad'; g.fillRect(0,0,S,S);                                        // highland base
+  for(let i=0;i<9;i++){ const x=seed()*S,y=seed()*S,r=S*(0.10+seed()*0.22);          // MARIA — big soft dark seas
+    const gr=g.createRadialGradient(x,y,0,x,y,r); gr.addColorStop(0,'rgba(120,120,116,0.55)'); gr.addColorStop(1,'rgba(120,120,116,0)');
+    g.fillStyle=gr; g.beginPath(); g.arc(x,y,r,0,6.2832); g.fill(); }
+  for(let i=0;i<150;i++){ const x=seed()*S,y=seed()*S,r=S*(0.006+seed()*0.05);        // CRATERS — dark floor + a bright sunlit rim on one side
+    g.fillStyle='rgba(70,70,68,'+(0.15+seed()*0.3).toFixed(2)+')'; g.beginPath(); g.arc(x,y,r,0,6.2832); g.fill();
+    g.strokeStyle='rgba(230,230,222,'+(0.12+seed()*0.28).toFixed(2)+')'; g.lineWidth=Math.max(1,r*0.22);
+    g.beginPath(); g.arc(x-r*0.16,y-r*0.16,r*0.92,0.6,3.4); g.stroke(); }
+  for(let i=0;i<2600;i++){ const x=seed()*S,y=seed()*S,v=(seed()*40-20)|0;            // fine regolith grain
+    g.fillStyle='rgba('+(150+v)+','+(150+v)+','+(146+v)+',0.06)'; g.fillRect(x,y,1,1); }
+  const tex=new THREE.CanvasTexture(cv); tex.colorSpace=THREE.SRGBColorSpace; tex.needsUpdate=true;
+  skyMat.uniforms.uMoonTex.value=tex; skyMat.uniforms.uHasMoon.value=1;
+}catch(e){ /* no moon face — the shader falls back to a plain pale disc */ } })();
 // SKY CUBEMAP — bakes the full-screen sky shader into a cubemap refreshed ~1Hz (big fill win). It uses a
 // half-float CUBE render target, the least universally-supported feature added — so it's OPT-IN via ?skycube
 // while we keep the proven realtime dome as the default. (Kept off the default path to rule it out of load issues.)
@@ -1572,6 +1599,14 @@ const waterMat = new THREE.ShaderMaterial({
       vec3 skyRefl=mix(vec3(0.03,0.05,0.09),vec3(0.35,0.5,0.68),uDay);
       vec3 col=mix(base, skyRefl, F);
       // NO specular glints and NO white foam crests — they read as "shiny white flashes". Removed on purpose.
+      // MOONGLADE (night only): the one specular term we keep — a soft glinting path where the moon reflects
+      // off the ripples toward the eye. Gated hard to night (1-uDay) so it never becomes a daytime sparkle.
+      float night = clamp(1.0 - uDay*1.3, 0.0, 1.0);
+      if(night > 0.02){ vec3 Rm = reflect(-normalize(-uMoonDir), N);      // moon comes FROM -uMoonDir; reflect its incoming ray about the rippled normal
+        float glint = pow(max(dot(Rm, V), 0.0), 60.0);                    // tight lobe = a coherent shimmering track, not a wash
+        float track = smoothstep(0.55, 1.0, abs(N.x)+abs(N.z));           // only the tilted ripple faces catch it → broken, watery path
+        col += vec3(0.28,0.34,0.42) * glint * night * (0.35 + 0.65*track);
+      }
       // Beer-Lambert depth absorption: the deeper the water column, the darker & more opaque, until the bottom disappears.
       float absorb = 1.0 - exp(-vDepth*0.9);                          // 0 at a thin film -> ~1 in deep water (steeper → opaque sooner)
       col = mix(col, vec3(0.002,0.008,0.012), absorb*0.97);           // sink toward near-black with depth — the deep must read genuinely DARK (Ben 07-20)
@@ -1784,6 +1819,14 @@ function applyResolution(){
   if(_sceneRT) _sceneRT.setSize(_dbv.x, _dbv.y);   // scene target matches the composer's internal resolution
 }
 applyResolution();
+// QUALITY TIER (pause menu) — the crisp, safe-to-live parts apply immediately (shadow-map resolution + FXAA);
+// the pixel-ratio ceiling and post-pass set are baked at load, so those settle on the next launch. Persisted.
+function applyQuality(q){ if(['Low','Medium','High','Ultra'].indexOf(q)<0)return; CFG.quality=q;
+  try{ localStorage.setItem('hollowcraft_q',q); }catch(e){}
+  try{ const sz=q==='Ultra'?2048:q==='Low'?512:1024;   // live shadow-map resize (dispose the old target so THREE rebuilds it)
+    if(sunLight.shadow.mapSize.x!==sz){ if(sunLight.shadow.map){ sunLight.shadow.map.dispose(); sunLight.shadow.map=null; } sunLight.shadow.mapSize.set(sz,sz); sunLight.shadow.needsUpdate=true; } }catch(e){}
+  try{ if(gradePass) gradePass.uniforms.uFXAA.value = (q==='Low'?0:1); }catch(e){}
+  flashName('quality: '+q+' — some effects apply on next launch'); }
 
 // screenshot pipeline for the entity's vision (renders to a small offscreen target;
 // works without preserveDrawingBuffer). Returns a downscaled JPEG data URL.
@@ -3357,6 +3400,10 @@ function buildPauseSettings(){ const el=document.getElementById('pausesettings')
     const s=document.createElement('input'); s.type='range'; s.min=min; s.max=max; s.step=step; s.value=val; s.style.width='150px';
     const v=document.createElement('span'); v.style.cssText='width:40px;text-align:right;color:#d8c79a'; v.textContent=fmt(val);
     s.oninput=()=>{ v.textContent=fmt(+s.value); on(+s.value); }; w.appendChild(s); w.appendChild(v); d.appendChild(l); d.appendChild(w); el.appendChild(d); };
+  { const d=document.createElement('div'); d.style.cssText='display:flex;align-items:center;justify-content:space-between;font:13px Georgia;color:#cbb98f;';   // QUALITY tier — shadow crispness + AA apply live; pixel-ratio ceiling + post passes settle on the next load
+    const l=document.createElement('span'); l.textContent='Quality'; const sel=document.createElement('select'); sel.style.cssText='background:#1a140c;color:#e0cfa0;border:1px solid #3a2c18;border-radius:5px;padding:3px 7px;font:13px Georgia;';
+    ['Low','Medium','High','Ultra'].forEach(q=>{ const o=document.createElement('option'); o.value=q; o.textContent=q; if(q===CFG.quality)o.selected=true; sel.appendChild(o); });
+    sel.onchange=()=>{ applyQuality(sel.value); }; d.appendChild(l); d.appendChild(sel); el.appendChild(d); }
   slider('Volume',0,1,0.05,_masterVol,x=>Math.round(x*100)+'%',x=>{ _masterVol=x; applyVolume(); try{localStorage.setItem('hollowcraft_vol',x);}catch(e){} });
   slider('Render distance',3,CFG.RD_MAX,1,CFG.RENDER_DIST,x=>x+' ch',x=>{ CFG.RENDER_DIST=x; try{localStorage.setItem('hollowcraft_rd',x);}catch(e){} });
   slider('Look sensitivity',0.4,2.2,0.05,_sensMult,x=>x.toFixed(2)+'x',x=>{ _sensMult=x; try{localStorage.setItem('hollowcraft_sens',x);}catch(e){} });
@@ -4313,7 +4360,7 @@ function loop(){
   const t1=performance.now();
   if(USE_SKYCUBE){ let da=Math.abs(worldTime-_skyBakeAng); if(da>CFG.DAY_LEN*0.5)da=CFG.DAY_LEN-da; if(!_skyBaked || da>CFG.DAY_LEN*0.0005){ _skyBakeAng=worldTime; _skyBaked=true; bakeSky(); } }   // rebake ~3x/sec → the sky gradient shifts smoothly through dawn/dusk instead of stepping
   else skyDome.position.copy(camera.position);
-  updateHighlight(); updateBars(); updateMinimap(dt); updateBossRegen(dt); updateVoid(dt); updateWretchBar();
+  updateHighlight(); updateBars(); updateMinimap(dt); updateBossRegen(dt); updatePeel(dt); updateVoid(dt); updateWretchBar();
   if(gradePass){ gradePass.uniforms.uTime.value=clock.elapsedTime; gradePass.uniforms.uDark.value=1-globalU.uDay.value; }   // grain+vignette rise as it darkens
   if(godrayPass){ camera.updateMatrixWorld();                                            // project the sky-sun direction to screen space for the god-ray origin
     _sunProj.copy(camera.position).addScaledVector(globalU.uSunDir.value, 2000).project(camera);
@@ -7781,6 +7828,7 @@ function hurtWretch(dmg){ if(wretch.hp==null){ wretch.hpMax=2700; wretch.hp=2700
   if(wretch.boss && (wretch._regenT||0)>0){ wretch._gunHit=false; spawnParticles(wretch.pos.x,wretch.pos.y+2,wretch.pos.z,0xf1e7d9,6,2,0.5); return; }   // UNTOUCHABLE while a new bar floods in — shots shear off as light
   const _freshEnc=(wretch.encDmg||0)===0;                                                // the first hit of a NEW encounter (encDmg resets after 10s untouched)
   wretch.hp=Math.max(0,wretch.hp-dmg); wretch.everHurt=true;                            // first hit → the health bar appears (see updateWretchBar)
+  if(wretch.boss && wretch._bossPhase===2 && !PEEL.on && wretch.hp<=wretch.hpMax*0.5){ beginPeel(0.5); if(typeof seraphSay==='function')seraphSay('fractal1'); }   // HALFWAY through the zealot, the world starts peeling away (Ben 07-20)
   wretch.wound=Math.min(1,(wretch.wound||0)+0.18);                                       // provoke (decoupled from raw damage) → drives HUNT/FLEE
   mind.model.timesHitMe=(mind.model.timesHitMe||0)+1;
   wretch.encDmg=(wretch.encDmg||0)+dmg; wretch.lastHitT=0;                                // damage taken THIS encounter (decays if it's left alone — see updateWretch)
@@ -7817,7 +7865,7 @@ function startBossRegen(){ wretch._bossPhase=(wretch._bossPhase||1)+1;
   _surgeFlash.style.transition='opacity .06s'; _surgeFlash.style.opacity='0.85';                              // white-out snap…
   setTimeout(()=>{ _surgeFlash.style.transition='opacity 1.5s'; _surgeFlash.style.opacity='0'; },90);         // …then the light drains away as the bar floods
   if(typeof seraphSay==='function')seraphSay(wretch._bossPhase>=3?'surge3a':'surge2a');
-  if(wretch._bossPhase>=3) setTimeout(()=>{ if(wretch.boss&&wretch.active&&wretch._bossPhase>=3) enterVoid(); }, 450);   // THE THIRD LIFE OPENS THE VOID — inside the white-out
+  if(wretch._bossPhase>=3){ beginPeel(1); PEEL.rate=0.05; }   // THE THIRD LIFE finishes stripping reality — the remaining ~half of the world peels off, then updatePeel opens the pure void at p>=1
   flashName(wretch._bossPhase>=BOSS_PHASES.length?'THE CERAPHIM WILL NOT DIE':'the ceraphim surges anew'); }
 function updateBossRegen(dt){ if(!wretch.boss || !(wretch._regenT>0)) return;
   wretch._regenT=Math.max(0,wretch._regenT-dt);
@@ -7855,7 +7903,7 @@ function killWretch(){ spawnParticles(wretch.pos.x,wretch.pos.y+1,wretch.pos.z,0
     if(wretch._eyeRig)wretch._eyeRig.visible=false; if(wretch._bossCore)wretch._bossCore.visible=false; if(wretch.P&&wretch.P.head)wretch.P.head.visible=true; if(wretch.P&&wretch.P.pelvis)wretch.P.pelvis.visible=true;   // the eye-wheel & core close; the true body returns
     if(typeof hideBossRing==='function')hideBossRing(); if(typeof hideBossBeam==='function')hideBossBeam(); wretch._laserState=null; wretch._bossPitch=0; wretch._bossRoll=0; wretch._faceLock=false;
     if(typeof clearRakeFeathers==='function')clearRakeFeathers(); wretch._prayT=0; wretch._laserA=null; if(typeof seraphFold==='function')seraphFold(null);
-    if(typeof exitVoid==='function')exitVoid();                                       // the white void collapses with its master
+    if(typeof exitVoid==='function')exitVoid(); if(typeof endPeel==='function')endPeel();   // the white void collapses with its master; any half-peeled world snaps back
     try{ lootChest(bx, gy, bz, [['angel_wings',1],['minigun',1],['rifle_ammo',64]]); }catch(e){}
     if(typeof herobrine!=='undefined')herobrine.haunting=false;
     try{ const jx=bx+1.5, jz=bz+1.5; let jy=groundYAt(jx,jz); if(jy<=CFG.SEA)jy=CFG.SEA+1;   // …and JESUS is resurrected, risen from the beast's ashes
@@ -8383,6 +8431,55 @@ function sndFractalSwell(){ if(!AC)return; const PHI=1.618034, f0=180;
 function _cloudTex(){ const S=128, cv=document.createElement('canvas'); cv.width=cv.height=S; const c=cv.getContext('2d');
   const g=c.createRadialGradient(S/2,S/2,4,S/2,S/2,S/2); g.addColorStop(0,'rgba(255,255,255,0.95)'); g.addColorStop(0.55,'rgba(255,255,252,0.55)'); g.addColorStop(1,'rgba(255,255,255,0)');
   c.fillStyle=g; c.fillRect(0,0,S,S); const t=new THREE.CanvasTexture(cv); return t; }
+// ===== THE WORLD PEELS AWAY (Ben 07-20, Coraline Beldam reference) ==========================================
+// Reality is a painted skin over a white nothing. Beginning halfway through Stage II, strips of the world
+// peel off like corroded paint in a harsh wind — a leading edge lifts, the strip curls back, tears free,
+// tumbles downwind, bleaches white and breaks apart — while the white void bleeds in behind. By the time
+// Stage III opens the world is ~half gone; the third life finishes stripping it and we enter the pure void.
+const PEEL={ on:false, p:0, target:0, rate:0.02, flakes:[], cap:56, wind:new THREE.Vector3(1,0,0.3),
+  prevFogC:null, prevFogD:0, prevBg:null, spawnAcc:0, mat:null, geo:null };
+function _peelTex(top){ const S=64, cv=document.createElement('canvas'); cv.width=cv.height=S; const c=cv.getContext('2d');
+  c.fillStyle=top; c.fillRect(0,0,S,S*0.32); for(let k=0;k<80;k++){ c.fillStyle='rgba(0,0,0,'+(Math.random()*0.12).toFixed(2)+')'; c.fillRect(Math.random()*S,Math.random()*S*0.32,2,2); }
+  c.fillStyle='#5a4326'; c.fillRect(0,S*0.32,S,S*0.68); for(let k=0;k<160;k++){ c.fillStyle=Math.random()<0.5?'rgba(40,26,12,0.5)':'rgba(120,92,54,0.4)'; c.fillRect(Math.random()*S,S*0.32+Math.random()*S*0.68,2,2+Math.random()*3); }
+  const t=new THREE.CanvasTexture(cv); t.colorSpace=THREE.SRGBColorSpace; return t; }
+function _peelAssets(){ if(PEEL.geo)return; PEEL.geo=new THREE.PlaneGeometry(3.0,7.0,1,5);            // a segmented carpet-strip so it can visibly CURL
+  PEEL.geo.translate(0,3.5,0);                                                                        // pivot at the leading edge (curl/peel rotates about here)
+  PEEL.matGrass=new THREE.MeshLambertMaterial({map:_peelTex('#4f7a34'),side:THREE.DoubleSide}); PEEL.matSand=new THREE.MeshLambertMaterial({map:_peelTex('#cabb86'),side:THREE.DoubleSide}); PEEL.matStone=new THREE.MeshLambertMaterial({map:_peelTex('#8a8a90'),side:THREE.DoubleSide}); }
+function _peelSurfaceMat(x,z){ const gy=groundYAt(x,z), b=getBlock(Math.floor(x),gy,Math.floor(z)), n=(B[b]&&B[b].name)||''; return /sand|gravel/.test(n)?PEEL.matSand : /stone|cobble|rock/.test(n)?PEEL.matStone : PEEL.matGrass; }
+function beginPeel(target){ _peelAssets(); if(!PEEL.on){ PEEL.on=true; PEEL.p=0; PEEL.spawnAcc=0;
+    PEEL.prevFogC=scene.fog.color.clone(); PEEL.prevFogD=scene.fog.density; PEEL.prevBg=scene.background;
+    const a=Math.random()*6.283; PEEL.wind.set(Math.cos(a),0,Math.sin(a)); }
+  PEEL.target=Math.max(PEEL.target,target); }
+function _spawnFlake(){ if(PEEL.flakes.length>=PEEL.cap)return;
+  const a=Math.random()*6.283, r=6+Math.random()*Math.max(10, CFG.RENDER_DIST*CK*0.7*(0.4+PEEL.p));           // ring expands outward as the peel deepens
+  const x=player.pos.x+Math.cos(a)*r, z=player.pos.z+Math.sin(a)*r, gy=groundYAt(x,z); if(gy<=CFG.SEA-2)return;
+  const g=new THREE.Group(); const m=new THREE.Mesh(PEEL.geo,_peelSurfaceMat(x,z)); g.add(m);
+  g.position.set(x,gy+0.05,z); g.rotation.y=Math.random()*6.283; g.rotation.x=-Math.PI/2;                     // lying flat on the ground
+  scene.add(g); PEEL.flakes.push({g,m, t:0, peel:0, free:false, vx:0,vy:0,vz:0, wob:Math.random()*6.283, spin:new THREE.Vector3((Math.random()-0.5)*3,(Math.random()-0.5)*3,(Math.random()-0.5)*3), op:1}); }
+function updatePeel(dt){ if(!PEEL.on)return;
+  const inVoid=VOID.on;
+  if(!inVoid){ PEEL.p += clamp(PEEL.target-PEEL.p, -1, 1)*Math.min(1,dt*PEEL.rate*18);                        // ease toward the target fraction (frozen once the void owns the sky)
+    const w=clamp(PEEL.p,0,1); scene.fog.color.copy(PEEL.prevFogC).lerp(_VWHITE,w*0.96); scene.fog.density=PEEL.prevFogD+(0.020-PEEL.prevFogD)*w;   // bleach the world to white from the edges in
+    if(w>0.15) scene.background=_VWHITE;
+    PEEL.spawnAcc+=dt*(3+30*w); while(PEEL.spawnAcc>=1){ PEEL.spawnAcc-=1; _spawnFlake(); } }
+  else if(!PEEL.flakes.length){ PEEL.on=false; return; }                                                     // void open + all flakes flown → peel is done
+  const wind=PEEL.wind;
+  for(let k=PEEL.flakes.length-1;k>=0;k--){ const f=PEEL.flakes[k]; f.t+=dt;
+    if(!f.free){ f.peel=Math.min(1,f.peel+dt*0.7);                                                            // CURL: the strip rears back off its leading edge
+      f.g.rotation.x=-Math.PI/2 + f.peel*2.6; f.g.position.y+=dt*0.4*f.peel;
+      if(f.peel>=1){ f.free=true; f.vx=wind.x*(3+Math.random()*4); f.vz=wind.z*(3+Math.random()*4); f.vy=2+Math.random()*3; if(Math.random()<0.3&&AC){ const p=panAt(f.g.position.x,f.g.position.y,f.g.position.z); burst(p,0.25,0.3,600,0.6,180,'lowpass'); } } }
+    else { f.vy-=2.4*dt; f.wob+=dt*6; f.g.position.x+=(f.vx+Math.sin(f.wob)*2)*dt; f.g.position.y+=f.vy*dt; f.g.position.z+=(f.vz+Math.cos(f.wob*0.8)*2)*dt;   // TUMBLE downwind, fluttering
+      f.g.rotation.x+=f.spin.x*dt; f.g.rotation.y+=f.spin.y*dt; f.g.rotation.z+=f.spin.z*dt;
+      f.g.scale.multiplyScalar(1-dt*0.35); f.op-=dt*0.5;                                                      // shrink + bleach to white then gone
+      if(f.m.material!==_peelWhiteMat && f.op<0.6){ f.m.material=_peelWhiteMat; }
+      if(f.op<=0 || f.g.position.y>groundYAt(f.g.position.x,f.g.position.z)+40){ spawnParticles(f.g.position.x,f.g.position.y,f.g.position.z,0xffffff,4,2,0.6); scene.remove(f.g); PEEL.flakes.splice(k,1); } } }
+  if(PEEL.p>=0.995 && !VOID.on) enterVoid();                                                                 // the last of the skin is gone → the pure void
+}
+const _VWHITE=new THREE.Color(0xf5f1ea), _peelWhiteMat=new THREE.MeshBasicMaterial({color:0xffffff,side:THREE.DoubleSide,transparent:true,opacity:0.9,fog:false});
+function endPeel(){ if(!PEEL.on)return; PEEL.on=false; PEEL.p=0; PEEL.target=0;
+  for(const f of PEEL.flakes){ try{ scene.remove(f.g); }catch(e){} } PEEL.flakes.length=0;
+  if(!VOID.on){ if(PEEL.prevFogC)scene.fog.color.copy(PEEL.prevFogC); scene.fog.density=PEEL.prevFogD; if(PEEL.prevBg)scene.background=PEEL.prevBg; }   // if the void never opened (boss died mid-peel), restore the sky
+  PEEL.prevFogC=null; PEEL.prevBg=null; }
 function enterVoid(){ if(VOID.on)return; VOID.on=true; VOID.center.copy(player.pos);
   VOID.prev={ bg:scene.background, fogCol:scene.fog.color.clone(), fogD:scene.fog.density,
     chunks:chunkRoot.visible, sky:(typeof skyDome!=='undefined')?skyDome.visible:null, pine:(typeof pineLayer!=='undefined')?pineLayer.visible:null,
@@ -9512,7 +9609,7 @@ refreshHotbar();
 //  entity voice, material footsteps, threat ducking). All synthesized.
 // =====================================================================
 let AC=null, master=null, ambBus=null, spatBus=null, wetBus=null, NB=null;
-let convForest=null, convCave=null, gForest=null, gCave=null, rumbleGain=null, crackleGain=null, windGain=null, insectGain=null;
+let convForest=null, convCave=null, gForest=null, gCave=null, rumbleGain=null, crackleGain=null, windGain=null, insectGain=null, submergeLP=null, shoreGain=null;
 let panners=[], pIdx=0, audioReady=false;
 let voicePanners=[], vIdx=0;   // DEDICATED pool for the Wretch's voice: short range + steep rolloff so stings die off fast (separate from the 64-block general pool)
 function irBuffer(sec,decay,dark){ const rate=AC.sampleRate, len=Math.floor(rate*sec), b=AC.createBuffer(2,len,rate);
@@ -9520,11 +9617,16 @@ function irBuffer(sec,decay,dark){ const rate=AC.sampleRate, len=Math.floor(rate
 function noiseBuf(sec){ const b=AC.createBuffer(1,Math.floor(AC.sampleRate*sec),AC.sampleRate); const d=b.getChannelData(0); for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1; return b; }
 function initAudio(){ if(AC)return; try{
   AC=new (window.AudioContext||window.webkitAudioContext)();
-  master=AC.createGain(); master.gain.value=0.75; const lim=AC.createDynamicsCompressor(); master.connect(lim); lim.connect(AC.destination);
+  master=AC.createGain(); master.gain.value=0.75; const lim=AC.createDynamicsCompressor();
+  submergeLP=AC.createBiquadFilter(); submergeLP.type='lowpass'; submergeLP.frequency.value=20000; submergeLP.Q.value=0.4;   // wide open above water; clamps to a dull ~460Hz when the head goes under (everything muffles)
+  master.connect(submergeLP); submergeLP.connect(lim); lim.connect(AC.destination);
   ambBus=AC.createGain(); ambBus.gain.value=0.6; ambBus.connect(master);
   spatBus=AC.createGain(); spatBus.gain.value=0.9; spatBus.connect(master);
   wetBus=AC.createGain(); wetBus.gain.value=0.5; wetBus.connect(master);
   NB=noiseBuf(1);
+  // SHORELINE LAP — a soft filtered-noise wash that rises when you're near the water's edge (driven per-frame in _audioFrame)
+  { const sw=AC.createBufferSource(); sw.buffer=NB; sw.loop=true; const slp=AC.createBiquadFilter(); slp.type='bandpass'; slp.frequency.value=520; slp.Q.value=0.6;
+    shoreGain=AC.createGain(); shoreGain.gain.value=0; sw.connect(slp); slp.connect(shoreGain); shoreGain.connect(ambBus); sw.start(); }
   convForest=AC.createConvolver(); convForest.buffer=irBuffer(1.6,2.2,false); gForest=AC.createGain(); gForest.gain.value=1.5; convForest.connect(gForest); gForest.connect(wetBus);   // long, spacious forest echo (was a short 0.5s room)
   convCave=AC.createConvolver(); convCave.buffer=irBuffer(3.6,6,true); gCave=AC.createGain(); gCave.gain.value=0; convCave.connect(gCave); gCave.connect(wetBus);
   spatBus.connect(convForest); spatBus.connect(convCave);
@@ -9792,6 +9894,11 @@ _audioFrame=(dt)=>{ if(!AC)return;
   // threat from entity proximity/state
   let threat=0; if(wretch.active){ threat=clamp(1-wretch.dist/45,0,1); if(wretch.state==='HUNT')threat=Math.max(threat,0.9); if(wretch.state==='STALK')threat=Math.max(threat,0.5); }
   setThreat(threat);
+  // SUBMERGED MUFFLE — head underwater clamps the master low-pass to a dull thud; opens back up at the surface
+  if(submergeLP){ submergeLP.frequency.setTargetAtTime(_submerged?460:20000, t, 0.08); }
+  // SHORELINE LAP — swells when open water sits within a few blocks of the ear (and hushes underwater / when parched-fog eats the world)
+  if(shoreGain){ let near=0; for(const [dx,dz] of [[2,0],[-2,0],[0,2],[0,-2],[3,3],[-3,-3],[3,-3],[-3,3],[5,0],[0,5]]){ if(getBlock(Math.floor(cp.x+dx),Math.floor(cp.y-1),Math.floor(cp.z+dz))===WATER || getBlock(Math.floor(cp.x+dx),Math.floor(cp.y),Math.floor(cp.z+dz))===WATER){ near++; } }
+    const lap=_submerged?0.0:Math.min(0.10, near*0.016); shoreGain.gain.setTargetAtTime(lap, t, 0.5); }
   // reverb by ENCLOSURE — how boxed-in the player is (proximity-weighted solid-block coverage around them). Open beach
   // → DRY (no echo); dense woods → some echo; a cave → the full cave echo. Falloff is exponential (cov²), so exposed
   // ground stays clean and only genuine enclosure rings.
@@ -10477,6 +10584,7 @@ window.__hc={
   eyes(){ try{ return { hp:wretch.hp, spheres:seraphEyeSpheres().map(e=>({x:+e.x.toFixed(1),y:+e.y.toFixed(1),z:+e.z.toFixed(1),r:+e.r.toFixed(2),central:!!e.central})) }; }catch(e){ return {err:e.message}; } },   // QA: the seven live eye hit-spheres + boss hp
   bossHp(){ try{ return { phase:wretch._bossPhase||1, hp:wretch.hp, hpMax:wretch.hpMax, regenT:+((wretch._regenT||0)).toFixed(2), boss:!!wretch.boss, active:!!wretch.active }; }catch(e){ return {err:e.message}; } },   // QA: 3-phase healthbar state
   stage2(){ try{ return { feathers:_rakeFeathers.length, pray:+((wretch._prayT||0)).toFixed(1), cycles:wretch._cycleN||0, sweep:!!wretch._laserA, laser:wretch._laserState||null, rakeCd:+((wretch._rakeCd||0)).toFixed(1) }; }catch(e){ return {err:e.message}; } },   // QA: zealot substage state
+  peel(o){ try{ o=o||{}; if(o.begin!=null)beginPeel(o.begin); if(o.rate!=null)PEEL.rate=o.rate; return { on:PEEL.on, p:+PEEL.p.toFixed(2), target:PEEL.target, flakes:PEEL.flakes.length, voidOn:VOID.on }; }catch(e){ return {err:e.message}; } },   // QA: world-peel dissolve state
   void3(o){ try{ o=o||{}; if(o.chainNow)VOID.chainCd=0.05; if(o.meter!=null)VOID.meter=o.meter;                       // QA: fractal-void state (+ force a chain / set the meter)
     return { on:VOID.on, morph:+VOID.morph.toFixed(2), fractal:!!VOID.fmat, chain:!!VOID.chain, bound:!!player.bound, meter:+VOID.meter.toFixed(2), teased:VOID.teased,
       bgIsRT:!!(scene.background&&scene.background.isTexture), clouds:VOID.clouds?VOID.clouds.children.length:0 }; }catch(e){ return {err:e.message}; } },
