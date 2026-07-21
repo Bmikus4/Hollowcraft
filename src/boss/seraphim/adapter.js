@@ -187,10 +187,27 @@ export function seraphBloom(on) {
 export function buildSeraphStoneProto(ctx = {}) {
   try {
     const m = new SeraphimModel({ scene: ctx.scene || _scene, camera: ctx.camera, renderer: ctx.renderer });
-    try { m.setFold && m.setFold(0.15); m.update(0.016, 0); } catch (e) {}
+    try { m.setFold && m.setFold(0); m.update(0.016, 0); } catch (e) {}   // wings fully SPREAD → every feather + all seven eyes preserved in the trophy
     const o = m.object3d;
     const stone = new THREE.MeshLambertMaterial({ color: 0x8f9299 });
-    o.traverse(x => { x.visible = true; if (x.isMesh || x.isInstancedMesh) { x.material = stone; x.castShadow = true; x.receiveShadow = true; x.frustumCulled = false; } });   // EVERY node visible (hidden subgroups otherwise blank the statue) + no instanced-cull
+    const grey = new THREE.DataTexture(new Uint8Array([143, 146, 153, 255]), 1, 1); grey.needsUpdate = true;
+    // FORCE-COMPILE so the feather/body shaders' onBeforeCompile runs → their uniforms exist to recolour.
+    try { if (ctx.renderer && ctx.renderer.compile) { const warm = new THREE.Scene(); warm.add(o); m.update(0.016, 0); ctx.renderer.compile(warm, ctx.camera || new THREE.PerspectiveCamera()); warm.remove(o); } } catch (e) {}
+    // The WINGS/CORE feathers are shaped by the body VERTEX shader (uBones/rest attrs) — swapping the material to plain
+    // stone collapses them ("feathers gone"). So KEEP that shader and just recolour it stone (grey atlas + grey tints);
+    // only the simple eye/cornea/lid meshes get plain stone.
+    const greyBody = (mat) => { const sh = mat && mat.userData && mat.userData.shader; if (!sh || !sh.uniforms) return false;
+      const U = sh.uniforms; let hit = false;
+      if (U.uAtlas) { U.uAtlas.value = grey; hit = true; }
+      for (const k of ['uIvoryHi', 'uIvoryLo', 'uRust', 'uRustDeep']) if (U[k] && U[k].value && U[k].value.setHex) { U[k].value.setHex(0x8f9299); hit = true; }
+      if (U.uEmberStrength) U.uEmberStrength.value = 0; if (U.uSSSStrength) U.uSSSStrength.value = 0;
+      if (U.uEmber && U.uEmber.value && U.uEmber.value.setHex) U.uEmber.value.setHex(0x2a2a2a);
+      if (hit && mat.emissive) { mat.emissive.setHex(0x000000); mat.emissiveIntensity = 0; }
+      return hit; };
+    o.traverse(x => { x.visible = true; if (x.isMesh || x.isInstancedMesh) {
+      x.castShadow = true; x.receiveShadow = true; x.frustumCulled = false;
+      if (!greyBody(x.material)) x.material = stone;   // feather shader recoloured in place; eyes/cornea/lids → plain stone
+    } });
     o.visible = true; o.scale.setScalar(1); o.position.set(0, 0, 0); o.quaternion.identity();
     o.updateMatrixWorld(true);
     return o;
