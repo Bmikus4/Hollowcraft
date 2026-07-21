@@ -258,6 +258,7 @@ export function buildWing(config) {
   const uni = material.userData.wingUniforms;
   const _invGroup = new THREE.Matrix4();
   const _qAnim = new THREE.Quaternion(), _qFold = new THREE.Quaternion();
+  const _th = [0, 0, 0, 0];   // reused per-wing bone-angle scratch (was an array literal allocated every frame × 8 wings) (Ben 07-21 perf)
   const state = { flapIntensity: 1, fold: 0 };
 
   function update(dt, elapsed) {
@@ -265,14 +266,14 @@ export function buildWing(config) {
     const ampK = 0.35 + 0.65 * state.flapIntensity;
     const tw = elapsed + flap.beta * Math.sin(omega * elapsed); // downstroke time-warp
     const ph = omega * tw + flap.phase;
-    const th = [0, flap.ampHumerus * ampK * Math.sin(ph), flap.ampRadius * ampK * Math.sin(ph - flap.phi), flap.ampCarpus * ampK * Math.sin(ph - 2 * flap.phi)];
+    _th[1] = flap.ampHumerus * ampK * Math.sin(ph); _th[2] = flap.ampRadius * ampK * Math.sin(ph - flap.phi); _th[3] = flap.ampCarpus * ampK * Math.sin(ph - 2 * flap.phi);
     const s = THREE.MathUtils.smoothstep(state.fold, 0, 1);
     for (let i = 1; i < 4; i++) {
-      _qAnim.setFromAxisAngle(flapAxis, th[i]);
+      _qAnim.setFromAxisAngle(flapAxis, _th[i]);
       _qFold.setFromAxisAngle(flapAxis, FOLD_ANGLE[i]);
       bones[i].quaternion.slerpQuaternions(_qAnim, _qFold, s); // quaternion blend, never euler-lerp
     }
-    group.updateWorldMatrix(true, true);
+    group.updateWorldMatrix(false, true);   // parent world matrix cancels in inv(group)*bone (both use the same parent) → group-local bones are identical without the ancestor walk (Ben 07-21 perf)
     _invGroup.copy(group.matrixWorld).invert();
     for (let i = 0; i < 4; i++) uni.uBones.value[i].multiplyMatrices(_invGroup, bones[i].matrixWorld); // bone matrix in group-local space
     uni.uTime.value = elapsed;

@@ -201,7 +201,8 @@ function buildEyeBand2(opts = {}) {
     lid: new THREE.InstancedMesh(G.lidU, lidMat, N * 2),
   };
   im.cornea.renderOrder = 3;
-  for (const k of Object.keys(im)) { im[k].frustumCulled = false; group.add(im[k]); }
+  const imKeys = Object.keys(im);                          // cache once — reused every frame in update() (no per-frame Object.keys alloc)
+  for (let ki = 0; ki < imKeys.length; ki++) { im[imKeys[ki]].frustumCulled = false; group.add(im[imKeys[ki]]); }
 
   // central-tracking pivot so the laser socket inherits the central gaze
   const centralPivot = new THREE.Object3D();
@@ -223,6 +224,7 @@ function buildEyeBand2(opts = {}) {
     deathClose: 0,
   }));
   eyes.forEach(e => { e.pivot.position.set(e.l.x, e.l.y, e.l.z); e.pivot.scale.setScalar(e.l.size); });
+  const centralEye = eyes.find(e => e.isC);                // cache the central eye once (was eyes.find() every frame in update())
 
   // per-eye tint ±5% (canon §4.3)
   eyes.forEach(e => {
@@ -241,8 +243,8 @@ function buildEyeBand2(opts = {}) {
   const BLINK = { close: 0.08, hold: 0.04, open: 0.2 };
   const blinkValue = (t) => t < BLINK.close ? t / BLINK.close : (t < BLINK.close + BLINK.hold ? 1 : (1 - (t - BLINK.close - BLINK.hold) / BLINK.open));
   function damp(q, goal, k, dt) { q.slerp(goal, 1 - Math.exp(-k * dt)); }
+  function refreshTargetLocal() { group.worldToLocal(targetLocal.copy(target)); }   // one mat4 invert per frame, shared by all 7 eyes (was 7 inverts/frame) (Ben 07-21 perf)
   function goalFor(e, wander, elapsed) {
-    group.worldToLocal(targetLocal.copy(target));
     _v.copy(targetLocal).sub(e.pivot.position);
     if (wander) {
       _v.add(e.offset);
@@ -254,7 +256,7 @@ function buildEyeBand2(opts = {}) {
   }
 
   let gazeMode = 'wander';
-  let chargeX = 0;
+  let chargeX = 0, _prevCharge = -1;   // _prevCharge gates the per-frame charge-attribute re-upload
 
   const tmp = new THREE.Matrix4(), tmpR = new THREE.Matrix4();
   const _flipY = new THREE.Matrix4().makeScale(1, -1, 1);   // upper-lid cap → lower-lid cap
@@ -269,6 +271,7 @@ function buildEyeBand2(opts = {}) {
     setDeathClose(perRing) { eyes.forEach(e => { e.deathClose = perRing[Math.min(3, e.ring)] || 0; }); },
 
     telegraphBlink() {
+      refreshTargetLocal();
       for (const e of eyes) { goalFor(e, false, 0); e.curQ.copy(e.goalQ); e.blinkActive = true; e.blinkT = 0; e.nextBlink = 4 + expRand(opts.blinkMean || 5.5); }
     },
 
@@ -281,6 +284,7 @@ function buildEyeBand2(opts = {}) {
     update(dt, elapsed) {
       dt = Math.min(dt, 0.05);
       const wander = gazeMode !== 'track';
+      refreshTargetLocal();                                  // once/frame (all eyes share the same target in group-local)
       for (const e of eyes) {
         if (e.isC || !wander) { goalFor(e, false, elapsed); damp(e.curQ, e.goalQ, e.isC ? 16 : 20, dt); }
         else {
@@ -295,7 +299,7 @@ function buildEyeBand2(opts = {}) {
 
         // Poisson blink, guard all-at-once
         if (!e.blinkActive && elapsed >= e.nextBlink) {
-          const blinking = eyes.reduce((n, x) => n + (x.blinkActive ? 1 : 0), 0);
+          let blinking = 0; for (let bi = 0; bi < eyes.length; bi++) if (eyes[bi].blinkActive) blinking++;   // plain loop — no per-frame reduce closure
           if (blinking >= 3) e.nextBlink = elapsed + 0.3; else { e.blinkActive = true; e.blinkT = 0; }
         }
         if (e.blinkActive) {
@@ -306,12 +310,15 @@ function buildEyeBand2(opts = {}) {
       }
 
       // central charge channel + laser socket follows central gaze
-      const cen = eyes.find(e => e.isC);
+      const cen = centralEye;                              // cached ref (was eyes.find(...) — a closure every frame)
       centralPivot.quaternion.copy(cen.curQ);
-      aCharge[cen.k] = chargeX;
-      aUvScale[cen.k] = 1 + chargeX * 0.5;                 // pupil constrict
-      irisGeoInst.getAttribute('aCharge').needsUpdate = true;
-      irisGeoInst.getAttribute('aUvScale').needsUpdate = true;
+      if (chargeX !== _prevCharge) {                       // only re-upload the two charge attributes when the charge actually changes (constant between lasers)
+        aCharge[cen.k] = chargeX;
+        aUvScale[cen.k] = 1 + chargeX * 0.5;               // pupil constrict
+        irisGeoInst.getAttribute('aCharge').needsUpdate = true;
+        irisGeoInst.getAttribute('aUvScale').needsUpdate = true;
+        _prevCharge = chargeX;
+      }
 
       // write instance matrices
       for (const e of eyes) {
@@ -328,7 +335,7 @@ function buildEyeBand2(opts = {}) {
         tmpR.makeRotationX(upper); im.lid.setMatrixAt(e.k, tmp.multiplyMatrices(P, tmpR));
         tmpR.makeRotationX(-upper); im.lid.setMatrixAt(N + e.k, tmp.multiplyMatrices(P, tmpR).multiply(_flipY));
       }
-      for (const k of Object.keys(im)) im[k].instanceMatrix.needsUpdate = true;
+      for (let ki = 0; ki < imKeys.length; ki++) im[imKeys[ki]].instanceMatrix.needsUpdate = true;   // cached key array — no Object.keys() alloc every frame
     },
 
     dispose() {
@@ -498,7 +505,7 @@ function buildSilhouette(mat) {
   }
   grp.userData.setPose = (flapPhase) => {
     const idx = flapPhase < -0.2 ? 0 : (flapPhase > 0.2 ? 2 : 1);
-    meshes.forEach((m, i) => { m.visible = i === idx; });
+    for (let i = 0; i < meshes.length; i++) meshes[i].visible = (i === idx);   // indexed loop — no per-frame closure alloc (Ben 07-21 perf)
   };
   return grp;
 }
@@ -695,8 +702,9 @@ export class SeraphimModel {
     if (this.camera) this.lod.update(this.camera);
     this.silhouette.userData.setPose(Math.sin(el * v.omega) * (flap));
 
-    // 7) analytic hit proxies (law 4)
-    this._updateHitProxies();
+    // 7) analytic hit proxies (law 4) — computed LAZILY in getHitProxies() now, not every frame:
+    // nothing in the game reads them (hit detection uses adapter's seraphEyeSpheres/seraphWingSpheres),
+    // so the per-frame ancestor-chain walk + 8 wing bounds rebuilds were pure waste (Ben 07-21 perf audit)
 
     return this;
   }
@@ -710,7 +718,7 @@ export class SeraphimModel {
     }
   }
 
-  getHitProxies() { return this.hitProxies; }
+  getHitProxies() { this._updateHitProxies(); return this.hitProxies; }   // lazy — only pays the cost if something actually asks
 
   dispose() {
     this.eyeBand.dispose();

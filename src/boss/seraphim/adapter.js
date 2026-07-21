@@ -202,7 +202,7 @@ export function seraphCorpseMode() {
   try { _model.object3d.quaternion.identity(); _model.object3d.updateMatrix(); } catch (e) {}
   // FOLD THE WINGS SHUT (Ben 07-21): a slain god CRUMPLES — folding collapses the ~39m wingspan so the ragdoll's
   // bounding box shrinks further. setFold is instant per update(); a few pumps bake the folded pose into the instance matrices.
-  try { if (_model.setFold) { _model.setFold(1); for (let k = 0; k < 3; k++) _model.update(0.05, _elapsed); } } catch (e) {}
+  try { if (_model.setFold) { _model.setFold(1); _model.update(0.05, _elapsed); } } catch (e) {}   // ONE pump — setFold is instant per update(); 3 pumps was 3× a full rig animation cost on the death frame (Ben 07-21 perf)
   try { _model.object3d.updateWorldMatrix(true, true); } catch (e) {}
 }
 
