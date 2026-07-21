@@ -4342,7 +4342,7 @@ function loop(){
   if(!started){ updateMenuCam(dt); }                                       // menu cinematic owns the camera until you press play
   else { if(!intro.active) applyLook(dt); if(intro.active) updateIntro(dt); else updateCamera(dt); }
   applyWaterFog();
-  updateDrops(dt); updateSpears(dt); updateStuckSpears(dt); updateParticles(dt); updateShells(dt); updateView(dt); if(typeof updateWings==='function')updateWings(dt); updateWatchers(dt); checkNotes(dt); updateSkyBirds(dt); if(typeof updateDungeonBugs==='function')updateDungeonBugs(dt);  // floating items, thrown/stuck spears, particles, ejected shell casings, held viewmodel, angel wings, watching-eyes, notes, sky birds, dungeon arachnids
+  updateDrops(dt); updateSpears(dt); updateStuckSpears(dt); updateParticles(dt); updateShells(dt); updateView(dt); if(typeof updateWings==='function')updateWings(dt); updateWatchers(dt); checkNotes(dt); updateSkyBirds(dt); updateLeaves(dt); if(typeof updateDungeonBugs==='function')updateDungeonBugs(dt);  // floating items, thrown/stuck spears, particles, ejected shell casings, held viewmodel, angel wings, watching-eyes, notes, sky birds, dungeon arachnids
   netUpdate(dt);                                                             // co-op: send my transform, interpolate peers, host broadcasts the Wretch/time
   updateAudio(dt);
   const t0=performance.now();
@@ -8679,6 +8679,56 @@ function bossUpdate(dt){ wretch.phase+=dt*1.4; const F=_bf();
 const animalGroup=new THREE.Group(); scene.add(animalGroup);
 const animals=[];
 // ---- SKY BIRDS: occasional distant flocks drifting across the sky (pure ambiance) ----
+// =====================================================================
+//  FALLING LEAVES — ambient wind-blown leaves drifting through the sky.
+//  One InstancedMesh (one draw call), struct-of-arrays state, recycled in a
+//  box that follows the player. Wind = a slowly-veering prevailing breeze +
+//  gusts (stronger in rain), the same feel as the wind-chime pendulum.
+// =====================================================================
+const LEAF_MAX=110, LEAF_R=34, LEAF_TOP=24, LEAF_BOT=16;   // horizontal radius, height above / depth below the eye
+const _leafTex=(function(){ try{ const s=32, cv=document.createElement('canvas'); cv.width=cv.height=s; const g=cv.getContext('2d');
+  g.clearRect(0,0,s,s); g.fillStyle='#fff';                                              // WHITE leaf mask (tinted per-instance) — a simple pointed leaf
+  g.beginPath(); g.moveTo(16,2); g.bezierCurveTo(30,10,30,24,16,31); g.bezierCurveTo(2,24,2,10,16,2); g.closePath(); g.fill();
+  g.strokeStyle='rgba(0,0,0,0.28)'; g.lineWidth=1.4; g.beginPath(); g.moveTo(16,4); g.lineTo(16,29); g.stroke();   // midrib
+  for(let i=1;i<=4;i++){ const y=6+i*4.6; g.beginPath(); g.moveTo(16,y); g.lineTo(16+ (7-i), y+3); g.moveTo(16,y); g.lineTo(16-(7-i), y+3); g.stroke(); }   // veins
+  const t=new THREE.CanvasTexture(cv); t.colorSpace=THREE.SRGBColorSpace; return t; }catch(e){ return null; } })();
+const _leafMat=new THREE.MeshBasicMaterial({map:_leafTex, transparent:true, alphaTest:0.35, side:THREE.DoubleSide, depthWrite:true, fog:true});
+const _leafIM=new THREE.InstancedMesh(new THREE.PlaneGeometry(0.42,0.34), _leafMat, LEAF_MAX);
+_leafIM.instanceMatrix.setUsage(THREE.DynamicDrawUsage); _leafIM.frustumCulled=false; _leafIM.renderOrder=1;
+_leafIM.setColorAt(0,new THREE.Color(1,1,1)); _leafIM.instanceColor.setUsage(THREE.DynamicDrawUsage);
+scene.add(_leafIM);
+const _leafPos=new Float32Array(LEAF_MAX*3), _leafRot=new Float32Array(LEAF_MAX*3), _leafSpin=new Float32Array(LEAF_MAX*3), _leafSz=new Float32Array(LEAF_MAX), _leafFall=new Float32Array(LEAF_MAX), _leafPh=new Float32Array(LEAF_MAX);
+const _leafPalette=[0x6f8f3a,0x86a341,0x547a30,0xb98b2e,0xc8702a,0x9a5a24,0x4e6b2a].map(h=>new THREE.Color(h));
+const _leafDummy=new THREE.Object3D(); let _leafInit=false;
+function _leafRespawn(i,aroundY){ const a=Math.random()*6.283, r=Math.random()*LEAF_R;
+  _leafPos[i*3]=camera.position.x+Math.cos(a)*r; _leafPos[i*3+1]=aroundY; _leafPos[i*3+2]=camera.position.z+Math.sin(a)*r;
+  _leafRot[i*3]=Math.random()*6.283; _leafRot[i*3+1]=Math.random()*6.283; _leafRot[i*3+2]=Math.random()*6.283;
+  _leafSpin[i*3]=(Math.random()-0.5)*2.4; _leafSpin[i*3+1]=(Math.random()-0.5)*2.0; _leafSpin[i*3+2]=(Math.random()-0.5)*2.6;
+  _leafSz[i]=0.6+Math.random()*0.9; _leafFall[i]=0.5+Math.random()*0.7; _leafPh[i]=Math.random()*6.283;
+  const c=_leafPalette[(Math.random()*_leafPalette.length)|0]; _leafIM.setColorAt(i,c); }
+function updateLeaves(dt){ if(!_leafIM.instanceColor)return;
+  const t=clock.elapsedTime, eye=camera.position;
+  if(!_leafInit){ for(let i=0;i<LEAF_MAX;i++) _leafRespawn(i, eye.y + (Math.random()*2-1)*(LEAF_TOP)); _leafInit=true; }
+  // day-tint the whole batch (leaves darken at dusk with the world) + hide when the eye is underground/submerged
+  const day=(typeof globalU!=='undefined'&&globalU.uDay)?globalU.uDay.value:1;
+  const hidden = _submerged || eye.y < CFG.SEA-6;
+  _leafMat.color.setScalar(hidden?0:(0.22+0.78*day));
+  // WIND — a prevailing breeze that slowly veers, plus gusts; rain drives it harder
+  const rain=(typeof weather!=='undefined'?(weather.rain||0):0);
+  const spd=0.8+rain*2.6, dir=t*0.06;
+  const wx=(Math.cos(dir)+0.5*Math.sin(t*0.6))*spd, wz=(Math.sin(dir)+0.5*Math.cos(t*0.47))*spd;
+  for(let i=0;i<LEAF_MAX;i++){ const b=i*3;
+    const flut=Math.sin(t*2.3+_leafPh[i]);                                     // per-leaf flutter across the wind
+    _leafPos[b]   += (wx + flut*0.9)*dt;
+    _leafPos[b+1] += (-_leafFall[i] + Math.sin(t*1.7+_leafPh[i])*0.15)*dt;      // slow flutter-fall
+    _leafPos[b+2] += (wz + Math.cos(t*2.1+_leafPh[i])*0.9)*dt;
+    _leafRot[b]+=_leafSpin[b]*dt; _leafRot[b+1]+=_leafSpin[b+1]*dt; _leafRot[b+2]+=_leafSpin[b+2]*dt;   // tumble
+    const dx=_leafPos[b]-eye.x, dz=_leafPos[b+2]-eye.z;
+    if(_leafPos[b+1] < eye.y-LEAF_BOT || dx*dx+dz*dz > (LEAF_R+4)*(LEAF_R+4)) _leafRespawn(i, eye.y+LEAF_TOP);   // fell below / drifted out → back to the top
+    _leafDummy.position.set(_leafPos[b],_leafPos[b+1],_leafPos[b+2]);
+    _leafDummy.rotation.set(_leafRot[b],_leafRot[b+1],_leafRot[b+2]);
+    _leafDummy.scale.setScalar(_leafSz[i]); _leafDummy.updateMatrix(); _leafIM.setMatrixAt(i,_leafDummy.matrix); }
+  _leafIM.instanceMatrix.needsUpdate=true; if(_leafIM.instanceColor)_leafIM.instanceColor.needsUpdate=true; }
 const skyBirdGroup=new THREE.Group(); scene.add(skyBirdGroup); const skyBirds=[]; let _birdT=10;
 function makeBird(){ const g=new THREE.Group(); const bm=new THREE.MeshBasicMaterial({color:0x191920});
   g.add(new THREE.Mesh(new THREE.BoxGeometry(0.16,0.12,0.5),bm));
@@ -10490,6 +10540,7 @@ window.__hc={
   setBlockAt(x,y,z,id){ try{ setBlockWorld(x,y,z,typeof id==='string'?BID[id]:id,true); return getBlock(x,y,z); }catch(e){ return e.message; } },
   giveItem(id,n){ try{ invAdd(id,n||1); refreshHotbar(); return invCount(id); }catch(e){ return e.message; } },
   hold(id){ try{ if(invCount(id)<1)invAdd(id,1); let si=-1; for(let i=0;i<9;i++){ if(inv[i]&&inv[i].id===id){ si=i; break; } } if(si<0){ inv[0]={id,n:1}; si=0; } selSlot=si; refreshHotbar(); return {held:id,slot:si}; }catch(e){ return e.message; } },
+  leaves(){ try{ return {count:_leafIM.count, max:LEAF_MAX, init:_leafInit, matColor:+_leafMat.color.r.toFixed(2), y0:+_leafPos[1].toFixed(1), eyeY:+camera.position.y.toFixed(1)}; }catch(e){ return e.message; } },
   viewDbg(){ try{ const vm=view.mesh; return { id:view.id, locked:!!locked, vis:!!view.group.visible, hasMesh:!!vm, meshVis:vm?!!vm.visible:null, children:view.group.children.length, rot:[+view.group.rotation.x.toFixed(3),+view.group.rotation.y.toFixed(3),+view.group.rotation.z.toFixed(3)], pos:[+view.group.position.x.toFixed(3),+view.group.position.y.toFixed(3),+view.group.position.z.toFixed(3)] }; }catch(e){ return e.message; } },
   invList(){ try{ return inv.filter(Boolean).map(s=>s.id+':'+s.n); }catch(e){ return e.message; } },
   pos(){ try{ return {x:player.pos.x,y:player.pos.y,z:player.pos.z,yaw:player.yaw,pitch:player.pitch}; }catch(e){ return e.message; } },
@@ -10523,6 +10574,7 @@ window.__hc={
   bookPng(){ try{ return _bookCv?_bookCv.toDataURL('image/png'):null; }catch(e){ return null; } },   // QA: current baked page as a png data URI
   arm(){ try{ HORROR.huntArmed=true; return true; }catch(e){ return e.message; } },                    // QA: end the day-1 grace
   say(id){ try{ seraphSay(id||'taunt1'); return true; }catch(e){ return e.message; } },                // QA: fire a seraph line (banner + god-voice)
+  heal(){ try{ player.health=20; player.dead=false; return player.health; }catch(e){ return e.message; } },   // QA: keep the tester alive through the boss's brutal stages
   winLurk(){ try{ const ok=startWindowLurk(); return { ok, lurk:wretch._lurk?{gx:wretch._lurk.gx,gy:wretch._lurk.gy,gz:wretch._lurk.gz,nx:+wretch._lurk.nx.toFixed(2),nz:+wretch._lurk.nz.toFixed(2)}:null, pos:{x:+wretch.pos.x.toFixed(2),y:+wretch.pos.y.toFixed(2),z:+wretch.pos.z.toFixed(2)}, yaw:+wretch.yaw.toFixed(2) }; }catch(e){ return {err:e.message}; } },   // QA: force the window head-press lurk
   headPos(){ try{ const v=new THREE.Vector3(); (wretch.P.head||wretch.P.neck).getWorldPosition(v); return {x:+v.x.toFixed(2),y:+v.y.toFixed(2),z:+v.z.toFixed(2)}; }catch(e){ return {err:e.message}; } },   // QA: the head's live world position
   skill(o){ try{ if(o)Object.assign(SKILL,o); return Object.assign({},SKILL); }catch(e){ return {err:e.message}; } },   // QA: read/inject the session skill ledger
