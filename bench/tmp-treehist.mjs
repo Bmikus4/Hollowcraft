@@ -18,9 +18,11 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     const errors=[]; page.on('pageerror', e=>errors.push(String(e.message||e).slice(0,180)));
     await page.goto('http://127.0.0.1:'+port+'/index.html?debug=1&t=210', { waitUntil:'load', timeout:90000 });
     await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true; } catch(e){ return false; } })()`, { timeout:90000 });
-    await sleep(4000);   // stay at natural spawn, stream
+    await sleep(18000);   // stay at natural spawn, let ALL nearby chunks fully generate + settle
     const h = await page.evaluate(`__hc.treehist()`);
-    console.log(JSON.stringify({ treehist:h, errors }, null, 1));
+    const g = await page.evaluate(`__hc.genScan()`);
+    const tt = await page.evaluate(`__hc.trunkTrace(284,12)`);
+    console.log(JSON.stringify({ LIVE_trunks:{tallest:h.tallest, nTrunks:h.nTrunks, hist:h.hist}, nEdits:g.nEdits, airEdits:g.air, editBBox:g.editBBox, errors }));
     await browser.close(); process.exit(0);
   } finally { try{ server.kill(); }catch(e){} }
 })().catch(e=>{ console.error(e); process.exit(1); });
