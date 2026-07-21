@@ -1775,16 +1775,18 @@ const MotionBlurShader={
   uniforms:{
     tDiffuse:{value:null}, tDepth:{value:null}, tPrev:{value:null},   // tPrev = dummy so ShaderPass has somewhere to dump readBuffer (we feed tDiffuse ourselves from the scene RT)
     uInvVP:{value:new THREE.Matrix4()}, uPrevVP:{value:new THREE.Matrix4()}, uStrength:{value:0.6}, uEnabled:{value:1},
-    uWUV:{value:new THREE.Vector2(-9,-9)}, uWVel:{value:new THREE.Vector2(0,0)}, uWWorld:{value:new THREE.Vector3()}, uWParams:{value:new THREE.Vector3(0.18,0.0,3.0)}   // x=screen radius, y=active, z=world radius
+    uWUV:{value:new THREE.Vector2(-9,-9)}, uWVel:{value:new THREE.Vector2(0,0)}, uWWorld:{value:new THREE.Vector3()}, uWParams:{value:new THREE.Vector3(0.18,0.0,3.0)},   // x=screen radius, y=active, z=world radius
+    uCamPos:{value:new THREE.Vector3()}, uNear:{value:2.6}   // pixels within uNear units of the camera = the held viewmodel/scope → NEVER motion-blurred (Ben 07-21: reprojection smeared the camera-locked gun/sights)
   },
   vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
   fragmentShader:`precision highp float; varying vec2 vUv;
-    uniform sampler2D tDiffuse, tDepth; uniform mat4 uInvVP, uPrevVP; uniform float uStrength, uEnabled;
-    uniform vec2 uWUV, uWVel; uniform vec3 uWWorld, uWParams;
+    uniform sampler2D tDiffuse, tDepth; uniform mat4 uInvVP, uPrevVP; uniform float uStrength, uEnabled, uNear;
+    uniform vec2 uWUV, uWVel; uniform vec3 uWWorld, uWParams, uCamPos;
     void main(){
       if(uEnabled<0.5){ gl_FragColor=texture2D(tDiffuse,vUv); return; }   // blur off → pass the scene through untouched (this pass is also the scene→composer bridge)
       float depth=texture2D(tDepth,vUv).x;
       vec4 wp=uInvVP*vec4(vUv*2.0-1.0, depth*2.0-1.0, 1.0); wp/=wp.w;   // pixel world position
+      if(distance(wp.xyz,uCamPos)<uNear){ gl_FragColor=texture2D(tDiffuse,vUv); return; }   // HELD VIEWMODEL/scope (camera-locked, always near) → never blurred (fixes smeared gun/sights)
       vec4 pv=uPrevVP*wp; vec2 prevUV=(pv.xy/pv.w)*0.5+0.5;             // where it was last frame
       vec2 vel=(vUv-prevUV)*uStrength;                                  // camera-reprojected screen velocity
       if(uWParams.y>0.5){                                              // Wretch smear: its own screen velocity, gated to pixels actually on the creature
@@ -4733,7 +4735,7 @@ function loop(){
     _curVP.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     if(!_mbInit){ _prevVP.copy(_curVP); _mbInit=true; }                                 // no bogus full-screen smear on frame 1
     const U=motionPass.uniforms;
-    U.uInvVP.value.copy(_curVP).invert(); U.uPrevVP.value.copy(_prevVP);
+    U.uInvVP.value.copy(_curVP).invert(); U.uPrevVP.value.copy(_prevVP); U.uCamPos.value.copy(camera.position);
     U.uStrength.value = player.grabbed?0.0:0.6;                                         // no blur during the grab cutscene
     _mbW.set(wretch.pos.x, wretch.pos.y+1.2, wretch.pos.z);                             // Wretch object smear
     let wactive=0;
@@ -9251,7 +9253,29 @@ function _cloudTex(){ const S=128, cv=document.createElement('canvas'); cv.width
 // Stage III opens the world is ~half gone; the third life finishes stripping it and we enter the pure void.
 const PEEL={ on:false, p:0, target:0, rate:0.02, flakes:[], cap:90, wind:new THREE.Vector3(1,0,0.3),
   prevFogC:null, prevFogD:0, prevBg:null, spawnAcc:0, leafAcc:0, geoBase:null, geoYs:null, W:1.1, L:2.2, mats:null,
-  patch:null, patchN:0, PATCH_CAP:1400, done:null };
+  patch:null, patchN:0, PATCH_CAP:1400, done:null, frontier:new Set(), growAcc:0 };
+// FRONTIER GROWTH (Ben 07-21): vantawhite spreads organically — fill enclosed GAPS first (a cell ringed by
+// vantawhite), then expand OUTWARD from the frontier. Only SURFACE-EXPOSED, non-vantawhite solid blocks are
+// eligible (never buried blocks, water, unbreakables, or the dungeon). The frontier is maintained incrementally
+// (seeded whenever a block turns vantawhite), so there is no per-tick world scan.
+function _peelExposed(x,y,z){ return !isOpaque[getBlock(x+1,y,z)]||!isOpaque[getBlock(x-1,y,z)]||!isOpaque[getBlock(x,y+1,z)]||!isOpaque[getBlock(x,y-1,z)]||!isOpaque[getBlock(x,y,z+1)]||!isOpaque[getBlock(x,y,z-1)]; }
+function _peelEligible(x,y,z){ if(y<1||y>=WH)return false; const b=getBlock(x,y,z), V=BID.vantawhite;
+  if(b===AIR||b===WATER||b===V||!isSolid[b]||(B[b]&&B[b].hard<0)||(typeof inDungeon==='function'&&inDungeon(x,y,z)))return false;   // 2b: never re-peel vantawhite; skip air/water/unbreakable/dungeon
+  return _peelExposed(x,y,z); }   // 2a: surface/exposed only
+function _peelSeed(x,y,z){ if(!PEEL.frontier)return; const nb=[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+  for(const n of nb){ const ax=x+n[0],ay=y+n[1],az=z+n[2]; if(_peelEligible(ax,ay,az)) PEEL.frontier.add(ax+'|'+ay+'|'+az); } }
+function _peelVwN(x,y,z){ const V=BID.vantawhite; let c=0; if(getBlock(x+1,y,z)===V)c++; if(getBlock(x-1,y,z)===V)c++; if(getBlock(x,y+1,z)===V)c++; if(getBlock(x,y-1,z)===V)c++; if(getBlock(x,y,z+1)===V)c++; if(getBlock(x,y,z-1)===V)c++; return c; }
+function _peelGrow(n){ if(!PEEL.frontier||!PEEL.frontier.size)return; const V=BID.vantawhite; if(V==null)return;
+  const _bulk=(typeof beginBulk==='function'); if(_bulk)beginBulk();
+  try{ for(let i=0;i<n && PEEL.frontier.size;i++){ let best=null,bestS=-1,scan=0;   // pick the highest gap-fill score without a full sort
+      for(const k of PEEL.frontier){ const p=k.split('|'), x=+p[0],y=+p[1],z=+p[2];
+        if(!_peelEligible(x,y,z)){ PEEL.frontier.delete(k); continue; }             // lazily prune stale entries
+        const s=_peelVwN(x,y,z); if(s>bestS){ bestS=s; best=k; if(s>=5)break; }      // 5-6 vantawhite neighbours = near-sealed hole → take it now
+        if(++scan>=48)break; }                                                       // bounded scan → cheap
+      if(best==null)break; const p=best.split('|'), x=+p[0],y=+p[1],z=+p[2]; PEEL.frontier.delete(best);
+      if(typeof bossScar!=='undefined'&&bossScar){ const _k=x+','+y+','+z; if(!bossScar.has(_k))bossScar.set(_k,getBlock(x,y,z)); }
+      setBlockWorld(x,y,z,V,true); if(typeof netEdit==='function')netEdit(x,y,z,V); _peelSeed(x,y,z); }   // convert + push its neighbours onto the frontier (outward growth)
+  } finally { if(_bulk)endBulk(); } }
 const _peelHideM=new THREE.Matrix4().makeScale(0,0,0);
 function _peelTex(top){ const S=64, cv=document.createElement('canvas'); cv.width=cv.height=S; const c=cv.getContext('2d');
   c.fillStyle=top; c.fillRect(0,0,S,S*0.32); for(let k=0;k<80;k++){ c.fillStyle='rgba(0,0,0,'+(Math.random()*0.12).toFixed(2)+')'; c.fillRect(Math.random()*S,Math.random()*S*0.32,2,2); }
@@ -9316,7 +9340,8 @@ function updatePeel(dt){ if(!PEEL.on)return;
     if(w>0.2) scene.background=_VWHITE;
     PEEL.spawnAcc+=dt*(10+90*w); while(PEEL.spawnAcc>=1){ PEEL.spawnAcc-=1; _spawnFlake('ground'); }          // peel real block faces, faster as it progresses → ~80% eaten by the end of stage II
     PEEL.leafAcc+=dt*(4+10*w); while(PEEL.leafAcc>=1){ PEEL.leafAcc-=1; _spawnFlake('leaf'); }                // leaves torn loose, streaming home
-    PEEL.skyAcc=(PEEL.skyAcc||0)+dt*(3+16*w); while(PEEL.skyAcc>=1){ PEEL.skyAcc-=1; _spawnFlake('sky'); } }  // the SKY peels too — heaven-shards curl off overhead (Ben 07-20)
+    PEEL.skyAcc=(PEEL.skyAcc||0)+dt*(3+16*w); while(PEEL.skyAcc>=1){ PEEL.skyAcc-=1; _spawnFlake('sky'); }     // the SKY peels too — heaven-shards curl off overhead (Ben 07-20)
+    PEEL.growAcc+=dt*(3+34*w); const _gn=PEEL.growAcc|0; if(_gn>0){ PEEL.growAcc-=_gn; _peelGrow(Math.min(_gn,12)); } }   // the WHITENING grows out from the frontier: fills gaps, then expands from what is already vantawhite (Ben 07-21)
   else if(!PEEL.flakes.length){ PEEL.on=false; return; }
   const P=_peelPortal();
   for(let k=PEEL.flakes.length-1;k>=0;k--){ const f=PEEL.flakes[k]; f.t+=dt;
@@ -9522,7 +9547,7 @@ function bossUpdate(dt){ wretch.phase+=dt*1.4; const F=_bf();
           if(V!=null) for(let dx=-1;dx<=1;dx++)for(let dz=-1;dz<=1;dz++){ const x=_fx+dx, z=_fz+dz, y=Math.floor(groundYAt(x+0.5,z+0.5))-1; if(y<1||y>=WH)continue;
             const b=getBlock(x,y,z); if(b===AIR||b===WATER||b===V||!isSolid[b]||(B[b]&&B[b].hard<0)||inDungeon(x,y,z))continue;
             if(bossScar){ const _k=x+','+y+','+z; if(!bossScar.has(_k))bossScar.set(_k,b); }   // record the original so the Atlas can unwrite it on the boss's death
-            setBlockWorld(x,y,z,V,true); if(typeof netEdit==='function')netEdit(x,y,z,V); }
+            setBlockWorld(x,y,z,V,true); if(typeof netEdit==='function')netEdit(x,y,z,V); if(typeof _peelSeed==='function')_peelSeed(x,y,z); }   // seed the frontier so the whitening then GROWS out from here
         } finally { if(_bulk)endBulk(); } }
       const _ax=wretch._laserAim.x,_az=wretch._laserAim.z, _br=F.blast-0.1;
       if(Math.hypot(_ax-player.pos.x,_az-player.pos.z)<_br && typeof damage==='function')damage(F.dmg,'the seraph bathes you in searing light');
