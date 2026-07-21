@@ -1642,6 +1642,8 @@ const hemi = new THREE.HemisphereLight(0x2a3350, 0x24282f, 0.28);   // ground co
 scene.add(hemi);
 const ambient = new THREE.AmbientLight(0x1a2130, 0.12);
 scene.add(ambient);
+const nvLight = new THREE.DirectionalLight(0xffffff, 0);   // NIGHT-VISION IR illuminator — a headlamp from the eye, on only while the goggles are worn (updateSky drives position/intensity)
+scene.add(nvLight); scene.add(nvLight.target);
 
 // torch/lantern point-light pool (budgeted, follow nearest emitters to player)
 // NOTE: lights stay visible with a FIXED count — gating by intensity, never .visible,
@@ -2717,6 +2719,10 @@ function updateSky(dt){
   fogShell.position.copy(camera.position); fogShell.material.color.copy(fc);
   const fo=Math.min(0.985, wf*1.25); fogShell.material.opacity=fo; fogShell.visible=fo>0.01;
   updateHorizon();                                                                          // 2-layer island horizon (ocean seaward / pines landward)
+  if(nvgActive()){ ambient.intensity=Math.max(ambient.intensity,0.34); hemi.intensity=Math.max(hemi.intensity,0.5);    // NIGHT VISION: only a small ambient/hemi lift (AmbientLight is directionless → cranking it FLATTENS everything to a green wash). The SHAPE comes from nvLight below.
+    if(nvLight){ nvLight.intensity=1.7; nvLight.position.copy(camera.position); const ld=lookDir(); nvLight.target.position.set(camera.position.x+ld.x*10, camera.position.y+ld.y*10, camera.position.z+ld.z*10); nvLight.target.updateMatrixWorld(); }   // the IR illuminator: a headlamp-style directional fill from YOUR viewpoint → surfaces facing away stay darker, so geometry/contrast survive the phosphor tint
+    scene.fog.density=Math.min(scene.fog.density, 1.4/(CFG.RENDER_DIST*CK)*(1+wf*wf*18)); }                            // amplified image sees a bit further through the dark (weather fog still limits you)
+  else if(nvLight && nvLight.intensity>0) nvLight.intensity=0;
 }
 // When the EYE is submerged, override to dense water-colored fog: suspended particles compound with
 // distance so you can only see a few blocks — and the world edge vanishes into murk (above & below).
@@ -2838,6 +2844,7 @@ defItem('wine',{name:'Wine',max:16,icon:{t:'jar',c:'#7a1030'},drink:{water:8}});
 defItem('hunting_rifle',{name:'Hunting Rifle',max:1,icon:{t:'tool',kind:'sword',c:'#3a2a1a'},gun:'bolt'});   // scoped bolt-action; left-click fires (needs rifle_ammo), right-click aims down the scope
 defItem('suppressor',{name:'Suppressor',max:4,icon:{t:'bar',c:'#26262c'}});   // a machined iron can — craft it onto the rifle to muffle the shot
 defItem('ghost',{name:'Ghost',max:1,ghost:true,icon:{t:'blob',c:'#35f0dd'}});   // Covenant anti-grav craft — place it, right-click to ride (WASD fly, Space boost, Ctrl off)
+defItem('nvg',{name:'Night Vision Goggles',max:1,nvg:true,armor:{slot:0,def:1,dur:0},icon:{t:'blob',c:'#3dff86'}});   // helmet slot — worn+on (toggle N) = see perfectly in the dark, green phosphor + heavy grain
 defItem('hunting_rifle_suppressed',{name:'Hunting Rifle · Suppressed',max:1,icon:{t:'tool',kind:'sword',c:'#26262c'},gun:'bolt',suppressed:true});   // rifle + suppressor: 40% quieter (sound + Wretch-heard range), 20 less damage
 defItem('rifle_ammo',{name:'Rifle Cartridge',max:64,icon:{t:'bullet',c:'#caa23c'}});
 defItem('flint_and_steel',{name:'Flint & Steel',max:1,icon:{t:'shard',c:'#c9ccd2'},firestarter:{dur:24}});   // right-click an unlit torch (world or held stack) to relight it
@@ -2989,7 +2996,14 @@ function updateGhost(dt){ if(!ghost.active)return; const t=clock.elapsedTime;
     ghost.bank += ((clamp(dyaw*2.4,-0.5,0.5) + str*-0.25) - ghost.bank)*Math.min(1,dt*6);   // roll into turns + strafe
     ghost.pitch += (((-fwd)*0.12) - ghost.pitch)*Math.min(1,dt*5);                          // nose dips forward under accel
     if(keys.ControlLeft||keys.ControlRight){ dismountGhost(); }
-  } else { ghost.vx*=Math.pow(0.02,dt); ghost.vz*=Math.pow(0.02,dt); ghost.bank+=(0-ghost.bank)*Math.min(1,dt*4); ghost.pitch+=(0-ghost.pitch)*Math.min(1,dt*4); }
+  } else if(!ghost._jesus){   // PARKED — spring physics: the player can shove it around, it drifts and coasts to a stop
+    const dx=ghost.x-player.pos.x, dz=ghost.z-player.pos.z, d=Math.hypot(dx,dz)||1;
+    if(d<1.7){ const psp=Math.hypot(player.vel.x,player.vel.z), push=(1.7-d)*(6+psp*1.6);   // closer + faster walk = harder shove
+      ghost.vx += (dx/d)*push*dt*6; ghost.vz += (dz/d)*push*dt*6;
+      player.pos.x -= (dx/d)*Math.min(0.06,(1.7-d)*0.4); player.pos.z -= (dz/d)*Math.min(0.06,(1.7-d)*0.4); }   // it pushes back on you a touch (it has mass)
+    ghost.x+=ghost.vx*dt; ghost.z+=ghost.vz*dt; ghost.spd=Math.hypot(ghost.vx,ghost.vz);
+    ghost.vx*=Math.pow(0.04,dt); ghost.vz*=Math.pow(0.04,dt);                                 // hover damping — glides then settles
+    ghost.bank+=((clamp(-ghost.vx*0.02+ghost.vz*0.02,-0.3,0.3))-ghost.bank)*Math.min(1,dt*4); ghost.pitch+=(0-ghost.pitch)*Math.min(1,dt*4); }
   // HOVER: rise/fall toward a fixed height over whatever is below — floats over hills, water, cliffs
   const ty=ghostTopY(ghost.x,ghost.z)+GHOST_HOVER;
   ghost.y += (ty-ghost.y)*Math.min(1,dt*7);
@@ -2999,7 +3013,73 @@ function updateGhost(dt){ if(!ghost.active)return; const t=clock.elapsedTime;
   if(ghost.mesh.userData.disc) ghost.mesh.userData.disc.material.opacity = 0.35 + 0.2*Math.sin(t*9) + 0.25*Math.min(1,ghost.spd/GHOST_TOP);   // shimmer stronger under thrust
   if(player.riding){ player.pos.set(ghost.x, my+0.2, ghost.z); player.vel.set(0,0,0);   // slave the rider to the seat → the camera rides
     if(ghost.spd>2 && AC && (updateGhost._h=(updateGhost._h||0)+dt)>0.05){ updateGhost._h=0; } }   // (engine hum hook — kept light)
+  // ---- EASTER EGG: the INTRO Jesus (only him) commandeers a Ghost parked near him — one hop aboard, then he
+  // rides it off to the horizon at max speed (Ben 07-20). Never the risen/miracle Jesus, only the silent greeter.
+  if(!player.riding && !ghost._jesus && typeof animals!=='undefined'){
+    for(const a of animals){ if(a.type!=='jesus' || !a.introJesus || a.dead) continue;
+      const dx=ghost.x-a.x, dz=ghost.z-a.z; if(dx*dx+dz*dz < 36){ ghost._jesus=a; a._onGhost=true; a._introT=999; a.flee=0; a._leaving=0;   // freeze his depart-over-sea; he's got wheels now
+        flashName('He steps aboard the Ghost.'); break; } } }
+  if(ghost._jesus){ const a=ghost._jesus;
+    if(a.dead){ ghost._jesus=null; }
+    else { a._onGhost=true; const off=1.0;                                 // he sits ON the saddle
+      a.x=ghost.x - Math.sin(ghost.yaw)*0.34; a.z=ghost.z - Math.cos(ghost.yaw)*0.34; a.y=(ghost.y+ghost.bob)+off;
+      if(a.mesh){ a.mesh.position.set(a.x,a.y,a.z); a.mesh.rotation.y=ghost.yaw+Math.PI; }
+      // drive AWAY from the player at flat-out speed, holding a fixed heading out to sea/horizon
+      if(ghost._jhead==null) ghost._jhead=Math.atan2(ghost.x-player.pos.x, ghost.z-player.pos.z);
+      let dh=ghost._jhead-ghost.yaw; while(dh>Math.PI)dh-=6.283; while(dh<-Math.PI)dh+=6.283; ghost.yaw+=clamp(dh,-GHOST_TURN*dt,GHOST_TURN*dt);
+      const sy=Math.sin(ghost.yaw), cy=Math.cos(ghost.yaw); ghost.vx=-sy*GHOST_TOP*1.5; ghost.vz=-cy*GHOST_TOP*1.5;   // boost speed, forever
+      ghost.x+=ghost.vx*dt; ghost.z+=ghost.vz*dt; ghost.spd=Math.hypot(ghost.vx,ghost.vz);
+      ghost.bank+=((clamp(dh*2.4,-0.4,0.4))-ghost.bank)*Math.min(1,dt*6);
+      const ty2=ghostTopY(ghost.x,ghost.z)+GHOST_HOVER; ghost.y+=(ty2-ghost.y)*Math.min(1,dt*7);
+      ghost.mesh.position.set(ghost.x,ghost.y+ghost.bob,ghost.z); ghost.mesh.rotation.set(ghost.pitch,ghost.yaw,ghost.bank);
+      if(ghost.gl)ghost.gl.position.set(ghost.x,ghost.y+ghost.bob+0.4,ghost.z);
+      if(Math.hypot(ghost.x-player.pos.x,ghost.z-player.pos.z)>CFG.RENDER_DIST*CK+30){ ghost.active=false; ghost.mesh.visible=false; if(a.mesh){animalGroup.remove(a.mesh);} const i=animals.indexOf(a); if(i>=0)animals.splice(i,1); ghost._jesus=null; flashName('...he is gone.'); } }   // rode off past the fog wall → both vanish
+  }
 }
+// ============================================================================
+//  NIGHT VISION GOGGLES — a helmet-slot wearable. Worn (and switched on) you see
+//  PERFECTLY in the dark (ambient amplified in updateSky) through a green phosphor
+//  image with HEAVY animated grain and the twin-tube binocular mask. Toggle: N.
+// ============================================================================
+function buildNVG(){ const g=new THREE.Group();   // forward = -Z (lenses point away from the face)
+  const shell=new THREE.MeshPhongMaterial({color:0x2b3026, shininess:22, specular:0x20241a});   // matte olive housing
+  const dark =new THREE.MeshPhongMaterial({color:0x15171a, shininess:40, specular:0x30343a});
+  const lens =new THREE.MeshBasicMaterial({color:0x3dff86, fog:false});                          // glowing phosphor objective
+  const box=(w,h,d,m,x,y,z)=>{ const e=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m); e.position.set(x,y,z); e.castShadow=true; g.add(e); return e; };
+  box(0.34,0.16,0.10, shell, 0,0,0.06);                                                          // mount bridge across the brow
+  for(const s of [-1,1]){ const tube=new THREE.Mesh(new THREE.CylinderGeometry(0.075,0.082,0.30,14),dark); tube.rotation.x=Math.PI/2; tube.position.set(s*0.11,0,-0.10); tube.castShadow=true; g.add(tube);   // objective tube
+    const hood=new THREE.Mesh(new THREE.CylinderGeometry(0.09,0.075,0.06,14),shell); hood.rotation.x=Math.PI/2; hood.position.set(s*0.11,0,-0.27); g.add(hood);                                              // lens hood
+    const gl=new THREE.Mesh(new THREE.CircleGeometry(0.062,16),lens); gl.position.set(s*0.11,0,-0.301); g.add(gl); }                                                                                        // green lens face
+  const bridge=new THREE.Mesh(new THREE.BoxGeometry(0.12,0.05,0.06),dark); bridge.position.set(0,0,-0.14); g.add(bridge);   // inter-tube bridge
+  box(0.05,0.05,0.05, dark, 0.19,0.05,-0.05);                                                     // little IR illuminator nub
+  return g; }
+function nvgWorn(){ return !!(armor[0] && armor[0].id==='nvg'); }
+function nvgActive(){ return nvgWorn() && player.nvgOn!==false && !player.grabbed && !player.dead; }
+let _nvEl=null,_nvGrain=null,_nvGCv=null,_nvGCtx=null,_nvImg=null;
+function _nvBuild(){ if(_nvEl)return;
+  _nvEl=document.createElement('div'); _nvEl.style.cssText='position:fixed;inset:0;z-index:19;pointer-events:none;display:none';
+  // NOTE: the GREEN PHOSPHOR + amplification is a CSS filter on the CANVAS itself (see updateNVG) — a DOM overlay
+  // with mix-blend-mode can't blend against the WebGL canvas (its own stacking context isolates it → flat green disc).
+  // HEAVY GRAIN — a small noise canvas re-randomized each frame, stretched over the screen (canvas element = no per-frame PNG encode)
+  _nvGCv=document.createElement('canvas'); _nvGCv.width=_nvGCv.height=200; _nvGCtx=_nvGCv.getContext('2d'); _nvImg=_nvGCtx.createImageData(200,200);
+  _nvGCv.style.cssText='position:absolute;inset:0;width:100%;height:100%;image-rendering:pixelated;mix-blend-mode:overlay;opacity:0.4'; _nvEl.appendChild(_nvGCv);
+  // NV APERTURE — one big soft circular vignette (you SEE the whole scene; the edge just falls into the tube shadow)
+  const mask=document.createElement('div'); mask.style.cssText='position:absolute;inset:0;'+
+    'background:radial-gradient(circle closest-side at 50% 50%,rgba(0,0,0,0) 72%,rgba(0,0,0,0.55) 90%,rgba(0,0,0,0.9) 100%)'; _nvEl.appendChild(mask);
+  const scan=document.createElement('div'); scan.style.cssText='position:absolute;inset:0;background:repeating-linear-gradient(0deg,rgba(0,0,0,0) 0 2px,rgba(0,40,20,0.10) 2px 3px);mix-blend-mode:multiply'; _nvEl.appendChild(scan);
+  document.body.appendChild(_nvEl); }
+const NV_FILTER='brightness(2.3) contrast(1.08) sepia(0.85) hue-rotate(62deg) saturate(3.4)';   // amplify the dark scene per-pixel (preserves contrast) → green phosphor
+function updateNVG(dt){ if(!_nvEl)_nvBuild(); const on=nvgActive();
+  if(on!==updateNVG._was){ updateNVG._was=on; _nvEl.style.display=on?'block':'none'; canvas.style.filter = on?NV_FILTER:''; }   // toggle only on change — the canvas filter does the amplify+greenify (blends with the real render, unlike a DOM overlay)
+  if(!on)return;
+  const d=_nvImg.data;                                                    // re-randomize the grain field every frame → live, boiling NV noise
+  for(let i=0;i<d.length;i+=4){ const v=(Math.random()*Math.random()*255)|0; d[i]=v*0.25|0; d[i+1]=v; d[i+2]=v*0.4|0; d[i+3]=255; }   // green-biased sparkle
+  _nvGCtx.putImageData(_nvImg,0,0);
+}
+function toggleNVG(){ if(!nvgWorn()){ flashName('no goggles to flip'); return; }
+  const wasOn = player.nvgOn!==false; player.nvgOn = wasOn ? false : true;   // flip on↔off
+  flashName(wasOn?'goggles up':'goggles down — night vision on');
+  if(AC){ const p=panAt(player.pos.x,player.pos.y+1.5,player.pos.z); tone(p,{f:wasOn?520:900,type:'square',dur:0.05,vol:0.12,to:wasOn?300:1200}); } }
 // ---- WIND CHIME PHYSICS (Ben 07-20): each placed chime's hanging body is a damped pendulum. Wind rocks it
 // (outdoors only), the player brushing through it shoves it, the Wretch passing slams it — and hard swings RING.
 const _chimeFx2={};
@@ -3127,6 +3207,7 @@ shaped('scarecrow',1,[' H ','PHP',' P '],{H:'hay',P:'planks'});
 shaped('campfire',1,[' S ','SCS','LLL'],{S:'stick',C:'coal',L:'log'});   // MC-style: 3 sticks + 1 coal + 3 logs
 shaped('furnace',1,['CCC','C C','CCC'],{C:'cobble'});                     // 8 cobblestone → a furnace (placeable smelter)
 shaped('ghost',1,['IGI','ILI','I I'],{I:'iron_ingot',G:'gold_block',L:'lantern'});   // the Ghost: iron chassis around a gold-block core + a lantern's caged light (the anti-grav heart)
+shaped('nvg',1,['GLG','I I'],{G:'glass',L:'lantern',I:'iron_ingot'});   // NVG: two glass objectives + a lantern's light-tube core on an iron mount
 shaped('glass_bottle',3,['G G',' G '],{G:'glass'});                       // 3 glass → 3 bottles
 shapeless('waterskin',1,['leather','leather','string']);                  // 2 leather + string → a waterskin
 shapeless('recipe_book',1,['planks','string']);                          // a spare field notebook
@@ -3544,6 +3625,7 @@ addEventListener('keydown',e=>{ if(e.code==='Space')e.preventDefault();
     const dr=drops[drops.length-1]; if(dr){ dr.vx=d.x*4.5; dr.vz=d.z*4.5; dr.vy=2.2; }
     s.n--; if(s.n<=0)inv[selSlot]=null; refreshHotbar(); } }
   if(e.code==='KeyR'){ const _rs=heldSlot(), _rg=_rs&&ITEMS[_rs.id]; if(_rg&&_rg.gun&&isFinite(magCap(_rg))){ startReload(_rs.id,_rg); return; } respawn(); }   // R = RELOAD when holding a mag-fed gun; respawn otherwise
+  if(e.code==='KeyN' && !e.repeat){ toggleNVG(); return; }   // flip the night-vision goggles up/down (when worn)
   if(e.code==='KeyK'){ if(!window._allowCreative){ flashName('the wood does not answer'); return; }   // SURVIVAL: no dev-summon — K is a creative/debug tool only
     HORROR._firstNight=true; wretch._summoned=true;   // SUMMON — anytime, day or night; it persists and CHOOSES what to do right now
     if(!wretch.active){ wretch.spawnT=0; if(!spawnWretch(Math.random()*360,26)){ wretch.spawnT=0.5; return; } }
@@ -4182,6 +4264,7 @@ let _submerged=false; const _waterOverlay=document.getElementById('water');
 function updateSubmerge(){
   const eye=camera.position, sub=getBlock(Math.floor(eye.x),Math.floor(eye.y),Math.floor(eye.z))===WATER;
   if(sub!==_submerged){ _submerged=sub; if(_waterOverlay)_waterOverlay.style.opacity=sub?1:0; }
+  if((typeof VOID!=='undefined'&&VOID.on) || (typeof PEEL!=='undefined'&&PEEL.on)){ return; }   // the WHITE VOID / peel own the sky+fog — never let the water/sky code stomp them (Ben 07-21)
   if(sub){ scene.fog.density=0.30; scene.fog.color.setRGB(0.02,0.11,0.14); scene.background=_uwBG.copy(scene.fog.color); }   // near-opaque murk (~3 blocks); overrides updateSky's fog while under
   else { if((player.water||20)<4) scene.fog.density*=1.12;   // PARCHED: the world itself dims and closes in — dehydration lies to the eyes (horror amplifier). (The surface-swim fog clamp is GONE — Ben 07-20: half-submerged swimming fogged the whole world; the murk now needs your EYES under)
     if(!(player.grabbed&&(wretch.grabPhase==='jumpscare'||wretch.grabPhase==='devour')) && scene.background!==_skyBG){ scene.background=_skyBG; } }   // surfaced → restore the sky (but NOT during a jumpscare — leave the black void up)
@@ -4429,6 +4512,7 @@ function loop(){
     if(rmbHeld && performance.now()>=nextAct){ doPlace(); nextAct=performance.now()+240; } }   // right-hold = repeat place
   if(started && !player.dead && !intro.active){ if(!NET.on||NET.host)updateBrain(dt); updateWretch(dt); if(NET.on&&!NET.host)netAnimalsTick(); else updateAnimals(dt); if(typeof updateHerobrine==='function'){ if(NET.on && herobrine.haunting && herobrine.owner!=null && herobrine.owner!==NET.id) hbMirrorTick(dt); else updateHerobrine(dt); } }   // co-op: director + animals run on the host; the HAUNT runs on its interactor, others mirror
   if(started && !player.dead && !intro.active) updateGhost(dt);            // hover vehicle — must run BEFORE the camera so a rider's slaved position is current this frame
+  if(started) updateNVG(dt);                                               // night-vision overlay (green phosphor + heavy grain) while the goggles are worn+on
   if(!started){ updateMenuCam(dt); }                                       // menu cinematic owns the camera until you press play
   else { if(!intro.active) applyLook(dt); if(intro.active) updateIntro(dt); else updateCamera(dt); }
   applyWaterFog();
@@ -6266,7 +6350,7 @@ function _addBug(parent,kind,origin,n,uMax,vMax){ const g=buildArachnid(kind); p
   const tanA=Math.abs(n.y)>0.9? new THREE.Vector3(1,0,0) : new THREE.Vector3(0,1,0).cross(n).normalize();   // wall: tanA=horizontal, tanB=vertical · ceiling: both horizontal
   const tanB=n.clone().cross(tanA).normalize();
   const b={ g, kind, n:n.clone(), tanA, tanB, o:origin.clone(), u:0, v:0, dir:Math.random()*6.283, wT:0, moving:false,
-    off:(kind==='daddy'?0.3:0.32), crawl:(kind==='daddy'?0.5:0.8), uMax, vMax, phase:Math.random()*10, legrate:(kind==='daddy'?4:7) };
+    off:(kind==='daddy'?0.95:0.32), crawl:(kind==='daddy'?0.5:0.8), uMax, vMax, phase:Math.random()*10, legrate:(kind==='daddy'?4:7) };   // daddy body rides ~1 block off its surface so its long legs reach DOWN to plant their feet ON the wall/ceiling (foot tip sits ~1.07 below the body origin)
   _dunBugs.push(b); return b; }
 function spawnDungeonBugs(cx,fy,cz,g){ _dunBugs=[]; const DR=13, DH=11, fw=fy+1, ceil=fy+DH-1, midY=(fw+ceil)/2;   // floor spiders come from the real animal spawner; here = the massive daddy-long-legs on the walls & ceiling
   const uH=DR-4, vH=(DH-8)/2;                                                                 // stay >2 blocks from every edge of the wall (never within 2 of an edge)
@@ -6285,8 +6369,8 @@ function updateDungeonBugs(dt){ if(!_dunBugs.length || !_dungeonGroup || !_dunge
       if(Math.abs(nv)>b.vMax){ nv=Math.sign(nv)*b.vMax; b.dir=-b.dir; }
       b.u=nu; b.v=nv; }
     b.g.position.copy(b.o).addScaledVector(b.tanA,b.u).addScaledVector(b.tanB,b.v).addScaledVector(b.n,b.off);   // body sits right ON its surface (no floating)
-    // simple, correct attach: body-up to the surface normal, face travel direction, + a 180° body flip (right-side up)
-    b.g.quaternion.setFromUnitVectors(_BUGYUP,b.n); b.g.rotateY(b.dir); b.g.rotateX(Math.PI); }
+    // correct attach: dorsal (+Y) to the surface normal so the BACK faces the room and the feet (−Y) reach BACK to the wall, then face travel direction — NO 180° flip (that was rolling it belly-out, feet waving into the room)
+    b.g.quaternion.setFromUnitVectors(_BUGYUP,b.n); b.g.rotateY(b.dir); }
 }
 function decorateDungeon(cx,fy,cz){ const g=new THREE.Group(); scene.add(g); const fw=fy+1; _dungeonGroup=g; _dungeonC={x:cx,y:fy,z:cz}; g.visible=false;
   const R=()=>(Math.random()-0.5)*10;
@@ -6499,7 +6583,7 @@ function animateWretch(dt, moving){
   const claw = clamp((cr-0.45)/0.55, 0, 1);
   // THE RISE (Ben 07-20 v2): TORSO-ONLY. The charging animation is copied verbatim — same spread leg cycle, same
   // pelvis, same ground contact — and ONLY the torso rotates up over the final ten blocks (distance-driven).
-  const _riseT=(st==='HUNT' && wretch.committed && wretch.dist<20.5) ? clamp((20-wretch.dist)/16.6,0,1) : 0;   // begins a full 20 blocks out (Ben 07-20), complete by grab range (~3.4)
+  const _riseT=((st==='HUNT'||st==='CHASE') && wretch.committed && wretch.dist<20.5) ? clamp((20-wretch.dist)/16.6,0,1) : 0;   // begins a full 20 blocks out (Ben 07-20) — a committed charge is CHASE until 6 blocks then HUNT, so BOTH must arm the rise or it only starts at ~6 blocks; complete by grab range (~3.4)
   wretch._riseB=(wretch._riseB||0)+(_riseT-(wretch._riseB||0))*Math.min(1,dt*2);                              // 3x slower ease — the torso rears up unhurried, stride by stride
   const lunging=wretch._riseB;
   const _SNHUNCH=[0.10,0.16,0.20,0.04,-0.16];                                         // sneak: spine curls forward, neck/head pull LEVEL — the eyes never leave you while the body slinks
@@ -7021,6 +7105,7 @@ function buildBook(){ _bookInit(); bakeBookPage(); const grp=new THREE.Group();
   grp.userData.book=1; return grp; }
 function itemModel(id){ const it=ITEMS[id];
   if(it&&it.ghost) return buildGhost();   // the Ghost renders as its full craft (drop + 3D inventory icon)
+  if(it&&it.nvg) return buildNVG();        // night-vision goggles model (drop + 3D icon + held)
   if(it&&it.book) return buildBook();
   if(it&&it.bible) return buildBible();
   if(!it) return new THREE.Mesh(new THREE.BoxGeometry(0.2,0.2,0.2), new THREE.MeshLambertMaterial({color:0xcc33cc}));
@@ -7062,7 +7147,7 @@ function icon3DURL(id){ if(_icon3D[id])return _icon3D[id];
   _iconCtx.putImageData(img,0,0); _iconScene.remove(m); _disposeView(m);
   _icon3D[id]=_iconCanvas.toDataURL(); return _icon3D[id]; }
 function slotIconURL(id){ const it=ITEMS[id]; const modelBlock = it&&it.block!=null && B[it.block] && B[it.block].cat==='model';   // fence/bars/chair/gate/door/pot/etc. → render their real 3D model, not a flat grass tile
-  return (it&&(it.gun||it.tool||it.ghost||it.block===BID.torch||it.block===BID.torch_unlit||it.block===BID.lantern||it.block===BID.candle||modelBlock||id==='handcuffs'))?icon3DURL(id):iconURL(id); }   // 3D icon for modelled items (incl. the Ghost), else 2D
+  return (it&&(it.gun||it.tool||it.ghost||it.nvg||it.block===BID.torch||it.block===BID.torch_unlit||it.block===BID.lantern||it.block===BID.candle||modelBlock||id==='handcuffs'))?icon3DURL(id):iconURL(id); }   // 3D icon for modelled items (Ghost, NVG, …), else 2D
 const _dropGeo=new THREE.BoxGeometry(0.26,0.26,0.26);
 function spawnDrop(id,n,x,y,z,delay,did){ if(!ITEMS[id])return; n=n||1;
   const m=itemModel(id); m.scale.multiplyScalar((ITEMS[id]&&ITEMS[id].gun)?1.5:0.5); m.traverse(o=>{ if(o.isMesh)o.castShadow=true; }); dropGroup.add(m);   // drops render as their actual 3D model; guns (rifle) drop at 3x the normal drop scale so they read as a real weapon on the ground
@@ -7665,6 +7750,8 @@ function setViewItem(id){ if(view.id===id)return; view.id=id;
   else if(it.block===BID.red_torch){ view.mesh=buildHeldTorch(true,true); view.mesh.scale.setScalar(0.6); }   // held red shrine torch
   else if(it.ghost){ const mm=buildGhost(); const bb=new THREE.Box3().setFromObject(mm), sz=bb.getSize(new THREE.Vector3()), ctr=bb.getCenter(new THREE.Vector3()), s=0.34/(Math.max(sz.x,sz.y,sz.z)||1);
     mm.scale.setScalar(s); mm.position.set(-ctr.x*s,-ctr.y*s,-ctr.z*s); view.mesh=mm; }   // held Ghost = a mini of the real craft
+  else if(it.nvg){ const mm=buildNVG(); const bb=new THREE.Box3().setFromObject(mm), sz=bb.getSize(new THREE.Vector3()), ctr=bb.getCenter(new THREE.Vector3()), s=0.34/(Math.max(sz.x,sz.y,sz.z)||1);
+    mm.scale.setScalar(s); mm.position.set(-ctr.x*s,-ctr.y*s,-ctr.z*s); mm.rotation.y=0.5; view.mesh=mm; }   // held goggles
   else if(it.spear){ view.mesh=buildSpear(it.spear); view.mesh.userData.spearHeld=true; }   // carried cocked behind the shoulder — see updateView
   else if(it.book){ view.mesh=buildBook(); view.mesh.userData.bookHeld=true; }   // held open, readable — see updateView
   else if(it.bible){ view.mesh=buildBible(); view.mesh.userData.bookHeld=true; }  // THE BIBLE — same held-open reading pose
@@ -7977,14 +8064,12 @@ function dropWretchCorpse(){ const g=wretch.group, P=wretch.P; if(!g||!P) return
     if(P.jaw)P.jaw.rotation.x=0.35; if(P.maw)P.maw.scale.setScalar(0.3);
     g.updateMatrixWorld(true);
   }catch(e){}
-  if(_wretchCorpse){ scene.remove(_wretchCorpse); _wretchCorpse.traverse(o=>{ if(o.material)(Array.isArray(o.material)?o.material:[o.material]).forEach(m=>m.dispose&&m.dispose()); }); _wretchCorpse=null; }   // keep only the latest body (dispose its CLONED materials, never the shared geometry)
+  if(_wretchCorpse){ const idx=_ragdolls.indexOf(_wretchCorpse); if(idx>=0){ _rgDispose(_wretchCorpse); _ragdolls.splice(idx,1); } _wretchCorpse=null; }   // keep only the latest wretch body
   const corpse=g.clone(true);
   corpse.traverse(o=>{ if(o.material){ o.material=Array.isArray(o.material)?o.material.map(m=>m.clone()):o.material.clone(); (Array.isArray(o.material)?o.material:[o.material]).forEach(m=>{ if(m.emissive)m.emissive.setRGB(0,0,0); }); } });   // own its materials; snuff the eyeshine — it's dead
-  const gy=groundYAt(wretch.pos.x,wretch.pos.z,wretch.pos.y), S=g.scale.y||1;
-  corpse.position.set(wretch.pos.x, gy+0.1*S, wretch.pos.z);
-  corpse.rotation.set(-1.32, wretch.yaw+0.3, 0.25);                                                                  // toppled onto its back/side on the ground
-  corpse.visible=true; scene.add(corpse); _wretchCorpse=corpse;
-  if(typeof spawnBloodSplat==='function') spawnBloodSplat(wretch.pos.x, wretch.pos.z, 1.7);                          // a pool of gore beneath it
+  corpse.position.set(wretch.pos.x, wretch.pos.y, wretch.pos.z); corpse.rotation.set(0,wretch.yaw,0); corpse.updateMatrixWorld(true);
+  // no static toppled pose — the crumpled rig RAGDOLLS: every limb collapses under gravity, tumbles to the earth, and lies there forever (blood pools below)
+  _wretchCorpse=pushRagdoll(corpse,{ x:wretch.pos.x, y:wretch.pos.y, z:wretch.pos.z, boss:true, ttl:Infinity, vy:1.2, spin:1, blood:true, bloodScale:1.7 });
 }
 function killWretch(){ spawnParticles(wretch.pos.x,wretch.pos.y+1,wretch.pos.z,0x3a0608,36,3.2,1.6); wretchVoice&&wretchVoice('scream',wretch.pos);
   const bx=Math.floor(wretch.pos.x), bz=Math.floor(wretch.pos.z), gy=groundYAt(bx+0.5,bz+0.5,Math.floor(wretch.pos.y)+4), wasBoss=!!wretch.boss;
@@ -8300,23 +8385,23 @@ function sndPortalClose(){ if(!AC)return;                                       
 function closePortal(){ if(!PORTAL.on || PORTAL.closing!=null)return; PORTAL.closeDur=1.6; PORTAL.closing=1.6; sndPortalClose(); }   // animate shut (updatePortal disposes at 0)
 // ===== THE CERAPHIM'S FALL (Ben 07-20): the slain seraph keeps its FULL body and RAGDOLLS out of the sky with
 // collision physics — a dead weight tumbling down to crash on the ground, where it lies whole. =====
-let BOSSCORPSE=null;
+let BOSSCORPSE=null, _seraphRagdoll=null;
 function _startBossCorpse(){ if(!wretch.group)return; const g=wretch.group;
   // steal the whole live model — detach it from the wretch so a future spawn builds fresh (the seraph singleton
   // rides the corpse until another boss is ever summoned; the normal wretch that respawns is a clean new rig).
-  BOSSCORPSE={ g, x:wretch.pos.x, y:wretch.pos.y, z:wretch.pos.z, vx:(Math.random()-0.5)*3, vy:2, vz:(Math.random()-0.5)*3,
-    sx:(Math.random()-0.5)*2.2, sy:(Math.random()-0.5)*1.4, sz:(Math.random()-0.5)*2.2, settled:false, scale:g.scale.x };
+  // The FULL seraph now RAGDOLLS: every wing, feather and eye is its own bone falling under gravity, tumbling out of
+  // the sky and collapsing onto the earth (no piece sinks). It lies there forever; a great crash of ichor + dust marks the fall.
+  const cx=wretch.pos.x, cz=wretch.pos.z;
+  _seraphRagdoll=pushRagdoll(g,{ x:cx, y:wretch.pos.y, z:cz, boss:true, ttl:Infinity, vy:0.5, spin:1.4, blood:false,
+    onLand:(p)=>{ const gy=p?p.y:groundYAt(cx,cz);
+      spawnParticles(cx,gy,cz,0x8a8578,60,7,2.4); spawnParticles(cx,gy,cz,0xf1e7d9,30,5,2.0);                 // a great dust plume + a burst of holy light
+      if(typeof spawnBloodSplat==='function')spawnBloodSplat(cx,cz,3.4);                                       // a vast pool of divine ichor spreads beneath the fallen god
+      if(AC){ burst(master,1.0,0.06,220,0.6,50,'lowpass'); tone(master,{f:70,type:'sine',dur:1.4,vol:0.5,to:26,atk:0.004}); }   // the HEAVY thud of a god hitting the ground
+      if(typeof playSample==='function')playSample('seraph_toll',{x:cx,y:gy,z:cz},1.0); } });
   wretch.group=null; wretch.P=null; wretch._bossWings=null; wretch._eyeRig=null; wretch._bossCore=null; }   // hand-off complete
-function updateBossCorpse(dt){ const C=BOSSCORPSE; if(!C||C.settled)return; if(dt>0.06)dt=0.06;
-  C.vy-=22*dt; C.x+=C.vx*dt; C.y+=C.vy*dt; C.z+=C.vz*dt;                                   // gravity + drift
-  C.g.position.set(C.x,C.y,C.z); C.g.rotation.x+=C.sx*dt; C.g.rotation.y+=C.sy*dt; C.g.rotation.z+=C.sz*dt;   // tumble
-  const gy=groundYAt(C.x,C.z)+3.0*C.scale;                                                 // the big body rests with its mass above the floor
-  if(C.y<=gy && C.vy<0){ C.y=gy; C.g.position.y=gy; C.settled=true;                        // CRASH — it hits the earth and lies still
-    C.g.rotation.set(C.g.rotation.x*0.15+ (Math.random()-0.5)*0.3, C.g.rotation.y, C.g.rotation.z*0.15+ (Math.random()-0.5)*0.3);   // flops mostly flat
-    spawnParticles(C.x,gy,C.z,0x8a8578,60,7,2.4); spawnParticles(C.x,gy,C.z,0xf1e7d9,30,5,2.0);              // a great dust plume + a burst of holy light
-    if(AC){ burst(master,1.0,0.06,220,0.6,50,'lowpass'); tone(master,{f:70,type:'sine',dur:1.4,vol:0.5,to:26,atk:0.004}); }   // the HEAVY thud of a god hitting the ground
-    if(typeof playSample==='function')playSample('seraph_toll',{x:C.x,y:gy,z:C.z},1.0); } }
-function clearBossCorpse(){ if(!BOSSCORPSE)return; try{ scene.remove(BOSSCORPSE.g); }catch(e){} BOSSCORPSE=null; }
+function updateBossCorpse(dt){ /* the seraph corpse is a full ragdoll now (see _ragdolls) — nothing to tick here */ }
+function clearBossCorpse(){ if(_seraphRagdoll){ const idx=_ragdolls.indexOf(_seraphRagdoll); if(idx>=0){ _rgDispose(_seraphRagdoll); _ragdolls.splice(idx,1); } _seraphRagdoll=null; }
+  if(BOSSCORPSE){ try{ scene.remove(BOSSCORPSE.g); }catch(e){} BOSSCORPSE=null; } }
 function _disposePortal(){ PORTAL.on=false;
   try{ if(PORTAL.grp){ scene.remove(PORTAL.grp); PORTAL.grp.traverse(o=>{ if(o.material&&o.material.dispose)o.material.dispose(); }); if(PORTAL.grp.children[0])PORTAL.grp.children[0].geometry.dispose(); } if(PORTAL.tex)PORTAL.tex.dispose(); }catch(e){}
   PORTAL.grp=null; PORTAL.tex=null; PORTAL.light=null; PORTAL._flood=null; PORTAL.closing=null; }
@@ -8662,7 +8747,7 @@ function updatePeel(dt){ if(!PEEL.on)return;
       f.g.rotation.x+=f.spin.x*dt; f.g.rotation.y+=f.spin.y*dt; f.g.rotation.z+=f.spin.z*dt;
       if(d<6){ if(!f.leaf)spawnParticles(px.x,px.y,px.z,0xffffff,3,2,0.5); scene.remove(f.g); if(f.geo&&f.geo!==PEEL.geoBase)f.geo.dispose(); PEEL.flakes.splice(k,1); } } }
   if(PEEL.p>=0.995 && !VOID.on) enterVoid(); }
-const _VWHITE=new THREE.Color(0xf5f1ea);
+const _VWHITE=new THREE.Color(0xffffff);   // pure heavenly white (Ben 07-21)
 function endPeel(){ if(!PEEL.on){ if(PEEL.patch){ for(let i=0;i<PEEL.PATCH_CAP;i++)PEEL.patch.setMatrixAt(i,_peelHideM); PEEL.patch.instanceMatrix.needsUpdate=true; } return; } PEEL.on=false; PEEL.p=0; PEEL.target=0;
   for(const f of PEEL.flakes){ try{ scene.remove(f.g); if(f.geo&&f.geo!==PEEL.geoBase)f.geo.dispose(); }catch(e){} } PEEL.flakes.length=0;
   if(PEEL.patch){ for(let i=0;i<PEEL.PATCH_CAP;i++)PEEL.patch.setMatrixAt(i,_peelHideM); PEEL.patch.instanceMatrix.needsUpdate=true; }
@@ -8687,7 +8772,7 @@ function enterVoid(){ if(VOID.on)return; VOID.on=true; VOID.center.copy(player.p
   VOID.aura.scale.setScalar(46); scene.add(VOID.aura);
   VOID.morph=0; VOID.meter=0; VOID.bindT=0; VOID.teased=false;
   sndVoidEntry(); if(typeof seraphSay==='function')seraphSay('voidIn');
-  setTimeout(()=>{ if(VOID.on){ sndFractalSwell(); if(typeof seraphSay==='function')seraphSay('fractal1'); _voidFractalStart(); } }, 3000);
+  setTimeout(()=>{ if(VOID.on){ sndFractalSwell(); if(typeof seraphSay==='function')seraphSay('fractal1'); _voidFractalStart(); } }, 1600);   // the cosmos wells up PROMPTLY (Ben 07-21: fractals should dominate the void)
   VOID.shimmer=setInterval(()=>{ if(!AC||!VOID.on)return; const SET=[2093,2637,3136,3520,4186];                     // gold-dust bells, barely there
     for(let i=0,n=1+(Math.random()<0.4?1:0);i<n;i++){ const f=SET[(Math.random()*SET.length)|0];
       tone(master,{f,type:'sine',dur:1.8,vol:0.015+Math.random()*0.015,atk:0.008,delay:Math.random()*0.4,detune:Math.random()*12-6}); } }, 700);
@@ -8698,17 +8783,17 @@ function _voidFractalStart(){ if(VOID.fmat || VOID.fetching)return; VOID.fetchin
     const half={w:Math.max(2,(innerWidth>>1)), h:Math.max(2,(innerHeight>>1))};
     VOID.rt=new THREE.WebGLRenderTarget(half.w,half.h,{depthBuffer:false});
     VOID.fscene=new THREE.Scene(); VOID.fcam=new THREE.OrthographicCamera(-1,1,1,-1,0,1);
-    const white=new THREE.DataTexture(new Uint8Array([240,236,228,255]),1,1); white.needsUpdate=true;
+    const white=new THREE.DataTexture(new Uint8Array([70,44,20,255]),1,1); white.needsUpdate=true;   // dark-bronze iris chip (was near-white, which bleached the whole fractal)
     VOID.fmat=new THREE.ShaderMaterial({ vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position.xy,1.0,1.0); }', fragmentShader:src,
       uniforms:{ uCamPos:{value:new THREE.Vector3()}, uCamRight:{value:new THREE.Vector3()}, uCamUp:{value:new THREE.Vector3()}, uCamFwd:{value:new THREE.Vector3()},
         uTanHalfFov:{value:Math.tan(37*Math.PI/180)}, uAspect:{value:innerWidth/innerHeight},
-        uType:{value:0}, uIter:{value:12}, uS:{value:2.30}, uB:{value:1.0}, uC:{value:new THREE.Vector3(1,1,1)}, uK:{value:8}, uBulbIter:{value:8},
-        uR1:{value:new THREE.Matrix3()}, uR2:{value:new THREE.Matrix3()}, uInvR:{value:1.90},
-        uRho:{value:0.70}, uTauMax:{value:0.55}, uIrisWidth:{value:0.10}, uScrWidth:{value:0.06}, uIrisStrength:{value:0.95}, uScrStrength:{value:0.75}, uIris:{value:white},
-        uMorph:{value:0}, uBossSmink:{value:4.0}, uMaxSteps:{value:72}, uEps:{value:0.0016}, uFar:{value:22.0},
-        uSigma:{value:0.055}, uWrap:{value:0.5}, uAoStrength:{value:0.85}, uShadowK:{value:8.0}, uCoreRadius:{value:3.2},
+        uType:{value:0}, uIter:{value:14}, uS:{value:2.10}, uB:{value:1.0}, uC:{value:new THREE.Vector3(1,1,1)}, uK:{value:8}, uBulbIter:{value:8},   // more folds + lower scale = denser structure that FILLS the field of view
+        uR1:{value:new THREE.Matrix3()}, uR2:{value:new THREE.Matrix3()}, uInvR:{value:1.60},   // tight inversion → the fractal wraps CLOSE around the player, enveloping above/below/all around
+        uRho:{value:0.70}, uTauMax:{value:0.55}, uIrisWidth:{value:0.10}, uScrWidth:{value:0.06}, uIrisStrength:{value:0.25}, uScrStrength:{value:0.20}, uIris:{value:white},   // low iris/scripture wash so the DARK palette shows (the white 1x1 iris was bleaching every surface)
+        uMorph:{value:0}, uBossSmink:{value:4.0}, uMaxSteps:{value:170}, uEps:{value:0.0012}, uFar:{value:56.0},   // enough steps+reach for DOWNWARD rays to punch THROUGH the sparse inversion origin and hit the far-side shell (kills the nadir white-hole → true 360 incl. straight down)
+        uSigma:{value:0.008}, uWrap:{value:0.5}, uAoStrength:{value:1.0}, uShadowK:{value:10.0}, uCoreRadius:{value:3.2},   // near-zero depth fog: hits KEEP their dark colour across the whole depth = bold structure, not a white wash
         uLightDir:{value:new THREE.Vector3(0.35,0.9,0.5).normalize()},
-        uIvory:{value:new THREE.Color(0xf2ece4)}, uRust:{value:new THREE.Color(0x7e2c20)}, uEmber:{value:new THREE.Color(0xd9902f)}, uFog:{value:new THREE.Color(0xf5f1ea)}, uTime:{value:0} } });
+        uIvory:{value:new THREE.Color(0xd98a1e)}, uRust:{value:new THREE.Color(0x9a4708)}, uEmber:{value:new THREE.Color(0xffe08a)}, uFog:{value:new THREE.Color(0xffffff)}, uTime:{value:0} } });   // LUMINOUS GOLD cosmic mass melting to white at depth — saturated gold survives the half-res upscale + bloom and GLOWS against the white void (dark-on-white just averaged to gray); matches the seraphim gold theme
     VOID.fscene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), VOID.fmat));
     if(typeof seraphSay==='function')setTimeout(()=>{ if(VOID.on)seraphSay('fractal2'); },5500);
   }).catch(()=>{ VOID.fetching=false; }); }
@@ -8743,15 +8828,20 @@ function _voidBindBar(){ if(!VOID.bar){ VOID.bar=document.createElement('div'); 
 const _chM=new THREE.Matrix4(), _chP=new THREE.Vector3(), _chQ=new THREE.Quaternion(), _chS=new THREE.Vector3(1,1,1), _chUp=new THREE.Vector3(0,1,0);
 function updateVoid(dt){ if(!VOID.on){ if(player.bound)_voidUnbind(); return; }
   if(!wretch.boss || !wretch.active){ exitVoid(); return; }                                                          // safety: the fight ended some other way
+  // RE-ASSERT the pure white every frame — updateSky/applyWaterFog ran before us and would repaint the sky+fog+light
+  chunkRoot.visible=false; if(typeof skyDome!=='undefined')skyDome.visible=false;
+  scene.fog.color.setRGB(1,1,1); scene.fog.density=0.006; sunLight.intensity=0.55; hemi.intensity=2.4; if(typeof ambient!=='undefined')ambient.intensity=0.75;
+  if(!VOID.fmat) scene.background=_VWHITE;                                                                           // white until the fractal RT takes the sky (set below)
   // gold aura rides the boss; clouds drift
   if(VOID.aura){ VOID.aura.position.set(wretch.pos.x, wretch.pos.y+3.2*(wretch.group?wretch.group.scale.y:1), wretch.pos.z); VOID.aura.material.opacity=0.4+0.2*Math.sin(performance.now()*0.0021); }
   if(VOID.clouds) for(const s of VOID.clouds.children){ if(s.userData.dr)s.position.x+=s.userData.dr*dt; }
   // fractal: morph in, camera-mapped, painted as the scene background
-  if(VOID.fmat){ VOID.morph=Math.min(1,VOID.morph+dt/6); const U=VOID.fmat.uniforms;
+  if(VOID.fmat){ VOID.morph=Math.min(1,VOID.morph+dt/3.5); const U=VOID.fmat.uniforms;   // morph to FULL fractal in ~3.5s — it should fill the void, not linger faint
     U.uMorph.value=VOID.morph; U.uTime.value=performance.now()*0.001;
-    const e=camera.matrixWorld.elements, S=0.12;
+    const e=camera.matrixWorld.elements, S=0.05;   // tiny follow-scale: player movement only DRIFTS the viewpoint, keeping them immersed in the shell (not flying out to the sparse origin)
     U.uCamRight.value.set(e[0],e[1],e[2]); U.uCamUp.value.set(e[4],e[5],e[6]); U.uCamFwd.value.set(-e[8],-e[9],-e[10]);
-    U.uCamPos.value.set((camera.position.x-VOID.center.x)*S,(camera.position.y-VOID.center.y)*S,(camera.position.z-VOID.center.z)*S);
+    // IMMERSION: park the eye at radius ≈ uInvR so the densest inversion shell WRAPS the player 360° (above, below, all around) — origin is where the fractal is sparsest
+    U.uCamPos.value.set(0.0+(camera.position.x-VOID.center.x)*S, 1.45+(camera.position.y-VOID.center.y)*S, 0.35+(camera.position.z-VOID.center.z)*S);   // immerse at radius≈uInvR: densest shell wraps the surround+sky; the sparse-origin cone points DOWN = the white void-floor you walk on
     U.uAspect.value=innerWidth/innerHeight; U.uTanHalfFov.value=Math.tan((camera.fov*0.5)*Math.PI/180);
     const _r1=performance.now()*0.00003, _r2=performance.now()*0.000018;                                             // slow sacred rotation (≤0.05 rad/s nausea limit)
     U.uR1.value.set(Math.cos(_r1),0,Math.sin(_r1), 0,1,0, -Math.sin(_r1),0,Math.cos(_r1));
@@ -9061,12 +9151,15 @@ function spawnFromEgg(type, h){ h = h || raycastVoxel(); let x,z;
   const mesh=buildAnimalMesh(type,false); mesh.position.set(x,gy,z);
   animals.push({type,mesh,x,y:gy,z,yaw:Math.random()*6.283,hp:ANIMALS[type].hp,timer:0,flee:0,dead:false});
   spawnParticles(x,gy+0.4,z,0xd8f0ff,10,1.6,0.7); flashName('spawned '+type); }
-function killAnimal(a){ if(a.dead)return; if(a.type==='jesus'){ spawnParticles(a.x,a.y+1.7,a.z,0xffe680,16,2.2,1.2); return; }   // JESUS CANNOT DIE — this is the single death chokepoint (combat AND wretch predation both route here), so he is untouchable
-  a.dead=true; animalGroup.remove(a.mesh);
+function killAnimal(a,opts){ if(a.dead)return; if(a.type==='jesus'){ spawnParticles(a.x,a.y+1.7,a.z,0xffe680,16,2.2,1.2); return; }   // JESUS CANNOT DIE — this is the single death chokepoint (combat AND wretch predation both route here), so he is untouchable
+  a.dead=true;
   if(a.type==='villager')achUnlock('villain'); else achUnlock('hunter');   // the honest hunt vs. the thing you should not have done
-  a.mesh.traverse(o=>{ if(o.material&&o.material.dispose)o.material.dispose(); });
   for(const [id,mn,mx] of (ANIMALS[a.type].drops||[])){ const n=mn+((Math.random()*(mx-mn+1))|0); for(let i=0;i<n;i++) spawnDrop(id,1,a.x,a.y+0.3,a.z); }
-  spawnParticles(a.x,a.y+0.4,a.z,0xcc2018,10,2,1.2); }
+  spawnParticles(a.x,a.y+0.4,a.z,0xcc2018,10,2,1.2);
+  if(opts&&opts.carcassOnly){ animalGroup.remove(a.mesh); a.mesh.traverse(o=>{ if(o.material&&o.material.dispose)o.material.dispose(); }); return; }   // the Wretch RENDS it → a bone carcass stands in for the body (no intact ragdoll)
+  // RAGDOLL the body: keep the mesh, let it tumble to the ground under gravity, flop onto its flank, and lie there ~120s with blood pooling beneath (then it fades + despawns)
+  a.mesh.position.set(a.x,a.y,a.z);
+  pushRagdoll(a.mesh,{ x:a.x, y:a.y, z:a.z, boss:false, ttl:120, vy:2.1+Math.random()*1.1, spin:5+Math.random()*6, blood:true, bloodScale:0.7+Math.random()*0.35, restLift:0.13 }); }
 function sfxHurt(pos){ if(!AC)return; const p=panAt(pos.x,pos.y,pos.z); burst(p,0.4,0.14,420,1.2,180); burst(p,0.2,0.08,900,0.8,300); }   // short grunt (procedural fallback)
 function hurtAnimal(a,dmg){
   if(a.type==='jesus'){ { const hs=heldSlot(); if(hs&&ITEMS[hs.id]&&ITEMS[hs.id].gun)achUnlock('jesus'); } const now=clock.elapsedTime; if(now-(a._provT||-9)>1.0){ a._provT=now; if(typeof spawnDrop==='function')spawnDrop(Math.random()<0.5?'bread':'wine',1,a.x,a.y+0.7,a.z); spawnParticles(a.x,a.y+1.7,a.z,0xffe680,10,1.6,0.9); flashName('he provides'); } return; }   // JESUS CANNOT DIE — struck, he yields bread & wine instead
@@ -9101,6 +9194,7 @@ function updateAnimalsFrame(dt){
       if(gy>CFG.SEA+3){ const mesh=buildAnimalMesh('villager'); mesh.position.set(vx,gy,vz); animals.push({type:'villager',mesh,x:vx,y:gy,z:vz,yaw:Math.random()*6.283,hp:ANIMALS.villager.hp,timer:0,flee:0,dead:false}); } } }
   for(let i=animals.length-1;i>=0;i--){ const a=animals[i]; if(a.dead){ a._held=false; animals.splice(i,1); continue; }
     if(a._held) continue;                                                                          // intimidation-kill: the Wretch owns this animal's transform this frame — its own AI must not fight gripPrey
+    if(a._onGhost) continue;                                                                       // he's aboard the Ghost — updateGhost owns his transform (the hijack easter egg); don't run his walk/depart AI or cull him
     if(Math.hypot(a.x-player.pos.x,a.z-player.pos.z)>((a.introJesus&&a._leaving)?CFG.RENDER_DIST*CK+12:82)){ animalGroup.remove(a.mesh); animals.splice(i,1); continue; }   // the departing Jesus persists to the fog wall (render edge), then despawns unseen
     a.timer-=dt; a.flee=Math.max(0,a.flee-dt);
     const pth=Math.hypot(a.x-player.pos.x,a.z-player.pos.z), wth=wretch.active?Math.hypot(a.x-wretch.pos.x,a.z-wretch.pos.z):999;
@@ -9152,12 +9246,74 @@ function updateAnimalsFrame(dt){
   } }
   // WRETCH PREDATION: hungry + prey within reach → grab, gorge (jaw flares open), spray blood, leave a split carcass
   if(wretch.active && !wretch.dragging && !wretch._intim && wretch.hunger<40){ for(const a of animals){ if(a.dead||a.type==='villager'||a._held)continue;
-    if(Math.hypot(a.x-wretch.pos.x,a.z-wretch.pos.z)<2.4){ const kx=a.x,ky=a.y,kz=a.z; killAnimal(a);
+    if(Math.hypot(a.x-wretch.pos.x,a.z-wretch.pos.z)<2.4){ const kx=a.x,ky=a.y,kz=a.z; killAnimal(a,{carcassOnly:true});
       wretch.hunger=Math.min(100,wretch.hunger+25); wretch.faceOpen=1; wretch._preyBiteT=0.7;               // an animal restores 1/4 of its hunger; jaw yawns wide on the bite
       spawnParticles(kx,ky+0.4,kz,0x4a0606,26,3.2,1.7); spawnParticles(kx,ky+0.5,kz,0x260303,14,2.2,1.2);   // dark arterial spray
       if(typeof spawnBloodSplat==='function')spawnBloodSplat(kx,kz,1.0+Math.random()*0.4);                  // painted gore on the ground
       wretchVoice&&wretchVoice('close_clicks',{x:kx,y:ky,z:kz}); spawnCarcass(kx,ky,kz); break; } } }
-  updateCarcasses(dt); }
+  updateCarcasses(dt); updateRagdolls(dt); }
+// ---- RAGDOLL CORPSES — a slain body keeps its own mesh and falls under gravity, collides with the ground, and flops
+//      onto its flank. Creatures fade out + despawn after their ttl (~120s); boss bodies (ttl=Infinity) lie there forever.
+//      Blood pools beneath on the killing blow. One rigid tumble reads as a ragdoll on these blocky low-poly bodies. ----
+const _ragdolls=[]; const _RG_G=17; const _rgV=new THREE.Vector3(), _rgQ=new THREE.Quaternion();
+// Break a body into its parts, each a Verlet particle (bone) under gravity, tethered to its parent bone, tumbling as it
+// falls and colliding with the terrain via its FULL oriented box so no piece can ever sink under the ground.
+function pushRagdoll(root,o){ o=o||{};
+  const ox=(o.x!=null?o.x:root.position.x), oz=(o.z!=null?o.z:root.position.z);
+  root.updateMatrixWorld(true);
+  const meshes=[]; root.traverse(m=>{ if(m.isMesh) meshes.push(m); });
+  if(!meshes.length) return null;
+  const idxOf=new Map(meshes.map((m,i)=>[m,i]));
+  const cont=new THREE.Group(); scene.add(cont);
+  const parts=meshes.map(m=>{ const wp=new THREE.Vector3(), wq=new THREE.Quaternion(), ws=new THREE.Vector3(); m.matrixWorld.decompose(wp,wq,ws);
+    if(!m.geometry.boundingBox) m.geometry.computeBoundingBox();
+    const bb=m.geometry.boundingBox;
+    const half=new THREE.Vector3().subVectors(bb.max,bb.min).multiplyScalar(0.5).multiply(ws);        // local half-extents (scaled)
+    const ctr=new THREE.Vector3().addVectors(bb.max,bb.min).multiplyScalar(0.5).multiply(ws);          // geometry centre offset from the mesh origin (translated geoms aren't centred)
+    return { m, wp, wq, ws, half, ctr, vol:half.x*half.y*half.z,
+      pos:wp.clone(), prev:wp.clone(), parent:-1, rest:0, baseQ:wq.clone(),
+      axis:new THREE.Vector3(Math.random()-0.5,Math.random()-0.5,Math.random()-0.5).normalize(), ang:0,
+      spin:(o.spin!=null?o.spin:1)*(2+Math.random()*4)*(Math.random()<0.5?1:-1), grounded:false }; });
+  let torso=0; for(let i=1;i<parts.length;i++) if(parts[i].vol>parts[torso].vol) torso=i;               // biggest part = the anchor the limbs hang from
+  parts.forEach((p,i)=>{ let a=p.m.parent, par=-1; while(a){ if(idxOf.has(a)){ par=idxOf.get(a); break; } a=a.parent; }
+    if(par<0) par=(i===torso?-1:torso); p.parent=par; if(par>=0) p.rest=p.pos.distanceTo(parts[par].pos); });
+  parts.forEach(p=>{ if(p.m.parent) p.m.parent.remove(p.m); cont.add(p.m); p.m.position.copy(p.wp); p.m.quaternion.copy(p.wq); p.m.scale.copy(p.ws); });   // FLATTEN: cont is identity → local==world, appearance unchanged
+  try{ if(root.parent) root.parent.remove(root); }catch(e){}
+  const vy=(o.vy!=null?o.vy:2.0), dt0=1/60, dx=(o.dx||0)+(Math.random()-0.5)*0.5, dz=(o.dz||0)+(Math.random()-0.5)*0.5;
+  parts.forEach((p,i)=>{ const isT=(i===torso);                                                        // encode the launch impulse as a prev-position offset (Verlet velocity)
+    p.prev.x=p.pos.x-((isT?dx*1.6:0)+(Math.random()-0.5)*0.7)*dt0;
+    p.prev.y=p.pos.y-((isT?vy:vy*0.5)+(Math.random()-0.5)*0.9)*dt0;
+    p.prev.z=p.pos.z-((isT?dz*1.6:0)+(Math.random()-0.5)*0.7)*dt0; });
+  const rd={ cont, parts, torso, boss:!!o.boss, ttl:(o.ttl!=null?o.ttl:120), t:0, settled:false, landed:false, onLand:o.onLand||null };
+  _ragdolls.push(rd);
+  if(o.blood!==false && typeof spawnBloodSplat==='function') spawnBloodSplat(ox,oz,(o.bloodScale||1.0));
+  return rd; }
+function _rgDispose(rd){ try{ scene.remove(rd.cont); }catch(e){} rd.cont.traverse(o=>{ if(o.material)(Array.isArray(o.material)?o.material:[o.material]).forEach(m=>m&&m.dispose&&m.dispose()); if(o.geometry&&o.geometry.dispose)o.geometry.dispose(); }); }
+function _rgLowY(p,q){ let lo=1e9; const h=p.half, c=p.ctr;                                             // lowest world-Y offset over the 8 oriented-box corners → exact ground clearance
+  for(let sx=-1;sx<=1;sx+=2)for(let sy=-1;sy<=1;sy+=2)for(let sz=-1;sz<=1;sz+=2){ _rgV.set(c.x+sx*h.x,c.y+sy*h.y,c.z+sz*h.z).applyQuaternion(q); if(_rgV.y<lo)lo=_rgV.y; }
+  return lo; }
+function updateRagdolls(dt){ if(dt>0.05)dt=0.05; const dt2=dt*dt;
+  for(let ri=_ragdolls.length-1;ri>=0;ri--){ const rd=_ragdolls[ri]; rd.t+=dt;
+    if(!rd.boss && rd.t>=rd.ttl){ _rgDispose(rd); _ragdolls.splice(ri,1); continue; }
+    if(!rd.boss && rd.t>rd.ttl-6){ const f=Math.max(0,(rd.ttl-rd.t)/6); rd.cont.traverse(o=>{ if(o.material){ o.material.transparent=true; o.material.opacity=f; } }); }
+    if(rd.settled) continue;                                                                            // came to rest → freeze the sim (no jitter, no cost), meshes stay put
+    const P=rd.parts; let maxV=0;
+    for(const p of P){ const vx=(p.pos.x-p.prev.x)*0.99, vy=(p.pos.y-p.prev.y)*0.99, vz=(p.pos.z-p.prev.z)*0.99;   // Verlet integrate (inertia + gravity)
+      p.prev.copy(p.pos); p.pos.x+=vx; p.pos.y+=vy-_RG_G*dt2; p.pos.z+=vz; }
+    for(let k=0;k<6;k++) for(const p of P){ if(p.parent<0)continue; const q=P[p.parent];                // tether relaxation — keep each limb its bone-length from its parent (joints fold freely)
+      _rgV.subVectors(p.pos,q.pos); const len=_rgV.length()||1e-4, diff=(len-p.rest)/len;
+      _rgV.multiplyScalar(diff); p.pos.addScaledVector(_rgV,-0.6); q.pos.addScaledVector(_rgV,0.4); }
+    for(const p of P){                                                                                  // orient (base pose + accumulating tumble), then hard-clamp the whole box above the terrain
+      _rgQ.setFromAxisAngle(p.axis,p.ang); p.m.quaternion.multiplyQuaternions(p.baseQ,_rgQ);
+      const gy=groundYAt(p.pos.x,p.pos.z,p.pos.y+2), minY=gy-_rgLowY(p,p.m.quaternion);
+      if(p.pos.y<minY){ p.pos.y=minY; p.prev.x+=(p.pos.x-p.prev.x)*0.5; p.prev.z+=(p.pos.z-p.prev.z)*0.5; p.prev.y=p.pos.y;   // land + ground friction
+        if(!p.grounded)p.grounded=true; }
+      if(!p.grounded){ p.ang+=p.spin*dt; p.spin*=0.985; }                                               // limbs flail in the air, freeze once down
+      p.m.position.copy(p.pos);
+      const sp=Math.abs(p.pos.x-p.prev.x)+Math.abs(p.pos.y-p.prev.y)+Math.abs(p.pos.z-p.prev.z); if(sp>maxV)maxV=sp; }
+    if(!rd.landed && P[rd.torso].grounded){ rd.landed=true; if(rd.onLand)try{ rd.onLand(P[rd.torso].pos); }catch(e){} }   // torso hits earth → fire the crash FX once
+    if(rd.t>1.2 && maxV<0.004){ rd.settled=true; }                                                      // everything at rest → latch
+  } }
 // ---- PAINTED BLOOD (procedural splatter decals — replaces the old flat light-red planes) ----
 const _bloodTex=[];
 function _makeBloodTex(){ const c=document.createElement('canvas'); c.width=c.height=256; const x=c.getContext('2d'); const cx=128, cy=128; x.clearRect(0,0,256,256);
@@ -10819,7 +10975,9 @@ window.__hc={
   skyprobe(){ try{ const px=Math.floor(player.pos.x), pz=Math.floor(player.pos.z), out=[]; for(let dz=-2;dz<=2;dz++)for(let dx=-2;dx<=2;dx++){ const wx=px+dx, wz=pz+dz, c=getChunk(wx>>4,wz>>4); if(!c)continue; const ci=(wx&15)+(wz&15)*CK; const ht=c.htop[ci], sh=surfaceH(wx,wz); if(ht-sh>2) out.push({dx,dz,htop:ht,surf:sh,gap:ht-sh}); } return {inflated:out, count:out.length}; }catch(e){ return {err:e.message}; } },   // QA: columns where baked htop >> terrain surface = trunk-inflated skylight ceiling (the black-woods bug)
   ghostGive(){ try{ invAdd('ghost',1); refreshHotbar(); return 'gave ghost'; }catch(e){ return {err:e.message}; } },   // QA: put a Ghost item in the bag
   ghostHere(ride){ try{ placeGhost(Math.floor(player.pos.x), Math.floor(player.pos.y), Math.floor(player.pos.z)); if(ride)mountGhost(); return {x:+ghost.x.toFixed(1),y:+ghost.y.toFixed(1),z:+ghost.z.toFixed(1),riding:!!player.riding}; }catch(e){ return {err:e.message}; } },   // QA: spawn (and optionally ride) a Ghost at the player
-  ghostState(){ try{ return {active:ghost.active, riding:!!player.riding, x:+ghost.x.toFixed(1),y:+ghost.y.toFixed(1),z:+ghost.z.toFixed(1), ty:+ghostTopY(ghost.x,ghost.z).toFixed(1), yaw:+ghost.yaw.toFixed(2), spd:+ghost.spd.toFixed(1), bank:+ghost.bank.toFixed(2), kw:!!keys.KeyW}; }catch(e){ return {err:e.message}; } },   // QA: live Ghost telemetry
+  ghostState(){ try{ return {active:ghost.active, riding:!!player.riding, jesus:!!ghost._jesus, x:+ghost.x.toFixed(1),y:+ghost.y.toFixed(1),z:+ghost.z.toFixed(1), ty:+ghostTopY(ghost.x,ghost.z).toFixed(1), yaw:+ghost.yaw.toFixed(2), spd:+ghost.spd.toFixed(1), bank:+ghost.bank.toFixed(2), kw:!!keys.KeyW}; }catch(e){ return {err:e.message}; } },   // QA: live Ghost telemetry
+  nvgEquip(on){ try{ armor[0]=(on===false)?null:{id:'nvg',n:1}; player.nvgOn=true; if(typeof updateArmorView==='function')updateArmorView(); return {worn:nvgWorn(), active:nvgActive(), amb:+ambient.intensity.toFixed(2)}; }catch(e){ return {err:e.message}; } },   // QA: force-equip the NVGs
+  jesusGhost(){ try{ let j=null; for(const a of animals) if(a.type==='jesus'&&a.introJesus&&!a.dead){ j=a; break; } return { introJesus: j?{x:+j.x.toFixed(1),z:+j.z.toFixed(1),onGhost:!!j._onGhost}:null, ghostJesus:!!ghost._jesus, ghostSpd:+ghost.spd.toFixed(1), ghostActive:ghost.active }; }catch(e){ return {err:e.message}; } },   // QA: intro-Jesus hijack state
   stage2(){ try{ return { feathers:_rakeFeathers.length, pray:+((wretch._prayT||0)).toFixed(1), cycles:wretch._cycleN||0, sweep:!!wretch._laserA, laser:wretch._laserState||null, rakeCd:+((wretch._rakeCd||0)).toFixed(1) }; }catch(e){ return {err:e.message}; } },   // QA: zealot substage state
   peel(o){ try{ o=o||{}; if(o.begin!=null)beginPeel(o.begin); if(o.rate!=null)PEEL.rate=o.rate; return { on:PEEL.on, p:+PEEL.p.toFixed(2), target:PEEL.target, flakes:PEEL.flakes.length, voidOn:VOID.on }; }catch(e){ return {err:e.message}; } },   // QA: world-peel dissolve state
   void3(o){ try{ o=o||{}; if(o.chainNow)VOID.chainCd=0.05; if(o.meter!=null)VOID.meter=o.meter;                       // QA: fractal-void state (+ force a chain / set the meter)
