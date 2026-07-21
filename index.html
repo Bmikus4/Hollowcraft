@@ -1042,9 +1042,9 @@ function greedyMesh(c, pass){
   let _vn=0;                           // vertices written into the shared scratch this call
   const g=_sg;                         // padded-snapshot reads (snapshotChunk(c) ran in buildChunkMeshes) — NOT world getBlock
   const isSrc = pass==='opaque'
-      ? (id)=> id!==AIR && isOpaque[id]
+      ? (id)=> id!==AIR && isOpaque[id] && id!==BID.leaves_core   // leaves_core is opaque (for skylight+cull) but renders in the LEAF pass so it gets the emissive foliage material, not the black opaque one
       : pass==='leaf'
-      ? (id)=> id===BID.leaves                          // leaves-only pass (FrontSide material)
+      ? (id)=> id===BID.leaves || id===BID.leaves_core  // BOTH canopy blocks → the emissive leaf material (was: shell only, so the dense core rendered black via opaqueMat)
       : (id)=> blockCat[id]==='cutout' && id!==BID.leaves;   // 'cutout' pass = glass etc, leaves excluded
   const hides = pass==='opaque'
       ? (nid)=> isOpaque[nid]                          // opaque hidden only by opaque
@@ -1302,7 +1302,7 @@ const opaqueMat = injectAtlas(new THREE.MeshPhongMaterial({ shininess:1, specula
 const cutoutMat = injectAtlas(new THREE.MeshPhongMaterial({ side:THREE.DoubleSide, shininess:0, specular:0x000000 }), {cutout:true});   // glass etc — genuinely see-through both sides
 // leaves get their OWN FrontSide material: the mesher emits all 6 faces of every leaf block, each seen from its normal side,
 // so single-sided is visually identical to the old DoubleSide while halving canopy fragment work (the scene's biggest fill sink).
-const leafMat   = injectAtlas(new THREE.MeshPhongMaterial({ side:THREE.FrontSide, shininess:0, specular:0x000000 }), {});   // OPAQUE now (was cutout/alpha-test): with the solid needle texture, leaves render with early-Z and zero discard overdraw — the big forest fill win
+const leafMat   = injectAtlas(new THREE.MeshPhongMaterial({ side:THREE.FrontSide, shininess:0, specular:0x000000, emissive:0x2e5626, emissiveIntensity:1 }), {});   // OPAQUE now (was cutout/alpha-test): early-Z, zero discard overdraw. EMISSIVE green FLOOR (Ben 07-21): a cube canopy has faces pointing every way, so the ~half that face away from the sun got only the weak ambient floor and rendered near-BLACK ("trees gone, sparse blocks"). A dim green emissive keeps every leaf face readable as foliage without globally brightening caves/interiors.
 const foliageMat= injectAtlas(new THREE.MeshPhongMaterial({ side:THREE.FrontSide, shininess:0, specular:0x000000 }), {cutout:true, wind:true});   // FrontSide (was DoubleSide) — the mesher emits both crossed quads, so one always faces you; halves grass/flower alpha-test overdraw
 opaqueMat.shadowSide = THREE.FrontSide;
 // distinct cache keys so the shared-source injected materials don't collide in the program cache
@@ -2369,7 +2369,7 @@ function buildChunkStaged(c){
   const _lm = L? _chunkMat(leafMat,L)   : leafMat;
   const _fm = L? _chunkMat(foliageMat,L): foliageMat;
   const cg=greedyMesh(c,'cutout'); if(cg){ cg.computeBoundingSphere(); const m=new THREE.Mesh(cg,_cm); m.castShadow=false; m.receiveShadow=true; m.userData.baseMat=cutoutMat; g.add(m); }   // glass — see-through, no solid shadow
-  const lg=greedyMesh(c,'leaf'); if(lg){ lg.computeBoundingSphere(); const m=new THREE.Mesh(lg,_lm); m.castShadow=true; m.receiveShadow=true; m.customDepthMaterial=leafDepthMat; m.userData.baseMat=leafMat; g.userData.leaf=m; g.add(m); }   // leaves cast ALPHA-TESTED shadows → dappled light shafts ("god rays") through the canopy gaps
+  const lg=greedyMesh(c,'leaf'); if(lg){ lg.computeBoundingSphere(); const m=new THREE.Mesh(lg,_lm); m.castShadow=true; m.receiveShadow=false; m.customDepthMaterial=leafDepthMat; m.userData.baseMat=leafMat; g.userData.leaf=m; g.add(m); }   // leaves CAST alpha-tested shadows (god-ray dapple on the ground) but must NOT RECEIVE: the now-opaque dense pine canopy was shadowing ITSELF to near-black, so only the sun-lit top cap showed = "trees gone, sparse blocks floating" (Ben 07-21). receiveShadow=false → full bright-green canopy.
   if(c.hasCross){ const fg=foliageMesh(c); if(fg){ fg.computeBoundingSphere(); const m=new THREE.Mesh(fg,_fm); m.castShadow=false; m.receiveShadow=true; m.userData.detail=1; m.userData.baseMat=foliageMat; g.userData.foliage=m; g.add(m); } }   // detail=1: suppressible in the fogged far rings
   if(c.hasWater){ const wg=waterMesh(c); if(wg){ wg.computeBoundingSphere(); const m=new THREE.Mesh(wg,waterMat); m.castShadow=false; m.receiveShadow=false; m.renderOrder=3; m.userData.detail=1; g.userData.water=m; g.add(m); } }
   if(c.hasModel) buildModelBlocks(c,g); else c.emitters=[];
@@ -8393,16 +8393,24 @@ function _ripPath(ctx,W,Hh,open,sd,t){ const cx=W/2, cy=Hh/2, hh=Hh*0.34*(0.22+0
 // onto an offscreen canvas that TEXTURES a 30x62m double-sided plane standing at the summon point — a real
 // tear in the world's skin, with additive halo layers, a blazing interior, edge embers, and a light that
 // spills from it. The creature is parked BEHIND the plane and physically flies OUT through the aperture.
+function _cineStars(c){ if(c._stars)return c._stars; const s=[]; for(let i=0;i<180;i++)s.push([Math.random(),Math.random(),0.5+Math.random()*1.7,Math.random()*6.283]); return c._stars=s; }
 function _drawRipTex(t){ const c=_cine; if(!c)return; const ctx=c.ctx, W=c.cv.width, Hh=c.cv.height;
   ctx.clearRect(0,0,W,Hh);
   const open = t<0.9? 0.015+0.05*(t/0.9) : t<1.6? 0.065+0.29*((t-0.9)/0.7) : t<4.3? 0.355+0.03*Math.sin(t*9) : Math.max(0.01, 0.355*(1-(t-4.3)/0.45));   // hairline crack → torn open → SLAMS shut
-  c.open=open; const o3=Math.min(1.05,open*2.8);                                          // world-space aperture: the 2D curve was tuned for a fullscreen canvas — widen ~3x so the tear gapes wide enough for the body to force through
-  ctx.save(); _ripPath(ctx,W,Hh,o3,c.sd,t);                                               // INTERIOR: the blinding white void on the far side
-  const g=ctx.createLinearGradient(0,0,0,Hh); g.addColorStop(0,'#fff'); g.addColorStop(0.45,'#fff6e4'); g.addColorStop(1,'#ffffff');
-  ctx.fillStyle=g; ctx.shadowColor='#fff'; ctx.shadowBlur=26; ctx.fill(); ctx.restore();
-  const glowMul=open<0.12? 2.2 : 1;                                                       // the HAIRLINE phase must still burn — fatten the rim glow while the crack is a sliver
-  for(const rim of [['rgba(232,192,112,0.95)',3,9],['rgba(255,216,138,0.8)',-2,7],['#ffffff',0,4]]){ ctx.save(); ctx.translate(rim[1],0);   // WHITE + GOLD rim (Ben 07-20)
-    _ripPath(ctx,W,Hh,Math.max(o3,0.05),c.sd,t); ctx.strokeStyle=rim[0]; ctx.lineWidth=rim[2]*glowMul; ctx.shadowColor='#ffe8b0'; ctx.shadowBlur=30*glowMul; ctx.stroke(); ctx.restore(); }
+  c.open=open; const o3=Math.min(1.05,open*2.8);                                          // world-space aperture: widen ~3x so the tear gapes wide enough for the body to force through
+  // INTERIOR: the same COSMOS the settled portal shows (deep space + round stars) — the opening now reflects the real portal
+  ctx.save(); _ripPath(ctx,W,Hh,o3,c.sd,t); ctx.clip();
+    const bg=ctx.createRadialGradient(W/2,Hh/2,8,W/2,Hh/2,Hh*0.62); bg.addColorStop(0,'#0b0a20'); bg.addColorStop(0.6,'#060617'); bg.addColorStop(1,'#02020a'); ctx.fillStyle=bg; ctx.fillRect(0,0,W,Hh);
+    ctx.globalCompositeOperation='lighter';
+    for(const s of _cineStars(c)){ const x=s[0]*W, y=s[1]*Hh, rr=s[2]*(0.6+0.4*Math.sin(t*3+s[3]))*3.2;   // ROUND soft stars (radial gradients, not squares)
+      const sg=ctx.createRadialGradient(x,y,0,x,y,rr); sg.addColorStop(0,'rgba(255,255,255,0.95)'); sg.addColorStop(0.4,'rgba(210,224,255,0.45)'); sg.addColorStop(1,'rgba(255,255,255,0)'); ctx.fillStyle=sg; ctx.beginPath(); ctx.arc(x,y,rr,0,6.283); ctx.fill(); }
+    // the EMERGENCE: a blinding light wells up from the deep as the ceraphim forces through, then fades
+    const ea=clamp((t-1.5)/0.7,0,1)*clamp(1-(t-3.4)/1.1,0,1); if(ea>0.01){ const fl=ctx.createRadialGradient(W/2,Hh*0.5,4,W/2,Hh*0.5,Hh*0.42); fl.addColorStop(0,'rgba(255,250,232,'+(0.95*ea).toFixed(2)+')'); fl.addColorStop(0.6,'rgba(255,244,214,'+(0.35*ea).toFixed(2)+')'); fl.addColorStop(1,'rgba(255,244,214,0)'); ctx.fillStyle=fl; ctx.fillRect(0,0,W,Hh); }
+    ctx.globalCompositeOperation='source-over';
+  ctx.restore();
+  // BRIGHT THIN GOLD rim (matches the settled portal) — a little fatter while it's a hairline so the crack still burns
+  const glowMul=open<0.12?1.8:1;
+  for(const rim of [['#fff4cc',2.4],['#ffd23a',4.2]]){ ctx.save(); _ripPath(ctx,W,Hh,Math.max(o3,0.05),c.sd,t); ctx.strokeStyle=rim[0]; ctx.lineWidth=rim[1]*glowMul; ctx.shadowColor='#ffcf3a'; ctx.shadowBlur=9*glowMul; ctx.stroke(); ctx.restore(); }
   c.tex.needsUpdate=true; }
 // THE PORTAL PERSISTS: after the Ceraphim tears through, the rip does NOT close — it hangs open in the world
 // for the whole fight (white + gold), and the peeling world + wind-torn leaves stream back INTO it.
@@ -8414,26 +8422,43 @@ let _portalScene=null, _portalRT=null, _portalCosmos=null;
 function _portalCosmosBuild(){ if(_portalScene)return; _portalScene=new THREE.Scene();
   _portalRT=new THREE.WebGLRenderTarget(1024,1024,{minFilter:THREE.LinearFilter,magFilter:THREE.LinearFilter});
   _portalCosmos=new THREE.Group(); _portalScene.add(_portalCosmos);
-  const N=1500, ps=new Float32Array(N*3), cs=new Float32Array(N*3);                       // deep-space starfield — points spread through a big volume so near stars parallax against far ones
-  for(let i=0;i<N;i++){ const r=45+Math.pow(Math.random(),0.55)*560, a=Math.random()*6.283, e=(Math.random()-0.5)*1.6, rr=r*Math.cos(e*0.9);
-    ps[i*3]=rr*Math.cos(a); ps[i*3+1]=r*Math.sin(e*0.9)*0.7; ps[i*3+2]=rr*Math.sin(a);
-    const w=0.65+Math.random()*0.35, tnt=Math.random(); cs[i*3]=w*(0.82+0.18*tnt); cs[i*3+1]=w*(0.86+0.14*(1-tnt)); cs[i*3+2]=w; }
-  const sg=new THREE.BufferGeometry(); sg.setAttribute('position',new THREE.BufferAttribute(ps,3)); sg.setAttribute('color',new THREE.BufferAttribute(cs,3));
-  const stars=new THREE.Points(sg,new THREE.PointsMaterial({size:2.6,sizeAttenuation:true,vertexColors:true,transparent:true,opacity:0.95,depthWrite:false,blending:THREE.AdditiveBlending}));
-  _portalCosmos.add(stars); _portalCosmos.userData.stars=stars;
-  const nt=_cloudTex(), neb=[];                                                           // nebula clouds — big additive sprites at varied depth
+  const st=_starTex();                                                                    // ROUND soft star sprite (points render as squares without a texture)
+  function _mkStars(N,rMin,rSpread,size,bright){ const ps=new Float32Array(N*3), cs=new Float32Array(N*3);   // stars spread through a big volume → near stars parallax against far ones
+    for(let i=0;i<N;i++){ const r=rMin+Math.pow(Math.random(),0.55)*rSpread, a=Math.random()*6.283, e=(Math.random()-0.5)*1.7, rr=r*Math.cos(e*0.9);
+      ps[i*3]=rr*Math.cos(a); ps[i*3+1]=r*Math.sin(e*0.9)*0.75; ps[i*3+2]=rr*Math.sin(a);
+      const w=bright*(0.7+Math.random()*0.3), tnt=Math.random(); cs[i*3]=w*(0.82+0.18*tnt); cs[i*3+1]=w*(0.86+0.14*(1-tnt)); cs[i*3+2]=w*(0.92+0.08*Math.random()); }
+    const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.BufferAttribute(ps,3)); g.setAttribute('color',new THREE.BufferAttribute(cs,3));
+    return new THREE.Points(g,new THREE.PointsMaterial({size,map:st,alphaTest:0.02,sizeAttenuation:true,vertexColors:true,transparent:true,opacity:0.95,depthWrite:false,blending:THREE.AdditiveBlending})); }
+  const stars=_mkStars(1200,45,560,3.4,0.85), bigStars=_mkStars(150,60,520,9,1.0);        // many faint + a scatter of bright round stars
+  _portalCosmos.add(stars); _portalCosmos.add(bigStars); _portalCosmos.userData.stars=stars; _portalCosmos.userData.bigStars=bigStars;
+  const nt=_cloudTex(), neb=[];                                                           // nebula clouds — big soft additive sprites at varied depth
   for(const [col,dep,sz] of [[0x7040c0,-140,300],[0x2878b4,-240,380],[0xc89a5a,-90,200],[0x9040a0,-380,500]]){
     const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:nt,color:col,transparent:true,opacity:0.22,depthWrite:false,blending:THREE.AdditiveBlending}));
     sp.position.set((Math.random()-0.5)*320,(Math.random()-0.5)*220,dep); sp.scale.setScalar(sz); _portalCosmos.add(sp); neb.push(sp); }
   _portalCosmos.userData.neb=neb;
-  const gal=new THREE.Sprite(new THREE.SpriteMaterial({map:nt,color:0xc4c2ff,transparent:true,opacity:0.13,depthWrite:false,blending:THREE.AdditiveBlending}));   // a slow galaxy disc far behind
-  gal.position.set(70,-40,-340); gal.scale.set(680,260,1); _portalCosmos.add(gal); _portalCosmos.userData.gal=gal; }
+  const gt=_galaxyTex(), gals=[];                                                         // actual spiral GALAXIES (not smears) hanging far behind at a tilt
+  for(const [dep,sz,tilt,col] of [[-330,420,0.7,0xd7d2ff],[-470,300,-1.05,0xffe6cf]]){
+    const gal=new THREE.Sprite(new THREE.SpriteMaterial({map:gt,color:col,transparent:true,opacity:0.55,depthWrite:false,blending:THREE.AdditiveBlending}));
+    gal.position.set((Math.random()-0.5)*260,(Math.random()-0.5)*160,dep); gal.scale.set(sz,sz,1); gal.material.rotation=tilt; _portalCosmos.add(gal); gals.push(gal); }
+  _portalCosmos.userData.gal=gals[0]; _portalCosmos.userData.gals=gals; }
+let _starTexC=null, _galTexC=null;
+function _starTex(){ if(_starTexC)return _starTexC; const S=64,cv=document.createElement('canvas');cv.width=cv.height=S;const c=cv.getContext('2d');
+  const g=c.createRadialGradient(S/2,S/2,0,S/2,S/2,S/2); g.addColorStop(0,'rgba(255,255,255,1)'); g.addColorStop(0.18,'rgba(255,255,255,0.9)'); g.addColorStop(0.45,'rgba(255,255,255,0.3)'); g.addColorStop(1,'rgba(255,255,255,0)');
+  c.fillStyle=g; c.beginPath(); c.arc(S/2,S/2,S/2,0,6.283); c.fill();
+  c.strokeStyle='rgba(255,255,255,0.4)'; c.lineWidth=1.4; c.beginPath(); c.moveTo(S/2,7); c.lineTo(S/2,S-7); c.moveTo(7,S/2); c.lineTo(S-7,S/2); c.stroke();   // faint 4-point glint
+  _starTexC=new THREE.CanvasTexture(cv); _starTexC.colorSpace=THREE.SRGBColorSpace; return _starTexC; }
+function _galaxyTex(){ if(_galTexC)return _galTexC; const S=256,cv=document.createElement('canvas');cv.width=cv.height=S;const c=cv.getContext('2d'); c.translate(S/2,S/2);
+  for(let arm=0;arm<2;arm++){ c.save(); c.rotate(arm*Math.PI); for(let i=0;i<260;i++){ const t=i/260, ang=t*6.1, rr=t*S*0.46, x=Math.cos(ang)*rr, y=Math.sin(ang)*rr*0.45, a=(1-t)*0.55;
+    c.fillStyle='rgba('+((190+50*Math.random())|0)+','+((195+40*Math.random())|0)+',255,'+a.toFixed(2)+')'; c.beginPath(); c.arc(x,y,2.4*(1-t)+0.5,0,6.283); c.fill(); } c.restore(); }
+  const g=c.createRadialGradient(0,0,0,0,0,S*0.17); g.addColorStop(0,'rgba(255,250,235,0.95)'); g.addColorStop(0.5,'rgba(255,238,205,0.4)'); g.addColorStop(1,'rgba(255,238,205,0)'); c.fillStyle=g; c.beginPath(); c.arc(0,0,S*0.17,0,6.283); c.fill();
+  _galTexC=new THREE.CanvasTexture(cv); _galTexC.colorSpace=THREE.SRGBColorSpace; return _galTexC; }
 function _portalCosmosStep(dt){ if(!_portalCosmos)return; const c=_portalCosmos.userData;
   if(c.stars) c.stars.rotation.y+=dt*0.006;                                               // the cosmos churns slowly on its own
+  if(c.bigStars) c.bigStars.rotation.y+=dt*0.006;
   if(c.neb) c.neb.forEach((s,i)=>{ s.material.rotation+=dt*0.02*(i%2?1:-1); });
-  if(c.gal) c.gal.material.rotation+=dt*0.008;
+  if(c.gals) c.gals.forEach((s,i)=>{ s.material.rotation+=dt*(0.01+i*0.004)*(i%2?-1:1); });   // the galaxies wheel slowly
   _portalCosmos.position.copy(PORTAL.pos); if(PORTAL.grp) _portalCosmos.quaternion.copy(PORTAL.grp.quaternion); }
-function _portalCosmosDispose(){ if(!_portalScene)return; try{ _portalScene.traverse(o=>{ if(o.geometry&&o.geometry.dispose)o.geometry.dispose(); if(o.material)(Array.isArray(o.material)?o.material:[o.material]).forEach(m=>{ if(m.map&&m.map.dispose)m.map.dispose(); m.dispose&&m.dispose(); }); }); }catch(e){} try{ _portalRT&&_portalRT.dispose(); }catch(e){} _portalScene=null; _portalRT=null; _portalCosmos=null; }
+function _portalCosmosDispose(){ if(!_portalScene)return; try{ _portalScene.traverse(o=>{ if(o.geometry&&o.geometry.dispose)o.geometry.dispose(); if(o.material)(Array.isArray(o.material)?o.material:[o.material]).forEach(m=>{ if(m.map&&m.map.dispose)m.map.dispose(); m.dispose&&m.dispose(); }); }); }catch(e){} try{ _portalRT&&_portalRT.dispose(); }catch(e){} _portalScene=null; _portalRT=null; _portalCosmos=null; _starTexC=null; _galTexC=null; }
 function _portalMat(){ return new THREE.ShaderMaterial({ transparent:true, depthWrite:false, side:THREE.DoubleSide, fog:false, toneMapped:false,
   uniforms:{ uRT:{value:_portalRT?_portalRT.texture:null}, uMask:{value:PORTAL.tex}, uOpacity:{value:0.85} },
   vertexShader:'varying vec2 vUv; varying vec4 vClip; void main(){ vUv=uv; vClip=projectionMatrix*modelViewMatrix*vec4(position,1.0); gl_Position=vClip; }',
@@ -8499,62 +8524,58 @@ function _disposePortal(){ PORTAL.on=false;
   _portalCosmosDispose();
   PORTAL.grp=null; PORTAL.tex=null; PORTAL.light=null; PORTAL._flood=null; PORTAL.closing=null; PORTAL.open=null; PORTAL.openTarget=null; }
 function bossCutscene(x,y,z,isSummoner){ if(_cine)return;
-  const gy=groundYAt(x,z);
+  const gy=groundYAt(x,z), cy=gy+16;   // tear centre ~16 up
   // thin DOM layer: only the darkening veil + the compositor-thread white flash (the build-hitch hider) remain 2D
   const wrap=document.createElement('div'); wrap.style.cssText='position:fixed;inset:0;z-index:30;pointer-events:none;';
   const veil=document.createElement('div'); veil.style.cssText='position:absolute;inset:0;background:#03000a;opacity:0;transition:opacity .8s;';
   const flash=document.createElement('div'); flash.style.cssText='position:absolute;inset:0;background:#fff;opacity:0;';
   const st=document.createElement('style'); st.textContent='@keyframes _cineFlash{0%{opacity:0}8%{opacity:1}30%{opacity:1}100%{opacity:0}}';
   wrap.appendChild(veil); wrap.appendChild(flash); document.head.appendChild(st); document.body.appendChild(wrap);
+  // REDONE INTRO (Ben 07-21): the intro IS the real cosmos-window portal opening — built up-front, one continuous
+  // smooth aperture ramp (hairline → wide for the emergence → settle), transparent throughout, tilted to face the
+  // ground-viewer below. No separate laggy canvas rip, no expand-then-snap. updatePortal (main loop) drives it.
+  if(PORTAL.on)_disposePortal();
   const sd=[]; for(let i=0;i<14;i++)sd.push(Math.random());
-  // the WORLD-PLACED tear: canvas → texture → core plane + two additive halos + a spilling light
-  const cv=document.createElement('canvas'); cv.width=384; cv.height=768;
+  const cv=document.createElement('canvas'); cv.width=384; cv.height=768; const ctx=cv.getContext('2d');
   const tex=new THREE.CanvasTexture(cv); tex.colorSpace=THREE.SRGBColorSpace;
   const grp=new THREE.Group();
-  const core=new THREE.Mesh(new THREE.PlaneGeometry(44,64), new THREE.MeshBasicMaterial({map:tex,transparent:true,side:THREE.DoubleSide,depthWrite:false,fog:false,toneMapped:false})); core.renderOrder=6; grp.add(core);
-  for(const [s,o] of [[1.07,0.5],[1.16,0.22]]){ const h=new THREE.Mesh(core.geometry, new THREE.MeshBasicMaterial({map:tex,transparent:true,opacity:o,side:THREE.DoubleSide,depthWrite:false,fog:false,toneMapped:false,blending:THREE.AdditiveBlending})); h.scale.setScalar(s); h.position.z=-0.3*s; h.renderOrder=5; grp.add(h); }   // glow bleed
-  const ripLight=new THREE.PointLight(0xfff2dd, 0, 110, 2); ripLight.position.set(0,4,3); grp.add(ripLight);
-  grp.position.set(x, gy+30, z);
-  grp.rotation.y=Math.atan2(player.pos.x-x, player.pos.z-z);                             // the tear faces the summoner
+  const core=new THREE.Mesh(new THREE.PlaneGeometry(44,64), new THREE.MeshBasicMaterial({transparent:true,opacity:0,depthWrite:false,visible:false})); core.renderOrder=6; grp.add(core);   // mat replaced by the cosmos shader below
+  for(const [s,o] of [[1.07,0.5],[1.16,0.22]]){ const h=new THREE.Mesh(core.geometry, new THREE.MeshBasicMaterial({map:tex,transparent:true,opacity:o,side:THREE.DoubleSide,depthWrite:false,fog:false,toneMapped:false,blending:THREE.AdditiveBlending})); h.scale.setScalar(s); h.position.z=-0.3*s; h.renderOrder=5; grp.add(h); }   // gold-rim bloom halos (sample the mask)
+  const ripLight=new THREE.PointLight(0xfff2dd, 0, 150, 2); ripLight.position.set(0,4,3); grp.add(ripLight);
+  grp.position.set(x, cy, z); grp.lookAt(player.pos.x, gy+1.6, player.pos.z);            // FACE the summoner's eye on the ground → the tear tilts DOWN so it's fully viewable from below
   scene.add(grp);
-  _cine={x, y:gy+26, z, wrap, cv, ctx:cv.getContext('2d'), tex, grp, ripLight, veil, flash, st, sd, built:false, shake:0, open:0, isSummoner, gy};
-  if(typeof playSample==='function') playSample('seraph_toll',{x,y:gy,z},1.0);           // something leans against the skin of the world
-  if(AC){ burst(master,0.5,1.2,300,0.6,3200); tone(master,{f:52,type:'sine',dur:1.4,vol:0.3,to:30}); }   // the first CRACK — glass-and-thunder
-  flashName('the air begins to split—');
-  if(typeof seraphSay==='function')seraphSay('arrive1');
+  PORTAL.on=true; PORTAL.grp=grp; PORTAL.tex=tex; PORTAL.ctx=ctx; PORTAL.cv=cv; PORTAL.sd=sd; PORTAL.x=x; PORTAL.y=cy; PORTAL.z=z; PORTAL.t=0; PORTAL.pos.set(x,cy,z); PORTAL.light=ripLight;
+  PORTAL.open=0.02; PORTAL.openTarget=0.02; _portalCosmosBuild(); _portalMaskDraw(PORTAL.open); core.material=_portalMat();
+  const flood=new THREE.PointLight(0xffffff, 60, 220, 2); flood.position.set(0,0,6); grp.add(flood); PORTAL._flood=flood;
+  const dpx=player.pos.x-x, dpz=player.pos.z-z, dpl=Math.hypot(dpx,dpz)||1;
+  _cine={x, y:cy, z, wrap, veil, flash, st, grp, ripLight, built:false, shake:0, isSummoner, gy, fx:dpx/dpl, fz:dpz/dpl};
+  if(typeof playSample==='function') playSample('seraph_toll',{x,y:gy,z},1.0);
+  if(AC){ burst(master,0.5,1.2,300,0.6,3200); tone(master,{f:52,type:'sine',dur:1.4,vol:0.3,to:30}); }
+  flashName('the air begins to split—'); if(typeof seraphSay==='function')seraphSay('arrive1');
   let _lastT=performance.now(); _cine.t=0;
   (function tick(){ if(!_cine)return; const c=_cine, _now=performance.now();
-    c.t += Math.min(0.05,(_now-_lastT)/1000); _lastT=_now; const t=c.t;   // STALL-PROOF clock: a hitched frame advances the show ≤50ms — the beats can never be skipped
+    c.t += Math.min(0.05,(_now-_lastT)/1000); _lastT=_now; const t=c.t;
     c.veil.style.opacity = t<4.0? '0.55' : '0';
-    if(t>=1.15 && !c.built){ c.built=true; c.flash.style.animation='_cineFlash 1.1s linear forwards';
-      setTimeout(()=>{ if(!_cine)return; try{ if(_cine.isSummoner) summonBoss(x,gy+1,z); else guestBossBuild(x,z); }catch(e){}   // the hitch lands INSIDE the flash
-        if(wretch.group){ wretch._park=true; const fx=Math.sin(_cine.grp.rotation.y), fz=Math.cos(_cine.grp.rotation.y);
-          wretch.pos.set(x - fx*18, gy+26, z - fz*18); if(typeof seraphFold==='function')seraphFold(0.92); }   // it waits FURLED behind the tear — unseen until it comes through
-        flashName('THE CERAPHIM TEARS THROUGH.'); if(typeof seraphSay==='function')seraphSay('arrive2'); },90); }
+    // ONE continuous aperture ramp: hairline → wide (emergence) → settle. updatePortal eases PORTAL.open toward this.
+    PORTAL.openTarget = t<0.9 ? 0.03+0.06*(t/0.9)
+                      : t<1.9 ? (function(u){ return 0.09+0.86*(u*u*(3-2*u)); })((t-0.9)/1.0)
+                      : t<4.1 ? 0.95 : 0.34;
     c.shake = t<1.15?0 : Math.max(0, 1-Math.max(0,t-2.0)/1.3);
-    _drawRipTex(t);
-    c.ripLight.intensity = Math.max(t>0.15&&t<4.6?34:0, Math.min(2.2,c.open)*160);        // light spills as it opens (a burning seam even at hairline), dies as it seals
-    if(Math.random()<0.5 && c.open>0.06 && c.open<1.5){ const a=Math.random()*6.283, hh=26*Math.min(1,c.open*2.6);   // edge embers crawl the rim
-      const ex=x+Math.sin(grp.rotation.y+1.5708)*(Math.random()-0.5)*8, ez=z+Math.cos(grp.rotation.y+1.5708)*(Math.random()-0.5)*8;
-      spawnParticles(ex, gy+30+Math.cos(a)*hh, ez, Math.random()<0.5?0xff4630:0x99b8ff, 2, 1.2, 0.5); }
-    // THE EMERGENCE (owner drives; guests mirror via the 20Hz w packets): parked behind the plane, it flies
-    // forward THROUGH the aperture, wings furled then unfurling as it clears the tear
+    if(t>=1.15 && !c.built){ c.built=true; c.flash.style.animation='_cineFlash 1.1s linear forwards';
+      setTimeout(()=>{ if(!_cine)return; try{ if(_cine.isSummoner) summonBoss(x,gy+1,z); else guestBossBuild(x,z); }catch(e){}
+        if(wretch.group){ wretch._park=true; wretch.pos.set(x - c.fx*18, gy+12, z - c.fz*18); if(typeof seraphFold==='function')seraphFold(0.92); }   // waits FURLED behind the tear
+        flashName('THE CERAPHIM TEARS THROUGH.'); if(typeof seraphSay==='function')seraphSay('arrive2'); },90); }
+    if(Math.random()<0.5 && (PORTAL.open||0)>0.06){ const a=Math.random()*6.283, hh=20*Math.min(1,(PORTAL.open||0)*2.6);   // edge embers crawl the rim
+      const ex=x+(-c.fz)*(Math.random()-0.5)*8, ez=z+(c.fx)*(Math.random()-0.5)*8;
+      spawnParticles(ex, cy+Math.cos(a)*hh, ez, Math.random()<0.5?0xff4630:0x99b8ff, 2, 1.2, 0.5); }
+    // THE EMERGENCE: parked behind the tear, it flies forward THROUGH the aperture toward the player, unfurling as it clears
     if(c.isSummoner && c.built && wretch.group && t>2.2){ const u=clamp((t-2.2)/2.2,0,1), e=u*u*(3-2*u);
-      const fx=Math.sin(grp.rotation.y), fz=Math.cos(grp.rotation.y);                    // plane's facing (toward player)
-      wretch.pos.set(x - fx*(18-30*e), gy+26 - 6*e, z - fz*(18-30*e));                   // 18 behind → 12 in front
-      if(typeof seraphFold==='function')seraphFold(u>=1?null:0.92*(1-e));                // furled → spread as it clears
-      if(u>=1 && wretch._park){ wretch._park=false; }                                    // released to the fight
-    }
+      wretch.pos.set(x - c.fx*(18-30*e), gy+12 - 6*e, z - c.fz*(18-30*e));
+      if(typeof seraphFold==='function')seraphFold(u>=1?null:0.92*(1-e));
+      if(u>=1 && wretch._park){ wretch._park=false; } }
     if(t<5.2) requestAnimationFrame(tick); else endBossCutscene(); })(); }
-function endBossCutscene(){ const c=_cine; if(!c)return; _cine=null;
-  // THE PORTAL STAYS: hand the rip mesh to the persistent PORTAL — it hangs open, white+gold, the whole fight,
-  // and floods the world with a BIG white light. (Only closePortal() at the boss's death removes it.)
-  try{ if(c.grp){ PORTAL.on=true; PORTAL.grp=c.grp; PORTAL.tex=c.tex; PORTAL.ctx=c.ctx; PORTAL.cv=c.cv; PORTAL.sd=c.sd; PORTAL.x=c.x; PORTAL.y=c.gy+30; PORTAL.z=c.z; PORTAL.t=0; PORTAL.pos.set(c.x,c.gy+30,c.z);
-      PORTAL.open=0.95; PORTAL.openTarget=0.34;                                           // start WIDE (as the ceraphim came through) → updatePortal eases it DOWN to the held size: a smooth shrink, no snap
-      _portalCosmosBuild(); _portalMaskDraw(PORTAL.open);                                 // build the 3D cosmos behind the tear + paint the first (wide) mask
-      const core=c.grp.children[0]; if(core&&core.isMesh){ const om=core.material; core.material=_portalMat(); if(om&&om.dispose)om.dispose(); }   // swap the white-void card for the cosmos-window shader
-      if(c.ripLight){ c.ripLight.color.setRGB(1,1,1); c.ripLight.intensity=200; c.ripLight.distance=340; PORTAL.light=c.ripLight; }   // a huge white sun pouring out of the tear
-      const flood=new THREE.PointLight(0xffffff, 120, 220, 2); flood.position.set(0,0,6); c.grp.add(flood); PORTAL._flood=flood; } }catch(e){}
+function endBossCutscene(){ const c=_cine; if(!c)return; _cine=null;   // the portal is ALREADY the persistent cosmos window — just settle it and release the boss
+  try{ PORTAL.openTarget=0.34; if(PORTAL.light){ PORTAL.light.color.setRGB(1,1,1); PORTAL.light.distance=340; } }catch(e){}
   try{ if(typeof seraphFold==='function')seraphFold(null); if(wretch._park)wretch._park=false; }catch(e){}
   try{ c.wrap.remove(); c.st.remove(); }catch(e){} }
 function guestBossBuild(x,z){ if(wretch.boss)return;   // the owner's ticks may have raced us here — then the rig already exists and there is nothing to mask
@@ -11065,7 +11086,7 @@ window.__hc={
     else if(mode==='doubleSide'){ if(typeof leafMat!=='undefined'){ leafMat.side=THREE.DoubleSide; leafMat.needsUpdate=true; } }
     return { mode, touched:n, sunShadow:sunLight.castShadow, leafShadowSide:(typeof leafMat!=='undefined')?leafMat.shadowSide:null }; }catch(e){ return {err:e.message}; } },
   treeprobe(rad){ try{ rad=rad||48; let logs=0, leaves=0, cols=0;   // QA: are trees in the BLOCK DATA? scan inland for log/leaves columns
-    const cx0=spawnX+70, cz0=spawnZ+70;                                          // well inland, off the trail spine
+    const cx0=spawnX+150, cz0=spawnZ+150;                                        // FAR inland, past all home structures — clean forest
     // find the first real trunk (log ≥3 above surface) and scan its full 11x11 box for a canopy
     let trunk=null;
     for(let dx=-rad; dx<=rad && !trunk; dx++) for(let dz=-rad; dz<=rad && !trunk; dz++){ const wx=cx0+dx, wz=cz0+dz; const h=surfaceH(wx,wz);
@@ -11298,6 +11319,8 @@ window.__hc={
     wretch.boss=true; wretch.active=true; wretch.hp=100; wretch.hpMax=100; wretch._bossPhase=3; if(!VOID.on)enterVoid(); VOID.floor=Math.round(player.pos.y); VOID.floored=true;
     player.pos.y=VOID.floor+9; player.vel.set(0,-1,0); return { on:VOID.on, floor:+VOID.floor.toFixed(2), floored:VOID.floored, startY:+player.pos.y.toFixed(2) }; }catch(e){ return {err:e.message}; } },
   voidFloorState(){ try{ return { on:VOID.on, floored:VOID.floored, floor:VOID.floor, py:+player.pos.y.toFixed(2), onGround:!!player.onGround, restDelta:+(player.pos.y-(VOID.floor||0)).toFixed(3) }; }catch(e){ return {err:e.message}; } },
+  ripShot(t){ try{ const cv=document.createElement('canvas'); cv.width=384; cv.height=768; const ctx=cv.getContext('2d'); const sd=[]; for(let i=0;i<14;i++)sd.push(0.35+0.45*Math.abs(Math.sin(i*1.7)));   // QA: dump the OPENING rip look at time t (the RAF cutscene stalls headless)
+    const save=_cine; _cine={ctx, cv, sd, tex:{needsUpdate:false}, open:0, _stars:null}; try{ _drawRipTex(t); }catch(e){ _cine=save; return {err:e.message}; } const url=cv.toDataURL('image/png'); _cine=save; return url; }catch(e){ return {err:e.message}; } },
   portalInfo(){ try{ return { on:PORTAL.on, open:+((PORTAL.open!=null?PORTAL.open:-1)).toFixed(3), target:PORTAL.openTarget, pos:[+PORTAL.pos.x.toFixed(1),+PORTAL.pos.y.toFixed(1),+PORTAL.pos.z.toFixed(1)], cosmos:!!_portalScene, rt:!!_portalRT, mat:(PORTAL.grp&&PORTAL.grp.children[0])?PORTAL.grp.children[0].material.type:null, rotY:PORTAL.grp?+PORTAL.grp.rotation.y.toFixed(2):null, cine:!!_cine }; }catch(e){ return {err:e.message}; } },   // QA: portal state
   facePortal(back,side){ try{ back=(back==null?32:back); side=side||0; const th=PORTAL.grp?PORTAL.grp.rotation.y:0, nx=Math.sin(th), nz=Math.cos(th), rx=Math.cos(th), rz=-Math.sin(th);   // QA: stand in front of the tear (normal faces the summoner) to view it / test parallax
     const eyeY=PORTAL.pos.y-6; player.pos.set(PORTAL.pos.x+nx*back+rx*side, eyeY-(typeof EYE!=='undefined'?EYE:1.6), PORTAL.pos.z+nz*back+rz*side);
