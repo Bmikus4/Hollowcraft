@@ -1241,7 +1241,8 @@ canvas.addEventListener('webglcontextlost',(e)=>{ e.preventDefault(); try{ (type
 renderer.setPixelRatio(Math.min(devicePixelRatio, CFG.quality==='Ultra'?2:1.25));
 renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = !Q.get('noshadow');   // real-time sun shadow (directional). ?noshadow disables for diagnostics.
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+let _softShadows=(()=>{ try{ return localStorage.getItem('hollowcraft_softsh')!=='0'; }catch(e){ return true; } })();   // POSTFX setting: soft (PCF) vs hard shadows
+renderer.shadowMap.type = _softShadows ? THREE.PCFSoftShadowMap : THREE.BasicShadowMap;
 // AgX (r160) preserves shadow detail in dark scenes where ACES crushes/desaturates it
 renderer.toneMapping = THREE.AgXToneMapping;
 renderer.toneMappingExposure = 1.05;
@@ -1799,6 +1800,7 @@ const MotionBlurShader={
     }`
 };
 let gradePass, godrayPass=null, motionPass=null, _sceneRT=null, _mbMode=false;
+let _mbOn=(()=>{ try{ return localStorage.getItem('hollowcraft_mb')!=='0'; }catch(e){ return true; } })();   // POSTFX setting (Ben 07-21): hyper-real depth-reprojection motion blur, ON by default, disableable in Settings
 // Motion-blur render path: the scene renders into OUR target (_sceneRT, universally-supported RGBA8 + a depth
 // texture), and motionPass is the first composer pass reading it (does the reprojection blur AND bridges the
 // scene into the post chain). BUT we only take this path if the GPU actually reports the framebuffer complete —
@@ -1810,7 +1812,7 @@ try{
   const gl=renderer.getContext(); renderer.setRenderTarget(_sceneRT);
   const complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER)===gl.FRAMEBUFFER_COMPLETE;
   renderer.setRenderTarget(null);
-  _mbMode = false;   // motion blur REMOVED entirely (was: complete && CFG.quality!=='Low' && !Q.get('nomblur'))
+  _mbMode = complete && CFG.quality!=='Low' && !Q.get('nomblur') && _mbOn;   // re-enabled (Ben 07-21): depth-correct per-pixel motion blur; classic fallback if the GPU can't do the depth RT
 }catch(e){ _mbMode=false; }
 if(!_mbMode && _sceneRT){ try{ _sceneRT.dispose(); }catch(e){} _sceneRT=null; }
 function buildComposer(){
@@ -1832,6 +1834,7 @@ function buildComposer(){
   composer.addPass(new OutputPass());
   gradePass = new ShaderPass(GradeShader);
   if (CFG.quality==='Low') gradePass.uniforms.uGrain.value=0.036;   // grain +20% (Ben 07-21)
+  try{ const _g=+localStorage.getItem('hollowcraft_grain'); if(_g>=0 && !isNaN(_g) && localStorage.getItem('hollowcraft_grain')!=null) gradePass.uniforms.uGrain.value=_g; }catch(e){}   // restore the POSTFX grain setting (survives composer rebuilds)
   composer.addPass(gradePass);
 }
 buildComposer();
@@ -1851,6 +1854,19 @@ function applyResolution(){
   if(_sceneRT) _sceneRT.setSize(_dbv.x, _dbv.y);   // scene target matches the composer's internal resolution
 }
 applyResolution();
+// POSTFX: toggle motion blur live — (re)create the scene depth-RT if turning on, rebuild the composer chain.
+function setMotionBlur(on){ try{ _mbOn=!!on; try{ localStorage.setItem('hollowcraft_mb', on?'1':'0'); }catch(e){}
+  if(_mbOn && !_sceneRT){ try{ _sceneRT=new THREE.WebGLRenderTarget(innerWidth,innerHeight); _sceneRT.depthTexture=new THREE.DepthTexture(innerWidth,innerHeight); _sceneRT.depthTexture.type=THREE.UnsignedIntType;
+      const gl=renderer.getContext(); renderer.setRenderTarget(_sceneRT); const ok=gl.checkFramebufferStatus(gl.FRAMEBUFFER)===gl.FRAMEBUFFER_COMPLETE; renderer.setRenderTarget(null); if(!ok){ _sceneRT.dispose(); _sceneRT=null; } }catch(e){ _sceneRT=null; } }
+  _mbMode = !!_sceneRT && _mbOn && CFG.quality!=='Low' && !Q.get('nomblur');
+  try{ if(composer&&composer.dispose)composer.dispose(); }catch(e){}
+  buildComposer(); applyResolution(); return _mbMode; }catch(e){ return false; } }
+function setSoftShadows(soft){ try{ _softShadows=!!soft; try{ localStorage.setItem('hollowcraft_softsh', soft?'1':'0'); }catch(e){}
+  renderer.shadowMap.type = _softShadows ? THREE.PCFSoftShadowMap : THREE.BasicShadowMap;
+  scene.traverse(o=>{ if(o.isMesh && o.material) (Array.isArray(o.material)?o.material:[o.material]).forEach(m=>{ if(m)m.needsUpdate=true; }); });   // shadow-type change needs a material recompile
+  if(typeof sunLight!=='undefined' && sunLight.shadow){ if(sunLight.shadow.map){ sunLight.shadow.map.dispose(); sunLight.shadow.map=null; } sunLight.shadow.needsUpdate=true; }
+  return _softShadows; }catch(e){ return false; } }
+function setGrain(v){ try{ if(gradePass)gradePass.uniforms.uGrain.value=v; try{ localStorage.setItem('hollowcraft_grain',v); }catch(e){} }catch(e){} }
 // QUALITY TIER (pause menu) — the crisp, safe-to-live parts apply immediately (shadow-map resolution + FXAA);
 // the pixel-ratio ceiling and post-pass set are baked at load, so those settle on the next launch. Persisted.
 function applyQuality(q){ if(['Low','Medium','High','Ultra'].indexOf(q)<0)return; CFG.quality=q;
@@ -3699,6 +3715,15 @@ function buildPauseSettings(){ const el=document.getElementById('pausesettings')
   { const d=document.createElement('div'); d.style.cssText='display:flex;align-items:center;justify-content:space-between;font:13px Georgia;color:#cbb98f;';
     const l=document.createElement('span'); l.textContent='Cinematic mode (smooth flight)'; const c=document.createElement('input'); c.type='checkbox'; c.checked=cineMode; c.style.cssText='width:18px;height:18px;accent-color:#8a6';
     c.onchange=()=>{ applyCine(c.checked); }; d.appendChild(l); d.appendChild(c); el.appendChild(d); }
+  // ---- POSTFX ----
+  { const hd=document.createElement('div'); hd.textContent='POSTFX'; hd.style.cssText='letter-spacing:2px;color:#c0a050;font:11px Georgia;border-top:1px solid rgba(130,150,115,.14);padding-top:9px;'; el.appendChild(hd); }
+  { const d=document.createElement('div'); d.style.cssText='display:flex;align-items:center;justify-content:space-between;font:13px Georgia;color:#cbb98f;';
+    const l=document.createElement('span'); l.textContent='Motion blur'; const c=document.createElement('input'); c.type='checkbox'; c.checked=_mbOn; c.style.cssText='width:18px;height:18px;accent-color:#8a6';
+    c.onchange=()=>{ if(typeof setMotionBlur==='function')setMotionBlur(c.checked); }; d.appendChild(l); d.appendChild(c); el.appendChild(d); }
+  { const d=document.createElement('div'); d.style.cssText='display:flex;align-items:center;justify-content:space-between;font:13px Georgia;color:#cbb98f;';
+    const l=document.createElement('span'); l.textContent='Soft shadows'; const c=document.createElement('input'); c.type='checkbox'; c.checked=_softShadows; c.style.cssText='width:18px;height:18px;accent-color:#8a6';
+    c.onchange=()=>{ if(typeof setSoftShadows==='function')setSoftShadows(c.checked); }; d.appendChild(l); d.appendChild(c); el.appendChild(d); }
+  slider('Film grain',0,0.14,0.005,(gradePass?gradePass.uniforms.uGrain.value:0.06),x=>Math.round(x/0.06*100)+'%',x=>{ if(typeof setGrain==='function')setGrain(x); });
   { const got=Object.keys(achGot).length, det=document.createElement('details');   // ACHIEVEMENTS ledger — collapsed count line, open for the list; unfound easter eggs stay hidden as ? ? ?
     det.style.cssText='text-align:left;font:13px Georgia;color:#cbb98f;border-top:1px solid rgba(130,150,115,.14);padding-top:9px;';
     const sum=document.createElement('summary'); sum.style.cssText='cursor:pointer;letter-spacing:2px;color:#c0a050;font-size:11px;'; sum.textContent='ACHIEVEMENTS  '+got+' / '+ACHIEVEMENTS.length; det.appendChild(sum);
@@ -11548,6 +11573,8 @@ window.__hc={
     return { sample:[px,py,pz], wasBlock:was, nowBlock:getBlock(px,py,pz), scarSize:bossScar.size }; }catch(e){ return {err:e.message, stack:(e.stack||'').slice(0,200)}; } },
   qaAtlasUse(){ try{ return { returned:useAtlas() }; }catch(e){ return {err:e.message, stack:(e.stack||'').slice(0,200)}; } },
   qaBlock(x,y,z){ try{ return getBlock(x,y,z); }catch(e){ return -1; } },
+  postfx(){ try{ return { mbOn:_mbOn, mbMode:_mbMode, motionPass:!!motionPass, softShadows:_softShadows, shadowType:renderer.shadowMap.type, grain:gradePass?+gradePass.uniforms.uGrain.value.toFixed(3):null }; }catch(e){ return {err:e.message}; } },
+  setMB(on){ try{ return { mbMode:setMotionBlur(on) }; }catch(e){ return {err:e.message}; } },
   equipHat(id){ try{ id=id||'straw_hat'; armor[0]={id,n:1}; if(typeof openInventory==='function')openInventory(2); if(typeof updateArmorView==='function')updateArmorView(); return { helm:armor[0].id, hatVisible:!!(_pv&&_pv.P&&_pv.P.strawHat&&_pv.P.strawHat.visible) }; }catch(e){ return {err:e.message}; } },   // QA: equip a helmet + open the paperdoll
   placeTrophy(which){ try{ const id=(which==='wretch')?BID.wretch_trophy:BID.ceraphim_trophy; const px=Math.floor(player.pos.x)+3, pz=Math.floor(player.pos.z), py=groundYAt(px,pz,player.pos.y);
     setBlockWorld(px,py,pz,id,true); const c=getChunk(px>>4,pz>>4); if(c){ c.dirty=true; buildChunkMeshes(c); }
