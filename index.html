@@ -1520,7 +1520,7 @@ let _pineLastX=1e9, _pineLastZ=1e9, _pineLastRD=0;
 function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.position.copy(camera.position); const day=globalU.uDay.value;
   { const fc=scene.fog.color;   // PERFECT MATCH BY CONSTRUCTION (Ben 07-20): the backdrop ring's deep colour = exactly what the REAL water fogs to at its far edge (same formula as waterMat's fog target) — the seam cannot mismatch in any weather/time
     _uWater.value.setRGB(fc.r*0.5, fc.g*0.5+0.012, fc.b*0.5+0.028);
-    _uWater.value.lerp(_deepSea, 0.6*day);   // …but BY DAY the deep water below the horizon returns to the planned DEEP BLUE (Ben 07-20 rev): the seam still anchors on uHorizonBlend, only the depths darken to blue
+    _uWater.value.lerp(_deepSea, Math.min(1, 0.42+0.5*day));   // the deep water below the horizon reads as a resonant DEEP BLUE — strongly by DAY (~0.92) but also clearly at NIGHT (~0.42) so the dark under-horizon band is a vivid deep blue at all hours (Ben 07-21); the seam still anchors on uHorizonBlend, only the depths darken to blue
     { const cd=_horizCamDir; camera.getWorldDirection(cd); oceanMat.uniforms.uCamYaw.value=Math.atan2(cd.z,cd.x); }   // view azimuth for the horizon bow
     _uHorizonBlend.value.setRGB(   // shared sky/sea anchor: the ring's own value pulled 25% toward the sky's horizon tone — always ≥ the sea, ≤ the low sky
       _uWater.value.r*0.75+lerp(0.02,0.62,day)*0.25,
@@ -8011,12 +8011,12 @@ function fireGun(){ const held=heldSlot(), it=held?ITEMS[held.id]:null, bolt = i
     if(wretch.active && !wretch.dragging){ const hx=px-wretch.pos.x, hz=pz-wretch.pos.z, hy=py-wretch.pos.y, r2=hx*hx+hz*hz;   // TIGHT capsule — precise aim required
       const head = hy>3.2 && r2<0.85*0.85, body = hy>-0.3 && hy<4.8 && r2<1.1*1.1;
       if(head||body){ const _wd=(bolt?(head?100:70):rev?(head?68:45):(head?65:50)) - (sup?20:0); if(!NET.on||wretchOwner()===NET.id){ wretch._gunHit=true; hurtWretch(_wd); } else netSend({t:'hw',v:_wd});   // AR 50 / Python 45 body (Ben 07-20), heads scaled; co-op: only the owner mutates HP; guests request the hit
-        spawnParticles(px,py,pz,head?0xff3020:0x3a0608,head?16:12,2,0.6); if(head)flashName('headshot'); return true; } }
+        spawnParticles(px,py,pz,head?0xff3020:0x3a0608,head?16:12,2,0.6); if(head)flashName('headshot'); if(wretch.group)addMobHole(wretch.group,px,py,pz,wretch.pos.x,wretch.pos.y+2.4,wretch.pos.z); return true; } }   // red→black wound rides the Wretch
     for(let bi=0;bi<skyBirds.length;bi++){ const b=skyBirds[bi]; if(b.dead)continue; const bp=b.m.position, br=0.9*b.m.scale.x;   // SKY BIRDS die to gunfire (Ben 07-20) — generous sphere, they're small and far
       const dxb=px-bp.x, dyb=py-bp.y, dzb=pz-bp.z; if(dxb*dxb+dyb*dyb+dzb*dzb < br*br){ b.dead=true; b.vy=1.5; b.spin=(Math.random()-0.5)*7;
         spawnParticles(bp.x,bp.y,bp.z,0x191920,14,2.2,0.9); flashName('bird down'); return true; } }
     let an=null; for(const a of animals){ if(a.dead)continue; const hh=(ANIMALS[a.type]?ANIMALS[a.type].h:1)*1.15, dxa=px-a.x, dza=pz-a.z, dya=py-a.y; const rr=hh>1.3?0.9:0.5; if(dxa*dxa+dza*dza < rr && dya>-0.25 && dya<hh+0.4){ an=a; break; } }   // vertical CAPSULE, radius scaled up for big-bodied animals (deer/sheep bodies reached well past the old 0.65 cylinder — center-mass shots whiffed)
-    if(an){ hurtAnimal(an,animDmg); spawnParticles(px,py,pz,0xcc2018,8,1.6,0.5); return true; }
+    if(an){ hurtAnimal(an,animDmg); spawnParticles(px,py,pz,0xcc2018,8,1.6,0.5); if(an.mesh&&!an.dead)addMobHole(an.mesh,px,py,pz,an.x,an.y+((ANIMALS[an.type]?ANIMALS[an.type].h:1)*0.5),an.z); return true; }   // red→black wound rides the animal
     if(NET.on && !NET.host){ for(const _k in _netAnimals){ const _e=_netAnimals[_k]; const _dx=px-_e.x,_dz=pz-_e.z,_dy=py-_e.y;   // GUEST: the real animals[] is empty here → hit the host's mirrored animals and request the damage
       if(_dx*_dx+_dz*_dz<0.9 && _dy>-0.25 && _dy<2.2){ const _n=+String(_k).replace(/^n/,''); if(_n===_n)netSend({t:'han',n:_n,v:animDmg}); spawnParticles(px,py,pz,0xcc2018,8,1.6,0.5); return true; } } } }
   return true; }
@@ -9513,8 +9513,17 @@ function buildSpawnChest(){ if(_spawnChestDone)return; const sx=spawnX, sz=spawn
 // skirt FEATHERS the pad back into the natural terrain — a smoothstep height ramp per column, so no
 // structure ever sits in a pit, on a plinth, or against a sheer cut. Touched columns are re-capped to
 // match the local surface (grass / snow / sand); untouched terrain keeps its native top. pathR = legacy, ignored.
+// flood-remove a WHOLE tree (trunk + connected canopy) from a seed block — so clearing a structure site never leaves
+// leaves floating with no trunk. Face+edge neighbourhood bridges the canopy's occasional 1-block gaps; capped for safety.
+const _TREEBLK=id=>(id===BID.log||id===BID.leaves||id===BID.leaves_core);
+function _treeFlood(sx,sy,sz){ if(!_TREEBLK(getBlock(sx,sy,sz)))return; const stack=[[sx,sy,sz]]; let n=0;
+  const NB=[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1],[1,1,0],[-1,1,0],[1,-1,0],[-1,-1,0],[0,1,1],[0,1,-1],[0,-1,1],[0,-1,-1],[1,0,1],[-1,0,1],[1,0,-1],[-1,0,-1]];
+  while(stack.length && n<9000){ const c=stack.pop(); if(!_TREEBLK(getBlock(c[0],c[1],c[2])))continue; setBlockWorld(c[0],c[1],c[2],AIR,true); n++;
+    for(const d of NB) stack.push([c[0]+d[0],c[1]+d[1],c[2]+d[2]]); } }
 function groundStructure(cx,cz,gy,R,pathR){
   const SK=4, P=R+1, T=P+SK;
+  for(let dx=-T;dx<=T;dx++)for(let dz=-T;dz<=T;dz++){ const wx=cx+dx, wz=cz+dz;   // FIRST: wipe any tree standing on or overhanging this pad (whole tree, so no canopy is ever left floating)
+    for(let y=surfaceH(wx,wz)+1;y<=surfaceH(wx,wz)+50;y++){ if(_TREEBLK(getBlock(wx,y,wz))) _treeFlood(wx,y,wz); } }
   for(let dx=-T;dx<=T;dx++)for(let dz=-T;dz<=T;dz++){ const wx=cx+dx, wz=cz+dz, cheb=Math.max(Math.abs(dx),Math.abs(dz));
     const nH=surfaceH(wx,wz), f=cheb<=P?0:(cheb-P)/SK, e=f*f*(3-2*f);
     const tH=Math.round(gy+(nH-gy)*e);                            // pad level ramping smoothly back to the noise surface
@@ -9984,8 +9993,22 @@ function addBulletHole(px,py,pz,nx,ny,nz){ try{
   if(!_bholeGeo){ _bholeGeo=new THREE.CircleGeometry(0.065,8); _bholeMat=new THREE.MeshBasicMaterial({color:0x0d0a08,transparent:true,opacity:0.85,depthWrite:false,polygonOffset:true,polygonOffsetFactor:-2,polygonOffsetUnits:-2}); }
   const m=new THREE.Mesh(_bholeGeo,_bholeMat); m.position.set(px+nx*0.013,py+ny*0.013,pz+nz*0.013); m.lookAt(px+nx,py+ny,pz+nz); m.renderOrder=2; scene.add(m);
   _bholes.push({m,t:clock.elapsedTime}); if(_bholes.length>70){ const o=_bholes.shift(); scene.remove(o.m); } }catch(e){} }   // cap: oldest holes give way
+// MOB bullet holes — a wound decal PARENTED to the creature's mesh (rides the body), fading RED → black hole over a
+// few seconds, then persisting to the shared 120s lifetime. cx/cy/cz = the mob CENTER (gives the outward face normal).
+const _mobHoles=[]; let _mobHoleGeo=null;
+function addMobHole(mesh,px,py,pz,cx,cy,cz){ try{ if(!mesh)return;
+  if(!_mobHoleGeo)_mobHoleGeo=new THREE.CircleGeometry(0.10,10);
+  const mat=new THREE.MeshBasicMaterial({color:0xc21414,transparent:true,opacity:0.96,depthWrite:false,fog:false,polygonOffset:true,polygonOffsetFactor:-2,polygonOffsetUnits:-2,side:THREE.DoubleSide});
+  const m=new THREE.Mesh(_mobHoleGeo,mat); mesh.updateMatrixWorld();
+  const lp=mesh.worldToLocal(new THREE.Vector3(px,py,pz)), ctr=mesh.worldToLocal(new THREE.Vector3(cx,cy,cz));
+  const n=lp.clone().sub(ctr); if(n.lengthSq()<1e-6)n.set(0,0,1); n.normalize();
+  m.position.copy(lp).addScaledVector(n,0.02); m.lookAt(lp.clone().add(n)); m.renderOrder=3; mesh.add(m);
+  _mobHoles.push({m,mat,t:clock.elapsedTime}); if(_mobHoles.length>60){ const o=_mobHoles.shift(); if(o.m.parent)o.m.parent.remove(o.m); } }catch(e){} }
 function updateBlockFx(dt){
-  { const now=clock.elapsedTime; while(_bholes.length && now-_bholes[0].t>120){ const o=_bholes.shift(); scene.remove(o.m); } }   // bullet holes age out at 120s
+  { const now=clock.elapsedTime; while(_bholes.length && now-_bholes[0].t>120){ const o=_bholes.shift(); scene.remove(o.m); }   // surface holes age out at 120s
+    for(let i=_mobHoles.length-1;i>=0;i--){ const h=_mobHoles[i], age=now-h.t;
+      if(age>120 || !h.m.parent){ if(h.m.parent)h.m.parent.remove(h.m); _mobHoles.splice(i,1); continue; }
+      const k=Math.min(1,age/3.5); h.mat.color.setRGB(0.76*(1-k)+0.05*k, 0.08*(1-k)+0.02*k, 0.08*(1-k)+0.02*k); } }   // fresh RED wound darkens to a near-black hole over 3.5s
   if(!chestLid||!chestLidAnim.active)return; chestLidAnim.t+=dt*3.4*chestLidAnim.dir; const t=clamp(chestLidAnim.t,0,1); const e=t*t*(3-2*t); chestLid.rotation.x=-1.35*e;
   if(chestLidAnim.dir<0&&t<=0){ chestLid.visible=false; chestLidAnim.active=false; _lidRestore(); } if(chestLidAnim.dir>0&&t>=1) chestLidAnim.active=false; }
 let sfxCreak=null;
@@ -10992,6 +11015,12 @@ window.__hc={
   hud(on){ try{ if(on!=null){ _hudOn=!!on; applyHud(); } const ui=document.getElementById('ui'); return {hudOn:_hudOn, uiDisplay:ui?ui.style.display:null, cine:cineMode}; }catch(e){ return {err:e.message}; } },   // QA: HUD toggle
   cinematic(on){ try{ applyCine(on); return {cine:cineMode, fly:!!player.fly, cineSpeed, hudShown:document.getElementById('ui').style.display!=='none'}; }catch(e){ return {err:e.message}; } },   // QA: cinematic mode toggle
   cineDrive(){ try{ return {x:+player.pos.x.toFixed(1),y:+player.pos.y.toFixed(1),z:+player.pos.z.toFixed(1),vx:+player.vel.x.toFixed(2),vy:+player.vel.y.toFixed(2),vz:+player.vel.z.toFixed(2),cineSpeed}; }catch(e){ return {err:e.message}; } },   // QA: cine flight telemetry
+  mobHoles(){ try{ return { count:_mobHoles.length, colors:_mobHoles.slice(-3).map(h=>h.mat.color.getHexString()) }; }catch(e){ return {err:e.message}; } },   // QA: mob bullet-hole count + newest colors (red→black)
+  shootWretch(n){ try{ n=n||6; if(!wretch.active)this.summon(); wretch.pos.set(player.pos.x+1.6, player.pos.y, player.pos.z); wretch.dragging=false; wretch.boss=false;   // wretch at arm's length in front
+    this.gun('ar15'); const hp0=wretch.hp; let fired=0;
+    for(let i=0;i<n;i++){ const dx=wretch.pos.x-player.pos.x, dy=(wretch.pos.y+2.0)-(player.pos.y+EYE), dz=wretch.pos.z-player.pos.z, L=Math.hypot(dx,dy,dz)||1;
+      player.yaw=Math.atan2(-dx,-dz); player.pitch=clamp(Math.asin(dy/L),-1.2,1.2); view.reloadT=0; view.boltT=0; if(fireGun())fired++; }
+    return { holes:_mobHoles.length, fired, hp0, hp:wretch.hp, colors:_mobHoles.slice(-3).map(h=>h.mat.color.getHexString()) }; }catch(e){ return {err:e.message+' @ '+(e.stack||'').split('\n')[1]}; } },   // QA: yank wretch close + shoot it, count wound decals
   stage2(){ try{ return { feathers:_rakeFeathers.length, pray:+((wretch._prayT||0)).toFixed(1), cycles:wretch._cycleN||0, sweep:!!wretch._laserA, laser:wretch._laserState||null, rakeCd:+((wretch._rakeCd||0)).toFixed(1) }; }catch(e){ return {err:e.message}; } },   // QA: zealot substage state
   peel(o){ try{ o=o||{}; if(o.begin!=null)beginPeel(o.begin); if(o.rate!=null)PEEL.rate=o.rate; return { on:PEEL.on, p:+PEEL.p.toFixed(2), target:PEEL.target, flakes:PEEL.flakes.length, voidOn:VOID.on }; }catch(e){ return {err:e.message}; } },   // QA: world-peel dissolve state
   void3(o){ try{ o=o||{}; if(o.chainNow)VOID.chainCd=0.05; if(o.meter!=null)VOID.meter=o.meter;                       // QA: fractal-void state (+ force a chain / set the meter)
