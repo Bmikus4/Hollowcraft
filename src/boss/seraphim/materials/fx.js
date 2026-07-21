@@ -71,15 +71,17 @@ const FX_FRAG = /* glsl */`
   void main() {
     vec3 col; float a;
     if (vMode < 0.5) {
-      // white-hot core, gentle length pulse r(t)=r0(1+0.15 sin40t) -> intensity pulse
+      // GOLD core with energy SPIRALLING up its length (Ben 07-21)
       float pulse = 0.9 + 0.15 * sin(uTime * 40.0);
-      col = uCore * pulse;
-      a = pulse;
+      float spiral = 0.5 + 0.5 * sin(vUv2.x * 6.2831853 * 3.0 + vUv2.y * 26.0 - uTime * 11.0);   // 3 helical bands flowing upward
+      col = uCore * pulse * (0.65 + 1.0 * spiral);
+      a = pulse * (0.55 + 0.45 * spiral);
     } else if (vMode < 1.5) {
-      // fresnel glow sheath
+      // GOLD fresnel sheath, counter-spiralling for a woven look
       float f = pow(1.0 - abs(dot(normalize(vWN), normalize(vWV))), 2.0);
-      col = uSheath * f * 1.6;
-      a = f * 0.9;
+      float spiral = 0.5 + 0.5 * sin(vUv2.x * 6.2831853 * 2.0 - vUv2.y * 18.0 - uTime * 7.0);
+      col = uSheath * f * (1.1 + 1.1 * spiral);
+      a = f * (0.6 + 0.4 * spiral);
     } else {
       // radial ember / flare
       vec2 p = vUv2 * 2.0 - 1.0;
@@ -97,8 +99,8 @@ export function createFxMaterial() {
   return new THREE.ShaderMaterial({
     uniforms: {
       uTime:   { value: 0 },
-      uCore:   { value: new THREE.Color(0xffffff) },
-      uSheath: { value: new THREE.Color(0x9fd8ff) },
+      uCore:   { value: new THREE.Color(0xfff0c4) },   // bright warm-gold core (Ben 07-21)
+      uSheath: { value: new THREE.Color(0xffc233) },   // deep gold glow sheath
       uEmber:  { value: new THREE.Color(0xd9902f) },
     },
     vertexShader: FX_VERT,
