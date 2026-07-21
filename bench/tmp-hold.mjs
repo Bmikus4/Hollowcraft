@@ -21,9 +21,11 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true; } catch(e){ return false; } })()`, { timeout:90000 });
     await sleep(3000);
     const id = process.argv[2]||'field_guide';
-    await page.evaluate(`__hc.hold('${id}')`); await sleep(1200);
+    await page.evaluate(`__hc.hold('${id}')`); await sleep(1000);
     await page.screenshot({ path: path.join(OUT,'hold-'+id+'.png') });
-    console.log(JSON.stringify({ id, errors }));
+    const cine = await page.evaluate(`__hc.qaCine(true)`); await sleep(800);
+    await page.screenshot({ path: path.join(OUT,'hold-cine.png') });
+    console.log(JSON.stringify({ id, cineState:cine, errors }));
     await browser.close(); process.exit(0);
   } finally { try{ server.kill(); }catch(e){} }
 })().catch(e=>{ console.error(e); process.exit(1); });

@@ -3704,7 +3704,11 @@ addEventListener('keydown',e=>{ if(e.code==='Space')e.preventDefault();
   if(e.code==='KeyE'){ if(!player.grabbed)openInventory(2); return; }   // no menus while it has you — mash Space, that's all there is
   if(e.code.startsWith('Digit')){ const n=+e.code.slice(5); if(n>=1&&n<=9){ selSlot=n-1; refreshHotbar(); const s=inv[selSlot]; flashName(s?ITEMS[s.id].name:'');} }
   if(e.code==='KeyF'){ if(!window._allowCreative){ flashName('flight is locked in survival'); return; } player.fly=!player.fly; player.vel.y=0; flashName(player.fly?'fly':'walk'); }   // SURVIVAL: no flight
-  if(e.code==='KeyG'){ if(!window._allowCreative){ flashName('creative is locked in survival'); return; } player.creative=!player.creative; flashName(player.creative?'creative':'survival'); }   // SURVIVAL: cannot switch to creative mid-game
+  if(e.code==='KeyG'){ if(!window._allowCreative){ flashName('creative is locked in survival'); return; }   // G CYCLES gamemodes: survival → creative → cinematic → survival (Ben 07-21)
+    if(cineMode){ applyCine(false); player.creative=false; flashName('survival'); }
+    else if(player.creative){ applyCine(true); }                                   // applyCine flashes the CINEMATIC banner
+    else { player.creative=true; flashName('creative'); }
+    return; }
   if(e.code==='KeyQ'){ const s=heldSlot(); if(s){ const d=lookDir();                              // drop ONE of the held item, tossed forward, with a 1.8s no-pickup window
     spawnDrop(s.id,1, player.pos.x+d.x*0.6, player.pos.y+1.2, player.pos.z+d.z*0.6, 1.8);
     const dr=drops[drops.length-1]; if(dr){ dr.vx=d.x*4.5; dr.vz=d.z*4.5; dr.vy=2.2; }
@@ -8040,6 +8044,7 @@ function finishReload(){ const id=view.reloadId, it=id&&ITEMS[id]; view.reloadT=
 function updateView(dt){ updateRecoil(dt);                                          // camera recoil integrates every frame (kick + smooth recovery)
   if(player.grabbed){ view.group.visible=false; if(view.holoRet)view.holoRet.visible=false; return; }   // no hands/held item during the capture — only the maw fills the screen
   if(!started || intro.active){ view.group.visible=false; if(view.holoRet)view.holoRet.visible=false; return; }   // CINEMATICS own the camera — no floating hand/held item in the menu flythrough or the wake-up (Ben 07-20)
+  if(cineMode || !_hudOn){ view.group.visible=false; if(view.holoRet)view.holoRet.visible=false; return; }   // HIDE THE HAND (Ben 07-21): cinematic mode + the hide-HUD setting both drop the viewmodel
   setViewItem(heldSlot()?heldSlot().id:null);
   // SPEAR CHARGE (right-hold = wind up a throw, like drawing a bow). Cancel if we lose focus / swap off the spear.
   if(spearCharge.active){ const hs=heldSlot(); if(locked && !openUI && !player.dead && hs && ITEMS[hs.id] && ITEMS[hs.id].spear) spearCharge.t+=dt; else spearCharge.active=false; }
@@ -8575,7 +8580,7 @@ function whitenAround(cx,cz,r){ const V=BID.vantawhite; if(V==null)return 0; con
 // WHITEN A TUBE ALONG THE BEAM — walk the ray eye->impact and convert EVERY solid block within `rad` of the line to vantawhite (2-3 block radius for the WHOLE span, per Ben). Deduped, capped, bulk-wrapped.
 function whitenBeamSpan(ox,oy,oz, tx,ty,tz, rad){ const V=BID.vantawhite; if(V==null)return 0;
   let dx=tx-ox, dy=ty-oy, dz=tz-oz; const L=Math.hypot(dx,dy,dz)||1; dx/=L; dy/=L; dz/=L;
-  const R=Math.max(1,rad|0), R2=(rad+0.35)*(rad+0.35); let n=0; const cap=420;
+  const R=Math.max(1,rad|0), R2=(rad+0.35)*(rad+0.35); let n=0; const cap=700;   // higher cap so the full 5-radius circular tube fills (deduped across ticks; bulk-wrapped) (Ben 07-21)
   const doBulk=(typeof beginBulk==='function'); if(doBulk)beginBulk();
   try{ for(let t=1.5; t<=L; t+=1.0){ const px=ox+dx*t, py=oy+dy*t, pz=oz+dz*t, cx=Math.floor(px), cy=Math.floor(py), cz=Math.floor(pz);
     for(let ax=-R;ax<=R;ax++)for(let ay=-R;ay<=R;ay++)for(let az=-R;az<=R;az++){ if(ax*ax+ay*ay+az*az>R2)continue;
@@ -8608,19 +8613,30 @@ function _ensureBurstAssets(){ if(_burstAssets)return; _burstAssets=true;
     g.add(ring); g.add(inner); g.rotation.x=-Math.PI/2; g.visible=false; g.userData={ring,inner}; scene.add(g); _burstRings.push(g);
     const beam=new THREE.Mesh(new THREE.CylinderGeometry(0.14,0.34,1,10,1,true), new THREE.MeshBasicMaterial({color:0xffd23a,transparent:true,opacity:0,side:THREE.DoubleSide,depthWrite:false,blending:THREE.AdditiveBlending})); beam.frustumCulled=false; beam.visible=false; scene.add(beam); _burstBeams.push(beam); } }
 function _bossTargets(){ const out=[{x:player.pos.x,z:player.pos.z,vx:player.vel.x,vz:player.vel.z}]; if(NET.on)for(const id in NET.peers){ const p=NET.peers[id]; if(p&&!p.dead)out.push({x:p.x,z:p.z,vx:0,vz:0}); } return out; }
+const _burstByEye={};                                             // eye layout index i -> its ONE active burst (one beam+one ring per eye)
+function _slotForEye(i){ return i<0 ? (i+3) : (i+2); }            // side eyes -3..-1 -> slots 0..2, 1..3 -> slots 3..5 (6 stable pool slots, each eye owns one)
 function updateSeraphBursts(dt){
-  if(!(wretch.boss && wretch._bossPhase>=3 && typeof VOID!=='undefined' && VOID.on)){ if(_seraphBursts.length){ _seraphBursts.length=0; for(const g of _burstRings)g.visible=false; for(const b of _burstBeams)b.visible=false; } return; }
+  if(!(wretch.boss && wretch._bossPhase>=3 && typeof VOID!=='undefined' && VOID.on)){ if(_seraphBursts.length){ _seraphBursts.length=0; for(const g of _burstRings)g.visible=false; for(const b of _burstBeams)b.visible=false; for(const k in _burstByEye)delete _burstByEye[k]; } return; }
   _ensureBurstAssets(); const fy=(VOID.floor!=null?VOID.floor:groundYAt(player.pos.x,player.pos.z));
+  const eyes=(typeof seraphEyeSpheres==='function')?seraphEyeSpheres().filter(e=>!e.central):[];   // current SIDE eyes (world pos + closed state)
+  const eyePos={}; for(let i=0;i<eyes.length;i++){ const e=eyes[i]; eyePos[e.i]={x:e.x,y:e.y,z:e.z,closed:e.closed}; }
+  const tg=_bossTargets();
+  // SPAWN WAVE — assign each IDLE, OPEN eye to its NEAREST player (eyes are spread across the band, so the eyes closest to a
+  // given player target THAT player: 2 players → the ~3 eyes on each flank strike their own player). One burst per eye.
   wretch._burstCd=(wretch._burstCd==null?2.2:wretch._burstCd)-dt;
-  if(wretch._burstCd<=0 && _seraphBursts.length<6){ wretch._burstCd=1.4+Math.random()*1.3;
-    const eyes=(typeof seraphEyeSpheres==='function')?seraphEyeSpheres().filter(e=>!e.central && !e.closed):[];   // a SEALED eye (shot out, 90s) cannot fire its burst laser (Ben 07-21)
-    if(eyes.length){ const tg=_bossTargets(), n=2+((Math.random()*2)|0);   // 2-3 side-eye strikes per wave, spread across the players
-      for(let i=0;i<n;i++){ const e=eyes[(Math.random()*eyes.length)|0], tp=tg[i%tg.length];
-        const cx=wretch._laserAim?wretch._laserAim.x:tp.x, cz=wretch._laserAim?wretch._laserAim.z:tp.z;   // land where the central shove is herding them + a lead on their motion
-        const tx=tp.x+(tp.vx||0)*0.5+(cx-tp.x)*0.3+(Math.random()-0.5)*3, tz=tp.z+(tp.vz||0)*0.5+(cz-tp.z)*0.3+(Math.random()-0.5)*3;
-        _seraphBursts.push({ex:e.x,ey:e.y,ez:e.z, tx,tz, t:0, warn:0.85, fire:0.35, ri:(_seraphBursts.length)%_burstRings.length, hit:false }); }
-      if(typeof playSample==='function')playSample('seraph_charge',wretch.pos,0.6); } }
-  for(let k=_seraphBursts.length-1;k>=0;k--){ const b=_seraphBursts[k]; b.t+=dt; const ring=_burstRings[b.ri], beam=_burstBeams[b.ri];
+  if(wretch._burstCd<=0){ wretch._burstCd=1.4+Math.random()*1.3;
+    const idle=[]; for(let i=0;i<eyes.length;i++){ const e=eyes[i]; if(!e.closed && !_burstByEye[e.i])idle.push(e); }   // sealed eyes (shot out) can't be picked
+    const n=Math.min(idle.length, 2+((Math.random()*2)|0));
+    for(let w=0; w<n && idle.length; w++){ const pick=(Math.random()*idle.length)|0, e=idle.splice(pick,1)[0]; if(!e||_burstByEye[e.i])continue;
+      let best=tg[0], bd=1e9; for(let p=0;p<tg.length;p++){ const t=tg[p], d=(t.x-e.x)*(t.x-e.x)+(t.z-e.z)*(t.z-e.z); if(d<bd){ bd=d; best=t; } }   // nearest player to THIS eye
+      const cx=wretch._laserAim?wretch._laserAim.x:best.x, cz=wretch._laserAim?wretch._laserAim.z:best.z;   // land where the central shove is herding them + a lead
+      const tx=best.x+(best.vx||0)*0.5+(cx-best.x)*0.3+(Math.random()-0.5)*3, tz=best.z+(best.vz||0)*0.5+(cz-best.z)*0.3+(Math.random()-0.5)*3;
+      const b={ eyeI:e.i, slot:_slotForEye(e.i), ex:e.x,ey:e.y,ez:e.z, tx,tz, t:0, warn:0.85, fire:0.35, hit:false };
+      _seraphBursts.push(b); _burstByEye[e.i]=b; }
+    if(_seraphBursts.length && typeof playSample==='function')playSample('seraph_charge',wretch.pos,0.6); }
+  for(let k=_seraphBursts.length-1;k>=0;k--){ const b=_seraphBursts[k], ep=eyePos[b.eyeI], ring=_burstRings[b.slot], beam=_burstBeams[b.slot];
+    if(!ep || ep.closed){ if(ring)ring.visible=false; if(beam)beam.visible=false; delete _burstByEye[b.eyeI]; _seraphBursts.splice(k,1); continue; }   // eye sealed mid-charge → it CANNOT fire (Ben 07-21)
+    b.ex=ep.x; b.ey=ep.y; b.ez=ep.z; b.t+=dt;                     // beam origin TRACKS the live eye → the laser genuinely comes from that smaller eye
     if(b.t<b.warn){ ring.visible=true; ring.position.set(b.tx, fy+0.05, b.tz); const o=b.t/b.warn, pl=0.5+0.5*Math.sin(clock.elapsedTime*20);
       ring.userData.ring.material.opacity=0.35+0.5*o; ring.userData.inner.material.opacity=(0.3+0.5*pl)*o; ring.scale.setScalar(1.5-0.5*o); ring.rotation.z=clock.elapsedTime*2.4; beam.visible=false; }
     else if(b.t<b.warn+b.fire){ ring.userData.ring.material.opacity=0.95; ring.userData.inner.material.opacity=0.95;
@@ -8628,7 +8644,7 @@ function updateSeraphBursts(dt){
       if(!b.hit){ b.hit=true; spawnParticles(b.tx,fy+0.4,b.tz,0xff5a20,10,3,0.7); if(typeof sndBeamImpact==='function')sndBeamImpact(b.tx,fy,b.tz);
         if(Math.hypot(b.tx-player.pos.x,b.tz-player.pos.z)<2.0 && typeof damage==='function')damage(5,'a seraph eye sears you');
         if(NET.on)for(const id in NET.peers){ const p=NET.peers[id]; if(p&&Math.hypot(b.tx-p.x,b.tz-p.z)<2.0)netSend({t:'dmg',to:+id,v:5,c:'a seraph eye sears you'}); } } }
-    else { ring.visible=false; beam.visible=false; _seraphBursts.splice(k,1); } } }
+    else { ring.visible=false; beam.visible=false; delete _burstByEye[b.eyeI]; _seraphBursts.splice(k,1); } } }
 // SERAPH VISUAL FORM — the rig setup/teardown only (no AI). Called by summonBoss (owner) AND netWretchTick (guests), so every screen sees the winged eye-boss.
 function applyBossVisual(on){ if(!wretch.group)return;
   if(on){ if(typeof setForm==='function')setForm('demon'); wretch.group.scale.setScalar(WRETCH_DEMON_SCALE*2.0);
@@ -11428,6 +11444,8 @@ window.__hc={
     else if(mode==='doubleSide'){ if(typeof leafMat!=='undefined'){ leafMat.side=THREE.DoubleSide; leafMat.needsUpdate=true; } }
     return { mode, touched:n, sunShadow:sunLight.castShadow, leafShadowSide:(typeof leafMat!=='undefined')?leafMat.shadowSide:null }; }catch(e){ return {err:e.message}; } },
   hold(id){ try{ id=id||'field_guide'; invAdd(id,1); for(let i=0;i<9;i++){ if(inv[i]&&inv[i].id===id){ selSlot=i; break; } } refreshHotbar(); setViewItem(id); return { held:view.id }; }catch(e){ return {err:e.message}; } },   // QA: give + hold an item to inspect the first-person view model
+  qaCine(on){ try{ if(typeof applyCine==='function')applyCine(!!on); return { cineMode, hudOn:_hudOn, handVisible:!!(view.group&&view.group.visible) }; }catch(e){ return {err:e.message}; } },   // QA: toggle cinematic mode
+  qaHud(on){ try{ _hudOn=!!on; applyHud(); return { hudOn:_hudOn }; }catch(e){ return {err:e.message}; } },   // QA: toggle hide-HUD setting
   lightProbe(){ try{ const px=Math.floor(player.pos.x), pz=Math.floor(player.pos.z), gy=groundYAt(px,pz,player.pos.y);
     beginBulk();
     // flat stone test plot: floor + a back wall, so I can see block-light on BOTH a horizontal and a vertical face
