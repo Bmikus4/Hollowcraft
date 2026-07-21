@@ -72,7 +72,7 @@ const T = (name, cond, info='') => { console.log((cond?'PASS':'FAIL')+' — '+na
     T('marker block restored after load', B.postBlock===A.placedId, 'post='+B.postBlock+' expected='+A.placedId);
     T('inventory restored (diamond + rifle)', B.inv.includes('diamond:5') && B.inv.some(s=>s.startsWith('ar15:')), JSON.stringify(B.inv));
     T('player position restored', B.pos && Math.abs(B.pos[0]-(A.px+0.5))<3 && Math.abs(B.pos[2]-(A.pz+0.5))<3, JSON.stringify(B.pos)+' vs '+A.px+','+A.pz);
-    T('achievements persisted across reload', B.ach && B.ach.got.includes('bell') && B.ach.total===15, JSON.stringify(B.ach));
+    T('achievements persisted across reload', B.ach && B.ach.got.includes('bell') && B.ach.total===30, JSON.stringify(B.ach));
 
     // ============ PAGE C — main menu shows Continue when a save exists ============
     await page.goto(base, { waitUntil:'load', timeout:90000 });
