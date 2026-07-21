@@ -182,6 +182,21 @@ export function seraphBloom(on) {
   if (_bloom) _bloom.visible = !!on;
 }
 
+// STONE TROPHY PROTOTYPE (Ben 07-21): build a SEPARATE SeraphimModel, freeze one pose, and re-skin every mesh in
+// plain stone → the game caches this once and clones it (small) for the ceraphim_trophy. NOT the live boss model.
+export function buildSeraphStoneProto(ctx = {}) {
+  try {
+    const m = new SeraphimModel({ scene: ctx.scene || _scene, camera: ctx.camera, renderer: ctx.renderer });
+    try { m.setFold && m.setFold(0.15); m.update(0.016, 0); } catch (e) {}
+    const o = m.object3d;
+    const stone = new THREE.MeshLambertMaterial({ color: 0x8f9299 });
+    o.traverse(x => { if (x.isMesh || x.isInstancedMesh) { x.material = stone; x.castShadow = true; x.receiveShadow = true; x.visible = true; } });
+    o.visible = true; o.scale.setScalar(1); o.position.set(0, 0, 0); o.quaternion.identity();
+    o.updateMatrixWorld(true);
+    return o;
+  } catch (e) { return null; }
+}
+
 // Wing-fold override for the emergence choreography (null releases to the rig's preset).
 export function seraphFold(v) { if (_model) _model._foldOverride = (v == null ? null : v); }
 
