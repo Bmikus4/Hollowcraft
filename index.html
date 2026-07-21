@@ -1284,6 +1284,7 @@ function injectAtlas(mat, opts={}){
     sh.uniforms.uTime = globalU.uTime;
     sh.uniforms.uAtlas = { value: arrayTex };
     sh.uniforms.uLight3D = { value: _emptyLight3D };   // per-chunk block-light volume — a per-chunk material clone overrides this at compile (see _chunkMat)
+    sh.uniforms.uWhiteTile = { value: (typeof TILEIDX!=='undefined' && TILEIDX.vantawhite!=null)?TILEIDX.vantawhite:-1 };   // VANTAWHITE tile → rendered fully UNLIT pure white (a portal to a white void)
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>',
         '#include <common>\nattribute float aTile;\nattribute float aSky;\nattribute vec2 aBlockUV;'+
@@ -1294,7 +1295,7 @@ function injectAtlas(mat, opts={}){
         (opts.wind?'\nfloat wsw = sin(uTime*1.6 + transformed.x*0.6 + transformed.z*0.5)*0.10*aWind; transformed.x += wsw; transformed.z += cos(uTime*1.3 + transformed.x*0.4)*0.07*aWind;':''));
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>',
-        '#include <common>\nprecision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;')
+        '#include <common>\nprecision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;')
       .replace('#include <color_fragment>',
         '#include <color_fragment>\n'+
         'vec2 _fr=fract(vBUV); _fr.y=1.0-_fr.y;\n'+
@@ -1310,6 +1311,8 @@ function injectAtlas(mat, opts={}){
         'irradiance += vec3(3.6,1.95,0.80) * pow(_bl,1.45) * _fl;')   // warm torch glow added to indirect — falloff SOFTENED from _bl² (Ben 07-20: in truly dark chunks the squared curve collapsed the glow to an invisible puddle; ^1.45 carries the light to its full flood radius) + peak brightened ~16%
       .replace('#include <aomap_fragment>',
         '#include <aomap_fragment>\nreflectedLight.directDiffuse *= (0.12 + 0.88*smoothstep(0.22,0.9,vSky));');   // the SUN can't reach where the sky can't: kills direct light leaking into interiors/caves (and beyond the 46-block shadow radius), so enclosed spaces read genuinely dark
+    sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>',
+      '#include <dithering_fragment>\nif(uWhiteTile>=0.0 && abs(vTile-uWhiteTile)<0.5){ gl_FragColor=vec4(1.0,1.0,1.0,gl_FragColor.a); }');   // VANTAWHITE: overwrite the FINAL pixel to pure white AFTER lighting/tonemap/fog → genuinely unlit, no shadow/AO/surface-detail, a hole of pure white (Ben 07-21)
     if(Q.get('albedo')) sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\ngl_FragColor=vec4(_tex.rgb,1.0);');   // DIAGNOSTIC ?albedo: flat raw texture, NO lighting
   };
   mat.userData.atlas = true;   // marks this as a voxel-atlas material → chunks bind their per-chunk light volume to it
@@ -4709,7 +4712,7 @@ function loop(){
 }
 renderer.setAnimationLoop(loop);
 document.addEventListener('visibilitychange',()=>{ renderer.setAnimationLoop(document.hidden?null:loop); if(!document.hidden)clock.getDelta(); });
-addEventListener('resize',()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); applyResolution(); });
+addEventListener('resize',()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); applyResolution(); if(_portalRT)_portalRT.setSize(Math.round(384*((innerWidth/innerHeight)||1.78)),384); });   // keep the portal cosmos RT matched to screen aspect (round stars)
 canvas.setAttribute('role','img'); canvas.setAttribute('aria-label','Hollowcraft — a first-person voxel horror forest, stalked by the Wretch.');
 
 // =====================================================================
@@ -5588,7 +5591,7 @@ function updateWretch(dt){
         wretch._dropDescend=false;
         if(wInDun){ const dP=Math.hypot(gp.x-ex,gp.z-ez); const _los=!!(wretch.sense&&wretch.sense.seen);
           if(wretch._dunRetreat){ wretch._cryptAscend=false; aim(L.cx,L.cz); speed=Math.max(speed,reckless?16:12); if(Math.hypot(L.cx-ex,L.cz-ez)<4){ wretch._dunRetreat=false; wretch.committed=true; wretch.thought='Now — again, out of the dark.'; } }   // shot in its lair → withdraw to the MAIN ROOM, then resume the hunt (never flees to the woods)
-          else if((L.b2y!=null) && wretch.pos.y < F-1){ aim(L.shX,L.shZ); wretch._cryptAscend=(Math.hypot(L.shX-ex,L.shZ-ez)<2.8); }   // in the CRYPT → climb the stair-shaft back UP to the hall, then chase
+          else if((L.b2y!=null) && wretch.pos.y < L.fy-1){ aim(L.shX,L.shZ); wretch._cryptAscend=(Math.hypot(L.shX-ex,L.shZ-ez)<2.8); }   // in the CRYPT → climb the stair-shaft back UP to the hall, then chase (F was an undefined build-scope local → ReferenceError on crypt/labyrinth entry; L.fy is the hall floor) (Ben 07-21)
           else { wretch._cryptAscend=false;
             if(dP<7) aim(gp.x,gp.z);                                           // close → straight for you
             else { const wp=_tunNextWaypoint(L.net, wretch.pos.x,wretch.pos.z, gp.x,gp.z); aim(wp.x,wp.z); }
@@ -8667,7 +8670,7 @@ const PORTAL={ on:false, grp:null, tex:null, ctx:null, cv:null, sd:null, x:0,y:0
 // bright thin gold; the whole quad is slightly transparent. The mask canvas carries the tear silhouette (alpha) + gold rim.
 let _portalScene=null, _portalRT=null, _portalCosmos=null;
 function _portalCosmosBuild(){ if(_portalScene)return; _portalScene=new THREE.Scene();
-  _portalRT=new THREE.WebGLRenderTarget(512,512,{minFilter:THREE.LinearFilter,magFilter:THREE.LinearFilter});   // 512² is plenty for the tear + halves the fill cost (Ben 07-21 perf)
+  _portalRT=new THREE.WebGLRenderTarget(Math.round(384*((innerWidth/innerHeight)||1.78)),384,{minFilter:THREE.LinearFilter,magFilter:THREE.LinearFilter});   // MATCH SCREEN ASPECT (16:9) — a square RT sampled in screen-space stretched stars into ovals; ~same fill as 512² (Ben 07-21)
   _portalCosmos=new THREE.Group(); _portalScene.add(_portalCosmos);
   const st=_starTex();                                                                    // ROUND soft star sprite (points render as squares without a texture)
   function _mkStars(N,rMin,rSpread,size,bright){ const ps=new Float32Array(N*3), cs=new Float32Array(N*3);   // stars spread through a big volume → near stars parallax against far ones
@@ -8676,7 +8679,7 @@ function _portalCosmosBuild(){ if(_portalScene)return; _portalScene=new THREE.Sc
       const w=bright*(0.7+Math.random()*0.3), tnt=Math.random(); cs[i*3]=w*(0.82+0.18*tnt); cs[i*3+1]=w*(0.86+0.14*(1-tnt)); cs[i*3+2]=w*(0.92+0.08*Math.random()); }
     const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.BufferAttribute(ps,3)); g.setAttribute('color',new THREE.BufferAttribute(cs,3));
     return new THREE.Points(g,new THREE.PointsMaterial({size,map:st,alphaTest:0.02,sizeAttenuation:true,vertexColors:true,transparent:true,opacity:0.95,depthWrite:false,blending:THREE.AdditiveBlending})); }
-  const stars=_mkStars(1200,45,560,3.4,0.85), bigStars=_mkStars(150,60,520,9,1.0);        // many faint + a scatter of bright round stars
+  const stars=_mkStars(1200,45,560,1.4,0.85), bigStars=_mkStars(150,60,520,3.2,1.0);       // many faint + a scatter of bright round stars — sizes cut ~2.5x (were way too big) (Ben 07-21)
   _portalCosmos.add(stars); _portalCosmos.add(bigStars); _portalCosmos.userData.stars=stars; _portalCosmos.userData.bigStars=bigStars;
   const nt=_cloudTex(), neb=[];                                                           // nebula clouds — big soft additive sprites at varied depth
   for(const [col,dep,sz] of [[0x7040c0,-140,300],[0x2878b4,-240,380],[0xc89a5a,-90,200],[0x9040a0,-380,500]]){
@@ -8690,9 +8693,9 @@ function _portalCosmosBuild(){ if(_portalScene)return; _portalScene=new THREE.Sc
   _portalCosmos.userData.gal=gals[0]; _portalCosmos.userData.gals=gals; }
 let _starTexC=null, _galTexC=null;
 function _starTex(){ if(_starTexC)return _starTexC; const S=64,cv=document.createElement('canvas');cv.width=cv.height=S;const c=cv.getContext('2d');
-  const g=c.createRadialGradient(S/2,S/2,0,S/2,S/2,S/2); g.addColorStop(0,'rgba(255,255,255,1)'); g.addColorStop(0.18,'rgba(255,255,255,0.9)'); g.addColorStop(0.45,'rgba(255,255,255,0.3)'); g.addColorStop(1,'rgba(255,255,255,0)');
+  const g=c.createRadialGradient(S/2,S/2,0,S/2,S/2,S/2); g.addColorStop(0,'rgba(255,255,255,1)'); g.addColorStop(0.10,'rgba(255,255,255,0.92)'); g.addColorStop(0.26,'rgba(255,255,255,0.28)'); g.addColorStop(1,'rgba(255,255,255,0)');   // TIGHTER core → crisp pin-point stars, not fat blobs (Ben 07-21)
   c.fillStyle=g; c.beginPath(); c.arc(S/2,S/2,S/2,0,6.283); c.fill();
-  c.strokeStyle='rgba(255,255,255,0.4)'; c.lineWidth=1.4; c.beginPath(); c.moveTo(S/2,7); c.lineTo(S/2,S-7); c.moveTo(7,S/2); c.lineTo(S-7,S/2); c.stroke();   // faint 4-point glint
+  c.strokeStyle='rgba(255,255,255,0.28)'; c.lineWidth=1.0; c.beginPath(); c.moveTo(S/2,12); c.lineTo(S/2,S-12); c.moveTo(12,S/2); c.lineTo(S-12,S/2); c.stroke();   // faint, thin 4-point glint
   _starTexC=new THREE.CanvasTexture(cv); _starTexC.colorSpace=THREE.SRGBColorSpace; return _starTexC; }
 function _galaxyTex(){ if(_galTexC)return _galTexC; const S=256,cv=document.createElement('canvas');cv.width=cv.height=S;const c=cv.getContext('2d'); c.translate(S/2,S/2);
   for(let arm=0;arm<2;arm++){ c.save(); c.rotate(arm*Math.PI); for(let i=0;i<260;i++){ const t=i/260, ang=t*6.1, rr=t*S*0.46, x=Math.cos(ang)*rr, y=Math.sin(ang)*rr*0.45, a=(1-t)*0.55;
