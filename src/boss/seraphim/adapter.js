@@ -221,6 +221,8 @@ export function buildSeraphStoneProto(ctx = {}) {
     } });
     o.visible = true; o.scale.setScalar(1); o.position.set(0, 0, 0); o.quaternion.identity();
     o.updateMatrixWorld(true);
+    // expose the CENTRAL eye's local position so the trophy can seat it dead-centre on the pillar
+    try { const ce = m.eyeBand && m.eyeBand.eyes && m.eyeBand.eyes.find(e => e.isC); if (ce && ce.pivot && m.eyeBand.group) { const g = m.eyeBand.group; g.updateWorldMatrix(true, false); const p = new THREE.Vector3().copy(ce.pivot.position).applyMatrix4(g.matrixWorld); o.userData.centralEye = { x: p.x, y: p.y, z: p.z }; } } catch (e) {}
     return o;
   } catch (e) { return null; }
 }
