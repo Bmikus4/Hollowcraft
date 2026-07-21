@@ -245,9 +245,11 @@ export function seraphCorpseMode() {
   // frame — that child rotation defeated the ragdoll's flat-lay (the corpse "floated"). Reset it to identity so the
   // ragdoll's quaternion on wretch.group is the SOLE orientation: the wing-disc (feathers face +Z) then lays truly flat.
   try { _model.object3d.quaternion.identity(); _model.object3d.updateMatrix(); } catch (e) {}
-  // FOLD THE WINGS SHUT (Ben 07-21): a slain god CRUMPLES — folding collapses the ~39m wingspan so the ragdoll's
-  // bounding box shrinks further. setFold is instant per update(); a few pumps bake the folded pose into the instance matrices.
-  try { if (_model.setFold) { _model.setFold(1); _model.update(0.05, _elapsed); } } catch (e) {}   // ONE pump — setFold is instant per update(); 3 pumps was 3× a full rig animation cost on the death frame (Ben 07-21 perf)
+  // DEFAULT WING POSE (Ben 07-21): the slain god settles into its NATURAL/default wing pose — NOT fanned wide and
+  // NOT clamped shut. Release the fold override back to the rig preset, still the beat, and pump a few updates so the
+  // default pose fully bakes into the instance matrices (the old ONE-pump setFold(1) froze the wings mid-fold, which
+  // read as fanned). The no-sink clamp uses seraphBodyBox (the compact eye-band body), so wing spread doesn't float it.
+  try { if (_model.setFlapIntensity) _model.setFlapIntensity(0); _model._foldOverride = null; for (let k = 0; k < 4; k++) _model.update(0.05, _elapsed); } catch (e) {}
   try { _model.object3d.updateWorldMatrix(true, true); } catch (e) {}
 }
 
