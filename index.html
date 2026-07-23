@@ -625,6 +625,17 @@ for (let i=0;i<N_BLOCKS;i++){
   blockCat[i] = d.cat;
 }
 const AIR=BID.air, WATER=BID.water;
+// SKYLIGHT-OCCLUSION mask (Ben 07-23): htop feeds _ssky→aSky (the per-face skylight bake). It was written two
+// ways that DISAGREED: worldgen (genColumn) sets htop=ground and trees are added by placeSet which never touches
+// htop → bright canopy floor (tree shade is the shadowmap's job); but endBulk/setBlockWorld rescan for the highest
+// isOpaque block and FOLD THE CANOPY IN (leaves_core is opaque). So every forest chunk touched by a bulk build —
+// cabin/dungeon/village/cathedral/tree-fall, all at fixed seeded positions — baked its whole under-canopy floor to
+// vSky=0 → "dark faces that reject light", identical every reload, while untouched forest 1 chunk over stayed lit.
+// Fix: canopy must NOT raise htop in ANY path (used at the endBulk + setBlockWorld htop sites) → all chunks match
+// worldgen's bright baseline. Leaves still block TORCH light via isOpaque in bakeLight (a separate, correct thing).
+const occludesSky = isOpaque.slice();
+occludesSky[BID.leaves_core] = 0;   // opaque for rendering/culling, transparent to skylight
+occludesSky[BID.leaves]      = 0;   // already non-opaque; explicit for safety
 
 // =====================================================================
 //  WORLD STORAGE   (flat Uint8Array per chunk, index x + z*16 + y*256)
@@ -1059,6 +1070,15 @@ function snapshotChunk(c){
 const _snapN=new Array(9);
 function _sg(lx,ly,lz){ return (ly<0||ly>=WH) ? 0 : _snapB[(lx+1) + (lz+1)*_SW + ly*_SW*_SW]; }   // 0 === BID.air
 function _ssky(lx,ly,lz){ const th=_snapT[(lx+1)+(lz+1)*_SW]; if(ly>=th)return 1; const v=1-(th-ly)/6; return v<0?0:v; }
+// SIDE-FACE sky access (Ben 07-23): _ssky is a purely TOP-DOWN column-occlusion heightfield, so a vertical
+// face (cliff/slope-riser/cave-lip/eave/trunk-side) that is horizontally WIDE OPEN to the sky was stamped
+// vSky≈0 just because its own air column has something high above it → the shader then strips its sun and
+// floored it to 16% ambient → "dark faces that reject light", identical every reload (htop is seed-deterministic).
+// Fix: a side face sees sky if ANY lateral air-neighbour column is open. Genuine interiors (all 4 laterals
+// also capped by a roof) still read 0 → caves stay dark. Only x/z faces use this; y faces keep plain _ssky
+// (the column directly above a top/bottom face genuinely IS its sky).
+function _sskyOpen(lx,ly,lz){ let s=_ssky(lx,ly,lz); if(s>=1)return 1;
+  const m=Math.max(s, _ssky(lx+1,ly,lz), _ssky(lx-1,ly,lz), _ssky(lx,ly,lz+1), _ssky(lx,ly,lz-1)); return m; }
 
 function greedyMesh(c, pass){
   // pass: 'opaque' | 'cutout'
@@ -1085,8 +1105,8 @@ function greedyMesh(c, pass){
       for (x[v]=0; x[v]<dV; x[v]++){
         for (x[u]=0; x[u]<dU; x[u]++, n++){
           let a=0,b=0;
-          if (x[d]>=0){ const id=g(x[0],x[1],x[2]); if(isSrc(id)){ const nid=g(x[0]+q[0],x[1]+q[1],x[2]+q[2]); if(!hides(nid,id)){ const sky=Math.round(_ssky(x[0]+q[0],x[1]+q[1],x[2]+q[2])*15); a=packFace(id,faceTile(id,d,false),sky,false);} } }
-          if (x[d]<dD-1){ const xx=x[0]+q[0],xy=x[1]+q[1],xz=x[2]+q[2]; const id=g(xx,xy,xz); if(isSrc(id)){ const nid=g(x[0],x[1],x[2]); if(!hides(nid,id)){ const sky=Math.round(_ssky(x[0],x[1],x[2])*15); b=packFace(id,faceTile(id,d,true),sky,true);} } }
+          if (x[d]>=0){ const id=g(x[0],x[1],x[2]); if(isSrc(id)){ const nid=g(x[0]+q[0],x[1]+q[1],x[2]+q[2]); if(!hides(nid,id)){ const sky=Math.round((d===1?_ssky(x[0]+q[0],x[1]+q[1],x[2]+q[2]):_sskyOpen(x[0]+q[0],x[1]+q[1],x[2]+q[2]))*15); a=packFace(id,faceTile(id,d,false),sky,false);} } }
+          if (x[d]<dD-1){ const xx=x[0]+q[0],xy=x[1]+q[1],xz=x[2]+q[2]; const id=g(xx,xy,xz); if(isSrc(id)){ const nid=g(x[0],x[1],x[2]); if(!hides(nid,id)){ const sky=Math.round((d===1?_ssky(x[0],x[1],x[2]):_sskyOpen(x[0],x[1],x[2]))*15); b=packFace(id,faceTile(id,d,true),sky,true);} } }
           // only one side wins (a face belongs to the solid side facing air)
           mask[n] = a ? a : b;
         }
@@ -1671,7 +1691,7 @@ sunLight.shadow.needsUpdate = true;
 scene.add(sunLight); scene.add(sunLight.target);
 
 // cold moonlit ambient floor: darkness keeps texture, undersides stay dark (form reads)
-const hemi = new THREE.HemisphereLight(0x2a3350, 0x4a5568, 0.28);   // GROUND colour lifted 0x24282f→0x4a5568 (Ben 07-21): down/side faces (leaf undersides, shaded trunks) were pitch-black in the woods at noon. The ground hemisphere feeds every non-sunlit face → this is the surgical "dark faces in the trees" lever. SKY colour left ORIGINAL so distant terrain tops don't wash pale at the night horizon (that was the skybox-pine grey band).
+const hemi = new THREE.HemisphereLight(0x2a3350, 0x24282f, 0.28);   // ground colour lifted 0x0e0d12→0x24282f (Ben 07-20): down/side faces in shadow were fed the near-black ground hemisphere colour. NOTE: the "dark faces in the woods" were NOT this — that was the leaves_core→htop→vSky=0 bug (see occludesSky, Ben 07-23), now fixed at the source; this ground colour is back to its pre-hunt baseline.
 scene.add(hemi);
 const ambient = new THREE.AmbientLight(0x1a2130, 0.12);
 scene.add(ambient);
@@ -1924,7 +1944,7 @@ let _bulk=null;
 function beginBulk(){ if(!_bulk) _bulk={touched:new Map()}; }
 function endBulk(){ const t=_bulk; _bulk=null; if(!t||!t.touched.size) return;
   for(const c of t.touched.values()){
-    for(let lz=0;lz<CK;lz++)for(let lx=0;lx<CK;lx++){ let top=-1; for(let y=WH-1;y>=0;y--){ if(isOpaque[c.blocks[idx(lx,y,lz)]]){ top=y; break; } } c.htop[lx+lz*CK]=top; }
+    for(let lz=0;lz<CK;lz++)for(let lx=0;lx<CK;lx++){ let top=-1; for(let y=WH-1;y>=0;y--){ if(occludesSky[c.blocks[idx(lx,y,lz)]]){ top=y; break; } } c.htop[lx+lz*CK]=top; }   // occludesSky (not isOpaque): canopy must not fold into htop — matches worldgen (Ben 07-23)
     c._emit=null; markRemesh(c.cx,c.cz);
     for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++){ if(!dx&&!dz)continue; const nc=getChunk(c.cx+dx,c.cz+dz);
       if(nc && !t.touched.has(key(nc.cx,nc.cz))){ nc._emit=null; markRelight(nc.cx,nc.cz); } }   // any lantern the build placed lights across borders
@@ -1952,8 +1972,8 @@ function setBlockWorld(wx,wy,wz,b,record){
   if(b===WATER) c.hasWater=true; else if(blockCat[b]==='cross') c.hasCross=true; else if(blockCat[b]==='model') c.hasModel=true;
   // maintain column top for skylight
   const ci=lx+lz*CK;
-  if (isOpaque[b] && wy>c.htop[ci]) c.htop[ci]=wy;                                        // only OPAQUE blocks occlude skylight — torches/glass/leaves must NOT darken the column (was the "black voxels near torches" bug)
-  else if (!isOpaque[b] && wy===c.htop[ci]){ let t=-1; for(let y=wy-1;y>=0;y--){const bb=c.blocks[idx(lx,y,lz)]; if(isOpaque[bb]){t=y;break;}} c.htop[ci]=t; }
+  if (occludesSky[b] && wy>c.htop[ci]) c.htop[ci]=wy;                                        // occludesSky (not isOpaque): torches/glass/leaves AND canopy leaves_core must NOT darken the column (Ben 07-23 — matches worldgen; leaves_core was the "dark faces in the woods" root cause)
+  else if (!occludesSky[b] && wy===c.htop[ci]){ let t=-1; for(let y=wy-1;y>=0;y--){const bb=c.blocks[idx(lx,y,lz)]; if(occludesSky[bb]){t=y;break;}} c.htop[ci]=t; }
   markRemesh(c.cx,c.cz);
   if (lx===0) markRemesh(c.cx-1,c.cz); if (lx===15) markRemesh(c.cx+1,c.cz);
   if (lz===0) markRemesh(c.cx,c.cz-1); if (lz===15) markRemesh(c.cx,c.cz+1);
@@ -2798,8 +2818,8 @@ function updateSky(dt){
     const wR=1.0, wG=lerp(0.74,0.96,gz), wB=lerp(0.52,0.88,gz);                      // warm key color; oranger near the horizon
     sunLight.color.setRGB(lerp(0.36,wR,day), lerp(0.44,wG,day), lerp(0.74,wB,day));  // deeper moon-blue → warm sun, driven by `day`
     sunLight.intensity=lerp(0.42,3.4,day); }                                         // DARKNESS-FIRST night: moon 0.55→0.42 (Ben 07-21) so distant bare-stone peaks stop catching pale moonlight and reading GREY on the night horizon; near ground stays readable via the hemi ground-fill, not the moon (was 0.9→0.55)
-  hemi.intensity=lerp(0.28,0.70,day);                                                // fill lifted modestly (Ben 07-21: "dark faces 24/7") — the heavy lift lives in the GROUND colour (see hemi ctor) so forest interiors read without washing distant night-terrain pale; interiors/caves stay dark via the skylight-contrast curve
-  ambient.intensity=lerp(0.07,0.36,day);
+  hemi.intensity=lerp(0.24,0.62,day);                                                // pre-hunt baseline (the "dark faces" were the vSky/htop bug, fixed at source — no fill band-aid needed)
+  ambient.intensity=lerp(0.055,0.32,day);
   // NIGHT SHADOW KILL — in deep night the realtime shadow pass buys nothing the baked light volume +
   // low ambient don't already sell, and it costs a full caster-scene re-render every SHADOW_EVERY frames
   // plus a shadow-map fetch in every lit fragment, all night long. Hysteresis so dusk doesn't flap.
@@ -11909,6 +11929,14 @@ window.__hc={
       near.push({cheb, groupVis:c.group.visible, hasLeaf:!!lf, leafVis:lf?lf.visible:null, leafVerts:pos?pos.count:0}); });
     near.sort((a,b)=>a.cheb-b.cheb);
     return { RD, fogDensity:+scene.fog.density.toFixed(4), fogCheb, nearChunks:near.slice(0,10) }; }catch(e){ return {err:e.message}; } },
+  treeCol(wx,wz){ try{ const c=getChunk(wx>>4,wz>>4); if(!c||!c.generated) return {err:'nochunk'};
+    const lx=wx&15, lz=wz&15, col=lx+lz*CK;
+    const storedTop=c.htop[col];                                                 // what _ssky/aSky actually uses
+    let fullTop=-1; for(let y=WH-1;y>=0;y--){ if(isOpaque[c.blocks[idx(lx,y,lz)]]){ fullTop=y; break; } }        // highest opaque incl. leaves_core/log
+    let groundTop=-1; for(let y=WH-1;y>=0;y--){ const b=c.blocks[idx(lx,y,lz)]; if(b!==AIR&&b!==WATER&&b!==BID.leaves&&b!==BID.leaves_core&&b!==BID.log&&isOpaque[b]){ groundTop=y; break; } }   // true ground surface
+    let canopy=false; for(let y=WH-1;y>=0;y--){ if(c.blocks[idx(lx,y,lz)]===BID.leaves_core){ canopy=true; break; } }
+    return { storedTop, fullTop, groundTop, canopyDelta:fullTop-groundTop, hasCanopyCore:canopy,
+      inflated: storedTop>groundTop+2, verdict: storedTop>groundTop+2 ? 'HTOP INFLATED (canopy folded in → floor bakes dark)' : 'ok (htop = ground)' }; }catch(e){ return {err:e.message}; } },
   treeprobe(rad){ try{ rad=rad||48; let logs=0, leaves=0, cols=0;   // QA: are trees in the BLOCK DATA? scan inland for log/leaves columns
     const cx0=spawnX+150, cz0=spawnZ+150;                                        // FAR inland, past all home structures — clean forest
     // find the first real trunk (log ≥3 above surface) and scan its full 11x11 box for a canopy
