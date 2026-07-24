@@ -153,6 +153,30 @@ export function seraphHideBeam() {
   if (_beam) _beam.setVisible(false);
 }
 
+// STAGE III MINI EYE-LASERS (Ben 07-24): small GOLD versions of the central lance — the SAME spiralling core+sheath
+// shader (makeBeam), just its own gold-tinted material and a lighter fatten. One pooled beam per slot; the game drives
+// origin (EXACTLY a side-eye world pos) + target each frame. Not fattened to the big BEAM_FATTEN=8 → reads as a slim
+// gold thread against the central beam's searing girth.
+const MINI_FATTEN = 4;   // slightly more visible (Ben 07-24: was 3)
+const _miniBeams = [];   // slot -> makeBeam() result (own gold fx material)
+export function seraphMiniBeam(slot, ex, ey, ez, tx, ty, tz) {
+  if (!_scene) return;
+  let b = _miniBeams[slot];
+  if (!b) {
+    b = makeBeam();                                      // its OWN additive fx material (spiral core + fresnel sheath)
+    b.material.uniforms.uCore.value.setHex(0xffd23a);    // small GOLD version of the big laser
+    b.material.uniforms.uSheath.value.setHex(0xff9a2a);
+    b.mesh.renderOrder = 5;
+    _scene.add(b.mesh);
+    _miniBeams[slot] = b;
+  }
+  const el = _elapsed || (performance.now() / 1000);
+  updateBeam(b, _o.set(ex, ey, ez), _t.set(tx, ty, tz), el);   // spiral flows exactly as the central beam
+  fattenBeam(b, MINI_FATTEN);
+}
+export function seraphHideMiniBeam(slot) { const b = _miniBeams[slot]; if (b) b.setVisible(false); }
+export function seraphHideMiniBeams() { for (const b of _miniBeams) if (b) b.setVisible(false); }
+
 // GOLD beam is a STAGE 2 thing only (Ben 07-21): tint the shared fx material gold in stage 2, white-hot otherwise.
 export function seraphBeamGold(on) {
   if (!_beam || !_beam.material || !_beam.material.uniforms) return;
