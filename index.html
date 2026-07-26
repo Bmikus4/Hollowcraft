@@ -9911,7 +9911,7 @@ function brClearEnv(){ if(BR.env){ scene.remove(BR.env); BR.env.traverse(o=>{ if
 //   becomes a doorway (walls are drawn everywhere EXCEPT where another room is on the far side). Its OWN collision keeps
 //   the player inside the union of rooms — no voxel grid, so walls sit at any angle. Voxel layer = flat floor+ceiling (Y). =====
 function brxGenerate(){ BR.rooms=[]; let s=99991; const rnd=()=>{ s=(Math.imul(s,1664525)+1013904223)>>>0; return s/4294967296; };
-  const R=BR.rooms; R.push({x:BR_ENTRY.x,z:BR_ENTRY.z,w:12,d:12,rot:0,lit:true});
+  const R=BR.rooms; R.push({x:BR_ENTRY.x,z:BR_ENTRY.z,w:20,d:15,rot:0,lit:true});   // bigger entry room → the portal shows real depth
   const TARGET=120; let qi=0,guard=0;
   while(R.length<TARGET && qi<R.length && guard++<4000){ const p=R[qi++], nd=1+((rnd()*3)|0);
     for(let k=0;k<nd && R.length<TARGET;k++){ const ang=p.rot+(rnd()-0.5)*1.9, cw=7+((rnd()*11)|0), cd=7+((rnd()*11)|0);
@@ -9956,19 +9956,36 @@ function brxCollide(p){ const R=BR.rooms; if(!R||!R.length)return; const RAD=0.4
   p.pos.x=bx; p.pos.z=bz; p.vel.x*=0.2; p.vel.z*=0.2; }
 // ---- SEE-THROUGH PORTAL (Ben 07-26): render the BRX entry room from a camera aligned to the player's facing into an RT,
 //   then paint it onto the Void Door quad → you SEE the Backrooms room through the door before you step in. ----
-let _brPortalRT=null, _brPortalCam=null;
-function brRenderPortal(){ if(typeof renderer==='undefined'||!renderer||!BR.door)return;
-  if(!BR.rooms||!BR.rooms.length){ brxGenerate(); brBuildEnv(); }                                            // the room must exist to look at
-  if(!_brPortalRT){ _brPortalRT=new THREE.WebGLRenderTarget(256,512,{depthBuffer:true}); _brPortalCam=new THREE.PerspectiveCamera(80,0.5,0.05,320); }
-  const eyeY=BR_FLOOR+1.2+(typeof EYE!=='undefined'?EYE:1.6); _brPortalCam.position.set(BR_ENTRY.x, eyeY, BR_ENTRY.z);   // stand in the entry room…
-  const r1=BR.rooms[1]||BR.rooms[0]; _brPortalCam.rotation.order='YXZ'; _brPortalCam.up.set(0,1,0); _brPortalCam.lookAt(r1.x, eyeY-1.0, r1.z);   // …looking down the first connection into a lit room → "there's a room in there"
-  brxUpdateLights(BR_ENTRY.x, BR_ENTRY.z);                                                                    // light the preview area
-  const sBg=scene.background, sFC=scene.fog.color.clone(), sFD=scene.fog.density, sSun=sunLight.intensity, sHemi=hemi.intensity, sAmb=(typeof ambient!=='undefined')?ambient.intensity:null, sChunks=chunkRoot.visible, sSky=(typeof skyDome!=='undefined')?skyDome.visible:null;
-  const fc=_BR_FOG[0]; _brBg.setRGB(fc[0],fc[1],fc[2]); scene.background=_brBg; scene.fog.color.setRGB(fc[0],fc[1],fc[2]); scene.fog.density=0.045;   // dress the scene as the Backrooms just for this pass
-  sunLight.intensity=0; hemi.intensity=0.22; if(typeof ambient!=='undefined')ambient.intensity=0.10; chunkRoot.visible=false; if(typeof skyDome!=='undefined')skyDome.visible=false;
+let _brPortalRT=null, _brPortalCam=null, _brPortalMat=null;
+const _bv0=new THREE.Vector3(), _bv1=new THREE.Vector3(), _bv3=new THREE.Vector3(), _bq=new THREE.Quaternion(), _bcp=new THREE.Vector4(), _bq4=new THREE.Vector4(), _bPlane=new THREE.Plane(), _bSize=new THREE.Vector2();
+function brRenderPortal(){ if(typeof renderer==='undefined'||!renderer||!BR.door||typeof camera==='undefined')return;
+  if(!BR.rooms||!BR.rooms.length){ brxGenerate(); brBuildEnv(); }
+  renderer.getDrawingBufferSize(_bSize); const rw=Math.max(2,_bSize.x|0), rh=Math.max(2,_bSize.y|0);
+  if(!_brPortalRT){ _brPortalRT=new THREE.WebGLRenderTarget(rw,rh,{depthBuffer:true}); _brPortalCam=new THREE.PerspectiveCamera(); }
+  else if(_brPortalRT.width!==rw||_brPortalRT.height!==rh)_brPortalRT.setSize(rw,rh);
+  const d=BR.door, dy=d.y+1;                                                                                 // source portal (door) centre
+  const dstx=BR_ENTRY.x, dsty=BR_FLOOR+2, dstz=BR_ENTRY.z;                                                    // destination portal centre (inside the entry room)
+  // TRUE PARALLAX: virtual cam = the player's camera TRANSLATED by (dst - src). It moves with you → the door reveals the room by parallax.
+  camera.getWorldPosition(_bv0); camera.getWorldQuaternion(_bq);
+  _brPortalCam.position.set(_bv0.x+(dstx-d.x), _bv0.y+(dsty-dy), _bv0.z+(dstz-d.z)); _brPortalCam.quaternion.copy(_bq); _brPortalCam.updateMatrixWorld(true);
+  _brPortalCam.projectionMatrix.copy(camera.projectionMatrix);
+  // OBLIQUE NEAR-PLANE at the door plane → clip everything on the player's side, so only the room behind the door renders (no bleed-through)
+  _bPlane.setFromNormalAndCoplanarPoint(_bv3.set(-Math.sin(d.yaw),0,-Math.cos(d.yaw)).normalize(), _bv1.set(dstx,dsty,dstz)); _bPlane.applyMatrix4(_brPortalCam.matrixWorldInverse);
+  _bcp.set(_bPlane.normal.x,_bPlane.normal.y,_bPlane.normal.z,_bPlane.constant); const pe=_brPortalCam.projectionMatrix.elements;
+  _bq4.set((Math.sign(_bcp.x)+pe[8])/pe[0], (Math.sign(_bcp.y)+pe[9])/pe[5], -1, (1+pe[10])/pe[14]);
+  const dot=_bcp.x*_bq4.x+_bcp.y*_bq4.y+_bcp.z*_bq4.z+_bcp.w*_bq4.w; if(Math.abs(dot)>1e-6){ _bcp.multiplyScalar(2/dot); pe[2]=_bcp.x; pe[6]=_bcp.y; pe[10]=_bcp.z+1; pe[14]=_bcp.w; }
+  brxUpdateLights(dstx,dstz);
+  const sBg=scene.background,sFC=scene.fog.color.clone(),sFD=scene.fog.density,sSun=sunLight.intensity,sHemi=hemi.intensity,sAmb=(typeof ambient!=='undefined')?ambient.intensity:null,sChunks=chunkRoot.visible,sSky=(typeof skyDome!=='undefined')?skyDome.visible:null;
+  const fc=_BR_FOG[0]; _brBg.setRGB(fc[0],fc[1],fc[2]); scene.background=_brBg; scene.fog.color.setRGB(fc[0],fc[1],fc[2]); scene.fog.density=0.04;   // dress the scene as the Backrooms just for this pass
+  sunLight.intensity=0; hemi.intensity=0.12; if(typeof ambient!=='undefined')ambient.intensity=0.06; chunkRoot.visible=false; if(typeof skyDome!=='undefined')skyDome.visible=false;   // moody — let the fluorescents carry it, no wash
   const pv=renderer.getRenderTarget(); try{ renderer.setRenderTarget(_brPortalRT); renderer.render(scene,_brPortalCam); }catch(e){} renderer.setRenderTarget(pv);
   scene.background=sBg; scene.fog.color.copy(sFC); scene.fog.density=sFD; sunLight.intensity=sSun; hemi.intensity=sHemi; if(typeof ambient!=='undefined'&&sAmb!=null)ambient.intensity=sAmb; chunkRoot.visible=sChunks; if(typeof skyDome!=='undefined'&&sSky!=null)skyDome.visible=sSky;
-  const q=BR.door.grp&&BR.door.grp.userData&&BR.door.grp.userData.quad; if(q&&q.material.map!==_brPortalRT.texture){ q.material.map=_brPortalRT.texture; q.material.color.setHex(0xffffff); q.material.needsUpdate=true; } }
+  // paint the RT onto the door quad by SCREEN-SPACE uv → the window lines up exactly with the hole in the world (real parallax)
+  if(!_brPortalMat){ _brPortalMat=new THREE.ShaderMaterial({ uniforms:{uTex:{value:_brPortalRT.texture},uRes:{value:new THREE.Vector2(rw,rh)}}, side:THREE.DoubleSide, toneMapped:false, fog:false,
+    vertexShader:'void main(){ gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
+    fragmentShader:'uniform sampler2D uTex; uniform vec2 uRes; void main(){ gl_FragColor=texture2D(uTex, gl_FragCoord.xy/uRes); }' }); }
+  _brPortalMat.uniforms.uTex.value=_brPortalRT.texture; _brPortalMat.uniforms.uRes.value.set(rw,rh);
+  const q=d.grp&&d.grp.userData&&d.grp.userData.quad; if(q&&q.material!==_brPortalMat)q.material=_brPortalMat; }
 
 // ---- VHS TEAR overlay (2–3 frame full-screen flash, only on entity/key events) ----
 let _brTearEl=null;
