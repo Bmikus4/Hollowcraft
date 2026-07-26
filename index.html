@@ -9846,7 +9846,7 @@ function brRestoreAtmo(){ const p=BR.prev; if(!p)return; scene.background=p.bg; 
 function brSpawnDoor(x,y,z,yaw){ brClearDoor(); const grp=new THREE.Group(); grp.position.set(x,y+1.0,z); grp.rotation.y=yaw;
   const quad=new THREE.Mesh(new THREE.PlaneGeometry(1.0,2.0), new THREE.MeshBasicMaterial({color:0x000000,side:THREE.DoubleSide,fog:false,toneMapped:false})); grp.add(quad);
   const frame=new THREE.Mesh(new THREE.PlaneGeometry(1.16,2.16), new THREE.MeshBasicMaterial({color:0xfff4c0,side:THREE.DoubleSide,fog:false,transparent:true,opacity:0.5,blending:THREE.AdditiveBlending,depthWrite:false})); frame.position.z=-0.03; grp.add(frame);
-  grp.userData={frame}; grp.renderOrder=6; scene.add(grp); BR.door={grp,x,y,z,yaw,t:0}; brSubBassTear(); brVHS(); }
+  grp.userData={frame,quad}; grp.renderOrder=6; scene.add(grp); BR.door={grp,x,y,z,yaw,t:0}; brSubBassTear(); brVHS(); }
 function brClearDoor(){ if(BR.door&&BR.door.grp){ scene.remove(BR.door.grp); BR.door.grp.traverse(o=>{ if(o.geometry)o.geometry.dispose(); if(o.material)o.material.dispose(); }); } BR.door=null; }
 function brSpawnDoorNearPlayer(){ const yaw=player.yaw, dx=-Math.sin(yaw), dz=-Math.cos(yaw); const x=player.pos.x+dx*14, z=player.pos.z+dz*14;
   let gy=(typeof groundYAt==='function')?groundYAt(x,z):player.pos.y; if(gy<=CFG.SEA)gy=CFG.SEA+1; brSpawnDoor(x,gy,z,yaw+Math.PI);
@@ -9954,6 +9954,21 @@ function brxCollide(p){ const R=BR.rooms; if(!R||!R.length)return; const RAD=0.4
     const clx=Math.max(-(r.w/2-RAD),Math.min(r.w/2-RAD,lx)), clz=Math.max(-(r.d/2-RAD),Math.min(r.d/2-RAD,lz));
     const wx=r.x+clx*c-clz*s, wz=r.z+clx*s+clz*c, d=(wx-p.pos.x)*(wx-p.pos.x)+(wz-p.pos.z)*(wz-p.pos.z); if(d<bd){ bd=d; bx=wx; bz=wz; } }
   p.pos.x=bx; p.pos.z=bz; p.vel.x*=0.2; p.vel.z*=0.2; }
+// ---- SEE-THROUGH PORTAL (Ben 07-26): render the BRX entry room from a camera aligned to the player's facing into an RT,
+//   then paint it onto the Void Door quad → you SEE the Backrooms room through the door before you step in. ----
+let _brPortalRT=null, _brPortalCam=null;
+function brRenderPortal(){ if(typeof renderer==='undefined'||!renderer||!BR.door)return;
+  if(!BR.rooms||!BR.rooms.length){ brxGenerate(); brBuildEnv(); }                                            // the room must exist to look at
+  if(!_brPortalRT){ _brPortalRT=new THREE.WebGLRenderTarget(256,512,{depthBuffer:true}); _brPortalCam=new THREE.PerspectiveCamera(80,0.5,0.05,320); }
+  const eyeY=BR_FLOOR+1.2+(typeof EYE!=='undefined'?EYE:1.6); _brPortalCam.position.set(BR_ENTRY.x, eyeY, BR_ENTRY.z);   // stand in the entry room…
+  const r1=BR.rooms[1]||BR.rooms[0]; _brPortalCam.rotation.order='YXZ'; _brPortalCam.up.set(0,1,0); _brPortalCam.lookAt(r1.x, eyeY-1.0, r1.z);   // …looking down the first connection into a lit room → "there's a room in there"
+  brxUpdateLights(BR_ENTRY.x, BR_ENTRY.z);                                                                    // light the preview area
+  const sBg=scene.background, sFC=scene.fog.color.clone(), sFD=scene.fog.density, sSun=sunLight.intensity, sHemi=hemi.intensity, sAmb=(typeof ambient!=='undefined')?ambient.intensity:null, sChunks=chunkRoot.visible, sSky=(typeof skyDome!=='undefined')?skyDome.visible:null;
+  const fc=_BR_FOG[0]; _brBg.setRGB(fc[0],fc[1],fc[2]); scene.background=_brBg; scene.fog.color.setRGB(fc[0],fc[1],fc[2]); scene.fog.density=0.045;   // dress the scene as the Backrooms just for this pass
+  sunLight.intensity=0; hemi.intensity=0.22; if(typeof ambient!=='undefined')ambient.intensity=0.10; chunkRoot.visible=false; if(typeof skyDome!=='undefined')skyDome.visible=false;
+  const pv=renderer.getRenderTarget(); try{ renderer.setRenderTarget(_brPortalRT); renderer.render(scene,_brPortalCam); }catch(e){} renderer.setRenderTarget(pv);
+  scene.background=sBg; scene.fog.color.copy(sFC); scene.fog.density=sFD; sunLight.intensity=sSun; hemi.intensity=sHemi; if(typeof ambient!=='undefined'&&sAmb!=null)ambient.intensity=sAmb; chunkRoot.visible=sChunks; if(typeof skyDome!=='undefined'&&sSky!=null)skyDome.visible=sSky;
+  const q=BR.door.grp&&BR.door.grp.userData&&BR.door.grp.userData.quad; if(q&&q.material.map!==_brPortalRT.texture){ q.material.map=_brPortalRT.texture; q.material.color.setHex(0xffffff); q.material.needsUpdate=true; } }
 
 // ---- VHS TEAR overlay (2–3 frame full-screen flash, only on entity/key events) ----
 let _brTearEl=null;
@@ -10023,6 +10038,7 @@ function _stage2Sky(){ const want=!!(typeof wretch!=='undefined'&&wretch.boss&&w
 // ---- MAIN TICK ----
 function updateBackrooms(dt){
   if(BR.door&&!BR.inside){ BR.door.t+=dt; const d=BR.door,u=d.grp&&d.grp.userData; if(u&&u.frame)u.frame.material.opacity=0.35+0.25*Math.sin(d.t*6);
+    BR._pt=(BR._pt||0)+dt; if(BR._pt>0.05){ BR._pt=0; brRenderPortal(); }   // see-through portal ~20fps
     if(Math.hypot(player.pos.x-d.x,player.pos.z-d.z)<1.1&&Math.abs(player.pos.y-d.y)<2.2)brEnter(); }
   if(!BR.inside)return;
   if(player.dead){ brForceLeaveOnDeath(); return; }                                                                      // any death inside → clean out of the dimension (permadeath: key lost, halls sealed)
