@@ -61,10 +61,17 @@ const ev=(p,e)=>p.evaluate(e);
 
     await ev(page,`window.__hcBR.tp(10,2); window.__hcBR.look(3.1,0); window.__hcBR.anim('idle')`); await sleep(300); await page.screenshot({path:path.join(OUT,'br2-pale-idle.png')});
 
+    // ---- CRAWL PASSAGES: find one, screenshot it, and gate-test (blocked standing, free crouching) ----
+    let crawlTest=null, crawlCount=0;
+    { let sd=99991, found=false;
+      for(let k=0;k<12 && !found;k++){ await ev(page,`window.__hcBR.seed(${sd})`); await sleep(120); const cl=await ev(page,`window.__hcBR.crawlList()`); if(cl.length){ found=true; crawlCount=cl.length; await ev(page,`window.__hcBR.tpCrawl(0)`); await sleep(400); await page.screenshot({path:path.join(OUT,'br2-crawl.png')}); crawlTest=await ev(page,`window.__hcBR.testCrawl()`); } sd=(sd*1103515245+12345)>>>0; }
+    }
+
+    await ev(page,`window.__hcBR.seed(99991)`); await sleep(200);
     const finalRooms=await ev(page,`window.__hcBR.rooms()`); const finalErr=await ev(page,`window.__hcBR.err()`);
     const crashed=seedStats.filter(s=>s.err||s.fps<=0);
     const maxDoorsSeen=Math.max(...seedStats.map(s=>s.maxDoors));
-    console.log(JSON.stringify({ pageErrors:errors.slice(0,10), finalRooms, finalErr, crashedSeeds:crashed.length, maxDoorsSeen, doorCount:doorList.length, closedCount:doorList.filter(d=>d.closed).length, toggledOK, doorAfterState, seedSample:seedStats.slice(0,4), crashed:crashed.slice(0,4) }, null, 1));
+    console.log(JSON.stringify({ pageErrors:errors.slice(0,10), finalRooms, finalErr, crashedSeeds:crashed.length, maxDoorsSeen, doorCount:doorList.length, closedCount:doorList.filter(d=>d.closed).length, toggledOK, doorAfterState, crawlCount, crawlTest, seedSample:seedStats.slice(0,4), crashed:crashed.slice(0,4) }, null, 1));
   } catch(e){ console.error('FATAL', e.message); console.log(JSON.stringify({pageErrors:errors.slice(0,10)})); process.exitCode=1; }
   finally { try{ if(globalThis.__browser)await globalThis.__browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }
 })();
