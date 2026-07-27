@@ -295,7 +295,7 @@ const CFG = {
   RENDER_DIST: 6,       // chunks — LIGHT boot DEFAULT (chunk count is the #1 lag driver: 6=169 chunks, 8=289, 12=625). Adaptive/slider can climb to RD_MAX=12 on capable machines; it boots low to stay smooth.
   REACH: 6,
   DAY_LEN: 840,         // seconds per full cycle — 14 min total (≈7 min day / 7 min night)
-  GRAVITY: 26,
+  GRAVITY: 28.6,        // +10% (Ben 07-27) — heavier fall for every player; jump impulse untouched, so you also get a slightly shorter, snappier hop
   quality: 'High'       // Low | Medium | High | Ultra
 };
 const Q = new URLSearchParams(location.search);
@@ -1411,13 +1411,13 @@ function injectAtlas(mat, opts={}){
         'diffuseColor.rgb *= _tex.rgb;')
       .replace('#include <lights_fragment_maps>',
         '#include <lights_fragment_maps>\n'+
-        'irradiance *= (0.16 + 0.84*pow(vSky,1.3));\n'+   // skylight CONTRAST curve — floor RAISED 0.035→0.16 + exponent softened 1.7→1.3 (Ben 07-20): sky-occluded faces stay readable instead of pure-black voids; caves still go dark at night and torches always dominate
+        'irradiance *= (0.26 + 0.74*pow(vSky,1.15));\n'+   // skylight CONTRAST curve — floor 0.035→0.16 (Ben 07-20) →0.26 with a softer exponent (Ben 07-27, "black pixels everywhere"): under a canopy vSky≈0, and 16% of a 0.6 hemi is indistinguishable from black, so the forest floor and any dappled shade read as solid black holes. Caves/interiors still go dark (they also lose the direct term below) and torches still dominate.
         'vec3 _lpc = vLP + normalize(vObjN)*0.5;\n'+   // FACE→AIR offset (Ben 07-21): a face sits on the solid/air boundary; sampling there blended the solid cell (light 0) with the air cell → half-lit AND a per-cell checkerboard on lit surfaces. Push half a cell along the normal so we sample the LIT air cell at its texel centre.
         'float _bl = texture(uLight3D, vec3(_lpc.x/'+CK.toFixed(1)+', _lpc.y/'+WH.toFixed(1)+', _lpc.z/'+CK.toFixed(1)+')).r;\n'+   // baked block light 0..1, trilinear, 0 behind walls
         'float _fl = 0.90 + 0.10*sin(uTime*7.3 + vLP.x*1.7 + vLP.z*1.3);\n'+   // cheap warm flicker
         'irradiance += vec3(3.6,1.95,0.80) * pow(_bl,1.45) * _fl;')   // warm torch glow added to indirect — falloff SOFTENED from _bl² (Ben 07-20: in truly dark chunks the squared curve collapsed the glow to an invisible puddle; ^1.45 carries the light to its full flood radius) + peak brightened ~16%
       .replace('#include <aomap_fragment>',
-        '#include <aomap_fragment>\nreflectedLight.directDiffuse *= (0.12 + 0.88*smoothstep(0.22,0.9,vSky));');   // the SUN can't reach where the sky can't: kills direct light leaking into interiors/caves (and beyond the 46-block shadow radius), so enclosed spaces read genuinely dark
+        '#include <aomap_fragment>\nreflectedLight.directDiffuse *= (0.17 + 0.83*smoothstep(0.16,0.9,vSky));');   // the SUN can't reach where the sky can't: kills direct light leaking into interiors/caves (and beyond the 46-block shadow radius), so enclosed spaces read genuinely dark. Floor 0.12→0.17 and the knee pulled in (Ben 07-27) so a canopy gap still lets a little sun onto the forest floor.
     sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>',
       '#include <dithering_fragment>\nif(uWhiteTile>=0.0 && abs(vTile-uWhiteTile)<0.5){ gl_FragColor=vec4(1.0,1.0,1.0,gl_FragColor.a); }');   // VANTAWHITE: overwrite the FINAL pixel to pure white AFTER lighting/tonemap/fog → genuinely unlit, no shadow/AO/surface-detail, a hole of pure white (Ben 07-21)
     if(Q.get('albedo')) sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\ngl_FragColor=vec4(_tex.rgb,1.0);');   // DIAGNOSTIC ?albedo: flat raw texture, NO lighting
@@ -2935,8 +2935,11 @@ function updateSky(dt){
   // FOG COLOUR — BLACK at night, WHITE by day (Ben 07-27, fix-list #7). It used to ramp between a deep moonlit blue and a
   // grey-blue daytime haze; now it is a straight value ramp with only a whisper of blue left in the night floor, so the
   // horizon reads as a white daylight haze and as genuine darkness after dusk.
+  // The night end keeps a FLOOR (Ben 07-20, re-broken and re-fixed 07-27): with no floor the fog colour went to ~0.014
+  // and distant chunks stopped reading as dark mass and started reading as void-black holes. Floor = the horizon
+  // system's deep moonlit blue, same as before; only the DAY end changed, to white.
   const fc=scene.fog.color; const dcol=0.014+0.76*day;
-  fc.setRGB(dcol, dcol*1.005, Math.min(1, dcol*1.04+0.010*(1-day)));
+  fc.setRGB(Math.max(0.028,dcol), Math.max(0.042,dcol*1.005), Math.min(1, Math.max(0.072,dcol*1.04)));
   if(oc>0.01) fc.lerp(_fogGrey.setRGB(0.16+0.12*day,0.18+0.12*day,0.22+0.12*day), oc*0.6);   // rainy grey haze rolls the horizon in
   const _under=(typeof inDungeon==='function' && inDungeon(Math.floor(camera.position.x),Math.floor(camera.position.y),Math.floor(camera.position.z))) || (typeof playerRoofed==='function' && playerRoofed());
   const wf=_under?0:weather.fog;                                                    // FOG WEATHER: thickens the haze + pales the air — but it NEVER seeps underground/into the dungeon, so the lantern & room stay readable in fog
@@ -10091,7 +10094,10 @@ function brClearEnv(){ if(BR.env){ scene.remove(BR.env); BR.env.traverse(o=>{ if
 //   boxes). Walls have real THICKNESS (their end-caps form the doorway reveal). Corridors + a fraction of rooms stay unlit. =====
 const BR_CS=8, BR_CW=14, BR_CD=14, BR_WT=0.36;                                        // cell size, grid dims (rooms are 1–3 cells each way), wall thickness
 const BR_GX0=BR_X0+6, BR_GZ0=-56, BR_GW=BR_CW*BR_CS, BR_GD=BR_CD*BR_CS;               // region = the cell grid × cell size
-const BR_WY0=BR_FLOOR+1, BR_WY1=BR_FLOOR+BR_CH, BR_DOORH=BR_FLOOR+5, BR_HALF=BR_FLOOR+2.4, BR_CRAWL=BR_FLOOR+2.7;   // wall bottom/top, doorway top, half-wall top (1.4 tall → eye 1.62 sees over), crawl-opening top (1.7 tall → crouch to pass)
+// DOORS 1.5x SMALLER (Ben 07-27): the opening was 2.2 wide x 4.0 tall — a warehouse gate, not a door. /1.5 gives a
+// believable single door (1.47 x 2.67) that the 0.42-radius player still walks through cleanly.
+const BR_DOORW=2.2/1.5;
+const BR_WY0=BR_FLOOR+1, BR_WY1=BR_FLOOR+BR_CH, BR_DOORH=BR_FLOOR+1+4.0/1.5, BR_HALF=BR_FLOOR+2.4, BR_CRAWL=BR_FLOOR+2.35;   // wall bottom/top, doorway top, half-wall top (1.4 tall → eye 1.62 sees over), crawl-opening top (1.35 tall → crouch to pass; kept clearly under the shorter doorway)
 function brxGenerate(){ BR.rooms=[]; BR.walls=[]; BR.doors=[]; BR.lintels=[]; BR.pillars=[]; BR.fixtures=[]; BR.crawls=[];
   let s=(BR.seed||(BR.seed=99991))>>>0; const rnd=()=>{ s=(Math.imul(s,1664525)+1013904223)>>>0; return s/4294967296; };
   const CW=BR_CW, CD=BR_CD, cell=new Int16Array(CW*CD).fill(-1), R=BR.rooms, ci=(x,y)=>x*CD+y;
@@ -10135,18 +10141,26 @@ function brxGenerate(){ BR.rooms=[]; BR.walls=[]; BR.doors=[]; BR.lintels=[]; BR
     const nx=Math.max(1,Math.round(rw/9)-1), nz=Math.max(1,Math.round(rd/9)-1), mx=rw/(nx+1), mz=rd/(nz+1);
     for(let i=1;i<=nx;i++)for(let j=1;j<=nz;j++)BR.pillars.push({x:r.x0+mx*i,z:r.z0+mz*j,hw:0.6}); }
   // ---- INTERIOR FEATURES (Ben 07-27): free-standing PARTIAL walls that don't fully cover the room (gaps at the ends) — a mix of straight and ANGLED — plus occasional ANGLED chambers inside the big halls ----
+  // NEVER SEAL THE SPAWN (Ben 07-27): the rotated chambers are open boxes with ONE gapped edge, and a partial wall
+  // crossing that gap turns the box into a sealed cell. Spawning inside one leaves you in a room with no way out. Keep
+  // every interior feature clear of the entry point by a wide margin — the spanning tree already guarantees the entry
+  // ROOM has a doorway, so this is the only way in was ever blocked.
+  const _SPAWN_CLEAR=11;
+  const _nearSpawn=(x,z,pad)=>{ const dx=x-BR_ENTRY.x, dz=z-BR_ENTRY.z, r=_SPAWN_CLEAR+(pad||0); return dx*dx+dz*dz < r*r; };
   for(const r of R){ const rw=r.x1-r.x0, rd=r.z1-r.z0, area=r.cw*r.ch; if(area<4)continue;
     const n = area>=9 ? 2+((rnd()*2)|0) : 1;
     for(let f=0; f<n; f++){
       if(rnd()<0.32 && rw>=22 && rd>=22){                                                                                                        // an ANGLED chamber (a rotated open box) standing inside the hall
         const s2=7+rnd()*6, ang=(rnd()-0.5)*1.2, ccx=r.x0+rw*(0.28+rnd()*0.44), ccz=r.z0+rd*(0.28+rnd()*0.44), c=Math.cos(ang), si=Math.sin(ang), hw=s2/2;
+        if(_nearSpawn(ccx,ccz,s2)) continue;                                                                                                      // a chamber anywhere near the spawn would box you in
         const cor=(sx,sz)=>[ccx+c*hw*sx - si*hw*sz, ccz+si*hw*sx + c*hw*sz], p00=cor(-1,-1),p10=cor(1,-1),p11=cor(1,1),p01=cor(-1,1);
         const edge=(A,B,gap)=>{ if(gap){ const ex=B[0]-A[0], ez=B[1]-A[1]; BR.walls.push({x0:A[0],z0:A[1],x1:A[0]+ex*0.34,z1:A[1]+ez*0.34}); BR.walls.push({x0:A[0]+ex*0.66,z0:A[1]+ez*0.66,x1:B[0],z1:B[1]}); } else BR.walls.push({x0:A[0],z0:A[1],x1:B[0],z1:B[1]}); };
         edge(p00,p10,false); edge(p10,p11,true); edge(p11,p01,false); edge(p01,p00,false); }                                                     // one wall has a doorway gap so you can step inside
       else { const ang=(rnd()<0.5)?(rnd()<0.5?0:Math.PI/2):(rnd()-0.5)*1.5, ccx=r.x0+2+rnd()*(rw-4), ccz=r.z0+2+rnd()*(rd-4),                    // a partial divider (straight or angled)
           len=Math.min(rw,rd)*(0.3+rnd()*0.4), ex=Math.cos(ang)*len/2, ez=Math.sin(ang)*len/2, cl=(v,lo,hi)=>v<lo?lo:v>hi?hi:v;
         const x0=cl(ccx-ex,r.x0+1,r.x1-1), z0=cl(ccz-ez,r.z0+1,r.z1-1), x1=cl(ccx+ex,r.x0+1,r.x1-1), z1=cl(ccz+ez,r.z0+1,r.z1-1);
-        if(Math.hypot(x1-x0,z1-z0)>2.5){ const half=rnd()<0.33; BR.walls.push(half?{x0,z0,x1,z1,ty:BR_HALF,cap:true,half:true}:{x0,z0,x1,z1}); } } } }   // ~1/3 of dividers are HALF walls — low partitions you see over but can't pass
+        if(_nearSpawn((x0+x1)/2,(z0+z1)/2, Math.hypot(x1-x0,z1-z0)/2)) continue;                                                                   // and no divider may crowd the spawn either
+        if(Math.hypot(x1-x0,z1-z0)>2.5){ const half=rnd()<0.33; BR.walls.push(half?{x0,z0,x1,z1,ty:BR_HALF,half:true}:{x0,z0,x1,z1}); } } } }   // ~1/3 of dividers are HALF walls — low partitions you see over but can't pass (their TOP is capped in brBuildEnv)
   // NO FIXTURE INSIDE A WALL (Ben 07-27): a troffer is 2.0 x 0.86, and cell centres land on/next to the angled partial
   // walls, rotated chambers and pillars — so housings were sunk half-into masonry. Try the cell centre, then a few
   // offsets inside the cell, and if the cell is genuinely too tight, skip the fixture rather than embed it.
@@ -10166,7 +10180,7 @@ function brxGenerate(){ BR.rooms=[]; BR.walls=[]; BR.doors=[]; BR.lintels=[]; BR
 function brxEmitWall(run, vert, rnd){ const s0=vert?run.z0:run.x0, s1=vert?run.z1:run.x1, fixed=vert?run.x:run.z, L=s1-s0;
   const isDoor = run.a>=0 && run.b>=0 && BR._door && BR._door.has(run.a<run.b?run.a+'_'+run.b:run.b+'_'+run.a);
   const pushWall=(a0,a1)=>{ if(a1-a0<=0.001)return; BR.walls.push(vert?{x0:fixed,z0:a0,x1:fixed,z1:a1}:{x0:a0,z0:fixed,x1:a1,z1:fixed}); };
-  if(isDoor && L>=4){ const dw=2.2, ds=s0+(L-dw)/2;                                          // ONE doorway, centred in the shared wall
+  if(isDoor && L>=4){ const dw=BR_DOORW, ds=s0+(L-dw)/2;                                    // ONE doorway, centred in the shared wall
     pushWall(s0,ds); pushWall(ds+dw,s1); BR.lintels.push({vert,fixed,s0:ds,s1:ds+dw});
     if(rnd()<0.6){ const hingeAtStart=rnd()<0.5, hx=vert?fixed:(hingeAtStart?ds:ds+dw), hz=vert?(hingeAtStart?ds:ds+dw):fixed,   // 60% of doorways get a REAL door
       cx=vert?fixed:(ds+dw/2), cz=vert?(ds+dw/2):fixed, seg=vert?{x0:fixed,z0:ds,x1:fixed,z1:ds+dw}:{x0:ds,z0:fixed,x1:ds+dw,z1:fixed};
@@ -10181,15 +10195,33 @@ function brDoorMats(){ if(_brDoorMat)return _brDoorMat; const TL=new THREE.Textu
   const tx=(p,srgb)=>{ const t=TL.load(base+p); t.wrapS=t.wrapT=THREE.RepeatWrapping; t.anisotropy=8; if(srgb)t.colorSpace=THREE.SRGBColorSpace; return t; };
   const wood=new THREE.MeshStandardMaterial({ map:tx('wood/Planks011_1K-JPG_Color.jpg',true), normalMap:tx('wood/Planks011_1K-JPG_NormalGL.jpg'), roughnessMap:tx('wood/Planks011_1K-JPG_Roughness.jpg'), aoMap:tx('wood/Planks011_1K-JPG_AmbientOcclusion.jpg'), color:0xb98b55, roughness:0.9, metalness:0, side:THREE.DoubleSide });
   const brass=new THREE.MeshStandardMaterial({ map:tx('brass/Metal032_1K-JPG_Color.jpg',true), roughnessMap:tx('brass/Metal032_1K-JPG_Roughness.jpg'), metalnessMap:tx('brass/Metal032_1K-JPG_Metalness.jpg'), color:0xcaa04a, roughness:0.32, metalness:1.0 });
-  _brDoorMat={wood,brass}; return _brDoorMat; }
+  // A DOOR, NOT A PLANK SLAB (Ben 07-27): the old slab was the raw Planks011 map tiled across a box, which read as
+  // stacked logs. A Backrooms door is a painted office door — flat cream paint, stiles and rails standing proud of two
+  // recessed panels. The panelling is GEOMETRY, so it reads correctly at every angle and under the pooled fluorescents.
+  const paint=new THREE.MeshStandardMaterial({ color:0xd6cdb4, roughness:0.55, metalness:0, normalMap:tx('wood/Planks011_1K-JPG_NormalGL.jpg') });   // the wood normal survives as a faint grain under the paint
+  paint.normalScale=new THREE.Vector2(0.22,0.22);
+  const casing=new THREE.MeshStandardMaterial({ color:0xc8bda0, roughness:0.6, metalness:0 });   // architrave around the opening
+  _brDoorMat={wood,brass,paint,casing}; return _brDoorMat; }
 const BR_DOOR_OPEN=1.5;                                                                 // fully-open swing angle (radians)
-function brBuildDoors(grp){ if(!BR.doors||!BR.doors.length)return; const M=brDoorMats(), H=BR_DOORH-BR_WY0, th=0.14;
+function brBuildDoors(grp){ if(!BR.doors||!BR.doors.length)return; const M=brDoorMats(), H=BR_DOORH-BR_WY0, th=0.10;
   for(const d of BR.doors){ const pivot=new THREE.Group(); pivot.position.set(d.hx,BR_WY0,d.hz); const hs=d.hingeAtStart?1:-1;
     d.base=(d.vert?-Math.PI/2:0); d.hs=hs; d.a=d.closed?0:BR_DOOR_OPEN; d.target=d.a;    // a = live swing angle (0 = closed, in the wall plane)
     pivot.rotation.y=d.base + hs*d.swing*d.a;
-    const slab=new THREE.Mesh(new THREE.BoxGeometry(d.dw,H,th),M.wood); slab.position.set(hs*d.dw/2,H/2,0); pivot.add(slab);
-    const hb=new THREE.Mesh(new THREE.BoxGeometry(0.09,0.10,0.36),M.brass); hb.position.set(hs*(d.dw-0.18),H*0.46,0); pivot.add(hb);   // brass lever handle, protrudes both faces
-    pivot.frustumCulled=false; grp.add(pivot); d.pivot=pivot; } }
+    const W=d.dw*0.96, cx=hs*d.dw/2;                                                     // slight reveal so the leaf isn't jammed edge-to-edge in the opening
+    const slab=new THREE.Mesh(new THREE.BoxGeometry(W,H,th),M.paint); slab.position.set(cx,H/2,0); pivot.add(slab);
+    const pr=0.032, sw=Math.min(0.16,W*0.13), rh=Math.min(0.16,H*0.07);                  // proud depth, stile width, rail height
+    const bar=(w,h,y,x)=>{ const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,th+pr*2),M.paint); m.position.set(cx+(x||0),y,0); pivot.add(m); };
+    bar(sw,H,H/2,-(W/2-sw/2)); bar(sw,H,H/2,(W/2-sw/2));                                 // stiles
+    bar(W,rh,rh/2,0); bar(W,rh,H-rh/2,0); bar(W,rh,H*0.47,0);                             // bottom / top / lock rail → two recessed panels
+    const hb=new THREE.Mesh(new THREE.BoxGeometry(0.07,0.075,0.30),M.brass); hb.position.set(cx+hs*(W/2-sw-0.06),H*0.52,0); pivot.add(hb);   // brass lever handle, protrudes both faces
+    const rose=new THREE.Mesh(new THREE.CylinderGeometry(0.055,0.055,th+pr*2.4,10),M.brass); rose.rotation.x=Math.PI/2; rose.position.set(hb.position.x,H*0.52,0); pivot.add(rose);   // handle rose plate
+    pivot.frustumCulled=false; grp.add(pivot); d.pivot=pivot;
+    // ARCHITRAVE — a slim casing standing proud of the wall on both faces, so a doorway reads as a framed opening
+    { const jamb=(off)=>{ const m=new THREE.Mesh(new THREE.BoxGeometry(0.10,H+0.14,BR_WT+0.10),M.casing); m.position.set(off,(H+0.14)/2,0); return m; };
+      const cas=new THREE.Group(); cas.position.set(d.cx,BR_WY0,d.cz); cas.rotation.y=d.vert?-Math.PI/2:0;
+      cas.add(jamb(-d.dw/2-0.05)); cas.add(jamb(d.dw/2+0.05));
+      const head=new THREE.Mesh(new THREE.BoxGeometry(d.dw+0.30,0.12,BR_WT+0.10),M.casing); head.position.set(0,H+0.07,0); cas.add(head);
+      cas.frustumCulled=false; grp.add(cas); } } }
 function brUpdateDoors(dt){ if(!BR.doors)return; const k=Math.min(1,dt*7);
   for(const d of BR.doors){ if(!d.pivot||Math.abs(d.a-d.target)<0.001)continue; d.a+=(d.target-d.a)*k; d.pivot.rotation.y=d.base+d.hs*d.swing*d.a; } }
 function brTryToggleDoor(){ if(!BR.inside||!BR.doors||!BR.doors.length)return false; const ld=(typeof lookDir==='function')?lookDir():{x:-Math.sin(player.yaw),z:-Math.cos(player.yaw)};
@@ -10206,13 +10238,15 @@ function brBuildEnv(){ brClearEnv(); if(!BR.rooms||!BR.rooms.length)brxGenerate(
     arrU.push((X0-BR_X0)/T,Z0/T,(X1-BR_X0)/T,Z0/T,(X1-BR_X0)/T,Z1/T,(X0-BR_X0)/T,Z1/T); arrI.push(base,base+1,base+2,base,base+2,base+3); };
   flat(fP,fU,fI,fv,y0); fv+=4; flat(cP,cU,cI,cv,y1); cv+=4;                                            // floor + ceiling = one quad each over the whole region
   // ---- THICK wall boxes (2 long faces + 2 end caps); the end caps form the doorway reveal ----
-  const wallBox=(x0,z0,x1,z1,by,ty,soffit)=>{ const dx=x1-x0,dz=z1-z0,L=Math.hypot(dx,dz)||1,ux=dx/L,uz=dz/L, nx=-uz*BR_WT/2, nz=ux*BR_WT/2;
+  const wallBox=(x0,z0,x1,z1,by,ty,soffit,capTop)=>{ const dx=x1-x0,dz=z1-z0,L=Math.hypot(dx,dz)||1,ux=dx/L,uz=dz/L, nx=-uz*BR_WT/2, nz=ux*BR_WT/2;
     const aL=[x0+nx,z0+nz], aR=[x0-nx,z0-nz], bL=[x1+nx,z1+nz], bR=[x1-nx,z1-nz];
     const face=(p,q,uLen)=>{ P.push(p[0],by,p[1], q[0],by,q[1], q[0],ty,q[1], p[0],ty,p[1]); U.push(0,by/T, uLen/T,by/T, uLen/T,ty/T, 0,ty/T); I.push(v,v+1,v+2,v,v+2,v+3); v+=4; };
+    const horiz=(y)=>{ P.push(aL[0],y,aL[1], bL[0],y,bL[1], bR[0],y,bR[1], aR[0],y,aR[1]); U.push(0,0, L/T,0, L/T,BR_WT/T, 0,BR_WT/T); I.push(v,v+1,v+2,v,v+2,v+3); v+=4; };
     face(aL,bL,L); face(bR,aR,L); face(bL,bR,BR_WT); face(aR,aL,BR_WT);
-    if(soffit){ P.push(aL[0],by,aL[1], bL[0],by,bL[1], bR[0],by,bR[1], aR[0],by,aR[1]); U.push(0,0, L/T,0, L/T,BR_WT/T, 0,BR_WT/T); I.push(v,v+1,v+2,v,v+2,v+3); v+=4; } };   // underside face (doorway header soffit)
-  for(const s of BR.walls) wallBox(s.x0,s.z0,s.x1,s.z1,y0,(s.ty||y1),s.cap);                            // full-height walls (HALF walls carry a lower ty + a capped top you see over)
-  for(const l of (BR.lintels||[])){ let x0,z0,x1,z1; if(l.vert){ x0=x1=l.fixed; z0=l.s0; z1=l.s1; } else { z0=z1=l.fixed; x0=l.s0; x1=l.s1; } wallBox(x0,z0,x1,z1,(l.y0||BR_DOORH),y1,true); }   // header above each doorway/crawl — WITH soffit so the opening has a finished top
+    if(soffit) horiz(by);                                                                               // underside face (doorway header soffit)
+    if(capTop) horiz(ty); };                                                                            // TOP face — HALF WALLS WERE OPEN (Ben 07-27): you look over one and see straight down into the hollow box. The old `cap` flag emitted this quad at `by`, i.e. buried in the floor, so the top never got a surface.
+  for(const s of BR.walls) wallBox(s.x0,s.z0,s.x1,s.z1,y0,(s.ty||y1),false,!!s.half);                    // full-height walls (HALF walls carry a lower ty + a real capped top you see over)
+  for(const l of (BR.lintels||[])){ let x0,z0,x1,z1; if(l.vert){ x0=x1=l.fixed; z0=l.s0; z1=l.s1; } else { z0=z1=l.fixed; x0=l.s0; x1=l.s1; } wallBox(x0,z0,x1,z1,(l.y0||BR_DOORH),y1,true,false); }   // header above each doorway/crawl — WITH soffit so the opening has a finished top
   const mk=(pp,uu,ii,mat)=>{ if(!pp.length)return; const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.Float32BufferAttribute(pp,3)); g.setAttribute('uv',new THREE.Float32BufferAttribute(uu,2)); g.setIndex(ii); g.computeVertexNormals(); grp.add(new THREE.Mesh(g,mat)); };
   mk(fP,fU,fI,zm.floor); mk(cP,cU,cI,zm.ceil); mk(P,U,I,zm.wall);
   if(BR.pillars&&BR.pillars.length){ const pg=new THREE.BoxGeometry(1.4,BR_CH-1,1.4), inst=new THREE.InstancedMesh(pg,zm.wall,BR.pillars.length), _m=new THREE.Matrix4();
