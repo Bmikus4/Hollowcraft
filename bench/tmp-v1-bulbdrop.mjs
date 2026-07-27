@@ -62,8 +62,11 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
       await page.evaluate(`window.__hcBR.stepOff()`);
       for(let k=0;k<8;k++){ await page.evaluate(`(()=>{ if(typeof streamChunks==='function') for(let i=0;i<4;i++) streamChunks(160,160); })()`).catch(()=>{}); await sleep(400); }
       console.log('probe after stream:', JSON.stringify(await page.evaluate(`(()=>{ const d=window.__hcBR.drops()[0]; return {atCentre:__hc.blockAt(Math.round(d.x),40,Math.round(d.z)), chunk:__hc.probe().chunkHere}; })()`)));
+      await page.evaluate(`__hc.aim(false)`);           // forces `locked` — without pointer lock the harness never runs movement, so nothing ever falls
       await page.evaluate(`window.__hcBR.stepOff()`);   // step off into the middle, now that it is really loaded
-      await sleep(2600);
+      for(let k=0;k<5;k++){ await sleep(400);
+        console.log('  frame', k, JSON.stringify(await page.evaluate(`__hc.fallDbg()`))); }
+      await sleep(1200);
       const y1=(await page.evaluate(`__hc.pos()`)).y;
       console.log('stepped off ledge: y', y0.toFixed(2), '->', y1.toFixed(2), y1<y0-3?'FELL':'DID NOT FALL');
       await page.screenshot({ path: path.join(OUT,'v1-drop-falling.png') });
