@@ -27,11 +27,23 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
     await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
     await page.evaluate(`window.__hcBR.enter()`); await sleep(7000);
+    await page.evaluate(`__hc.qa(60)`);   // fill light: the entity is black and most rooms are unlit
     // forced clips, straight in front of the camera
     for(const a of ['idle','run','flail','peek','lunge']){
       await page.evaluate(`window.__hcBR.anim('${a}')`); await sleep(1400);
       await page.screenshot({ path: path.join(OUT,'v1-pale-'+a+'.png') });
       console.log('shot',a);
+    }
+    // HEAD CLOSE-UPS: shut (idle) and thrown open (flail)
+    for(const a of ['idle','flail']){
+      await page.evaluate(`window.__hcBR.anim('${a}')`); await sleep(1200);
+      const st2=await page.evaluate(`(()=>{ const p=window.__hcBR.paleState(); return p; })()`);
+      await page.evaluate(`(()=>{ const p=BR.pale; const yaw=player.yaw; player.pos.set(p.x + Math.sin(yaw)*2.0, BR_FLOOR+1.9, p.z + Math.cos(yaw)*2.0); })()`).catch(()=>{});
+      await sleep(900);
+      await page.evaluate(`(()=>{ const p=BR.pale; __hc.look(p.x, BR_FLOOR+3.35, p.z); })()`).catch(()=>{});
+      await sleep(700);
+      await page.screenshot({ path: path.join(OUT,'v1-pale-head-'+a+'.png'), clip:{x:400,y:120,width:480,height:420} });
+      console.log('head shot',a,'gape',st2&&st2.gape);
     }
     // face texture actually loaded?
     const face = await page.evaluate(`(()=>{ try{ const p=window.BR&&null; }catch(e){} return null; })()`);

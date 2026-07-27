@@ -10281,7 +10281,7 @@ function brxGenerate(){ BR.rooms=[]; BR.walls=[]; BR.doors=[]; BR.lintels=[]; BR
     let fx=null, fz=null; for(const o of _OFF){ if(_clearAt(x0+o[0], z0+o[1])){ fx=x0+o[0]; fz=z0+o[1]; break; } }
     if(fx===null) continue;                                                                                                                       // cell is walled in tight — no light here, and that reads as intentional dark
     const dead=rnd()<0.07;                                                                                                                        // ~7% of tubes are simply BURNT OUT — a dark cell inside a lit room
-    BR.fixtures.push({x:fx, z:fz, flick:!dead&&rnd()<0.20, dead, ph:rnd()*6.283}); } }
+    BR.fixtures.push({x:fx, z:fz, room:r.id, flick:!dead&&rnd()<0.20, dead, ph:rnd()*6.283}); } }   // room: brxUpdateLights only gives pool slots to fixtures in rooms you can actually SEE into (no light through walls)
   // ---- DINNER TABLES (Ben 07-27): a long table still laid for a meal, standing in a hall with nobody at it. Roughly
   //      one room in six gets one; needs clearance for the table AND the pulled-out chairs, and never near the spawn.
   // NOTE: tables roll off their OWN per-room stream, not the shared rnd(). Sharing it meant any change upstream (adding
@@ -10547,8 +10547,24 @@ function brFlick(ph,t){ const s=Math.sin(t*1.7+ph)*Math.sin(t*0.63+ph*1.7);
   if(s>0.55) return Math.sin(t*41+ph*5)>0 ? 1 : 0;      // strobe burst
   if(s<-0.88) return 0;                                  // a long dead beat
   return 1; }
+// NO LIGHT THROUGH WALLS (Ben 07-27) — a PointLight with no shadow map lights every surface in radius regardless of
+// geometry, and only the 2 nearest cast (6 faces each; 16 casters is unaffordable). So gate the pool by ROOM VISIBILITY
+// instead: your own room always, plus any room joined to it by an opening that is actually open. A shut door now
+// genuinely occludes its room's light. Recomputed a few times a second, not per frame.
+let _brLitSet=null, _brLitT=0, _brLitRoom=-2;
+function brLitRooms(){ const me=brxRoomAt(player.pos.x,player.pos.z); const id=me?me.id:-1;
+  if(_brLitSet && id===_brLitRoom && (_brLitT-=0.0166)>0) return _brLitSet;
+  _brLitT=0.25; _brLitRoom=id;
+  if(!me){ _brLitSet=null; return null; }                                       // standing in a doorway/void → don't gate at all
+  const S=new Set([id]), adj=brNavGraph().adj, D=BR.doors||[];
+  for(const e of (adj[id]||[])){ let blocked=false;
+    for(let i=0;i<D.length;i++){ const d=D[i]; if(Math.abs(d.cx-e.x)<0.7 && Math.abs(d.cz-e.z)<0.7){ blocked = (d.a!=null? d.a<0.5 : !!d.closed); break; } }
+    if(!blocked) S.add(e.to); }
+  _brLitSet=S; return S; }
 function brxUpdateLights(px,pz){ if(!BR.lightPool||!BR.fixtures)return; const F=BR.fixtures, near=[], y=BR_WY1-0.9, t=(typeof performance!=='undefined')?performance.now()*0.001:0;
-  for(let i=0;i<F.length;i++){ if(F[i].dead)continue; const dx=F[i].x-px,dz=F[i].z-pz,d=dx*dx+dz*dz; if(d<95*95)near.push({f:F[i],d}); }
+  let vis=null; try{ vis=brLitRooms(); }catch(e){ vis=null; }
+  for(let i=0;i<F.length;i++){ if(F[i].dead)continue; if(vis && F[i].room!=null && !vis.has(F[i].room))continue;
+    const dx=F[i].x-px,dz=F[i].z-pz,d=dx*dx+dz*dz; if(d<95*95)near.push({f:F[i],d}); }
   near.sort((a,b)=>a.d-b.d);
   let litNear=0, nearest=1e9;
   for(let i=0;i<BR.lightPool.length;i++){ const L=BR.lightPool[i]; if(i<near.length){ const f=near[i].f; L.visible=true; L.position.set(f.x,y,f.z);
@@ -10708,17 +10724,28 @@ function _stage2Sky(dt){
 // ===== THE PALE (Ben 07-26) — a tall gaunt faceless figure (its OWN model, not the Wretch). It FREEZES the instant you
 //   look at it and GLIDES at you the moment you look away. Rising dread-rumble as it closes behind you. Stare it down 6s
 //   to banish it; let it touch you and it's an instant-kill lunge (permadeath). Minimal geometry, maximal wrong. =====
-let _paleFaceMat=null, _paleFaceImg=null;
-function brPaleFaceMat(){ if(_paleFaceMat)return _paleFaceMat;
-  _paleFaceImg=new Image(); _paleFaceImg.src='./assets/backrooms/slendermem.gif';                  // an animated GIF keeps running inside an <img>; we just re-upload the frame each tick
-  const t=new THREE.Texture(_paleFaceImg); t.colorSpace=THREE.SRGBColorSpace; t.magFilter=THREE.LinearFilter; t.minFilter=THREE.LinearFilter; t.generateMipmaps=false;
-  // ZOOM ONTO THE FACE (Ben 07-27): the source frame is a whole head-and-shoulders shot on black. Tightened again — the
-  // crop is now 0.30 of the frame, CENTRED on the eyes-and-grin at ~(0.52, 0.33) from the top-left (v is flipped, so
-  // offset.y = 1-0.33-0.15). Sides of the head get the same material, so the crop wraps around the corners.
-  t.wrapS=t.wrapT=THREE.ClampToEdgeWrapping; t.repeat.set(0.30,0.30); t.offset.set(0.37,0.52);
-  _paleFaceImg.onload=()=>{ t.needsUpdate=true; };
-  _paleFaceMat=new THREE.MeshBasicMaterial({map:t, transparent:true, toneMapped:false, fog:false, side:THREE.DoubleSide, depthWrite:false});
-  _paleFaceMat.userData.tex=t; return _paleFaceMat; }
+// THE FACE — three materials over the SAME animated GIF: the whole face, its top half, its bottom half. Offsets live on
+// the Texture (not the material), so each variant needs its own Texture object over the shared <img>.
+// CROP (Ben 07-27, third pass): the full face must fit, uncut at the chin. Measured off frame 1 — the face spans
+// x 0.34..0.72 and y 0.15..0.53 from the top-left, so a 0.38 square centred at (0.53, 0.34). v is flipped, hence
+// offset.y = 1 - 0.15 - 0.38 = 0.47.
+const PALE_FACE={ u:0.34, v:0.47, s:0.38 };
+let _paleFaceImg=null, _paleFaceMats=null, _paleFaceTexs=null;
+function brPaleFaceMat(part){
+  if(!_paleFaceImg){ _paleFaceImg=new Image(); _paleFaceImg.src='./assets/backrooms/slendermem.gif'; }   // an animated GIF keeps running inside an <img>; we just re-upload the frame each tick
+  if(!_paleFaceMats){ _paleFaceMats={}; _paleFaceTexs=[];
+    const mk=(ru,rv,ou,ov)=>{ const t=new THREE.Texture(_paleFaceImg); t.colorSpace=THREE.SRGBColorSpace;
+      t.magFilter=THREE.LinearFilter; t.minFilter=THREE.LinearFilter; t.generateMipmaps=false;
+      t.wrapS=t.wrapT=THREE.ClampToEdgeWrapping; t.repeat.set(ru,rv); t.offset.set(ou,ov);
+      _paleFaceImg.addEventListener('load',()=>{ t.needsUpdate=true; }); _paleFaceTexs.push(t);
+      const m=new THREE.MeshBasicMaterial({map:t, transparent:true, toneMapped:false, fog:false, side:THREE.DoubleSide, depthWrite:false});
+      m.userData.tex=t; return m; };
+    const F=PALE_FACE, h=F.s/2;
+    _paleFaceMats.full=mk(F.s,F.s, F.u,F.v);
+    _paleFaceMats.top =mk(F.s,h,   F.u,F.v+h);      // upper half of the crop (v increases upward → the higher offset is the TOP of the image)
+    _paleFaceMats.bot =mk(F.s,h,   F.u,F.v); }
+  return _paleFaceMats[part||'full']; }
+function brPaleFaceTick(){ if(_paleFaceTexs) for(const t of _paleFaceTexs) t.needsUpdate=true; }   // pull the GIF's current frame into every crop
 function brPaleMesh(){ const g=new THREE.Group(); const S=1.5;                                    // 1.5x TALLER (Ben 07-27)
   const mat=new THREE.MeshStandardMaterial({color:0x060606, emissive:0x020203, emissiveIntensity:0.4, roughness:0.8, metalness:0.0});   // BLACK gaunt figure
   const eyeM=new THREE.MeshStandardMaterial({color:0x0b0b0d, emissive:0x14121a, emissiveIntensity:0.7, roughness:0.4, metalness:0});
@@ -10729,22 +10756,45 @@ function brPaleMesh(){ const g=new THREE.Group(); const S=1.5;                  
   const spine=grp('spine',0,0,0); hips.add(spine); box(0.34*S,torso,0.20*S, torso/2, spine);       // torso rises from the hips
   const chest=grp('chest',0,torso,0); spine.add(chest);
   const neckJ=grp('neck',0,0,0); chest.add(neckJ); box(0.09*S,neck,0.09*S, neck/2, neckJ);
-  const headJ=grp('head',0,neck,0); neckJ.add(headJ); box(0.22*S,headH,0.20*S, headH/2, headJ);
-  // THE FACE (Ben 07-27) — slendermem.gif, played live on a plane across the front of the head. An animated GIF in an
-  // <img> keeps animating on its own; the texture just needs needsUpdate every frame (brPaleAnim does it). Unlit +
-  // toneMapped:false so it reads as a glowing face in the pooled dark instead of vanishing into the black body.
-  // The face is the FRONT plane plus two narrow WRAP panels folded back onto the head's corners, so the grin bends
-  // around the edges of the skull instead of stopping dead at a flat rectangle (Ben 07-27).
-  { const fw=0.215*S, fm=brPaleFaceMat();
-    const face=new THREE.Mesh(new THREE.PlaneGeometry(fw, fw), fm);                       // SQUARE, to match the square crop — a tall plane stretched the grin sideways
-    face.position.set(0, headH*0.58, 0.101*S); headJ.add(face); g.userData.face=face;
-    for(const sx of [-1,1]){ const wrap=new THREE.Mesh(new THREE.PlaneGeometry(fw*0.30, fw), fm);
-      wrap.position.set(sx*(fw/2 + fw*0.128), headH*0.58, 0.101*S - fw*0.075);
-      wrap.rotation.y = sx*0.95; headJ.add(wrap); } }                                     // folded ~54 degrees back along each cheek
+  // ---- THE HEAD SPLITS (Ben 07-27) ----
+  // slendermem.gif covers the WHOLE front of the head, uncut at the chin, and the head is cut horizontally just below
+  // the middle of the face. The lower jaw keeps the bottom of the image; the CRANIUM above it is hinged and swings back,
+  // revealing bright red flesh, white teeth on both cut faces, and one long voxel tongue that flails like the Wretch's.
+  const headJ=grp('head',0,neck,0); neckJ.add(headJ);
+  const HW=0.22*S, HD=0.20*S, SPLIT=headH*0.46, fw=HW*0.98, fz=HD/2+0.004;
+  box(HW,SPLIT,HD, SPLIT/2, headJ);                                                       // lower jaw block
+  const cran=grp('cranium',0,SPLIT,0); headJ.add(cran); box(HW,headH-SPLIT,HD, (headH-SPLIT)/2, cran);   // hinged upper skull
+  { const fb=new THREE.Mesh(new THREE.PlaneGeometry(fw, SPLIT), brPaleFaceMat('bot'));    // bottom half of the image → the lower jaw
+    fb.position.set(0, SPLIT/2, fz); headJ.add(fb);
+    const ft=new THREE.Mesh(new THREE.PlaneGeometry(fw, headH-SPLIT), brPaleFaceMat('top'));   // top half → the cranium, so it travels with the lid as it opens
+    ft.position.set(0, (headH-SPLIT)/2, fz); cran.add(ft); g.userData.face=ft;
+    for(const sx of [-1,1]){ const wrap=new THREE.Mesh(new THREE.PlaneGeometry(fw*0.26, headH-SPLIT), brPaleFaceMat('top'));   // wraps the cranium's corners so the crop bends round the skull
+      wrap.position.set(sx*(fw/2 + fw*0.112), (headH-SPLIT)/2, fz - fw*0.066); wrap.rotation.y=sx*0.95; cran.add(wrap); } }
+  { const gum=new THREE.MeshBasicMaterial({color:0xb1121b, fog:false, side:THREE.DoubleSide});   // red flesh filling the head volume — shows the instant the lid lifts
+    const mouth=new THREE.Mesh(new THREE.BoxGeometry(HW*0.9,headH*0.52,HD*0.9),gum); mouth.position.set(0,SPLIT,0); headJ.add(mouth);
+    const teethM=new THREE.MeshBasicMaterial({color:0xf4f1e6, fog:false});
+    for(const row of [{p:headJ,d:1,b:SPLIT},{p:cran,d:-1,b:0}]){                          // a row of teeth on each cut face, pointing into the gap
+      for(let i=0;i<7;i++){ const th2=(i%2?0.055:0.078)*S;
+        const tt=new THREE.Mesh(new THREE.BoxGeometry(HW*0.10,th2,HD*0.10),teethM);
+        tt.position.set((-3+i)*HW*0.135, row.b + row.d*th2/2, HD*0.24); row.p.add(tt); } }
+    const tng=new THREE.MeshBasicMaterial({color:0x8e2530, fog:false});                   // ONE long voxel tongue, 5 tapering segments in a chain
+    let node=grp('tng0', 0, SPLIT+0.01*S, HD*0.16); headJ.add(node); const tsegs=[];
+    for(let i=0;i<4;i++){ const L=0.085*S, seg=new THREE.Mesh(new THREE.BoxGeometry((0.050-i*0.007)*S, (0.034-i*0.005)*S, L), tng);
+      seg.position.set(0,0,L/2); node.add(seg);
+      const nx=grp('tng'+(i+1), 0, 0, L); node.add(nx); tsegs.push(node); node=nx; }
+    // NOTE on the sign: rotating a node about X by +θ swings its +z child DOWN, so a positive base pitch draped the
+    // tongue over the chest. It sits slightly UP and lashes about that.
+    g.userData.tongue=tsegs; }
   for(const sd of [['L',-1],['R',1]]){ const n=sd[0], sx=sd[1];                                    // long arms, hang slightly forward — shoulder / elbow / WRIST, so a flail can break at three points
     const sh=grp('sh'+n, sx*0.20*S, -0.04*S, 0.02*S); chest.add(sh); box(0.08*S,0.62*S,0.09*S, -0.31*S, sh);
     const el=grp('el'+n,0,-0.62*S,0); sh.add(el); box(0.07*S,0.44*S,0.08*S, -0.22*S, el);
-    const wr=grp('wr'+n,0,-0.44*S,0); el.add(wr); box(0.055*S,0.20*S,0.065*S, -0.10*S, wr); }             // forearm shortened to make room for a long hand segment
+    const wr=grp('wr'+n,0,-0.44*S,0); el.add(wr); box(0.055*S,0.14*S,0.065*S, -0.07*S, wr);               // forearm shortened to make room for a long hand
+    // REALLY LONG, SKINNY FINGERS (Ben 07-27) — four of them, splayed, each a two-knuckle chain, plus a thumb
+    for(let f=0; f<4; f++){ const fx=(f-1.5)*0.030*S;
+      const k1=grp('fg'+n+f, fx, -0.14*S, 0); wr.add(k1); box(0.017*S,0.20*S,0.020*S, -0.10*S, k1);
+      k1.rotation.z=(f-1.5)*0.10; k1.rotation.x=-0.12-f*0.04;
+      const k2=grp('fk'+n+f, 0, -0.20*S, 0); k1.add(k2); box(0.014*S,0.17*S,0.017*S, -0.085*S, k2); k2.rotation.x=-0.30; }
+    { const th=grp('th'+n, sx*0.045*S, -0.13*S, 0.012*S); wr.add(th); box(0.018*S,0.15*S,0.020*S, -0.075*S, th); th.rotation.z=sx*0.85; } }
   for(const sd of [['L',-1],['R',1]]){ const n=sd[0], sx=sd[1];                                    // long thin legs
     const hp=grp('hip'+n, sx*0.11*S, 0, 0); hips.add(hp); box(0.10*S,thigh,0.12*S, -thigh/2, hp);
     const kn=grp('kn'+n,0,-thigh,0); hp.add(kn); box(0.09*S,shin,0.10*S, -shin/2, kn); }
@@ -10755,7 +10805,19 @@ function brPaleAnim(p, dt){ const m=p.mesh; if(!m||!m.userData.joints)return; co
   const R=(n,x,y,z)=>{ if(!n)return; n.rotation.x+=((x||0)-n.rotation.x)*bl; n.rotation.y+=((y||0)-n.rotation.y)*bl; n.rotation.z+=((z||0)-n.rotation.z)*bl; };
   let hipsY=HY, spX=0,spZ=0, hdX=0,hdY=0,hdZ=0, aLx=0,aLz=0,aRx=0,aRz=0, eL=0,eR=0, hLx=0,hRx=0, kL=0,kR=0, leanZ=0;
   let wLx=0,wLz=0,wRx=0,wRz=0;                                                                     // wrist break (see the arms in brPaleMesh)
-  if(m.userData.face && _paleFaceMat && _paleFaceMat.userData.tex) _paleFaceMat.userData.tex.needsUpdate=true;   // pull the GIF's current frame
+  brPaleFaceTick();                                                                                // pull the GIF's current frame into every face crop
+  // ---- THE CRANIUM HINGE + TONGUE (Ben 07-27): the lid is shut while it stalks and thrown right back when it is
+  //      violent — the flail, the lunge, the death-thrash. The tongue only flails while the mouth is open.
+  { const wantGape = (A==='flail'||A==='lunge') ? 1 : (A==='run' ? 0.18 : 0);
+    p.gape = (p.gape||0) + (wantGape-(p.gape||0)) * Math.min(1, dt*(wantGape>p.gape?14:6));
+    if(J.cranium) J.cranium.rotation.x = -1.55*p.gape;                                              // swings BACK off the hinge
+    const T=m.userData.tongue;
+    if(T){ const open=p.gape>0.12, f=26;
+      for(let i=0;i<T.length;i++){ const n=T[i];
+        if(!open){ n.rotation.x += (0-n.rotation.x)*bl; n.rotation.y += (0-n.rotation.y)*bl; n.rotation.z += (0-n.rotation.z)*bl; continue; }
+        n.rotation.x = (i===0? -0.22 : 0.05) + 0.34*Math.sin(t*f + i*1.35) * p.gape;                 // whips out and lashes, each segment a beat behind the last
+        n.rotation.y = 0.44*Math.sin(t*f*0.62 + i*0.9) * p.gape;
+        n.rotation.z = 0.20*Math.sin(t*f*1.31 + i*2.1) * p.gape; } } }
   switch(A){
     case 'idle': spX=0.05+0.02*sw(1.3); hdX=0.05*sw(1.0); aLx=0.03*sw(1.2); aRx=-0.03*sw(1.2); eL=eR=-0.05; break;
     case 'stand': spX=0.03; eL=eR=-0.04; break;
@@ -10944,8 +11006,8 @@ if(typeof window!=='undefined'){ window.__hcBR={ door:()=>brSpawnDoorNearPlayer(
   zones:()=>{ const c={0:0,1:0,2:0}; for(const r of (BR.rooms||[]))c[r.zone|0]=(c[r.zone|0]|0)+1; return c; },        // QA: how the PBR districts fell
   goTable:(i)=>{ const t=(BR.tables||[])[i|0]; if(!t)return null; if(!BR.inside)brEnter();
     player.pos.set(t.x + Math.sin(0.6)*7, BR_FLOOR+1.2, t.z + Math.cos(0.6)*7); player.yaw=0.6; player.pitch=-0.14; return {x:t.x,z:t.z}; },   // QA: stand off a table and look at it (lookDir for yaw is (-sin,-cos), so stand on the +(sin,cos) side)
-  paleState:()=>{ const p=BR.pale; if(!p)return null; const f=(typeof _paleFaceMat!=='undefined'&&_paleFaceMat&&_paleFaceMat.map&&_paleFaceMat.map.image);
-    return { state:p.state, phase:p.phase||'', anim:p.anim||'', peek:!!p.peek, lean:p.leanSide||0, thrashT:+((p.thrashT||0)).toFixed(2),
+  paleState:()=>{ const p=BR.pale; if(!p)return null; const f=(typeof _paleFaceImg!=='undefined'&&_paleFaceImg);
+    return { state:p.state, phase:p.phase||'', anim:p.anim||'', peek:!!p.peek, lean:p.leanSide||0, thrashT:+((p.thrashT||0)).toFixed(2), gape:+((p.gape||0)).toFixed(2),
       dist:+Math.hypot((p.x||0)-player.pos.x,(p.z||0)-player.pos.z).toFixed(1), faceLoaded: !!(f&&f.width>0),
       joints: p.mesh? Object.keys(p.mesh.userData.joints||{}).length : 0 }; },   // QA: Pale behaviour + is the gif face actually decoded
   tpDoor:(i)=>{ const d=(BR.doors||[])[i||0]; if(!d)return null; const nx=d.vert?1:0, nz=d.vert?0:1; player.pos.set(d.cx-nx*2.6,BR_FLOOR+1.2,d.cz-nz*2.6); const dx=d.cx-player.pos.x,dz=d.cz-player.pos.z; player.yaw=Math.atan2(-dx,-dz); if(typeof streamChunks==='function')for(let k=0;k<4;k++)streamChunks(160,160); return {i,closed:d.closed}; },
