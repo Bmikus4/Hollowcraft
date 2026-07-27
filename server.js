@@ -24,7 +24,8 @@ const server = http.createServer((req, res) => {
     if (err) { res.writeHead(404); res.end('not found'); return; }
     res.writeHead(200, {
       'Content-Type': MIME[path.extname(full).toLowerCase()] || 'application/octet-stream',
-      'Cache-Control': 'no-cache',
+      'Cache-Control': path.extname(full).toLowerCase()==='.html' ? 'no-store, no-cache, must-revalidate' : 'no-cache',   // never serve a stale index.html — a reload always gets the current code
+
       'Cross-Origin-Opener-Policy': 'same-origin',
       'Cross-Origin-Embedder-Policy': 'require-corp'
     });

@@ -35,6 +35,7 @@ const ev=(p,e)=>p.evaluate(e);
     for(let i=0;i<3;i++){ await ev(page,`window.__hcBR.look(${(i*2.09).toFixed(2)},0)`); await sleep(500); await page.screenshot({path:path.join(OUT,'ow-horizon-'+i+'.png')}); }
 
     await ev(page,`window.__hcBR.enter()`); await sleep(1200);
+    const wretchInside = await ev(page,`(()=>{try{const s=__hc.st();return {active:s.wa, grabbed:s.grabbed}}catch(e){return {err:String(e)}}})()`);   // Wretch must be despawned + no grab inside
 
     // ---- ROBUSTNESS: rebuild the maze on 24 random seeds; the loop must never crash (fps stays >0, err stays null) ----
     const seedStats=[]; let worst=null;
@@ -71,7 +72,8 @@ const ev=(p,e)=>p.evaluate(e);
     const finalRooms=await ev(page,`window.__hcBR.rooms()`); const finalErr=await ev(page,`window.__hcBR.err()`);
     const crashed=seedStats.filter(s=>s.err||s.fps<=0);
     const maxDoorsSeen=Math.max(...seedStats.map(s=>s.maxDoors));
-    console.log(JSON.stringify({ pageErrors:errors.slice(0,10), finalRooms, finalErr, crashedSeeds:crashed.length, maxDoorsSeen, doorCount:doorList.length, closedCount:doorList.filter(d=>d.closed).length, toggledOK, doorAfterState, crawlCount, crawlTest, seedSample:seedStats.slice(0,4), crashed:crashed.slice(0,4) }, null, 1));
+    const loopErr=await ev(page,`window._loopErr||null`);
+  console.log(JSON.stringify({ pageErrors:errors.slice(0,10), loopErr, wretchInside, finalRooms, finalErr, crashedSeeds:crashed.length, maxDoorsSeen, doorCount:doorList.length, closedCount:doorList.filter(d=>d.closed).length, toggledOK, doorAfterState, crawlCount, crawlTest, seedSample:seedStats.slice(0,4), crashed:crashed.slice(0,4) }, null, 1));
   } catch(e){ console.error('FATAL', e.message); console.log(JSON.stringify({pageErrors:errors.slice(0,10)})); process.exitCode=1; }
   finally { try{ if(globalThis.__browser)await globalThis.__browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }
 })();
