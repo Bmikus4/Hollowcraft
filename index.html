@@ -805,6 +805,75 @@ function placeSet(c, wx, wy, wz, b, force){
   if (force || c.blocks[i]===AIR || c.blocks[i]===BID.leaves){ c.blocks[i]=b;
     if(b===WATER)c.hasWater=true; else if(blockCat[b]==='cross')c.hasCross=true; else if(blockCat[b]==='model')c.hasModel=true; }   // keep render flags in sync so worldgen model/cross blocks (sulfur, foliage) mesh on first build, not only after an edit
 }
+// =====================================================================
+//  PINE — ONE SOURCE OF TRUTH, ALL-OR-NOTHING (Ben 07-27: "if a tree BASE is allowed, ALL its leaves must generate;
+//  if it isn't, neither base nor leaves"). Every gate lives in here, and both callers share it:
+//    worldgen decorate()   → emits the blocks into the chunk being generated
+//    groundStructure()     → emits the SAME block set to erase a tree standing where a building is about to go
+//  It is purely a function of (wx,wz) — no chunk, no world reads — so border-straddling chunks always agree and a
+//  regenerated chunk reproduces the identical tree. PINE_MAXR is the widest canopy the shape below can produce
+//  (rad = round(0.6 + t*0.44), t ≤ th+2-floor(th*0.45) = 20 at th=31 → 9), and the decorate sweep is sized to it.
+// =====================================================================
+const PINE_MAXR = 10;
+// STRUCTURE PADS — a pine whose trunk OR canopy would reach into one never generates. The offsets mirror the fixed
+// builder sites; radii cover each pad plus its feathered skirt. Dynamically-sited builders (village/church/cathedral/
+// golgotha/peaks/dungeon) can't be known here, so groundStructure erases whole trees for those instead.
+let _NOTREE=null;
+function noTreeZones(){ if(_NOTREE) return _NOTREE;
+  _NOTREE=[[22,-14,13],[0,1,3],[-34,30,7],[58,-72,13],[-70,-40,11],[14,34,10],[-48,-20,11],[40,18,12],[48,30,10],
+           [-20,64,9],[90,-40,12],[-60,50,10],[150,120,10],[120,-120,13]]
+    .map(z=>({x:spawnX+z[0], z:spawnZ+z[1], r:z[2]}));
+  return _NOTREE; }
+// SHAPE — height/thickness/canopy reach, drawn from the per-tree rng. Split out so the wide decorate sweep can ask "can
+// this tree even reach my chunk?" for the price of two rng calls (cheap) instead of a full pineEmit, and so the height
+// formula and the rng CONSUMPTION ORDER (th, th, thick, then the canopy gap rolls) live in exactly one place.
+function _pineShape(wx,wz){ const rng=tileRng((wx*92821^wz*68917)>>>0);
+  const th = Math.max(10, Math.round((18 + (rng()*14|0)) * (0.9 + rng()*0.25)));      // 18..31 base, then ±~12% random size fluctuation
+  const thick = rng()<0.15?1:0;                        // mostly single-trunk pines (was 35% chunky) → thinner on average
+  const base = Math.floor(th*0.45);
+  return { rng, th, thick, base, reach: Math.max(0, Math.round(0.6 + (th+2-base)*0.44)) + thick }; }
+function noTreeHit(wx,wz,reach){ const Z=noTreeZones();
+  for(let i=0;i<Z.length;i++){ const n=Z[i], dx=wx-n.x, dz=wz-n.z, r=n.r+reach; if(dx*dx+dz*dz<=r*r) return true; }
+  return false; }
+// emit(x,y,z,blockId,isTrunk) — called once per block of the tree rooted at (wx,wz). Returns false if no tree is allowed.
+function pineEmit(wx,wz,emit){
+  const h=surfaceH(wx,wz);
+  if (h<=CFG.SEA+4 || h>=WH-28) return false;
+  if (trailDist(wx,wz)<2.6 || inCabin(wx,wz) || nearOpening(wx,wz)) return false;   // dirt trail corridor + cabin footprint + trailhead clearings stay free of tree bases
+  if (!isGrassSurface(wx,wz)) return false;                                          // pines only on grass → natural treeline; bare rock/snow/ice/beach stay clear
+  const sh=_pineShape(wx,wz), rng=sh.rng, th=sh.th, thick=sh.thick;
+  const foot = thick ? [[0,0],[1,0],[0,1],[1,1]] : [[0,0]];
+  let drop=0; for(const fp of foot) drop=Math.max(drop, h-surfaceH(wx+fp[0],wz+fp[1]));
+  if (drop>2) return false;                            // footprint drops >2 blocks — too steep, it would float/break
+  // NO TREES OVER CAVES (Ben 07-21): every trunk footprint needs SOLID ground under its base. A cave mouth or shallow
+  // tunnel under the surface leaves the trunk floating over a hollow → skip the whole tree.
+  for(const fp of foot){ const bx=wx+fp[0], bz=wz+fp[1], bh=surfaceH(bx,bz), ent=fbm2(bx*0.018,bz*0.018,811,3)>0.62;
+    for(let dy=0; dy<4; dy++) if(caveCarved(bx, bh-dy, bz, bh, ent)) return false; }
+  const base=sh.base;
+  // ATOMIC vs BUILDINGS: reject on the TRUNK footprint, not the canopy reach. A canopy that overhangs a clearing is
+  // wanted (soft forest edge, Ben 07-21) and harmless — leaves only fill AIR. Testing the canopy instead carved bald
+  // 22-block circles around every structure. What must never happen is a TRUNK inside a building's footprint.
+  if (noTreeHit(wx,wz,thick?1:0)) return false;
+  // trunk: each footprint column grows from its OWN floor up to the canopy (fills up to 2 blocks over an overhang)
+  for(const fp of foot){ const gy=Math.min(h, surfaceH(wx+fp[0],wz+fp[1]));
+    for(let y=gy+1; y<=h+th; y++) emit(wx+fp[0], y, wz+fp[1], BID.log, true); }
+  // conical layered canopy
+  for (let y=base; y<=th+2; y++){
+    const t=(th+2-y);
+    let rad = Math.max(0, Math.round(0.6 + t*0.44));
+    if (y>=th) rad=Math.min(rad,1);
+    for (let oz=-rad;oz<=rad;oz++) for (let ox=-rad;ox<=rad;ox++){
+      if (ox*ox+oz*oz > (rad+0.4)*(rad+0.4)) continue;
+      if (ox===0&&oz===0&&y<th) continue;              // keep only the trunk column clear
+      const rr=Math.sqrt(ox*ox+oz*oz);
+      const core=(rr<=rad-3) && (y>base+2) && (y<th-1);   // interior (>3 blocks inward, not top/bottom) → solid core
+      if (!core && rng()<0.05) continue;               // outer shell: a few natural gaps; core stays solid
+      emit(wx+ox, h+y, wz+oz, core?BID.leaves_core:BID.leaves, false);
+    }
+  }
+  emit(wx, h+th+3, wz, BID.leaves, false);
+  return true;
+}
 function decorate(c){
   // scan an expanded region so trees straddle borders
   for (let dz=-3; dz<CK+3; dz++) for (let dx=-3; dx<CK+3; dx++){
@@ -819,41 +888,7 @@ function decorate(c){
     if (h<=CFG.SEA+4 || h>=WH-28) continue;   // COASTAL SETBACK: trees start ≥4 blocks above sea (was +1), so the treeline pulls back off the beach/shore instead of crowding the waterline. Raise this number to push it further inland.
     if (trailDist(wx,wz)<2.6 || inCabin(wx,wz) || nearOpening(wx,wz)) continue;   // keep the dirt trail corridor + cabin footprint + trailhead clearings free of tree bases
     if (!isGrassSurface(wx,wz)) continue;   // pines only on grass → natural treeline; bare rock/snow/ice/beach stay clear (deterministic so border trees still straddle)
-    if (pineAt(wx,wz)){
-      const rng=tileRng((wx*92821^wz*68917)>>>0);
-      let th = Math.max(10, Math.round((18 + (rng()*14|0)) * (0.9 + rng()*0.25)));   // 18..31 base, then ±~12% random size fluctuation
-      const thick = rng()<0.15?1:0;                      // mostly single-trunk pines now (was 35% chunky) → thinner on average
-      const foot = thick ? [[0,0],[1,0],[0,1],[1,1]] : [[0,0]];
-      let drop=0; for(const fp of foot) drop=Math.max(drop, h-surfaceH(wx+fp[0],wz+fp[1]));
-      if (drop>2) continue;                              // don't even spawn where the footprint drops >2 blocks (too steep — would float/break)
-      // NO TREES OVER CAVES (Ben 07-21): every trunk footprint needs SOLID ground under its base. A cave mouth or
-      // shallow tunnel under the surface leaves the trunk floating over a hollow → skip the whole tree. Deterministic
-      // (surfaceH + caveCarved), so border-straddling trees agree across chunks and it re-applies on chunk regen.
-      let hollow=false;
-      for(const fp of foot){ const bx=wx+fp[0], bz=wz+fp[1], bh=surfaceH(bx,bz), ent=fbm2(bx*0.018,bz*0.018,811,3)>0.62;
-        for(let dy=0; dy<4; dy++){ if(caveCarved(bx, bh-dy, bz, bh, ent)){ hollow=true; break; } } if(hollow) break; }
-      if (hollow) continue;                              // cave/overhang under the trunk → no solid footing, don't plant
-      // trunk: each footprint column grows from its OWN floor up to the canopy (fills up to 2 blocks over an overhang)
-      for(const fp of foot){ const gy=Math.min(h, surfaceH(wx+fp[0],wz+fp[1]));
-        for(let y=gy+1; y<=h+th; y++) placeSet(c, wx+fp[0], y, wz+fp[1], BID.log, true); }
-      // conical layered canopy
-      const base=Math.floor(th*0.45);
-      for (let y=base; y<=th+2; y++){
-        const t=(th+2-y);
-        let rad = Math.max(0, Math.round(0.6 + t*0.44));
-        if (y>=th) rad=Math.min(rad,1);
-        for (let oz=-rad;oz<=rad;oz++) for (let ox=-rad;ox<=rad;ox++){
-          if (ox*ox+oz*oz > (rad+0.4)*(rad+0.4)) continue;
-          if (ox===0&&oz===0&&y<th) continue;              // keep only the trunk column clear
-          const rr=Math.sqrt(ox*ox+oz*oz);
-          const core=(rr<=rad-3) && (y>base+2) && (y<th-1);   // interior (>3 blocks inward, not top/bottom) → solid core
-          if (!core && rng()<0.05) continue;               // outer shell: a few natural gaps; core stays solid
-          placeSet(c, wx+ox, h+y, wz+oz, core?BID.leaves_core:BID.leaves, false);
-        }
-      }
-      placeSet(c,wx,h+th+3,wz,BID.leaves,false);
-      continue;
-    }
+    if (pineAt(wx,wz)){ pineEmit(wx,wz,(bx,by,bz,id,trunk)=>placeSet(c,bx,by,bz,id,trunk)); continue; }
     if (dx<0||dx>=CK||dz<0||dz>=CK) continue;             // understory only in-chunk
     if (getBlock(wx,h,wz)!==BID.grass) continue;
     const r=xhash(wx,3,wz,919);
@@ -872,6 +907,19 @@ function decorate(c){
     else if (r<0.2755) deco=BID.sage;
     else if (r<0.2762) deco=BID.bloodroot;                             // rare
     if (deco!==AIR && c.blocks[idx(dx,h+1,dz)]===AIR){ c.blocks[idx(dx,h+1,dz)]=deco; c.hasCross=true; }   // only on open ground — never inside/under a tree trunk or its neighbours
+  }
+  // ---- OUTER TREE BAND (Ben 07-27, "trees must be full structures") ----
+  // A pine's canopy reaches PINE_MAXR blocks out, but the loop above only considers trunks up to 3 blocks outside the
+  // chunk — so every tree rooted 4..10 blocks past a border silently lost the slice of canopy that belongs to THIS
+  // chunk. That is the "broken trees" look: vertical bites out of the forest along chunk seams. Sweep the rest of the
+  // reach here, trees only (pineAt first: it is the cheap gate, and only ~1 column in 10 is a trunk).
+  for (let dz=-PINE_MAXR; dz<CK+PINE_MAXR; dz++) for (let dx=-PINE_MAXR; dx<CK+PINE_MAXR; dx++){
+    if (dx>=-3 && dx<CK+3 && dz>=-3 && dz<CK+3) continue;         // the loop above already handled the inner band
+    const wx=c.cx*CK+dx, wz=c.cz*CK+dz;
+    const out=Math.max(dx<0?-dx:(dx>=CK?dx-CK+1:0), dz<0?-dz:(dz>=CK?dz-CK+1:0));   // how far outside the chunk this trunk stands
+    if (_pineShape(wx,wz).reach < out) continue;                  // two rng calls: most trees out here cannot reach us at all — skip before paying for pineAt's fBm
+    if (!pineAt(wx,wz)) continue;
+    pineEmit(wx,wz,(bx,by,bz,id,trunk)=>placeSet(c,bx,by,bz,id,trunk));
   }
 }
 // fallen driftwood log on the beach — 20% chance per chunk, deterministic from seed
@@ -11032,30 +11080,27 @@ function buildSpawnChest(){ if(_spawnChestDone)return; const sx=spawnX, sz=spawn
 // match the local surface (grass / snow / sand); untouched terrain keeps its native top. pathR = legacy, ignored.
 // flood-remove a WHOLE tree (trunk + connected canopy) from a seed block — so clearing a structure site never leaves
 // leaves floating with no trunk. Face+edge neighbourhood bridges the canopy's occasional 1-block gaps; capped for safety.
-const _TREEBLK=id=>(id===BID.log||id===BID.leaves||id===BID.leaves_core);
-function _treeFlood(sx,sy,sz){ if(!_TREEBLK(getBlock(sx,sy,sz)))return; const stack=[[sx,sy,sz]]; let n=0;
-  const NB=[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1],[1,1,0],[-1,1,0],[1,-1,0],[-1,-1,0],[0,1,1],[0,1,-1],[0,-1,1],[0,-1,-1],[1,0,1],[-1,0,1],[1,0,-1],[-1,0,-1]];
-  // CRITICAL (Ben 07-21): bound the flood to ONE tree. Pines in a dense forest touch canopies, and the diagonal
-  // kernel would BRIDGE tree→tree and eat the ENTIRE connected forest (261k AIR edits recorded → applyEdits replays
-  // them → every tree truncated to a bare stub with a floating canopy = the whole "spawn trees broken" bug). Reject
-  // any cell more than R blocks (horizontally) from the seed, and cap at one big tree's worth of blocks.
-  const R=6;
-  while(stack.length && n<700){ const c=stack.pop(); if(Math.abs(c[0]-sx)>R || Math.abs(c[2]-sz)>R) continue; if(!_TREEBLK(getBlock(c[0],c[1],c[2])))continue; setBlockWorld(c[0],c[1],c[2],AIR,true); n++;
-    for(const d of NB) stack.push([c[0]+d[0],c[1]+d[1],c[2]+d[2]]); } }
+// _treeFlood is gone (Ben 07-27): a bounded flood can never match a pine's real extent — radius 6 / 700 blocks against a
+// canopy radius of 9 and thousands of blocks, so it truncated trees and left floating canopy over buildings. groundStructure
+// now replays pineEmit, the generator itself, to erase a tree exactly.
 function groundStructure(cx,cz,gy,R,pathR){
   const SK=4, P=R+1, T=P+SK;
-  // FIRST: remove trees ROOTED on this pad. Seed the flood ONLY at trunk bases (a log near the ground) — NEVER at
-  // overhanging canopy. Seeding at any tree block let the flood follow an OUTSIDE tree's leaves back to its trunk and
-  // eat the whole tree, shaving the forest to a hard SQUARE cutout. Now trees rooted outside keep their canopy, which
-  // OVERHANGS the clearing for a soft, natural forest edge (their outer leaves are non-solid → the ramp cut spares them). (Ben 07-21)
-  for(let dx=-T;dx<=T;dx++)for(let dz=-T;dz<=T;dz++){ const wx=cx+dx, wz=cz+dz, nH=surfaceH(wx,wz);
-    for(let y=nH+1;y<=nH+5;y++){ if(getBlock(wx,y,wz)===BID.log){ _treeFlood(wx,y,wz); break; } } }
+  // FIRST: remove every tree that reaches onto this pad — DETERMINISTICALLY, via the same generator that planted it
+  // (pineEmit). The old approach flood-filled from trunk bases with a radius-6 / 700-block cap, which is smaller than a
+  // tall pine (canopy radius up to 9, thousands of blocks) — so it truncated trees and left floating canopy over the
+  // building. That was the "broken trees over buildings" bug. Replaying the generator erases the WHOLE tree, exactly,
+  // and never bridges into a neighbour's canopy the way a flood does. (Ben 07-27)
+  // Only trees ROOTED on the pad go — a tree rooted outside keeps its whole canopy, which overhangs the clearing for a
+  // soft, natural forest edge (Ben 07-21). What changed is that a doomed tree now goes COMPLETELY, canopy and all.
+  for(let dx=-T;dx<=T;dx++)for(let dz=-T;dz<=T;dz++){ const wx=cx+dx, wz=cz+dz;
+    if(!pineAt(wx,wz))continue;
+    pineEmit(wx,wz,(bx,by,bz)=>{ const b=getBlock(bx,by,bz); if(b===BID.log||b===BID.leaves||b===BID.leaves_core) setBlockWorld(bx,by,bz,AIR,true); }); }
   for(let dx=-T;dx<=T;dx++)for(let dz=-T;dz<=T;dz++){ const wx=cx+dx, wz=cz+dz, cheb=Math.max(Math.abs(dx),Math.abs(dz));
     const nH=surfaceH(wx,wz), f=cheb<=P?0:(cheb-P)/SK, e=f*f*(3-2*f);
     const tH=Math.round(gy+(nH-gy)*e);                            // pad level ramping smoothly back to the noise surface
     let touched=false;
     const yTop=Math.max(nH,tH)+20;                                // high enough to take tree canopy standing on the old ground
-    for(let y=tH+1;y<=yTop;y++){ const b=getBlock(wx,y,wz); if(b!==AIR && isSolid[b]){ setBlockWorld(wx,y,wz,AIR,true); touched=true; } }   // cut everything above the ramp
+    for(let y=tH+1;y<=yTop;y++){ const b=getBlock(wx,y,wz); if(b!==AIR && isSolid[b] && b!==BID.leaves_core){ setBlockWorld(wx,y,wz,AIR,true); touched=true; } }   // cut everything above the ramp — EXCEPT canopy core. leaves_core is cat:'solid', so the old cut sliced holes through the canopy of trees rooted OUTSIDE the pad (the other half of "broken trees over buildings"); the overhang is wanted, and pad-rooted trees were already erased whole above. (Ben 07-27)
     for(let y=tH;y>tH-24 && y>2;y--){ const b=getBlock(wx,y,wz); if(b===AIR||b===WATER){ setBlockWorld(wx,y,wz,BID.dirt,true); touched=true; } else break; }   // fill under the ramp — no floating pads
     if(touched){ const b=getBlock(wx,tH,wz); if(b!==AIR&&b!==WATER) setBlockWorld(wx,tH,wz, tH>CFG.SEA+38?BID.stone : tH<=CFG.SEA+1?BID.sand : BID.grass, true); }
   }
