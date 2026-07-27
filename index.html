@@ -1960,7 +1960,8 @@ function grabFrame(){ try{
 //  BLOCK MUTATION + REMESH SCHEDULING
 // =====================================================================
 const remeshSet = new Set();
-function markRemesh(cx,cz){ const c=getChunk(cx,cz); if(c){ c.dirty=true; remeshSet.add(key(cx,cz)); } }
+function markRemesh(cx,cz){ const c=getChunk(cx,cz); if(c){ c.dirty=true; remeshSet.add(key(cx,cz));
+  if(c===_stagedC) c._reRemesh=true; } }   // EDIT LANDED MID-STAGED-BUILD (Ben 07-27, "cabin not loading"): stage A already baked the opaque pass from a snapshot taken BEFORE this edit. Stage B would then clear dirty + the caller drops it from remeshSet → the blocks live in c.blocks forever but never render (model blocks DO, they're built in stage B). Flag it so stage B re-queues itself.
 // LIGHT-ONLY UPDATE PATH — the light volume is a 3D texture fully decoupled from mesh topology, so a
 // torch place/break must NOT rebuild 9 chunks' geometry (the old behavior: ~30-60ms of greedy meshing
 // per light edit). Neighbors only need their light texture re-flooded + (on lit<->unlit transitions)
@@ -2529,7 +2530,9 @@ function buildChunkStaged(c){
   if(c.hasModel) buildModelBlocks(c,g); else c.emitters=[];
   if(c.group){ c.group.traverse(o=>{ if(o.isMesh||o.isInstancedMesh){ o.geometry.dispose(); if(o.userData.modelMat) o.userData.modelMat.dispose(); if(o.material&&o.material.userData&&o.material.userData.chunkClone) o.material.dispose(); } }); chunkRoot.remove(c.group); }   // dispose the OLD group only now (it stayed visible through the stage gap); light3D deliberately NOT touched here
   if(c._oldL){ c._oldL.dispose(); c._oldL=null; }      // now nothing samples the old volume — safe to free
-  chunkRoot.add(g); c.group=g; c.meshed=true; c.dirty=false;
+  chunkRoot.add(g); c.group=g; c.meshed=true;
+  c.dirty = !!c._reRemesh; c._reRemesh=false;                    // stale-snapshot guard (see markRemesh): stay dirty so the opaque pass reruns against the edited blocks
+  if(c.dirty) remeshSet.add(key(c.cx,c.cz));
   _stagedC=null; _stagedG=null;
   computeVisGraph(c);                  // 6-face connectivity for occlusion culling (see cullChunks)
   // NOTE: do NOT force sunLight.shadow.needsUpdate here. autoUpdate is off and the SHADOW_EVERY cadence
@@ -2636,16 +2639,16 @@ function streamChunks(genBudget, meshBudget){
   const meshT0=performance.now(), meshMS=fpsAvg<38?1.5:fpsAvg<52?2.5:3.5;   // smaller per-frame mesh budget → the CHUNK-STREAM HITCH (a 5ms mesh build spiking one frame as you walk) is cut; slightly more pop-in, far smoother motion
   // RESUME-FIRST: an in-flight staged build must complete its stage B before any new stage A may run (shared snapshot scratch)
   if(_stagedC){ const cc=_stagedC;
-    if(world.get(key(cc.cx,cc.cz))===cc && cc.generated){ if(buildChunkStaged(cc)){ remeshSet.delete(key(cc.cx,cc.cz)); _streamMeshed=true; meshBudget--; } if(performance.now()-meshT0>meshMS) return; }
+    if(world.get(key(cc.cx,cc.cz))===cc && cc.generated){ if(buildChunkStaged(cc)){ if(!cc.dirty) remeshSet.delete(key(cc.cx,cc.cz)); _streamMeshed=true; meshBudget--; } if(performance.now()-meshT0>meshMS) return; }   // !dirty: stage B re-flags a chunk edited mid-build — never drop that request
     else _abandonStaged(); }   // its chunk unloaded mid-build → drop the partial
   for(let i=0;i<RING.length && meshBudget>0;i++){ const o=RING[i]; if(Math.abs(o[0])>CFG.RENDER_DIST||Math.abs(o[1])>CFG.RENDER_DIST) continue; const c=getChunk(pcx+o[0],pcz+o[1]);
     if(c && c.dirty && neighbors8(c)){ _streamMeshed=true;
       if(!buildChunkStaged(c)){ if(performance.now()-meshT0>meshMS) return; if(!buildChunkStaged(c)) return; }   // stage A ran; finish B in-slice or resume next frame
-      remeshSet.delete(key(c.cx,c.cz)); meshBudget--; if(performance.now()-meshT0>meshMS) return; } }
+      if(!c.dirty) remeshSet.delete(key(c.cx,c.cz)); meshBudget--; if(performance.now()-meshT0>meshMS) return; } }
   // explicit edit-driven remeshes — same time slice (a big edit/explosion can't hitch the frame either)
   if(remeshSet.size){ for(const kk of Array.from(remeshSet)){ if(performance.now()-meshT0>meshMS)break; const c=world.get(kk); if(c&&c.dirty&&neighbors8(c)){ _streamMeshed=true;
       if(!buildChunkStaged(c)){ if(performance.now()-meshT0>meshMS) break; if(!buildChunkStaged(c)) break; }   // as above: bounded units, resume next frame if the slice is spent
-      remeshSet.delete(kk); } else remeshSet.delete(kk); } }
+      if(!c.dirty) remeshSet.delete(kk); } else remeshSet.delete(kk); } }
   // light-only refloods (torch place/break neighbors) — far cheaper than a remesh; same slice, drained after
   if(relightSet.size){ for(const kk of relightSet){ if(performance.now()-meshT0>meshMS)break; relightSet.delete(kk); const c=world.get(kk); if(c&&c.meshed&&!c.dirty) relightChunk(c); } }
 }
@@ -12817,7 +12820,12 @@ window.__hc={
   yank(){ if(!wretch.active) this.summon(); if(wretch.group){ wretch.pos.set(player.pos.x+1.4, player.pos.y, player.pos.z); wretch.state='HUNT'; wretch.committed=true; } return wretch.state; },
   set(p){ Object.assign(wretch, p||{}); return wretch.state; },
   cam(o){ o=o||{}; if(o.pitch!=null)player.pitch=o.pitch; if(o.yaw!=null)player.yaw=o.yaw; return {yaw:player.yaw,pitch:player.pitch}; },
+  look(x,y,z){ const dx=x-camera.position.x, dy=y-camera.position.y, dz=z-camera.position.z;   // QA/bench: aim the camera AT a world point (yaw convention lives in lookDir) — every visual harness needs this
+    player.yaw=Math.atan2(-dx,-dz); player.pitch=Math.atan2(dy, Math.hypot(dx,dz)||1e-6);
+    return {yaw:+player.yaw.toFixed(3), pitch:+player.pitch.toFixed(3), eye:[+camera.position.x.toFixed(2),+camera.position.y.toFixed(2),+camera.position.z.toFixed(2)]}; },
+  time(t){ if(t!=null) worldTime=((+t)%CFG.DAY_LEN+CFG.DAY_LEN)%CFG.DAY_LEN; return {worldTime:+worldTime.toFixed(1), frac:+(worldTime/CFG.DAY_LEN).toFixed(3), day:+globalU.uDay.value.toFixed(3)}; },   // QA/bench: jump the clock (frac 0.25=noon-ish, 0.75=midnight)
   tp(x,z){ player.pos.x=x; player.pos.z=z; player.pos.y=Math.max(groundYAt(x,z),CFG.SEA)+2; player.vel.set(0,0,0); return {x:+player.pos.x.toFixed(1),y:+player.pos.y.toFixed(1),z:+player.pos.z.toFixed(1)}; },   // QA/bench: teleport, ground-snapped
+  tpAt(x,y,z){ player.pos.set(x,y,z); player.vel.set(0,0,0); return {x:+player.pos.x.toFixed(1),y:+player.pos.y.toFixed(1),z:+player.pos.z.toFixed(1)}; },   // QA/bench: exact teleport, NO ground snap (groundYAt lands you on canopy tops)
   rd(n){ if(n!=null) CFG.RENDER_DIST=Math.max(3,Math.min(CFG.RD_MAX,n|0)); return CFG.RENDER_DIST; },   // QA/bench: get/set render distance
   probe(){ const P=player.pos; return { worldSize:world.size, sea:CFG.SEA, WH, feet:getBlock(Math.floor(P.x),Math.floor(P.y),Math.floor(P.z)), gyHere:groundYAt(P.x,P.z), gy26:groundYAt(P.x+26,P.z), gyN:groundYAt(P.x,P.z-26), chunkHere:!!getChunk(Math.floor(P.x)>>4,Math.floor(P.z)>>4), chunk26:!!getChunk((Math.floor(P.x)+26)>>4,Math.floor(P.z)>>4) }; },
   setBlock(dx,dy,dz,name){ const P=player.pos, wx=Math.floor(P.x)+(dx|0), wy=Math.floor(P.y)+(dy|0), wz=Math.floor(P.z)+(dz|0); const id=name==null?0:(typeof name==='number'?name:BID[name]); if(id===undefined)return 'unknown block: '+name; setBlockWorld(wx,wy,wz,id,true); return {wx,wy,wz,id,queued:{remesh:remeshSet.size,relight:relightSet.size}}; },   // QA/bench: place or clear (name=null) a block relative to the player, RECORDED like a player edit; reports the edit-queue depths
