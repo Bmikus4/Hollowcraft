@@ -79,11 +79,12 @@ const T = (name, cond, info='') => { console.log((cond?'PASS':'FAIL')+' — '+na
     await sleep(2500);
     const C = await page.evaluate(`(()=>({
       cont: document.getElementById('continue-row') && document.getElementById('continue-row').style.display,
-      info: (document.getElementById('continue-info')||{}).textContent,
+      info: document.getElementById('continue-info') ? 'PRESENT' : '',
+      btn: (document.getElementById('mb-continue')||{}).textContent,
       note: document.getElementById('host-resume-note') && document.getElementById('host-resume-note').style.display,
       savebtn: !!document.getElementById('savebtn') }))()`);
     T('menu shows Continue row for existing save', C.cont==='flex', 'display='+C.cont);
-    T('continue-info describes the save', /saved .*edits/.test(C.info||''), C.info);
+    T('Continue button reads just "Continue", no save detail line', C.info==='' && (C.btn||'').trim()==='Continue', 'info='+C.info+' btn='+C.btn);   // Ben 07-27: the saved-at/edits/nights line under the button was removed
     T('host panel warns it will resume the save', C.note==='block');
     T('pause menu has a Save Game button', C.savebtn===true);
 
