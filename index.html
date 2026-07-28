@@ -10245,7 +10245,11 @@ function brMaterials(){ if(_brMats)return _brMats; const TL=new THREE.TextureLoa
   // so concrete rooms and tile rooms each read as a single flat material box. Now every district is a distinct pairing.
   const yellow={ wall:std('wallpaper','Wallpaper001A_1K-JPG',0xd8bf62,-1), floor:matteCarpet(), ceil:office() };                                        // Yellow Halls — wallpaper walls, matte carpet
   const conc={ wall:std('concrete','Concrete048_1K-JPG',0x9a9a9e,-1), floor:std('wood','Planks011_1K-JPG',0x6d5233,1), ceil:std('concrete','Concrete048_1K-JPG',0x74747a,0) };   // Industrial — bare concrete walls over a dark boarded floor
-  const tile={ wall:std('tiles','Tiles141_1K-JPG',0xd8d8d1,-1), floor:std('concrete','Concrete048_1K-JPG',0x55555c,1), ceil:office() };                 // White Tile — tiled walls, poured concrete floor
+  // TILE IS A FLOOR, NOT A WALL (Ben 07-28: "the tile texture should ONLY be used on the floor, get a new texture for the
+  // walls in regions with tiled floors"). This district had it backwards — tiled walls over a concrete floor. Now the tiles
+  // are underfoot and the walls are painted concrete in a pale institutional sage, which keeps the district distinct from
+  // the Industrial one that already uses bare grey concrete.
+  const tile={ wall:std('concrete','Concrete048_1K-JPG',0xb9c2b4,-1), floor:std('tiles','Tiles141_1K-JPG',0xdedbd2,1), ceil:office() };
   _brMats={ 0:yellow, 1:conc, 2:tile, 3:conc, 4:yellow }; return _brMats; }   // per-zone skins (Ben 07-26)
 function brZoneMat(z){ const M=brMaterials(); return M[z]||M[0]; }
 function brClearEnv(){ if(BR.env){ scene.remove(BR.env); BR.env.traverse(o=>{ if(o.geometry)o.geometry.dispose(); }); BR.env=null; }
@@ -11195,16 +11199,23 @@ function _brMergeInto(list){                                                  //
   o.setAttribute('uv',new THREE.BufferAttribute(U,2));
   return o; }
 function brMergeStatic(grp){
-  const keep=new Set();                                                       // objects that must survive as themselves
-  const protect=o=>{ while(o && o!==grp){ keep.add(o); o=o.parent; } };
-  for(const d of (BR.doors||[])) if(d.grp) protect(d.grp);                    // swings
-  for(const b of (BR.bulbs||[])) if(b.grp) protect(b.grp);                    // hangs, and its glass swaps material when lit
-  for(const f of (BR.flickers||[])) if(f.m) protect(f.m);                     // visibility blinks per frame
+  // TWO DISTINCT SETS, and conflating them broke everything that moves. `roots` are subtrees that must be left completely
+  // alone; `onPath` are their ancestors, which must be walked THROUGH to reach static siblings but never merged themselves.
+  // The first version put both in one set and then recursed into it, so a door's hinge group survived while the leaf meshes
+  // under it were merged away - 174 hinges with nothing left to swing (Ben: "doors arent opening") - and the same for bulb
+  // glass and flicker diffusers ("lights appearing but not flickering or lighting up").
+  const roots=new Set(), onPath=new Set();
+  const protect=o=>{ if(!o) return; roots.add(o); let p=o.parent; while(p && p!==grp){ onPath.add(p); p=p.parent; } };
+  for(const d of (BR.doors||[])){ if(d.grp) protect(d.grp);
+    for(const L of (d.pivots||[])) if(L && L.pivot) protect(L.pivot); }                 // swings
+  for(const b of (BR.bulbs||[])) if(b.grp) protect(b.grp);                              // hangs, and its glass swaps material when lit
+  for(const f of (BR.flickers||[])) if(f.m) protect(f.m);                               // visibility blinks per frame
   grp.updateMatrixWorld(true);
   const inv=new THREE.Matrix4().copy(grp.matrixWorld).invert(), rel=new THREE.Matrix4();
   const buckets=new Map(), doomed=[];
   const walk=(o)=>{ for(const c of o.children.slice()){
-      if(keep.has(c)) { walk(c); continue; }                                  // inside a protected subtree: leave entirely alone
+      if(roots.has(c)) continue;                                                        // hands off, whole subtree
+      if(onPath.has(c)){ walk(c); continue; }                                           // holds something protected deeper down
       if(c.isMesh && c.visible && c.geometry && c.material && !Array.isArray(c.material)){
         rel.multiplyMatrices(inv, c.matrixWorld);
         const g=c.geometry.clone(); g.applyMatrix4(rel);
@@ -11222,10 +11233,6 @@ function brMergeStatic(grp){
     grp.add(m); made++;
     for(const g of e.geos) g.dispose(); }
   return made; }
-// BUILD ONE CHUNK'S GEOMETRY AND CACHE IT, touching nothing else. Swaps the live BR arrays aside exactly like brxChunkGen,
-// so it is safe to call while standing in the overworld — which is the point: Ben asked whether the first Backrooms chunk
-// could be built when the game loads, and it can. The 169ms cost of walking through the portal is almost entirely this work,
-// so doing it during the load screen makes the entry free rather than merely cheaper.
 function brxBuildChunkGroup(rec){
   const ck=rec.gx+'_'+rec.gz;
   if(!BR.envCache) BR.envCache=new Map();
@@ -11861,6 +11868,24 @@ if(typeof window!=='undefined'){ window.__hcBRX={          // the chunk substrat
     else if(where==='behind'){ player.pos.set(d.x-Math.sin(d.yaw)*7, d.y, d.z-Math.cos(d.yaw)*7); player.yaw=Math.atan2(-(d.x-player.pos.x),-(d.z-player.pos.z))+Math.PI; player.pitch=0; if(typeof camera!=='undefined'&&camera){ camera.position.copy(player.pos); camera.rotation.set(0,player.yaw,0); camera.updateMatrixWorld(true); } }
     else if(where==='far'){ player.pos.set(d.x+90, d.y, d.z+90); }
     return { frames:BR._portalFrames|0, inside:!!BR.inside, hasDoor:!!BR.door, x:+player.pos.x.toFixed(1), z:+player.pos.z.toFixed(1) }; },
+  // QA: a DETERMINISTIC draw-call count. Sampling renderer.info between frames catches whatever partial frame is in flight
+  // and reported 19 while the scene held 1320 meshes, which cannot be true. Force one render and read the counter it just set.
+  drawProbe:()=>{ renderer.info.reset(); renderer.render(scene,camera);
+    return { calls:renderer.info.render.calls, tris:renderer.info.render.triangles }; },
+  // QA: did the static merge eat anything that has to move? A hinge with no parent, or with no meshes left under it, is a
+  // door that can never open again.
+  doorRig:()=>{ let doors=0, pivots=0, orphaned=0, empty=0;
+    for(const d of (BR.doors||[])){ doors++;
+      for(const L of (d.pivots||[])){ pivots++;
+        if(!L.pivot || !L.pivot.parent) orphaned++;
+        else { let n=0; L.pivot.traverse(o=>{ if(o.isMesh) n++; }); if(!n) empty++; } } }
+    return { doors, pivots, orphaned, empty }; },
+  // QA: swing the nearest door and report whether its hinge angle actually changed
+  doorSwing:()=>{ const d=(BR.doors||[]).find(q=>q.pivots&&q.pivots.length); if(!d) return null;
+    const before=d.pivots[0].pivot.rotation.y;
+    d.target = (d.a>0.1) ? 0 : BR_DOOR_OPEN;
+    for(let i=0;i<80;i++) brUpdateDoors(0.05);
+    return { before:+before.toFixed(3), after:+d.pivots[0].pivot.rotation.y.toFixed(3), a:+d.a.toFixed(3), target:+d.target.toFixed(3) }; },
   // QA: coincident duplicate wall segments across the whole loaded set. This is the direct test for Ben's "walls are
   // overlapping often" — two wall planes on the identical world line, which is what both chunks emitting a shared
   // boundary produced. Direction-normalised, so A->B and B->A count as the same segment.
@@ -12151,6 +12176,11 @@ function _leafRespawn(i,aroundY){ const a=Math.random()*6.283, r=Math.random()*L
   _leafSz[i]=0.6+Math.random()*0.9; _leafFall[i]=0.5+Math.random()*0.7; _leafPh[i]=Math.random()*6.283; _leafLand[i]=0;
   const c=_leafPalette[(Math.random()*_leafPalette.length)|0]; _leafCol[i*3]=c.r; _leafCol[i*3+1]=c.g; _leafCol[i*3+2]=c.b; _leafIM.setColorAt(i,c); }
 function updateLeaves(dt){ if(!_leafIM.instanceColor)return;
+  // NOT INSIDE THE BACKROOMS (Ben 07-28). Drifting leaves are an outdoor-forest effect and they were rendering in the halls
+  // — the same isolation rule the audio already follows. Hide the batch outright rather than just stopping the sim, or the
+  // leaves in flight at the moment you step through the portal hang in the air with you.
+  if(typeof BR!=='undefined' && BR.inside){ if(_leafIM.visible){ _leafIM.visible=false; _leafInit=false; } return; }
+  if(!_leafIM.visible) _leafIM.visible=true;
   const t=clock.elapsedTime, eye=camera.position;
   if(!_leafInit){ for(let i=0;i<LEAF_MAX;i++) _leafRespawn(i, eye.y + (Math.random()*2-1)*(LEAF_TOP)); _leafInit=true; }
   // day-tint the whole batch (leaves darken at dusk with the world) + hide when the eye is underground/submerged
@@ -12190,7 +12220,12 @@ function makeBird(){ const g=new THREE.Group(); const bm=new THREE.MeshBasicMate
   const wl=new THREE.Mesh(new THREE.BoxGeometry(0.62,0.035,0.26),bm); wl.position.x=-0.36; wl.geometry.translate(0.31,0,0);   // pivot at the shoulder
   const wr=new THREE.Mesh(new THREE.BoxGeometry(0.62,0.035,0.26),bm); wr.position.x=0.36; wr.geometry.translate(-0.31,0,0);
   g.add(wl); g.add(wr); g.userData={wl,wr}; return g; }
-function updateSkyBirds(dt){ _birdT-=dt;
+function updateSkyBirds(dt){
+  // Same isolation rule as the leaves (Ben 07-28): outdoor ambience must not appear inside the Backrooms — birds were
+  // free to fly through the ceiling of a sealed hall.
+  if(typeof BR!=='undefined' && BR.inside){ if(skyBirdGroup.visible) skyBirdGroup.visible=false; return; }
+  if(!skyBirdGroup.visible) skyBirdGroup.visible=true;
+  _birdT-=dt;
   if(_birdT<=0){ _birdT=28+Math.random()*50; const n=3+(Math.random()*5|0), ang=Math.random()*6.283, dist=110;
     const cx=player.pos.x+Math.cos(ang)*dist, cz=player.pos.z+Math.sin(ang)*dist, hy=player.pos.y+42+Math.random()*28;
     const dir=Math.atan2(player.pos.x-cx,player.pos.z-cz)+(Math.random()-0.5)*0.7;

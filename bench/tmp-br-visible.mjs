@@ -82,6 +82,12 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     const lit = await page.evaluate(`(()=>{ const s=window.__hcBRX.envStats(); return {litNear:s.litNear, fixtures:s.fixtures}; })()`);
     T('the fluorescents are actually lighting the halls', lit.litNear>0, lit);
     T('there are fixtures to light them with', lit.fixtures>20, lit);
+    const rig = await page.evaluate(`window.__hcBRX.doorRig()`);
+    console.log('door rig:', JSON.stringify(rig));
+    T('no door hinge was swallowed by the static merge', rig.pivots>0 && rig.orphaned===0 && rig.empty===0, rig);
+    const sw = await page.evaluate(`window.__hcBRX.doorSwing()`);
+    console.log('door swing:', JSON.stringify(sw));
+    T('a door actually swings when told to', !!sw && Math.abs(sw.after-sw.before)>0.2, sw);
     await page.evaluate(`__hc.aim(false)`); await sleep(1200);
     await page.screenshot({ path: path.join(OUT,'br-visible.png') });
     // PIXELS. Reading back the WebGL canvas in-page returns blank (no preserveDrawingBuffer), so decode the screenshot
