@@ -48,7 +48,16 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
         } }
       return out; })()`);
 
-    T('every shared boundary punches the SAME holes from both sides', R.bad.length===0, {pairs:R.pairs, match:R.match, sample:R.bad[0]});
+    // RETIRED: this used to assert both sides of a boundary punch matching holes. That invariant existed to stop a door
+    // landing on one face and plaster on the other, and it is now satisfied structurally: a shared boundary has exactly ONE
+    // owner (the lower chunk), so there is only one wall and it cannot disagree with itself. What replaces it is the
+    // property that motivated the change — no two wall planes on the same line.
+    const dw = await page.evaluate(`window.__hcBRX.dupWalls()`);
+    console.log('duplicate wall check:', JSON.stringify(dw));
+    T('no two walls sit on the same world line (Ben: overlapping walls)', dw.dupPairs===0, dw);
+    // (openings-per-boundary is covered by 'no boundary is left completely sealed' below; R.bad is a capped sample list
+    //  and must never be used as a count)
+    T('the owning side still punches openings', R.gapCount>0, {gaps:R.gapCount, pairs:R.pairs});
     T('no boundary is left completely sealed', R.noGap.length===0, {sealed:R.noGap.slice(0,4)});
     T('crossings actually exist in quantity', R.gapCount>R.pairs, {gaps:R.gapCount, pairs:R.pairs});
     T('tunnels and stairs are being recorded', R.tun>0 && R.st>0, {chunks:R.chunks, tunnels:R.tun, stairs:R.st, lintels:R.lint});

@@ -55,11 +55,18 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
       const got=[];
       for(const t of [0,0.25,0.5,0.75,1.0]){
         const w=await page.evaluate(`window.__hcBRX.standOnRampAt(${JSON.stringify(near)},${t})`);
-        await sleep(650);
-        const y=(await page.evaluate(`__hc.pos()`)).y;
+        // WAIT FOR REST, do not guess a settle time. A fixed sleep made this sample alternate between pass and fail on the
+        // same seed: read too early and the player is still mid-drop onto the tread, which looks exactly like an obstruction.
+        let y=null, prev=null, still=0;
+        for(let k=0;k<20;k++){ await sleep(120); y=(await page.evaluate(`__hc.pos()`)).y;
+          if(prev!==null && Math.abs(y-prev)<0.005) { if(++still>=2) break; } else still=0;
+          prev=y; }
         got.push({t, want:w?w.want:null, got:+y.toFixed(2), err:w?+Math.abs(y-w.want).toFixed(2):null});
       }
       console.log('real flight surface:', JSON.stringify(got));
+      { const dxr=near.x1-near.x0, dzr=near.z1-near.z0;
+        const qx=near.x0+dxr*0.25, qz=near.z0+dzr*0.25;
+        console.log('flights claiming t=0.25:', JSON.stringify(await page.evaluate(`window.__hcBRX.rampsAt(${qx},${qz})`))); }
       T('the flight surface is exact end to end', got.every(g=>g.err!==null && g.err<0.6), got.filter(g=>g.err===null||g.err>=0.6));
       const span=got[4].got-got[0].got;
       T('walking it changes storey by exactly one', Math.abs(Math.abs(span)-BR_CH_EXPECT)<0.6, {foot:got[0].got, head:got[4].got, span:+span.toFixed(2)});

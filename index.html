@@ -10158,11 +10158,11 @@ function brEnter(){ if(BR.inside)return; const d=BR.door;
   else brBuildEnvAll();                                                                                                   // generate the angled room graph + render the smooth PBR environment
   brStartAudio(); BR.paleFlees=0; BR.pale={state:'dormant',cd:45+Math.random()*45,t:0}; }   // The Pale wakes 45-90s in; the flee counter (2 retreats, then it commits) resets per visit
 function brExit(){ if(!BR.inside)return; const r=BR.returnPos||{x:0,y:BR_FLOOR,z:0,yaw:0};
-  brStopAudio(); brResumeMusic(); brRestoreAtmo(); brClearEnv(); BR.rooms=[]; brClearExit(); brHidePale(); BR.inside=false;
+  brStopAudio(); brResumeMusic(); brRestoreAtmo(); brEnvCacheClear(); brClearEnv(); BR.rooms=[]; brClearExit(); brHidePale(); BR.inside=false;
   player.pos.set(r.x, (typeof groundYAt==='function')?groundYAt(r.x,r.z)+1.1:r.y+1.1, r.z); player.vel.set(0,0,0);
   if(typeof streamChunks==='function')for(let i=0;i<6;i++)streamChunks(160,160);
   if(typeof flashName==='function')flashName(BR.hasKey?'you step back into the world — the Key to Olympus is yours':'you step back into the world'); }
-function brForceLeaveOnDeath(){ brStopAudio(); brResumeMusic(); brRestoreAtmo(); brClearEnv(); BR.rooms=[]; brClearExit(); brHidePale(); BR.inside=false; BR.hasKey=false; BR.sealed=true; }
+function brForceLeaveOnDeath(){ brStopAudio(); brResumeMusic(); brRestoreAtmo(); brEnvCacheClear(); brClearEnv(); BR.rooms=[]; brClearExit(); brHidePale(); BR.inside=false; BR.hasKey=false; BR.sealed=true; }
 
 // ---- MINIMAP → dead static (one 64px noise texture, scrolled; no per-frame noise gen) ----
 let _brNoise=null;
@@ -10537,6 +10537,13 @@ function brxEmitWall(run, vert, rnd, o){ const s0=vert?run.z0:run.x0, s1=vert?ru
     if(vert){ if(line===0) dgx=-1; else if(line===o.CW) dgx=1; }
     else { if(line===0) dgz=-1; else if(line===o.CD) dgz=1; }
     if(dgx||dgz){
+      // ONE SIDE OWNS A SHARED BOUNDARY — the lower chunk, exactly as brxEdge is keyed. Both neighbours used to emit for
+      // the same boundary, so every chunk edge carried TWO coincident wall planes on the identical world line (z-fighting
+      // shimmer — Ben: "walls are overlapping often"), two lintels, two stair flights stacked on each other (measured:
+      // rampsAt returned flights 50->41 and 41->50 both at offset 0), and, because each side rolls its own rnd(), two door
+      // leaves in possibly DIFFERENT open states hung in one opening. The owner's geometry sits on the shared line and
+      // serves both chunks, so the non-owner emits nothing at all here.
+      if(!(dgx>0 || dgz>0)) return;
       const list=brxEdgeFrom(o.gx,o.gz,dgx,dgz)||[], base=vert?o.GZ0:o.GX0;
       // CLIP, DO NOT REJECT. The perimeter is split into one run per room that touches it, and those runs differ between
       // the two chunks. If a crossing had to fit wholly inside one run, a crossing straddling two runs on one side and
@@ -11135,13 +11142,31 @@ function brEnsureLightPool(){ if(BR.lightPool && BR.lightPool.length) return;
 // down. brBuildEnv writes from BR.*, so a chunk is built by swapping BR.* to that chunk's record — the same trick
 // brxChunkGen uses. Collision is world-space, so brxUnion offsets the room/wall heights to match (see brxLevelDy).
 function brxLevelDy(gx,gz){ return BR.levels ? (brxChunkBaseY(gx,gz) - BR_FLOOR) : 0; }
+// PER-CHUNK BUILT-GEOMETRY CACHE. brxChunkGen already caches the chunk DATA, but every crossing threw away and rebuilt
+// the GEOMETRY of all nine loaded chunks when at most three of them had changed — ~1900 meshes discarded and remade for
+// one step over a boundary, which is the hitch Ben felt "entering new chunks". Groups are now kept, keyed gx_gz, and only
+// newly-entered chunks are built. Anything that changes what a chunk BUILDS (the storey offset, the seed) must clear this.
+function brEnvCacheDetach(){ if(!BR.envCache) return;                       // lift cached groups clear of BR.env so the
+  for(const e of BR.envCache.values()) if(e.g && e.g.parent) e.g.parent.remove(e.g); }   // dispose-traverse below cannot eat them
+function brEnvCacheClear(){ if(!BR.envCache) return;
+  for(const e of BR.envCache.values()){ if(e.g){ if(e.g.parent) e.g.parent.remove(e.g);
+    e.g.traverse(o=>{ if(o.geometry) o.geometry.dispose(); }); } }
+  BR.envCache.clear(); }
 function brBuildEnvAll(){
   if(!BR.infinite || !BR.loaded || !BR.loaded.length){ brClearEnv(); brEnsureLightPool(); const g=brBuildEnv(); scene.add(g); BR.env=g; brxUpdateLights(player.pos.x,player.pos.z); return; }
+  brEnvCacheDetach();                                                       // MUST precede brClearEnv, which disposes geometry
   brClearEnv(); brEnsureLightPool();
   const parent=new THREE.Group(); scene.add(parent); BR.env=parent;
+  if(!BR.envCache) BR.envCache=new Map();
   const stash={}; for(const f of BRX_FIELDS) stash[f]=BR[f];
-  const allRamps=[], allFlick=[];
+  const allRamps=[], allFlick=[], live=new Set();
   for(const rec of BR.loaded){
+    const ck=rec.gx+'_'+rec.gz; live.add(ck);
+    let ent=BR.envCache.get(ck);
+    if(ent){ parent.add(ent.g);                                             // already built: re-parent, do not rebuild
+      for(const r of ent.ramps) allRamps.push(r);
+      for(const fl of ent.flickers) allFlick.push(fl);
+      continue; }
     for(const f of BRX_FIELDS) BR[f]=rec[f];
     BR.ramps=[];
     // NEVER SWALLOW A BUILD ERROR. This catch existed so one bad chunk could not kill the whole environment, but a bare
@@ -11151,10 +11176,17 @@ function brBuildEnvAll(){
       BR._buildErr=BR._buildErr||[]; if(BR._buildErr.length<8) BR._buildErr.push({gx:rec.gx, gz:rec.gz, err:String(e&&e.message||e), stack:String(e&&e.stack||'').split(String.fromCharCode(10)).slice(0,3).join(' | ')});
       console.error('[BRX] chunk '+rec.gx+','+rec.gz+' failed to build:', e); }
     if(g){ const dy=brxLevelDy(rec.gx,rec.gz); g.position.y=dy;
-      for(const r of (BR.ramps||[])) allRamps.push({...r, y0:r.y0+dy, y1:r.y1+dy});   // SPREAD, not a hand-written field list: the old copy enumerated x0..vert and silently dropped every field added later (it ate chw, so the walk surface shrank back to the visual rails and you fell through the carve beside a flight)
-      for(const fl of (BR.flickers||[])) allFlick.push(fl);
+      // SPREAD, not a hand-written field list: the old copy enumerated x0..vert and silently dropped every field added
+      // later (it ate chw, so the walk surface shrank back to the visual rails and you fell through the carve).
+      ent={ g, ramps:(BR.ramps||[]).map(r=>({...r, y0:r.y0+dy, y1:r.y1+dy})), flickers:(BR.flickers||[]).slice() };
+      BR.envCache.set(ck, ent);
+      for(const r of ent.ramps) allRamps.push(r);
+      for(const fl of ent.flickers) allFlick.push(fl);
       parent.add(g); } }
   for(const f of BRX_FIELDS) BR[f]=stash[f];
+  for(const [ck,e] of BR.envCache){ if(live.has(ck)) continue;              // evict chunks that streamed out, and only now dispose them
+    if(e.g){ if(e.g.parent) e.g.parent.remove(e.g); e.g.traverse(o=>{ if(o.geometry) o.geometry.dispose(); }); }
+    BR.envCache.delete(ck); }
   BR.ramps=allRamps; BR.flickers=allFlick;                    // both are per-frame consumers and must span the whole loaded set
   brxUpdateLights(player.pos.x,player.pos.z); }
 // DYING-TUBE FLICKER — returns 1 (on) or 0 (fully OFF), never a dim. A slow per-fixture envelope decides when a tube is
@@ -11673,7 +11705,7 @@ if(typeof window!=='undefined'){ window.__hcBRX={          // the chunk substrat
   chunkOf:(x,z)=>brxChunkOf(x,z), origin:(gx,gz)=>brxChunkOrigin(gx,gz), seedOf:(gx,gz)=>brxChunkSeed(gx,gz),
   SPAN:BRX_SPAN, CELLS:BRX_CELLS, entry:()=>({x:BR_ENTRY.x,z:BR_ENTRY.z}),
   level:(gx,gz)=>brxChunkLevel(gx,gz), baseY:(gx,gz)=>brxChunkBaseY(gx,gz), LEVELS:BRX_LEVELS,
-  infinite:(on)=>{ BR.infinite=!!on; if(BR.infinite && BR.inside){ BR.gen=null; BR._cgx=null; brxStream(true); } return !!BR.infinite; },
+  infinite:(on)=>{ BR.infinite=!!on; brEnvCacheClear(); if(BR.infinite && BR.inside){ BR.gen=null; BR._cgx=null; brxStream(true); } return !!BR.infinite; },
   stats:()=>({ infinite:!!BR.infinite, cached:BR.gen?BR.gen.size:0, loaded:(BR.loaded||[]).length,
     chunk:[BR._cgx,BR._cgz], rooms:(BR.rooms||[]).length, walls:(BR.walls||[]).length,
     at:brxChunkOf(player.pos.x,player.pos.z) }),
@@ -11695,7 +11727,37 @@ if(typeof window!=='undefined'){ window.__hcBRX={          // the chunk substrat
     if(hi>cur+0.06) gaps.push([+cur.toFixed(2), +hi.toFixed(2)]);
     return gaps; },
   crossings:(gx,gz)=>{ const rec=brxChunkGen(gx,gz); return { tunnels:rec.tunnels.length, stairs:rec.stairs.length, lintels:rec.lintels.length }; },
-  levels:(on)=>{ BR.levels=!!on; if(BR.inside){ try{ brBuildEnvAll(); }catch(e){ return {err:e.message}; } } return { levels:!!BR.levels, ramps:(BR.ramps||[]).length }; },
+  levels:(on)=>{ BR.levels=!!on; brEnvCacheClear();                        // dy and the stair flights differ per storey, so every cached group is stale
+    if(BR.inside){ try{ brBuildEnvAll(); }catch(e){ return {err:e.message}; } } return { levels:!!BR.levels, ramps:(BR.ramps||[]).length }; },
+  // QA: coincident duplicate wall segments across the whole loaded set. This is the direct test for Ben's "walls are
+  // overlapping often" — two wall planes on the identical world line, which is what both chunks emitting a shared
+  // boundary produced. Direction-normalised, so A->B and B->A count as the same segment.
+  dupWalls:()=>{ const seen=new Map(), dups=[];
+    const q=v=>Math.round(v*20)/20;
+    for(const w of (BR.walls||[])){
+      let a=[q(w.x0),q(w.z0)], b=[q(w.x1),q(w.z1)];
+      if(a[0]>b[0] || (a[0]===b[0] && a[1]>b[1])){ const t=a; a=b; b=t; }
+      const k=a[0]+','+a[1]+'>'+b[0]+','+b[1]+'@'+q(w.ty||0);
+      if(seen.has(k)){ if(dups.length<6) dups.push({seg:k, n:seen.get(k)+1}); seen.set(k,seen.get(k)+1); }
+      else seen.set(k,1); }
+    return { walls:(BR.walls||[]).length, unique:seen.size, dupPairs:dups.length, sample:dups.slice(0,3) }; },
+  // QA: which flights claim a given point, nearest first. Overlapping flights were the cause of an invisible step once.
+  rampsAt:(x,z)=>{ const out=[];
+    for(let i=0;i<(BR.ramps||[]).length;i++){ const R=BR.ramps[i];
+      const dx=R.x1-R.x0, dz=R.z1-R.z0, ll=dx*dx+dz*dz||1;
+      let t=((x-R.x0)*dx+(z-R.z0)*dz)/ll; if(t<-0.06||t>1.06) continue; t=Math.max(0,Math.min(1,t));
+      const off=Math.hypot(x-(R.x0+dx*t), z-(R.z0+dz*t));
+      if(off > (R.chw||R.hw)) continue;
+      out.push({ i, off:+off.toFixed(2), surf:+(R.y0+(R.y1-R.y0)*t).toFixed(2), y0:R.y0, y1:R.y1, hw:R.hw, chw:R.chw }); }
+    return out.sort((a,b)=>a.off-b.off); },
+  // QA: renderer resource counts + BR-side pools. A monotonic climb here while standing still IS a leak.
+  rinfo:()=>{ const i=renderer.info;
+    return { geometries:i.memory.geometries, textures:i.memory.textures, programs:(i.programs?i.programs.length:-1),
+             calls:i.render.calls, tris:i.render.triangles,
+             sceneKids:scene.children.length, envKids:BR.env?BR.env.children.length:-1,
+             gen:BR.gen?BR.gen.size:-1, ramps:(BR.ramps||[]).length, fixtures:(BR.fixtures||[]).length,
+             flickers:(BR.flickers||[]).length, lightPool:(BR.lightPool||[]).length,
+             rooms:(BR.rooms||[]).length, walls:(BR.walls||[]).length }; },
   // QA: stand directly under the nearest working fixture and look at the floor. Distinguishes "the floor is broken" from
   // "you were standing in one of the 30% of rooms that are deliberately unlit".
   standUnderFixture:()=>{ const F=BR.fixtures||[]; if(!F.length) return null;
@@ -11729,7 +11791,7 @@ if(typeof window!=='undefined'){ window.__hcBRX={          // the chunk substrat
              gorePct:+(100*gore/rooms).toFixed(3), bloodPct:+(100*blood/rooms).toFixed(2) }; },
   // QA: force the nearest room to be a gore room and rebuild, so it can be looked at
   forceGore:()=>{ const r=brxRoomAt(player.pos.x, player.pos.z); if(!r) return null;
-    r.gore=true; r.zone=2; r.lit=true; brBuildEnvAll();
+    r.gore=true; r.zone=2; r.lit=true; brEnvCacheClear(); brBuildEnvAll();   // mutating room data has no effect while that chunk's geometry is cached
     player.pos.set(r.cx_w, (r.fy!=null?r.fy:BR_WY0)+1.2, r.cz_w);
     return { x:+r.cx_w.toFixed(1), z:+r.cz_w.toFixed(1), w:+(r.x1-r.x0).toFixed(1) }; },
   // QA: is the VOXEL layer present under the player? BR.env is meshes; the floor/ceiling slabs are blocks, and the two
@@ -11820,7 +11882,7 @@ if(typeof window!=='undefined'){ window.__hcBR={ door:()=>brSpawnDoorNearPlayer(
     if(!p.setAnim)p.setAnim=(x)=>{ if(p.anim!==x){ p.anim=x; p.animT=0; } }; if(p.mesh){ p.y=brPaleFloorY(p.x,p.z); if(p.y==null)p.y=BR_WY0; p.mesh.position.set(p.x,p.y,p.z); p.mesh.visible=true; brPaleAnim(p,0.016); } return a||'idle'; },   // QA: force a named clip (idle/crouch/hide/rise/stand/walk/run/peek/flail/glide/lunge/turn/banish)
   rooms:()=>{ const R=BR.rooms||[], W=BR.walls||[]; const areas=R.map(r=>((r.x1-r.x0)*(r.z1-r.z0))|0); const angled=W.filter(w=>Math.abs(w.x1-w.x0)>0.01 && Math.abs(w.z1-w.z0)>0.01).length;
     return {rooms:R.length, walls:W.length, angledWalls:angled, halfWalls:W.filter(w=>w.half).length, crawls:(BR.crawls||[]).length, doors:(BR.doors||[]).length, pillars:(BR.pillars||[]).length, fixtures:(BR.fixtures||[]).length, avgDoors:R.length?+(R.reduce((s,r)=>s+(r.doors||0),0)/R.length).toFixed(2):0, maxDoors:R.length?Math.max(0,...R.map(r=>r.doors||0)):0, minArea:areas.length?Math.min(...areas):0, maxArea:areas.length?Math.max(...areas):0}; },
-  seed:(v)=>{ BR.seed=(v>>>0)||1; BR.rooms=[]; BR.gen=null; BR._cgx=null; if(BR.inside){ try{ if(BR.infinite) brxStream(true); else brBuildEnvAll(); }catch(e){ return 'ERR:'+(e&&e.message); } } return BR.seed; },   // QA: force a maze seed + rebuild
+  seed:(v)=>{ BR.seed=(v>>>0)||1; BR.rooms=[]; BR.gen=null; BR._cgx=null; brEnvCacheClear(); if(BR.inside){ try{ if(BR.infinite) brxStream(true); else brBuildEnvAll(); }catch(e){ return 'ERR:'+(e&&e.message); } } return BR.seed; },   // QA: force a maze seed + rebuild
   doorList:()=>(BR.doors||[]).map((d,i)=>({i,cx:+d.cx.toFixed(1),cz:+d.cz.toFixed(1),closed:d.closed,a:+(d.a||0).toFixed(2),kind:d.kind,dbl:!!d.dbl,leafW:+(d.leafW||0).toFixed(2)})),
   goDoor:(i)=>{ const d=(BR.doors||[])[i|0]; if(!d)return null; if(!BR.inside)brEnter();      // QA: stand square-on to a door, 3.2 back, eye level
     const nx=d.vert?1:0, nz=d.vert?0:1; player.pos.set(d.cx+nx*3.2, BR_FLOOR+1.2, d.cz+nz*3.2);
