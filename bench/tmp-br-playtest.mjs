@@ -51,7 +51,10 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     const p1 = await page.evaluate(`__hc.pos()`);
     const moved = Math.hypot(p1.x-p0.x, p1.z-p0.z);
     console.log('walked', moved.toFixed(1), 'blocks; y '+p0.y.toFixed(1)+' -> '+p1.y.toFixed(1));
-    T('the player can actually walk somewhere', moved>3, {moved:+moved.toFixed(1)});
+    // >1.5, not >3: this used to clear 3 blocks easily because the environment was not rendering or colliding at all, so
+    // there was nothing to walk into. With the rooms actually built, walking blind in a fixed direction hits a wall almost
+    // immediately — which is the correct behaviour. What matters is that the player is not welded to the spawn point.
+    T('the player can actually walk somewhere', moved>1.5, {moved:+moved.toFixed(1)});
     T('the player did not fall out of the world', p1.y > 20, {y:+p1.y.toFixed(1)});
 
     await page.evaluate(`__hc.qa(55)`); await sleep(700);

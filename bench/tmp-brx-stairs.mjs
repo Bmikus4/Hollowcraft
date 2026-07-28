@@ -49,28 +49,71 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     await page.evaluate(`window.__hcBRX.standOnRamp(0,0.05)`); await sleep(2500);
     const near = await page.evaluate(`window.__hcBRX.rampNear()`);
     console.log('nearest real flight', JSON.stringify(near));
-    T('a real flight is reachable and spans one storey', !!near && Math.abs((near.y1-near.y0)-BR_CH_EXPECT)<0.6, near);
+    // a flight may DESCEND, so compare the magnitude of the storey change, not a signed climb
+    T('a real flight is reachable and spans one storey', !!near && Math.abs(Math.abs(near.y1-near.y0)-BR_CH_EXPECT)<0.6, near);
     if(near){
       const got=[];
       for(const t of [0,0.25,0.5,0.75,1.0]){
-        const w=await page.evaluate(`window.__hcBRX.standOnRamp(${near.i},${t})`);
+        const w=await page.evaluate(`window.__hcBRX.standOnRampAt(${JSON.stringify(near)},${t})`);
         await sleep(650);
         const y=(await page.evaluate(`__hc.pos()`)).y;
         got.push({t, want:w?w.want:null, got:+y.toFixed(2), err:w?+Math.abs(y-w.want).toFixed(2):null});
       }
       console.log('real flight surface:', JSON.stringify(got));
-      // What holds: the flight's own record spans exactly one storey, and the surface is honoured where it exists.
-      const hit=got.filter(g=>g.err!==null && g.err<0.6);
-      T('the flight surface is honoured where the player meets it', hit.length>=1, {matched:hit, all:got});
-      // OPEN DEFECT — do not dress this up. Some real flights report a world span that does not match the storeys they
-      // join: a flight in a storey-1 chunk came back as y50 -> y59, i.e. climbing toward a storey 2 that cannot exist with
-      // BRX_LEVELS=2. The stair direction stored at generation time and the group offset applied at build time disagree in
-      // sign for at least some chunks, so the player falls through where the flight claims to start. Logged loudly, and
-      // written up in the report as the top open item, rather than hidden behind a relaxed assertion.
-      const maxY = 40 + (BR_LEVELS_MAX)*9 + 1;
-      const impossible = got.filter(g=>g.want!==null && g.want>maxY);
-      console.log('OPEN DEFECT — flight world heights beyond the top storey ('+maxY+'): '+JSON.stringify(impossible));
-      console.log('OPEN DEFECT — samples where the player fell through the flight: '+JSON.stringify(got.filter(g=>g.err!==null&&g.err>=0.6)));
+      T('the flight surface is exact end to end', got.every(g=>g.err!==null && g.err<0.6), got.filter(g=>g.err===null||g.err>=0.6));
+      const span=got[4].got-got[0].got;
+      T('walking it changes storey by exactly one', Math.abs(Math.abs(span)-BR_CH_EXPECT)<0.6, {foot:got[0].got, head:got[4].got, span:+span.toFixed(2)});
+      const maxY = 40 + BR_LEVELS_MAX*9 + 1;
+      T('no flight reaches beyond the top storey', got.every(g=>g.want===null || g.want<=maxY+0.01), {maxY, beyond:got.filter(g=>g.want>maxY)});
+      // BALUSTRADE: the side walls are render-only meshes, so this asserts the COLLISION added in the ramp loop, not the
+      // geometry. Stand mid-flight and strafe hard into each side: you must stay on the treads, not step off into the well.
+      for(const key of ['KeyA','KeyD']){
+        await page.evaluate(`window.__hcBRX.standOnRampAt(${JSON.stringify(near)},0.5)`); await sleep(500);
+        await page.keyboard.down(key); for(let i=0;i<6;i++) await sleep(300); await page.keyboard.up(key); await sleep(400);
+        const q=await page.evaluate(`__hc.pos()`);
+        const dxr=near.x1-near.x0, dzr=near.z1-near.z0, ll=dxr*dxr+dzr*dzr||1;
+        const tt=Math.max(0,Math.min(1,((q.x-near.x0)*dxr+(q.z-near.z0)*dzr)/ll));
+        const offd=Math.hypot(q.x-(near.x0+dxr*tt), q.z-(near.z0+dzr*tt));
+        const surf=near.y0+(near.y1-near.y0)*tt;
+        T('strafing '+key+' does not push the player off the flight', offd<1.6 && Math.abs(q.y-surf)<1.0,
+          {off:+offd.toFixed(2), hw:1.1, y:+q.y.toFixed(2), surf:+surf.toFixed(2)});
+      }
+      // ...and press the branch directly: the walls are render-only meshes, so this tests the COLLISION in the ramp loop.
+      const NEAR=JSON.stringify(near);
+      // t=0.25, NOT 0.5: the crossing sits ON the chunk boundary, so offsetting sideways at t=0.5 lands inside the
+      // boundary wall beside the opening and it is the WALL push-out being measured, not the balustrade.
+      await page.evaluate(`window.__hcBRX.standBesideRamp(${NEAR},0.25,1.3,0.1)`); await sleep(500);
+      const inside=await page.evaluate(`window.__hcBRX.rampOffset(${NEAR})`);
+      T('level with the treads, just outside the rail, you are pulled back onto the flight', inside.off<=1.1,
+        Object.assign({hw:1.1}, inside));
+      T('...and still standing on the tread, not dropped', Math.abs(inside.y-inside.surf)<1.0, inside);
+      // THE SHAFT ITSELF, asserted on the voxels rather than on where a dropped player happens to land. The earlier
+      // version placed the player at off 2.2 and checked it was not snapped onto the flight — but that column turned out to
+      // be uncarved concrete, so it was asserting a push-out from inside solid rock and proved nothing about the flight.
+      const scan = async(off)=>page.evaluate(`window.__hcBRX.colScan(${NEAR},0.25,${off})`);
+      const onIt=await scan(0), beside=await scan(1.3), past=await scan(3.0);
+      const clear=(c,lo,hi)=>{ for(let y=lo;y<=hi;y++) if(c.solid.includes(y)) return y; return null; };
+      T('the stairwell shaft is open through the storey the flight descends past',
+        clear(onIt,onIt.span.lo+1,onIt.span.hi)===null && clear(beside,onIt.span.lo+1,onIt.span.hi)===null,
+        {onFlight:onIt.solid, beside:beside.solid, span:onIt.span});
+      T('the bottom of the shaft is FLUSH with the storey it joins, not a block below it',
+        onIt.solid.length>0 && Math.max(...onIt.solid)===onIt.span.lo, {solid:onIt.solid, lo:onIt.span.lo, footOfFlight:Math.min(near.y0,near.y1)});
+      // The carve is quantized to whole columns and always overshoots the rails, so the guarantee is not "no slot" but
+      // "nothing to fall through": every carved column beside the flight has the stair surface under it.
+      for(const o of [1.8, 2.2]){
+        const cv=await scan(o);
+        if(!cv.solid.includes(onIt.span.hi)){                                    // this column IS carved — so it must be caught
+          await page.evaluate(`window.__hcBRX.standBesideRamp(${NEAR},0.25,${o},0.4)`); await sleep(500);
+          const q=await page.evaluate(`window.__hcBRX.rampOffset(${NEAR})`);
+          // The property that matters is "you do not fall a storey", not "you land exactly on the tread": at the outer edge
+          // of the carve the player's 0.42 radius overlaps the intact concrete next door, so being held at floor level there
+          // is just as safe as standing on the stair.
+          T('a carved column at off '+o+' beside the flight never drops you below the flight',
+            q.y >= q.surf-1.0, Object.assign({carved:cv.solid.length}, q));
+        } else T('off '+o+' is outside the carve — intact floor', true, {solid:cv.solid.length});
+      }
+      T('past the shaft the floor slab is intact — the carve is the flight footprint, not a trench',
+        past.span===null && past.solid.includes(onIt.span.hi), {solid:past.solid, span:past.span});
       await page.screenshot({ path: path.join(OUT,'v1-stairs-top.png') });
     }
     const fps=[]; for(let i=0;i<4;i++){ await sleep(700); fps.push((await page.evaluate(`__hc.st()`)).fps); }

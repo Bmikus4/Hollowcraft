@@ -10063,10 +10063,26 @@ function brVoidAt(wx,wz){ const R=BR.rooms; if(!R||!R.length)return false;
   return false; }
 // A vertical room carries on up past the flat voxel ceiling, so that ceiling must not exist over its footprint.
 // A stair crossing must not be roofed: its flight passes through the ceiling slab on the way to the storey above.
-function brStairAt(wx,wz){ const S=BR.stairs; if(!S||!S.length||!BR.levels)return false;
+// A stairwell is a SHAFT, not a hole in one lid. The old brStairAt returned a bare boolean and brGenColumn used it only to
+// clear y===topY — the ceiling of the column's own storey. But a crossing joins two storeys, and each column belongs to
+// exactly one of them: on the LOWER side the flight rises through that column's ceiling (correctly opened), while on the
+// UPPER side it descends through that column's own FLOOR slab and the concrete under it, which nothing ever opened. So the
+// descending half of every flight was buried in solid ground — measured as a tread that should sit at y47.75 stopping the
+// player at y49 on the slab above it. Return the flight's world span instead, and let the column open whichever of its own
+// two lids the flight actually passes through.
+function brStairRun(rise){ return Math.max(4.0, Math.abs(rise)*1.7); }      // ONE definition: the builder and the voxel carve must agree, or the shaft is either too short to walk or a trench in the carpet
+const BRX_STAIR_HW=1.3;                                                      // half-width of the shaft: flight hw 1.1 + its 0.16 rail, and NO MORE. At 2.0 the carve ran 0.74 past each rail, leaving a slot of open shaft in the carpet beside the stairs that a 0.42-radius player fits straight down.
+function brStairSpanAt(wx,wz){ const S=BR.stairs; if(!S||!S.length||!BR.levels)return null;
   for(let i=0;i<S.length;i++){ const st=S[i];
-    if(Math.abs(wx-st.cx)<=(st.vert?18:2.0) && Math.abs(wz-st.cz)<=(st.vert?2.0:18)) return true; }
-  return false; }
+    const half=brStairRun((st.rise||1)*BR_CH)/2 + 1.0;                     // the flight's true extent, not a blanket 18 (which cut ~10 blocks of open trench past each end once the FLOOR started opening too)
+    if(Math.abs(wx-st.cx)<=(st.vert?half:BRX_STAIR_HW) && Math.abs(wz-st.cz)<=(st.vert?BRX_STAIR_HW:half)){
+      // the two storeys this flight joins, read from the chunks either side of the boundary it sits on
+      const e=1.0, ax=st.cx+(st.vert?-e:0), az=st.cz+(st.vert?0:-e), bx=st.cx+(st.vert?e:0), bz=st.cz+(st.vert?0:e);
+      const ca=brxChunkOf(ax,az), cb=brxChunkOf(bx,bz);
+      const ya=brxChunkBaseY(ca.gx,ca.gz), yb=brxChunkBaseY(cb.gx,cb.gz);
+      if(ya===yb) continue;                                                  // no storey change here — nothing to open
+      return { lo:Math.min(ya,yb), hi:Math.max(ya,yb) }; } }
+  return null; }
 function brOpenTopAt(wx,wz){ const R=BR.rooms; if(!R||!R.length)return false;
   for(let i=0;i<R.length;i++){ const r=R[i]; if(!r.shaft)continue;
     if(wx>=r.x0 && wx<r.x1 && wz>=r.z0 && wz<r.z1) return true; }
@@ -10074,8 +10090,13 @@ function brOpenTopAt(wx,wz){ const R=BR.rooms; if(!R||!R.length)return false;
 function brGenColumn(c,lx,lz,wx,wz){ const bl=c.blocks;
   // STACKED FLOORS: the slab this column belongs to is its BRX chunk's storey, not one global BR_FLOOR.
   const _bc=brxChunkOf(wx,wz), FLOOR = BR.levels ? brxChunkBaseY(_bc.gx,_bc.gz) : BR_FLOOR, topY=FLOOR+BR_CH;   // BRX (Ben 07-26): FLAT floor+ceiling only — Y collision + a safety net. The ANGLED walls are BRX render+collision, NOT voxels.
-  const voidCol=brVoidAt(wx,wz), openTop=brOpenTopAt(wx,wz)||brStairAt(wx,wz);   // a flight climbs THROUGH the slab, so a stair crossing opens the lid too
-  for(let y=0;y<=topY;y++){ let b=0; if(y===0)b=BID.bedrock; else if(y<FLOOR)b=(voidCol?0:BID.br_concrete); else if(y===FLOOR)b=(voidCol?0:BID.br_carpet); else if(y===topY)b=(openTop?0:BID.br_ceiling); if(b)bl[idx(lx,y,lz)]=b; }
+  const voidCol=brVoidAt(wx,wz), sp=brStairSpanAt(wx,wz);
+  const openTop=brOpenTopAt(wx,wz) || (!!sp && sp.hi>=topY-0.01);               // the flight climbs out through THIS storey's ceiling
+  const openDown=(!!sp && sp.lo<FLOOR-0.01) ? sp.lo : null;                     // ...or descends through THIS storey's own floor: clear the slab and the concrete beneath it down to the storey below
+  for(let y=0;y<=topY;y++){ let b=0;
+    const shaft = voidCol || (openDown!==null && y>openDown);                   // y>lo, not y>=lo: block lo is the floor of the storey below, so leaving it makes the bottom of the shaft flush with that floor instead of a hidden one-block drop off the last tread
+    if(y===0)b=BID.bedrock; else if(y<FLOOR)b=(shaft?0:BID.br_concrete); else if(y===FLOOR)b=(shaft?0:BID.br_carpet); else if(y===topY)b=(openTop?0:BID.br_ceiling);
+    if(b)bl[idx(lx,y,lz)]=b; }
   c.htop[lx+lz*CK]=topY; }
 
 // ---- ATMOSPHERE: reuse the engine's own fog/light, just swap the presets per zone (crisp, cheap) ----
@@ -10381,6 +10402,12 @@ function brxGenerate(o){ BR.rooms=[]; BR.walls=[]; BR.doors=[]; BR.lintels=[]; B
   for(const r of R){ if(r.entry){ r.lit=true; continue; }
     r.lit = (r.zone===2) ? (rnd()<0.5) : (rnd()>=0.30);
     if((r.cw===1||r.ch===1) && rnd()<0.6) r.lit=false; }
+  // BLOOD (Ben 07-27): "0.1% chance that a room is covered in blood and bones, and the floor must be tile. 1% chance
+  // that a room has blood on it." The gore room is deliberately rare enough that most runs never see one — that is the
+  // point of it. Rolled here so the flag lives on the room record and rides the per-chunk cache like every other field.
+  for(const r of R){ if(r.entry) continue;
+    if(rnd()<0.001){ r.gore=true; r.zone=2; }                                              // "0.1% chance ... and the floor MUST be tile": those odds are over ALL rooms and the tile is a consequence, so the room is RE-SKINNED to tile. Rolling only within rooms that were already tile came out 4x rarer than Ben asked for (0.023% of rooms, not 0.1%).
+    else if(rnd()<0.01) r.blood=true; }                                                    // just blood, any floor
   // BLACKED-OUT SECTIONS (Ben 07-27): scattered single dark rooms read as noise. Two contiguous BANDS of the grid lose
   // every fixture instead → you walk out of the buzzing halls into a whole wing with nothing on, and back out again.
   for(let b=0;b<2;b++){ const vert=rnd()<0.5, span=3+((rnd()*4)|0), at=((rnd()*((vert?CW:CD)-span))|0);
@@ -10535,7 +10562,7 @@ function brxEmitWall(run, vert, rnd, o){ const s0=vert?run.z0:run.x0, s1=vert?ru
           if(ownsIt){
             if(cut.kind===BRX_TUNNEL) BR.tunnels.push(vert?{x0:fixed,z0:cut.a0,x1:fixed,z1:cut.a1}:{x0:cut.a0,z0:fixed,x1:cut.a1,z1:fixed});
             else { const _cx=vert?fixed:cut.mid, _cz=vert?cut.mid:fixed;
-              if(cut.kind===BRX_STAIR) BR.stairs.push({cx:_cx, cz:_cz, vert, dir:cut.c.dir, rise:cut.c.rise, zone});
+              if(cut.kind===BRX_STAIR) BR.stairs.push({cx:_cx, cz:_cz, vert, dir:cut.c.dir, rise:cut.c.rise, zone, out:(vert?dgx:dgz)});   // out = which way the NEIGHBOUR lies along the wall normal; the flight must reach ITS floor on that side
               if(cut.whole && rnd()<0.45){ const dw=cut.a1-cut.a0, hingeAtStart=rnd()<0.5;    // a leaf only where the full opening is in one run; fewer leaves on a boundary than inside a chunk — a threshold between wings reads better open
                 BR.doors.push({ hx:vert?fixed:(hingeAtStart?cut.a0:cut.a1), hz:vert?(hingeAtStart?cut.a0:cut.a1):fixed,
                   vert, dw, hingeAtStart, swing:(rnd()<0.5?1:-1), cx:_cx, cz:_cz,
@@ -10601,6 +10628,13 @@ function brxUnion(){ const keep=BR.loaded||[];
       if(r._ceil0===undefined) r._ceil0=r.ceil;
       r.ceil=r._ceil0+dy; r.fy=BR_WY0+dy; BR.rooms.push(r); }
     for(const w of rec.walls){ if(w._ty0===undefined) w._ty0=(w.ty||BR_WY1); w.ty=w._ty0+dy; }
+    // ROOM IDS ARE REWRITTEN ABOVE, so anything that STORES one has to be rewritten with them. Fixtures and bulbs are
+    // stamped with r.id at generation time, when it is a chunk-local index; brLitRooms works in these unioned ids. The two
+    // id spaces silently disagreed, so brxUpdateLights culled essentially every fixture as "not in a room you can see" and
+    // the Backrooms had NO pooled light at all — measured as litNear:0 while standing directly under a tube in a lit room.
+    // Rebased from a stored original so repeated unions cannot drift.
+    for(const f of rec.fixtures){ if(f._room0===undefined) f._room0=f.room; if(f._room0!=null) f.room=f._room0+base; }
+    for(const b of rec.bulbs){ if(b._room0===undefined) b._room0=b.room; if(b._room0!=null) b.room=b._room0+base; }
     for(const f of BRX_FIELDS){ if(f==='rooms')continue; const a=rec[f]; for(let i=0;i<a.length;i++) BR[f].push(a[i]); } }
   BR._nav=null; BR._navSeed=null; _brLitSet=null; _brLitRoom=-2; }       // both caches key off the room set, which just changed
 function brxStream(force){ if(!BR.infinite || !BR.inside) return false;
@@ -10681,6 +10715,48 @@ function brPropMats(){ if(_brPropMat)return _brPropMat; const M=brDoorMats();
   _brPropMat={ steel:M.steel, wood:M.wood, casing:M.casing,
     grey:L(0x6f7378), drab:L(0x5b5f52), card:L(0x9a7b4f), fabric:L(0x3d4550), rust:L(0x6a4630), paper:L(0xd6d2c2) };
   return _brPropMat; }
+// BLOOD AND BONES. Decals are flat planes a hair above the floor rather than voxel paint, so they cost nothing, survive
+// the chunk cache, and take the room's own pooled light. Bones are crude on purpose — under a dying fluorescent you read
+// the SHAPE of a ribcage, not its topology, and a low-poly scatter reads better than anything detailed and dim.
+let _brGoreMat=null;
+function brGoreMats(){ if(_brGoreMat)return _brGoreMat;
+  _brGoreMat={ blood:new THREE.MeshLambertMaterial({color:0x4a0d0c, transparent:true, opacity:0.93, depthWrite:false,
+                 polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2 }),     // dark and matte: fresh-red reads as paint under warm light
+               dry:new THREE.MeshLambertMaterial({color:0x33100f, transparent:true, opacity:0.8, depthWrite:false,
+                 polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2 }),
+               bone:new THREE.MeshLambertMaterial({color:0xcfc7ad}) };
+  return _brGoreMat; }
+function brBuildGore(grp){ const R=BR.rooms; if(!R||!R.length)return; const G=brGoreMats();
+  const pools=[], dries=[], bones=[];
+  for(const r of R){ if(!r.gore && !r.blood) continue;
+    const rn=tileRng(((r.cx_w*7919)^(r.cz_w*104729)^(r.gore?0xB1:0x51))>>>0);
+    const x0=r.x0+0.7, x1=r.x1-0.7, z0=r.z0+0.7, z1=r.z1-0.7, w=x1-x0, d=z1-z0;
+    if(w<=0.6||d<=0.6) continue;
+    const n = r.gore ? (14+((rn()*12)|0)) : (2+((rn()*3)|0));                              // "covered" vs "has blood on it"
+    for(let i=0;i<n;i++){
+      const rad=(r.gore? 0.6+rn()*1.9 : 0.5+rn()*1.2);
+      const g2=new THREE.CircleGeometry(rad, 9);
+      g2.rotateX(-Math.PI/2); g2.scale(1, 1, 0.55+rn()*0.8);                               // squashed: a pool spreads, it is not a coin
+      g2.rotateY(rn()*6.283);
+      g2.translate(x0+rn()*w, BR_WY0+0.015+ (i%3)*0.002, z0+rn()*d);                       // tiny stagger so overlapping pools do not z-fight
+      (rn()<0.35? dries : pools).push(g2); }
+    if(!r.gore) continue;
+    // a scatter of bones, with two or three ribcages among them
+    const nb=10+((rn()*10)|0);
+    for(let i=0;i<nb;i++){ const bx=x0+rn()*w, bz=z0+rn()*d, ry=rn()*6.283;
+      if(rn()<0.22){                                                                       // ribcage: a spine with ribs hooping off it
+        const len=0.7+rn()*0.5;
+        const sp=new THREE.BoxGeometry(len,0.07,0.07); sp.rotateY(ry); sp.translate(bx,BR_WY0+0.16,bz); bones.push(sp);
+        const nr=3+((rn()*3)|0);
+        for(let k=0;k<nr;k++){ const t=(k+0.5)/nr, rr=new THREE.TorusGeometry(0.17+rn()*0.06,0.028,4,8,Math.PI);
+          rr.rotateY(Math.PI/2); rr.rotateY(ry);
+          rr.translate(bx+Math.cos(ry)*(t-0.5)*len, BR_WY0+0.16, bz+Math.sin(ry)*(t-0.5)*len); bones.push(rr); } }
+      else if(rn()<0.25){ const sk=new THREE.SphereGeometry(0.11,7,6); sk.scale(1,0.92,1.12); sk.translate(bx,BR_WY0+0.11,bz); bones.push(sk); }
+      else { const ln=0.22+rn()*0.4, b2=new THREE.CylinderGeometry(0.033,0.033,ln,5);      // a long bone, lying down
+        b2.rotateZ(Math.PI/2); b2.rotateY(ry); b2.translate(bx,BR_WY0+0.04,bz); bones.push(b2); } } }
+  const add=(arr,mat,shadow)=>{ if(!arr.length)return; const m=new THREE.Mesh(_mergeGeos(arr), mat);
+    m.frustumCulled=false; if(shadow){ m.castShadow=true; m.receiveShadow=true; } grp.add(m); for(const g3 of arr) g3.dispose(); };
+  add(pools,G.blood,false); add(dries,G.dry,false); add(bones,G.bone,true); }
 function brBuildProps(grp){ const P=BR.props; if(!P||!P.length)return; const M=brPropMats();
   for(const pr of P){ const g=new THREE.Group(); g.position.set(pr.x, BR_WY0, pr.z); g.rotation.y=pr.rot;
     const BK=new Map(), _m4=new THREE.Matrix4(), _q=new THREE.Quaternion(), _e=new THREE.Euler(), _s=new THREE.Vector3(1,1,1), _p=new THREE.Vector3();
@@ -10765,31 +10841,41 @@ function brTryPullCord(){ const B=BR.bulbs; if(!BR.inside||!B||!B.length)return 
 // the opening, as a straight run of steps with a landing at the top — a switchback needs more floor than a boundary has.
 // Steps are merged into one mesh per material. The walk surface is registered in BR.ramps as a linear ramp, because the
 // voxel layer has no blocks here at all; brxCollide lifts the player onto it exactly the way a tilted floor works.
-function brBuildStairs(grp, s, yLo, yHi){ const M=brPropMats(), rise=yHi-yLo;
+function brBuildStairs(grp, s, yNear, yFar){ const M=brPropMats(), rise=yFar-yNear;
   if(Math.abs(rise)<0.2) return null;
-  const up = rise>0;
-  const RUN = Math.max(4.0, Math.abs(rise)*1.7);                                        // ~30 degrees; shallower than a domestic stair, which suits a building this size
+  // yNear is THIS chunk's floor, yFar the neighbour's. The old version took (yLo,yHi) and then built
+  // y = yLo + Math.abs(rise)*t — always ASCENDING from yLo whatever the sign — so every DESCENDING crossing produced a
+  // flight climbing away into nothing (measured as a storey-1 chunk reporting y50 -> y59, above the top storey). `up`
+  // only swapped which end was the bottom, which mirrors the direction of travel and not the height at all.
+  // Now the height is interpolated from yNear to yFar with its true sign, and the ends are anchored by geometry: the far
+  // end is on the neighbour's side of the boundary (s.out), so the flight actually lands on the floor it is joining.
+  const RUN = brStairRun(rise);                                                         // ~30 degrees; shallower than a domestic stair, which suits a building this size. Shared with the voxel carve — see brStairRun.
   const W = 2.2;                                                                        // flight width, wider than the doorway so the reveal is not the pinch point
-  // axis: along the wall NORMAL. vert boundary (constant x) → the flight runs in x.
-  const nx = s.vert?1:0, nz = s.vert?0:1;
-  const a0x = s.cx - nx*RUN/2, a0z = s.cz - nz*RUN/2;                                   // low end
-  const a1x = s.cx + nx*RUN/2, a1z = s.cz + nz*RUN/2;                                   // high end
-  const loX = up? a0x : a1x, loZ = up? a0z : a1z, hiX = up? a1x : a0x, hiZ = up? a1z : a0z;
+  const nx = s.vert?1:0, nz = s.vert?0:1;                                               // the wall normal: a vert boundary (constant x) runs the flight in x
+  const out = (s.out||1) >= 0 ? 1 : -1;                                                 // toward the neighbour
+  const nearX = s.cx - nx*out*RUN/2, nearZ = s.cz - nz*out*RUN/2;                       // this chunk's end
+  const farX  = s.cx + nx*out*RUN/2, farZ  = s.cz + nz*out*RUN/2;                       // the neighbour's end
   const N = Math.max(4, Math.round(Math.abs(rise)/0.42));                               // step count → ~0.42 rise each
-  const geos=[], tread=Math.abs(RUN)/N, stepR=Math.abs(rise)/N;
-  const _m=new THREE.Matrix4();
+  const geos=[], tread=RUN/N, stepR=Math.abs(rise)/N, _m=new THREE.Matrix4();
   for(let i=0;i<N;i++){
-    const t=(i+0.5)/N, x=loX+(hiX-loX)*t, z=loZ+(hiZ-loZ)*t, y=yLo+Math.abs(rise)*((i+1)/N)-stepR/2;
+    const t=(i+0.5)/N, x=nearX+(farX-nearX)*t, z=nearZ+(farZ-nearZ)*t;
+    const yTop = yNear + rise*((i+1)/N);                                                // the tread surface, signed
     const g2=new THREE.BoxGeometry(s.vert?tread:W, stepR, s.vert?W:tread);
-    _m.makeTranslation(x, y, z); g2.applyMatrix4(_m); geos.push(g2); }
+    _m.makeTranslation(x, yTop - stepR/2, z); g2.applyMatrix4(_m); geos.push(g2); }
   if(geos.length){ const m=new THREE.Mesh(_mergeGeos(geos), M.casing); m.castShadow=true; m.receiveShadow=true; m.frustumCulled=false; grp.add(m);
     for(const g3 of geos) g3.dispose(); }
-  // side walls so you cannot step off into the void beside the flight
-  for(const sgn of [-1,1]){ const wx=s.vert? (loX+hiX)/2 : s.cx+sgn*W/2, wz=s.vert? s.cz+sgn*W/2 : (loZ+hiZ)/2;
-    const wall=new THREE.Mesh(new THREE.BoxGeometry(s.vert?Math.abs(RUN):0.16, Math.abs(rise)+2.4, s.vert?0.16:Math.abs(RUN)), M.casing);
-    wall.position.set(wx, yLo+(Math.abs(rise)+2.4)/2 - 0.2, wz); wall.castShadow=true; wall.frustumCulled=false; grp.add(wall); }
-  BR.ramps.push({ x0:loX, z0:loZ, x1:hiX, z1:hiZ, y0:yLo, y1:yLo+Math.abs(rise), hw:W/2, vert:!!s.vert });
-  return {loX,loZ,hiX,hiZ,N};
+  // side walls so you cannot step off into the void beside the flight — spanning the FULL height either way
+  const yBot=Math.min(yNear,yFar), yTopAll=Math.max(yNear,yFar);
+  for(const sgn of [-1,1]){ const wx=s.vert? (nearX+farX)/2 : s.cx+sgn*W/2, wz=s.vert? s.cz+sgn*W/2 : (nearZ+farZ)/2;
+    const h=(yTopAll-yBot)+2.4;
+    const wall=new THREE.Mesh(new THREE.BoxGeometry(s.vert?RUN:0.16, h, s.vert?0.16:RUN), M.casing);
+    wall.position.set(wx, yBot + h/2 - 0.2, wz); wall.castShadow=true; wall.frustumCulled=false; grp.add(wall); }
+  // hw is the VISUAL flight (where the rails are); chw is how wide the walk surface COLLIDES. They differ on purpose: the
+  // voxel carve is quantized to whole 1x1 columns, so it always overshoots the rails by up to a block and no continuous
+  // half-width can ever meet them. Rather than chase the carve, the walk plane covers every column the carve can clear —
+  // so the leftover strip beside the rails has the stair surface under it instead of a storey of open air.
+  BR.ramps.push({ x0:nearX, z0:nearZ, x1:farX, z1:farZ, y0:yNear, y1:yFar, hw:W/2, chw:BRX_STAIR_HW+1.0, vert:!!s.vert });   // TRUE heights at each end, so a descending flight reads as descending
+  return {loX:nearX, loZ:nearZ, hiX:farX, hiZ:farZ, N};
 }
 const BR_DOOR_OPEN=1.5;                                                                 // fully-open swing angle (radians)
 const BR_JW=0.06;                                                                       // doorframe lining thickness — SLIM (Ben 07-27: the frames were "way too big"); it lines the reveal, it is not an architrave
@@ -10880,7 +10966,12 @@ function brTryToggleDoor(){ if(!BR.inside||!BR.doors||!BR.doors.length)return fa
     if(!got && typeof AC!=='undefined' && AC){ try{ const B=brBus(); tone(B,{f:best.closed?66:88,type:'sawtooth',dur:0.5,vol:0.16,to:46}); burst(B,0.18,0.4,850,1.4,-220,'lowpass'); }catch(e){} }
     if(best.closed && typeof AC!=='undefined' && AC){ try{ burst(brBus(),0.20,0.10,900,2.2,-320,'bandpass'); }catch(e){} } }   // …plus the latch clack when it shuts
   return true; }
-function brBuildEnv(){ brClearEnv(); if(!BR.rooms||!BR.rooms.length)brxGenerate(); const grp=new THREE.Group();
+// PURE BUILDER — it returns a group and installs nothing. It used to begin with brClearEnv(), which was harmless while it
+// was called exactly once per rebuild, and fatal the moment the per-chunk refactor started calling it nine times: the first
+// call tore the freshly-installed parent group out of the scene, disposed geometry that was still referenced, and set
+// BR.env=null, so all nine chunks were then built into an orphan and the Backrooms rendered as empty fog. Both callers
+// clear the environment themselves before they start; this must not.
+function brBuildEnv(){ if(!BR.rooms||!BR.rooms.length)brxGenerate(); const grp=new THREE.Group();
   const y0=BR_WY0, y1=BR_WY1, T=BR_TILE, X0=BR_GX0,X1=BR_GX0+BR_GW,Z0=BR_GZ0,Z1=BR_GZ0+BR_GD;
   for(const z of [0,1,2]){ const m=brZoneMat(z); if(m.ceil)m.ceil.emissiveIntensity=0.35; }             // dim the ceiling glow → the fluorescent PANELS become the visible overhead lights
   // ---- PER-ZONE surface batches (Ben 07-27): districts wear different PBR skins, so floor / ceiling / walls are each
@@ -10985,6 +11076,7 @@ function brBuildEnv(){ brClearEnv(); if(!BR.rooms||!BR.rooms.length)brxGenerate(
       jm.castShadow=true; jm.frustumCulled=false; grp.add(jm); } }
   brBuildTables(grp);                                                                                    // abandoned dinner tables, still laid (Ben 07-27)
   brBuildFrames(grp);                                                                                    // leafless openings that kept their frame
+  brBuildGore(grp);                                                                                      // blood pools (1% of rooms) and the rare bone room (0.1%, tile only)
   brBuildProps(grp);                                                                                     // furniture + junk piles (tile districts only)
   brBuildBulbs(grp);                                                                                     // the pull-cord bulbs in the crouch-only rooms
   BR.ramps=[];                                                                                           // rebuilt with the flights below
@@ -11052,9 +11144,14 @@ function brBuildEnvAll(){
   for(const rec of BR.loaded){
     for(const f of BRX_FIELDS) BR[f]=rec[f];
     BR.ramps=[];
-    let g=null; try{ g=brBuildEnv(); }catch(e){ g=null; }
+    // NEVER SWALLOW A BUILD ERROR. This catch existed so one bad chunk could not kill the whole environment, but a bare
+    // `g=null` turns a thrown exception into a silently missing chunk — the Backrooms render as empty fog and nothing
+    // anywhere says why. Record it and surface it.
+    let g=null; try{ g=brBuildEnv(); }catch(e){ g=null;
+      BR._buildErr=BR._buildErr||[]; if(BR._buildErr.length<8) BR._buildErr.push({gx:rec.gx, gz:rec.gz, err:String(e&&e.message||e), stack:String(e&&e.stack||'').split(String.fromCharCode(10)).slice(0,3).join(' | ')});
+      console.error('[BRX] chunk '+rec.gx+','+rec.gz+' failed to build:', e); }
     if(g){ const dy=brxLevelDy(rec.gx,rec.gz); g.position.y=dy;
-      for(const r of (BR.ramps||[])) allRamps.push({x0:r.x0,z0:r.z0,x1:r.x1,z1:r.z1,y0:r.y0+dy,y1:r.y1+dy,hw:r.hw,vert:r.vert});
+      for(const r of (BR.ramps||[])) allRamps.push({...r, y0:r.y0+dy, y1:r.y1+dy});   // SPREAD, not a hand-written field list: the old copy enumerated x0..vert and silently dropped every field added later (it ate chw, so the walk surface shrank back to the visual rails and you fell through the carve beside a flight)
       for(const fl of (BR.flickers||[])) allFlick.push(fl);
       parent.add(g); } }
   for(const f of BRX_FIELDS) BR[f]=stash[f];
@@ -11133,13 +11230,28 @@ function brxCollide(p){ const W=BR.walls; if(!W||!W.length)return; const RAD=0.4
       if(p.pos.y < surf){ p.pos.y=surf; if(p.vel.y<0)p.vel.y=0; p.onGround=true; } }
     // STAIRWELL FLIGHTS — the voxel layer has nothing here, so the walk surface is ours. Same one-way lift as a tilted
     // floor: project onto the flight's axis, take the height at that point, and hold the player on it.
-    if(BR.ramps) for(let i=0;i<BR.ramps.length;i++){ const R2=BR.ramps[i];
-      const dx=R2.x1-R2.x0, dz=R2.z1-R2.z0, ll=dx*dx+dz*dz||1;
-      let t=((p.pos.x-R2.x0)*dx+(p.pos.z-R2.z0)*dz)/ll; if(t<-0.06||t>1.06) continue;
-      const ox=p.pos.x-(R2.x0+dx*Math.max(0,Math.min(1,t))), oz=p.pos.z-(R2.z0+dz*Math.max(0,Math.min(1,t)));
-      if(Math.hypot(ox,oz) > R2.hw) continue;                                     // outside the flight's width
-      const surf=R2.y0+(R2.y1-R2.y0)*Math.max(0,Math.min(1,t));
-      if(p.pos.y < surf && p.pos.y > surf-2.6){ p.pos.y=surf; if(p.vel.y<0)p.vel.y=0; p.onGround=true; } }
+    // STAIRWELL FLIGHTS — the voxel layer has nothing here, so the walk surface is ours.
+    // ONE flight wins: the nearest by perpendicular offset. Applying every flight whose catch radius contains the player
+    // meant that where two flights come close, the lift (which is one-way UP) let the HIGHER one win regardless of which
+    // staircase you were actually on — an invisible step ~1 block above the treads. Widening the catch radius to cover the
+    // quantized carve made those overlaps reachable, so this has to resolve rather than accumulate.
+    if(BR.ramps){ let bi=-1, bOff=1e9, bT=0, bSurf=0;
+      for(let i=0;i<BR.ramps.length;i++){ const R2=BR.ramps[i];
+        const dx=R2.x1-R2.x0, dz=R2.z1-R2.z0, ll=dx*dx+dz*dz||1;
+        let t=((p.pos.x-R2.x0)*dx+(p.pos.z-R2.z0)*dz)/ll; if(t<-0.06||t>1.06) continue;
+        const tc=Math.max(0,Math.min(1,t));
+        const ox=p.pos.x-(R2.x0+dx*tc), oz=p.pos.z-(R2.z0+dz*tc), off=Math.hypot(ox,oz);
+        if(off > (R2.chw||R2.hw)) continue;                                     // clear of the flight AND of the carve it sits in
+        if(off < bOff){ bOff=off; bi=i; bT=tc; bSurf=R2.y0+(R2.y1-R2.y0)*tc; } }
+      if(bi>=0){ const R2=BR.ramps[bi], dx=R2.x1-R2.x0, dz=R2.z1-R2.z0;
+        if(p.pos.y < bSurf && p.pos.y > bSurf-2.6){ p.pos.y=bSurf; if(p.vel.y<0)p.vel.y=0; p.onGround=true; }
+        // BALUSTRADE. brBuildStairs draws a wall down each side of a flight, but those are plain meshes and Backrooms
+        // collision reads BR.walls/BR.boxes — so the rails were render-only and you could walk sideways straight off a
+        // staircase. Made solid here, in the one place that already knows the flight's geometry: pushing boxes into
+        // BR.boxes at build time would not survive, because that field is restored from the union stash on every rebuild.
+        if(bOff > R2.hw && p.pos.y < bSurf+1.2 && p.pos.y > bSurf-1.2){
+          const bx=R2.x0+dx*bT, bz=R2.z0+dz*bT, k=(R2.hw-0.02)/(bOff||1e-6);
+          p.pos.x=bx+(p.pos.x-bx)*k; p.pos.z=bz+(p.pos.z-bz)*k; } } }
     // LADDER in a vertical room — hold W while inside the stringers and you climb; the landing at the head is solid
     if(r && r.ladder){ const L=r.ladder, dx=p.pos.x-L.x, dz=p.pos.z-L.z;
       if(Math.abs(dx)<0.55 && Math.abs(dz)<0.55 && p.pos.y<L.top-0.6){
@@ -11429,7 +11541,7 @@ function brPaleFloorY(x,z){
     const dx=R2.x1-R2.x0, dz=R2.z1-R2.z0, ll=dx*dx+dz*dz||1;
     let t=((x-R2.x0)*dx+(z-R2.z0)*dz)/ll; if(t<-0.06||t>1.06) continue; t=Math.max(0,Math.min(1,t));
     const ox=x-(R2.x0+dx*t), oz=z-(R2.z0+dz*t);
-    if(Math.hypot(ox,oz) <= R2.hw) return R2.y0+(R2.y1-R2.y0)*t; }
+    if(Math.hypot(ox,oz) <= (R2.chw||R2.hw)) return R2.y0+(R2.y1-R2.y0)*t; }   // chw, not hw: the same carve overshoot the player is caught by (see brBuildStairs)
   const r=brxRoomAt(x,z); return r ? (r.fy!=null? r.fy : BR_WY0) : null; }
 function brNavGraph(){ if(BR._nav && BR._navSeed===BR.seed) return BR._nav;
   const R=BR.rooms||[], adj=R.map(()=>[]);
@@ -11584,13 +11696,95 @@ if(typeof window!=='undefined'){ window.__hcBRX={          // the chunk substrat
     return gaps; },
   crossings:(gx,gz)=>{ const rec=brxChunkGen(gx,gz); return { tunnels:rec.tunnels.length, stairs:rec.stairs.length, lintels:rec.lintels.length }; },
   levels:(on)=>{ BR.levels=!!on; if(BR.inside){ try{ brBuildEnvAll(); }catch(e){ return {err:e.message}; } } return { levels:!!BR.levels, ramps:(BR.ramps||[]).length }; },
+  // QA: stand directly under the nearest working fixture and look at the floor. Distinguishes "the floor is broken" from
+  // "you were standing in one of the 30% of rooms that are deliberately unlit".
+  standUnderFixture:()=>{ const F=BR.fixtures||[]; if(!F.length) return null;
+    let best=null,bd=1e9;
+    for(const f of F){ if(f.dead) continue; const r=brxRoomAt(f.x,f.z); if(!r||!r.lit) continue;
+      const d=(f.x-player.pos.x)**2+(f.z-player.pos.z)**2; if(d<bd){ bd=d; best={f,r}; } }
+    if(!best) return null;
+    const fy = best.r.fy!=null? best.r.fy : BR_WY0;
+    player.pos.set(best.f.x, fy+1.2, best.f.z); player.vel.set(0,0,0);
+    player.pitch=-0.75;                                                     // look down at the floor under the tube
+    brxUpdateLights(player.pos.x, player.pos.z);
+    return { x:+best.f.x.toFixed(1), z:+best.f.z.toFixed(1), fixtureY:+(best.f.y!=null?best.f.y:0).toFixed(1),
+             floorY:+fy.toFixed(1), litNear:BR._litNear, nearestD:+(BR._litD||0).toFixed(1), roomLit:!!best.r.lit }; },
+  // QA: what materials the environment is actually made of, biggest flat (floor/ceiling) meshes first.
+  envMats:()=>{ const out=[]; if(!BR.env) return out;
+    BR.env.traverse(o=>{ if(!o.isMesh) return; const m=o.material, g=o.geometry;
+      g.computeBoundingBox(); const bb=g.boundingBox;
+      out.push({ type:m.type, color:m.color?m.color.getHexString():null, hasMap:!!m.map,
+                 mapOK: m.map? !!(m.map.image && m.map.image.width) : null, side:m.side,
+                 flat:+(bb.max.y-bb.min.y).toFixed(2), y:+bb.min.y.toFixed(1),
+                 tris:(g.index?g.index.count/3:0), lightMapIntensity:m.lightMapIntensity }); });
+    return out.filter(o=>o.flat<0.05).sort((a,b)=>b.tris-a.tris).slice(0,8); },
+  // QA: tally the blood/bone rolls over a big sample of chunks. Rates this rare cannot be judged from one visit.
+  goreScan:(n)=>{ let rooms=0, gore=0, blood=0, goreNonTile=0, tile=0;
+    for(let gx=0; gx<(n||40); gx++) for(let gz=0; gz<3; gz++){
+      const rec=brxChunkGen(gx*7+1, gz*11+1);
+      for(const r of rec.rooms){ rooms++; if(r.zone===2) tile++;
+        if(r.gore){ gore++; if(r.zone!==2) goreNonTile++; }
+        if(r.blood) blood++; } }
+    return { rooms, gore, blood, goreNonTile, tilePct:+(100*tile/rooms).toFixed(1),
+             gorePct:+(100*gore/rooms).toFixed(3), bloodPct:+(100*blood/rooms).toFixed(2) }; },
+  // QA: force the nearest room to be a gore room and rebuild, so it can be looked at
+  forceGore:()=>{ const r=brxRoomAt(player.pos.x, player.pos.z); if(!r) return null;
+    r.gore=true; r.zone=2; r.lit=true; brBuildEnvAll();
+    player.pos.set(r.cx_w, (r.fy!=null?r.fy:BR_WY0)+1.2, r.cz_w);
+    return { x:+r.cx_w.toFixed(1), z:+r.cz_w.toFixed(1), w:+(r.x1-r.x0).toFixed(1) }; },
+  // QA: is the VOXEL layer present under the player? BR.env is meshes; the floor/ceiling slabs are blocks, and the two
+  // fail independently. Must live in the module: getBlock/getChunk are not on window.
+  floorProbe:()=>{ const px=Math.floor(player.pos.x), pz=Math.floor(player.pos.z), col=[];
+    for(let y=Math.floor(player.pos.y)+3; y>=Math.floor(player.pos.y)-5; y--) col.push([y, getBlock(px,y,pz)]);
+    const cx=Math.floor(px/CK), cz=Math.floor(pz/CK), c=getChunk(cx,cz);
+    return { pos:{x:+player.pos.x.toFixed(1), y:+player.pos.y.toFixed(1), z:+player.pos.z.toFixed(1)}, cx, cz,
+             col, chunk: c? { meshed:!!c.meshed, dirty:!!c.dirty, hasGroup:!!c.group, kids: c.group? c.group.children.length : 0 } : null,
+             chunkRootKids: (typeof chunkRoot!=='undefined' && chunkRoot)? chunkRoot.children.length : -1,
+             carpetId: BID.br_carpet }; },
+  // QA: what is actually IN the scene. Every assertion in the stair/infinite harnesses tested DATA — room counts, ramp
+  // heights, collision — and none of them tested whether a single triangle got built, so the whole suite passed green
+  // over an environment that rendered as empty fog.
+  envStats:()=>{ let groups=0, meshes=0, tris=0, visible=0;
+    const walk=o=>{ for(const c of o.children){ if(c.isMesh){ meshes++; if(c.visible)visible++;
+      const g=c.geometry, n=g&&g.index? g.index.count/3 : (g&&g.attributes&&g.attributes.position? g.attributes.position.count/3 : 0); tris+=n; }
+      if(c.isGroup) groups++; walk(c); } };
+    if(BR.env) walk(BR.env);
+    return { env:!!BR.env, groups, meshes, visible, tris:Math.round(tris), loaded:(BR.loaded||[]).length,
+             litNear:BR._litNear|0, fixtures:(BR.fixtures||[]).length,
+             errs:(BR._buildErr||[]) }; },
   ramps:()=>(BR.ramps||[]).map(r=>({x0:+r.x0.toFixed(1),z0:+r.z0.toFixed(1),x1:+r.x1.toFixed(1),z1:+r.z1.toFixed(1),y0:+r.y0.toFixed(1),y1:+r.y1.toFixed(1)})),
   // QA: index of the built flight nearest the player. Needed because a teleport can cross a chunk boundary and rebuild
   // the environment, which reorders BR.ramps — so the harness must re-find its flight after moving rather than trust an index.
   rampNear:()=>{ const R=BR.ramps||[]; let bi=-1, bd=1e9;
     for(let i=0;i<R.length;i++){ const r=R[i], mx=(r.x0+r.x1)/2, mz=(r.z0+r.z1)/2, d=Math.hypot(mx-player.pos.x, mz-player.pos.z);
       if(d<bd){ bd=d; bi=i; } }
-    return bi<0? null : {i:bi, dist:+bd.toFixed(1), y0:+R[bi].y0.toFixed(1), y1:+R[bi].y1.toFixed(1)}; },
+    if(bi<0) return null; const r=R[bi];
+    // Hand back the flight's own GEOMETRY, not just its index: sampling it means teleporting along it, which can cross a
+    // chunk boundary and rebuild BR.ramps, after which the index is stale (it silently pointed past the end of a shorter
+    // array and every sample past the boundary read null). Geometry is stable; the array order is not.
+    return {i:bi, dist:+bd.toFixed(1), y0:+r.y0.toFixed(1), y1:+r.y1.toFixed(1),
+            x0:r.x0, z0:r.z0, x1:r.x1, z1:r.z1, vert:!!r.vert}; },
+  // QA: a vertical scan of the voxel column beside a flight — what the shaft carve actually left behind.
+  colScan:(k,t,off)=>{ const dx=k.x1-k.x0, dz=k.z1-k.z0, L=Math.hypot(dx,dz)||1;
+    const x=k.x0+dx*t-dz/L*off, z=k.z0+dz*t+dx/L*off, out=[];
+    for(let y=38; y<=52; y++) if(solidAt(Math.floor(x),y,Math.floor(z))) out.push(y);
+    return { x:+x.toFixed(2), z:+z.toFixed(2), solid:out, span:brStairSpanAt(x,z) }; },
+  // QA: place the player a given perpendicular offset from a flight's centreline at fraction t and at a given height
+  // relative to the tread surface, then let one physics step settle it. Exercises the balustrade branch head-on rather
+  // than hoping a camera-relative strafe happens to press against it.
+  standBesideRamp:(k,t,off,dh)=>{ const dx=k.x1-k.x0, dz=k.z1-k.z0, L=Math.hypot(dx,dz)||1;
+    const px=-dz/L, pz=dx/L, cx=k.x0+dx*t, cz=k.z0+dz*t, surf=k.y0+(k.y1-k.y0)*t;
+    player.pos.set(cx+px*off, surf+(dh||0), cz+pz*off); player.vel.set(0,0,0);
+    return { surf:+surf.toFixed(2), off }; },
+  // QA: the player's current perpendicular offset from a flight and its height error against the tread surface.
+  rampOffset:(k)=>{ const dx=k.x1-k.x0, dz=k.z1-k.z0, ll=dx*dx+dz*dz||1;
+    const t=Math.max(0,Math.min(1,((player.pos.x-k.x0)*dx+(player.pos.z-k.z0)*dz)/ll));
+    const ox=player.pos.x-(k.x0+dx*t), oz=player.pos.z-(k.z0+dz*t), surf=k.y0+(k.y1-k.y0)*t;
+    return { t:+t.toFixed(3), off:+Math.hypot(ox,oz).toFixed(2), y:+player.pos.y.toFixed(2), surf:+surf.toFixed(2) }; },
+  // QA: stand at fraction t along a flight described by its own endpoints, independent of BR.ramps ordering.
+  standOnRampAt:(k,t)=>{ const x=k.x0+(k.x1-k.x0)*t, z=k.z0+(k.z1-k.z0)*t, want=k.y0+(k.y1-k.y0)*t;
+    player.pos.set(x, want+1.2, z); player.vel.set(0,0,0);
+    return { t, want:+want.toFixed(2) }; },
   // QA: drop the player onto a flight at fraction t and let brxCollide settle them. Tests the RAMP SURFACE specifically,
   // without confounding it with the room walls a forced test flight inevitably cuts through.
   standOnRamp:(i,t)=>{ const R2=(BR.ramps||[])[i|0]; if(!R2)return null;

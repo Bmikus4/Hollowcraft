@@ -68,6 +68,7 @@ const T=(name,ok,detail)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+' —
           } } }
       out.notNeighbour = __hcBRX.edge(0,0,2,0);              // must be null
       out.chunkOf = __hcBRX.chunkOf(__hcBRX.entry().x, __hcBRX.entry().z);
+      out.LEVELS=__hcBRX.LEVELS;
       out.originRound = (()=>{ const o=__hcBRX.origin(3,-2); const c=__hcBRX.chunkOf(o.x+1,o.z+1); return (c.gx===3&&c.gz===-2); })();
       return out; })()`);
 
@@ -89,8 +90,10 @@ const T=(name,ok,detail)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+' —
     const pu=100*R.up/(R.up+R.down);
     T('stairs split ~50/50 up/down', pu>40&&pu<60, {up:R.up,down:R.down,pctUp:+pu.toFixed(1)});
     T('chunk levels are deterministic and baseY follows', R.lvBad.length===0, {ok:R.lvDet, bad:R.lvBad.slice(0,2)});
-    T('all storeys are used', Object.keys(R.lv).length===3, R.lv);
+    T('all storeys are used', Object.keys(R.lv).length===R.LEVELS, {used:R.lv, LEVELS:R.LEVELS});
     T('every stairwell matches the real storey gap', R.stairBad.length===0, {ok:R.stairOK, sample:R.stairBad[0], rises:R.riseHist});
+    // With BRX_LEVELS=2 the gap between two districts can only be 1, so a flight is never more than one storey.
+    T('no flight is longer than one storey', Object.keys(R.riseHist).every(k=>+k<=R.LEVELS-1), {rises:R.riseHist, LEVELS:R.LEVELS});
     T('no boundary changes storey without a stairwell', R.flatBad.length===0, {sample:R.flatBad[0]});
 
     // re-seeding must reproduce byte-for-byte
