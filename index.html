@@ -10021,7 +10021,12 @@ function bossUpdate(dt){ wretch.phase+=dt*1.4; const F=_bf();
 //  OG lore: mono-yellow damp wallpaper, moist carpet, the endless fluorescent hum, and the Smiler.
 // =====================================================================================================
 const BR = { inside:false, door:null, exit:null, exitMesh:null, keyMesh:null, returnPos:null, hasKey:false, sealed:false,
-  prev:null, zone:0, t:0, encT:240, silenceT:0, buzzIv:null, droneIv:null, sm:null };
+  prev:null, zone:0, t:0, encT:240, silenceT:0, buzzIv:null, droneIv:null, sm:null,
+  // seed is set HERE, not lazily inside brxGenerate. The chunk substrate (brxChunkSeed / brxEdgeCrossingsLow) reads it,
+  // and while it was undefined those pure functions silently fell back to seed 1 — so anything that asked about a chunk
+  // boundary before the first maze was generated described a DIFFERENT world than the one that then got built. Caught by
+  // bench/tmp-brx-edges.mjs ("returning to the original seed reproduces it exactly" failed) rather than by reading.
+  seed:99991 };
 const BR_X0=100000, BR_FLOOR=40, BR_CELL=9, BR_CH=9;   // bigger cells = real rooms; BR_CH = uniform ceiling (voxel collision + PBR render match) (Ben 07-24)
 const BR_ENTRY={ x:100033, z:0 }, BR_KEY={ x:100600, z:0 };
 function brRegion(wx){ return wx>=BR_X0; }                                     // pure coordinate test — only ever runs for a chunk a player is standing in
@@ -10050,13 +10055,20 @@ function brVoidAt(wx,wz){ const R=BR.rooms; if(!R||!R.length)return false;
     if(wx>=r.x0+L && wx<r.x1-L && wz>=r.z0+L && wz<r.z1-L) return true; }
   return false; }
 // A vertical room carries on up past the flat voxel ceiling, so that ceiling must not exist over its footprint.
+// A stair crossing must not be roofed: its flight passes through the ceiling slab on the way to the storey above.
+function brStairAt(wx,wz){ const S=BR.stairs; if(!S||!S.length||!BR.levels)return false;
+  for(let i=0;i<S.length;i++){ const st=S[i];
+    if(Math.abs(wx-st.cx)<=(st.vert?18:2.0) && Math.abs(wz-st.cz)<=(st.vert?2.0:18)) return true; }
+  return false; }
 function brOpenTopAt(wx,wz){ const R=BR.rooms; if(!R||!R.length)return false;
   for(let i=0;i<R.length;i++){ const r=R[i]; if(!r.shaft)continue;
     if(wx>=r.x0 && wx<r.x1 && wz>=r.z0 && wz<r.z1) return true; }
   return false; }
-function brGenColumn(c,lx,lz,wx,wz){ const bl=c.blocks, topY=BR_FLOOR+BR_CH;   // BRX (Ben 07-26): FLAT floor+ceiling only — Y collision + a safety net. The ANGLED walls are BRX render+collision, NOT voxels.
-  const voidCol=brVoidAt(wx,wz), openTop=brOpenTopAt(wx,wz);
-  for(let y=0;y<=topY;y++){ let b=0; if(y===0)b=BID.bedrock; else if(y<BR_FLOOR)b=(voidCol?0:BID.br_concrete); else if(y===BR_FLOOR)b=(voidCol?0:BID.br_carpet); else if(y===topY)b=(openTop?0:BID.br_ceiling); if(b)bl[idx(lx,y,lz)]=b; }
+function brGenColumn(c,lx,lz,wx,wz){ const bl=c.blocks;
+  // STACKED FLOORS: the slab this column belongs to is its BRX chunk's storey, not one global BR_FLOOR.
+  const _bc=brxChunkOf(wx,wz), FLOOR = BR.levels ? brxChunkBaseY(_bc.gx,_bc.gz) : BR_FLOOR, topY=FLOOR+BR_CH;   // BRX (Ben 07-26): FLAT floor+ceiling only — Y collision + a safety net. The ANGLED walls are BRX render+collision, NOT voxels.
+  const voidCol=brVoidAt(wx,wz), openTop=brOpenTopAt(wx,wz)||brStairAt(wx,wz);   // a flight climbs THROUGH the slab, so a stair crossing opens the lid too
+  for(let y=0;y<=topY;y++){ let b=0; if(y===0)b=BID.bedrock; else if(y<FLOOR)b=(voidCol?0:BID.br_concrete); else if(y===FLOOR)b=(voidCol?0:BID.br_carpet); else if(y===topY)b=(openTop?0:BID.br_ceiling); if(b)bl[idx(lx,y,lz)]=b; }
   c.htop[lx+lz*CK]=topY; }
 
 // ---- ATMOSPHERE: reuse the engine's own fog/light, just swap the presets per zone (crisp, cheap) ----
@@ -10113,7 +10125,7 @@ function brEnter(){ if(BR.inside)return; const d=BR.door;
   brApplyAtmo(0);
   player.pos.set(BR_ENTRY.x, BR_FLOOR+1.2, BR_ENTRY.z); player.vel.set(0,0,0);                                            // yaw/pitch UNTOUCHED → frame-perfect continuity
   if(typeof streamChunks==='function')for(let i=0;i<8;i++)streamChunks(160,160);                                          // force the flat floor/ceiling voxels (Y collision) NOW → no fall-through
-  BR.rooms=[]; brBuildEnv();                                                                                              // generate the angled room graph + render the smooth PBR environment
+  BR.rooms=[]; brBuildEnvAll();                                                                                           // generate the angled room graph + render the smooth PBR environment
   brStartAudio(); BR.paleFlees=0; BR.pale={state:'dormant',cd:45+Math.random()*45,t:0}; }   // The Pale wakes 45-90s in; the flee counter (2 retreats, then it commits) resets per visit
 function brExit(){ if(!BR.inside)return; const r=BR.returnPos||{x:0,y:BR_FLOOR,z:0,yaw:0};
   brStopAudio(); brResumeMusic(); brRestoreAtmo(); brClearEnv(); BR.rooms=[]; brClearExit(); brHidePale(); BR.inside=false;
@@ -10201,7 +10213,78 @@ function brClearEnv(){ if(BR.env){ scene.remove(BR.env); BR.env.traverse(o=>{ if
 //   of many different sizes (this masks the grid), with a LARGE starting room. A randomized-Prim spanning tree over the
 //   room-adjacency graph is the doorway set → every room gets only 1–2 doorways (a labyrinth, not a grid of connected
 //   boxes). Walls have real THICKNESS (their end-caps form the doorway reveal). Corridors + a fraction of rooms stay unlit. =====
+// =====================================================================
+//  BRX CHUNK SUBSTRATE (Ben 07-27) — the coordinate system + determinism the infinite halls are built on.
+//
+//  The single hardest correctness property in an infinite chunked maze is that two neighbouring chunks must agree,
+//  EXACTLY, on what happens along the boundary they share — where the crossings are and what kind each one is — without
+//  ever consulting each other, because either one may be generated first, alone, in any order, and possibly again after
+//  the other has been thrown away. Get this wrong and you get walls with a door on one side and blank plaster on the
+//  other, which is unfixable later because the two chunks disagree about history.
+//
+//  The discipline: an edge is ALWAYS keyed by the lower of the two chunks that share it. brxEdge normalises the pair, so
+//  agreement is by construction rather than by care. This is the same rule that made pineEmit work in the overworld — a
+//  pure function of position, no state, identical answer from either side.
+//
+//  A BRX chunk is 8x8 cells = 64x64 blocks. Rooms never span a chunk boundary, so a boundary is always a wall line, and
+//  the crossings punched through it are the only way between chunks. Ben's three connector kinds live here: a door, a
+//  tunnel (a player-sized bore through the thick wall) and a stairwell, at 60/20/20.
+// =====================================================================
 const BR_CS=8, BR_CW=14, BR_CD=14, BR_WT=0.36;                                        // cell size, grid dims (rooms are 1–3 cells each way), wall thickness
+const BRX_CELLS=8, BRX_SPAN=BRX_CELLS*BR_CS;                                          // cells per chunk / blocks per chunk — derived from BR_CS, never a second literal to drift from it
+function brxHash(a,b,c,d){ let h=(a|0)^0x9e3779b9;
+  h=Math.imul(h^(b|0),2654435761)>>>0; h^=h>>>15;
+  h=Math.imul(h^(c|0),2246822519)>>>0; h^=h>>>13;
+  h=Math.imul(h^(d|0),3266489917)>>>0; h^=h>>>16;
+  return h>>>0; }
+function brxChunkOf(wx,wz){ return { gx:Math.floor((wx-BR_GX0)/BRX_SPAN), gz:Math.floor((wz-BR_GZ0)/BRX_SPAN) }; }
+function brxChunkOrigin(gx,gz){ return { x:BR_GX0+gx*BRX_SPAN, z:BR_GZ0+gz*BRX_SPAN }; }
+function brxChunkSeed(gx,gz){ return brxHash((BR.seed||1)>>>0, gx, gz, 0x5bd1); }
+const BRX_DOOR=0, BRX_TUNNEL=1, BRX_STAIR=2;
+// STACKED FLOORS (Ben 07-27, "levels can be inconsistent, that's fine for the backrooms").
+// Each chunk sits on one of BRX_LEVELS storeys, straight from a position hash — no constraint solving, no attempt to keep
+// neighbours within one storey of each other. Because it IS a pure function of (gx,gz), walking a loop still returns you
+// to the same floor; what varies is how far a given stairwell climbs, which is where the strangeness comes from.
+// Levels are assigned per DISTRICT of BRX_LVD x BRX_LVD chunks, not per chunk. A level per chunk meant two thirds of all
+// boundaries changed storey, and since a boundary that changes storey MUST carry a stairwell, that dragged the connector
+// mix to 46/13/41 instead of the 60/20/20 Ben asked for. Coarse districts mean a whole neighbourhood shares a floor and
+// only the seams between neighbourhoods step — which lands the stair rate near 20% and reads far better besides: you
+// walk a floor for a while, then find the stairs.
+const BRX_LEVELS=3, BRX_LVD=4;
+function brxChunkLevel(gx,gz){ return brxHash((BR.seed||1)>>>0, gx>>2, gz>>2, 0x1e5e1) % BRX_LEVELS; }
+function brxChunkBaseY(gx,gz){ return BR_FLOOR + brxChunkLevel(gx,gz)*BR_CH; }
+// The crossings along ONE shared edge. axis 0 = the edge between (gx,gz) and (gx+1,gz); axis 1 = between (gx,gz) and
+// (gx,gz+1). Always called with the LOWER chunk, via brxEdge.
+function brxEdgeCrossingsLow(gx,gz,axis){
+  const rnd=tileRng(brxHash((BR.seed||1)>>>0, gx*2+axis, gz*2+axis, 0xE39E));
+  const n=1+((rnd()*3)|0);                                                            // 1..3 crossings — enough to connect, sparse enough to be a labyrinth
+  // The storey gap across THIS boundary. `rise` is measured going from the lower-keyed chunk to the higher-keyed one, the
+  // same single frame of reference the whole substrate uses, so the far side just negates it.
+  const lo=brxChunkLevel(gx,gz), hi=brxChunkLevel(gx+(axis===0?1:0), gz+(axis===1?1:0)), gap=hi-lo;
+  const seen={}, out=[];
+  // KIND IS DECIDED BY GEOMETRY, NOT ROLLED. If this boundary changes storey then every way through it has to climb, so
+  // all of its crossings are stairwells; if it does not, none of them can be. Only the flavour of a flat crossing is a
+  // die roll. Rolling "stair" as a third option independently produced stairs that climbed toward chunks two storeys
+  // BELOW them, and then patching that up by promotion/demotion swung the mix to 46/13/41 and 72/18/9 in turn. Deciding
+  // it structurally lands the observed mix on target on its own, and cannot produce a flight that connects to nothing.
+  for(let i=0;i<n;i++){ const cell=(rnd()*BRX_CELLS)|0; const r=rnd();
+    const kind = gap!==0 ? BRX_STAIR : (r<0.25 ? BRX_TUNNEL : BRX_DOOR);
+    const at=0.25+rnd()*0.5;                                                          // where along that cell, kept off the corners
+    const dir = kind===BRX_STAIR ? (gap>0?1:-1) : 0, rise = kind===BRX_STAIR ? Math.abs(gap) : 0;
+    if(seen[cell])continue; seen[cell]=1; out.push({cell,kind,at,dir,rise}); }
+  out.sort((a,b)=>a.cell-b.cell);
+  return out; }
+// Ask for the crossings between ANY two adjacent chunks, from either side, and get the identical list.
+function brxEdge(gxA,gzA,gxB,gzB){
+  const dx=gxB-gxA, dz=gzB-gzA;
+  if(Math.abs(dx)+Math.abs(dz)!==1) return null;                                      // not neighbours
+  if(dx!==0) return brxEdgeCrossingsLow(Math.min(gxA,gxB), gzA, 0);
+  return brxEdgeCrossingsLow(gxA, Math.min(gzA,gzB), 1); }
+// The same crossings as seen FROM a given chunk: `dir` flipped when you are the higher of the pair, so a stairwell that
+// climbs out of chunk A is the same stairwell that descends into chunk B.
+function brxEdgeFrom(gx,gz,dgx,dgz){ const list=brxEdge(gx,gz,gx+dgx,gz+dgz); if(!list)return null;
+  const amLower = (dgx>0 || dgz>0);
+  return list.map(c=>({cell:c.cell, kind:c.kind, at:c.at, rise:c.rise, dir: amLower? c.dir : -c.dir})); }
 const BR_GX0=BR_X0+6, BR_GZ0=-56, BR_GW=BR_CW*BR_CS, BR_GD=BR_CD*BR_CS;               // region = the cell grid × cell size
 // DOORS 1.5x SMALLER (Ben 07-27) — but the STRUCTURAL OPENING stays 2.2 wide. Shrinking the opening to 1.47 made open
 // doors impassable: the wall stubs either side push the player 0.6 clear of their end points, so a 1.47 gap left only
@@ -10209,16 +10292,28 @@ const BR_GX0=BR_X0+6, BR_GZ0=-56, BR_GW=BR_CW*BR_CS, BR_GD=BR_CD*BR_CS;         
 // 2.2 x 4.0), and a fixed filler panel closes the rest of the opening so the frame is sealed all the way around.
 const BR_DOORW=2.2, BR_LEAFW=2.2/1.5;
 const BR_WY0=BR_FLOOR+1, BR_WY1=BR_FLOOR+BR_CH, BR_DOORH=BR_FLOOR+1+4.0/1.5, BR_HALF=BR_FLOOR+2.4, BR_CRAWL=BR_FLOOR+2.35;   // wall bottom/top, doorway top, half-wall top (1.4 tall → eye 1.62 sees over), crawl-opening top (1.35 tall → crouch to pass; kept clearly under the shorter doorway)
-function brxGenerate(){ BR.rooms=[]; BR.walls=[]; BR.doors=[]; BR.lintels=[]; BR.pillars=[]; BR.fixtures=[]; BR.crawls=[]; BR.tables=[]; BR.frames=[]; BR.windows=[]; BR.solids=[]; BR.props=[]; BR.boxes=[]; BR.bulbs=[];
-  let s=(BR.seed||(BR.seed=99991))>>>0; const rnd=()=>{ s=(Math.imul(s,1664525)+1013904223)>>>0; return s/4294967296; };
-  const CW=BR_CW, CD=BR_CD, cell=new Int16Array(CW*CD).fill(-1), R=BR.rooms, ci=(x,y)=>x*CD+y;
+// brxGenerate(o) — o is optional. With no argument it behaves exactly as it always has: one fixed BR_CW x BR_CD region at
+// BR_GX0/BR_GZ0 seeded from BR.seed. With an argument it generates ONE BRX CHUNK: its own cell grid at its own origin,
+// seeded per chunk, and only the chunk that contains BR_ENTRY gets the big starting room and the key.
+//   o = { GX0, GZ0, CW, CD, seed, acx, acy, isEntry }   acx/acy = this grid's cell origin in ABSOLUTE cell coordinates.
+// Absolute cell coords matter more than they look: the district zoning, the per-room table stream and the per-room prop
+// stream are all keyed off r.cx/r.cy, which are grid-LOCAL. Left local, every chunk would come out with an identical
+// zone pattern and identical furniture in the same relative rooms. r.acx/r.acy are the absolute ones and those are what
+// anything position-derived must use.
+function brxGenerate(o){ BR.rooms=[]; BR.walls=[]; BR.doors=[]; BR.lintels=[]; BR.pillars=[]; BR.fixtures=[]; BR.crawls=[]; BR.tables=[]; BR.frames=[]; BR.windows=[]; BR.solids=[]; BR.props=[]; BR.boxes=[]; BR.bulbs=[]; BR.tunnels=[]; BR.stairs=[]; BR.ramps=[];
+  const GX0 = o? o.GX0 : BR_GX0, GZ0 = o? o.GZ0 : BR_GZ0;
+  const ACX = o? o.acx : 0,      ACY = o? o.acy : 0;
+  const isEntry = o? !!o.isEntry : true;
+  let s=(o? o.seed : (BR.seed||(BR.seed=99991)))>>>0; const rnd=()=>{ s=(Math.imul(s,1664525)+1013904223)>>>0; return s/4294967296; };
+  const CW=(o?o.CW:BR_CW), CD=(o?o.CD:BR_CD), cell=new Int16Array(CW*CD).fill(-1), R=BR.rooms, ci=(x,y)=>x*CD+y;
   const free=(cx,cy,w,h)=>{ if(cx<0||cy<0||cx+w>CW||cy+h>CD)return false; for(let x=cx;x<cx+w;x++)for(let y=cy;y<cy+h;y++)if(cell[ci(x,y)]>=0)return false; return true; };
-  const claim=(cx,cy,w,h)=>{ const id=R.length, x0=BR_GX0+cx*BR_CS, z0=BR_GZ0+cy*BR_CS, x1=x0+w*BR_CS, z1=z0+h*BR_CS;
+  const claim=(cx,cy,w,h)=>{ const id=R.length, x0=GX0+cx*BR_CS, z0=GZ0+cy*BR_CS, x1=x0+w*BR_CS, z1=z0+h*BR_CS;
     for(let x=cx;x<cx+w;x++)for(let y=cy;y<cy+h;y++)cell[ci(x,y)]=id;
-    R.push({id,cx,cy,cw:w,ch:h,x0,z0,x1,z1,cx_w:(x0+x1)/2,cz_w:(z0+z1)/2,lit:true,doors:0}); return R[id]; };   // id: the nav graph indexes rooms by it (see brNavGraph)
-  // LARGE starting room around the fixed spawn cell
-  let ecx=Math.max(0,Math.min(CW-4,((BR_ENTRY.x-BR_GX0)/BR_CS|0)-1)), ecy=Math.max(0,Math.min(CD-3,((BR_ENTRY.z-BR_GZ0)/BR_CS|0)-1));
-  let ew=4, eh=3; while(!free(ecx,ecy,ew,eh)){ if(ew>1)ew--; else if(eh>1)eh--; else break; } const entry=claim(ecx,ecy,ew,eh); entry.entry=true;
+    R.push({id,cx,cy,acx:ACX+cx,acy:ACY+cy,cw:w,ch:h,x0,z0,x1,z1,cx_w:(x0+x1)/2,cz_w:(z0+z1)/2,lit:true,doors:0}); return R[id]; };   // id: the nav graph indexes rooms by it (see brNavGraph)
+  // LARGE starting room around the fixed spawn cell — only in the chunk that actually contains the entry
+  let entry=null;
+  if(isEntry){ let ecx=Math.max(0,Math.min(CW-4,((BR_ENTRY.x-GX0)/BR_CS|0)-1)), ecy=Math.max(0,Math.min(CD-3,((BR_ENTRY.z-GZ0)/BR_CS|0)-1));
+    let ew=4, eh=3; while(!free(ecx,ecy,ew,eh)){ if(ew>1)ew--; else if(eh>1)eh--; else break; } entry=claim(ecx,ecy,ew,eh); entry.entry=true; }
   // fill the rest — BIMODAL sizes: ~1/3 SMALL rooms, the rest MASSIVE (up to 5×5 cells = 40×40) → lots of big halls + some tight rooms
   for(let cy=0;cy<CD;cy++)for(let cx=0;cx<CW;cx++){ if(cell[ci(cx,cy)]>=0)continue;
     let w,h; if(rnd()<0.34){ w=1; h=(rnd()<0.3&&free(cx,cy,1,2))?2:1; }                                       // SMALL room
@@ -10227,9 +10322,14 @@ function brxGenerate(){ BR.rooms=[]; BR.walls=[]; BR.doors=[]; BR.lintels=[]; BR
   // REGIONS (Ben 07-27): the halls are not all yellow wallpaper. Districts of 4x4 cells each take one of the three PBR
   // skins — Yellow Halls, Industrial concrete, White Tile — so walking far enough changes the material world around you.
   // Districts (not per-room) keeps each region contiguous and legible; the entry district is always the iconic yellow.
-  { const DS=3, PAT=[0,0,1,2,0,1,2,0], ecxD=(ecx/DS)|0, ecyD=(ecy/DS)|0;                          // a fixed pattern over 3x3-cell districts guarantees all three skins appear on a 14x14 grid (a plain hash came out 39/1/4)
-    for(const r of R){ const dx=(r.cx/DS)|0, dy=(r.cy/DS)|0;
-      r.zone = (dx===ecxD&&dy===ecyD) ? 0 : PAT[(dx*3 + dy*5) % PAT.length]; }
+  { const DS=3, PAT=[0,0,1,2,0,1,2,0], ecxD=entry?((entry.acx/DS)|0):-99999, ecyD=entry?((entry.acy/DS)|0):-99999;   // a fixed pattern over 3x3-cell districts guarantees all three skins appear (a plain hash came out 39/1/4); keyed on ABSOLUTE cells so districts continue across chunk boundaries instead of every chunk repeating the same pattern
+    for(const r of R){ const dx=(r.acx/DS)|0, dy=(r.acy/DS)|0;
+      // POSITIVE modulo. JS % keeps the sign of the dividend, so at negative chunk coordinates (dx*3+dy*5) % 8 went
+      // negative and PAT[-3] was undefined — every district in the negative quadrants had zone === undefined, which
+      // silently fell back to the yellow material AND made `r.zone!==2` true everywhere, so no tile district and no
+      // furniture ever appeared out there. Only reachable once generation went infinite. (Ben 07-27)
+      const pi=((dx*3 + dy*5) % PAT.length + PAT.length) % PAT.length;
+      r.zone = (dx===ecxD&&dy===ecyD) ? 0 : PAT[pi]; }
     if(entry) entry.zone=0; }
   // ---- VARYING ROOM HEIGHTS (Ben 07-27) ----
   // Every room gets its own ceiling. Most sit "a bit above the player's head and above" — anywhere from ~2.4 of headroom
@@ -10267,7 +10367,7 @@ function brxGenerate(){ BR.rooms=[]; BR.walls=[]; BR.doors=[]; BR.lintels=[]; BR
   // every fixture instead → you walk out of the buzzing halls into a whole wing with nothing on, and back out again.
   for(let b=0;b<2;b++){ const vert=rnd()<0.5, span=3+((rnd()*4)|0), at=((rnd()*((vert?CW:CD)-span))|0);
     for(const r of R){ const c0=vert?r.cx:r.cy, c1=c0+(vert?r.cw:r.ch); if(r.entry)continue; if(c1>at && c0<at+span) r.lit=false; } }
-  let kr=entry,kd=-1; for(const r of R){ const dd=(r.cx_w-entry.cx_w)**2+(r.cz_w-entry.cz_w)**2; if(dd>kd){kd=dd;kr=r;} } BR.keyRoom=kr; BR_KEY.x=kr.cx_w; BR_KEY.z=kr.cz_w; kr.lit=true;
+  if(entry){ let kr=entry,kd=-1; for(const r of R){ const dd=(r.cx_w-entry.cx_w)**2+(r.cz_w-entry.cz_w)**2; if(dd>kd){kd=dd;kr=r;} } BR.keyRoom=kr; BR_KEY.x=kr.cx_w; BR_KEY.z=kr.cz_w; kr.lit=true; }
   // ---- adjacency graph → randomized-Prim spanning tree = the doorway set (sparse: 1–2 per room) ----
   const adj={}, add=(a,b)=>{ if(a<0||b<0||a===b)return; adj[a<b?a+'_'+b:b+'_'+a]=1; };
   for(let cx=0;cx<CW;cx++)for(let cy=0;cy<CD;cy++){ const r=cell[ci(cx,cy)]; if(cx+1<CW)add(r,cell[ci(cx+1,cy)]); if(cy+1<CD)add(r,cell[ci(cx,cy+1)]); }
@@ -10280,12 +10380,12 @@ function brxGenerate(){ BR.rooms=[]; BR.walls=[]; BR.doors=[]; BR.lintels=[]; BR
   BR._door=door;
   // ---- derive wall runs from the cell→room grid (grid-edge based → always aligned, gap-free, non-overlapping) ----
   const cAt=(gx,gy)=> (gx<0||gy<0||gx>=CW||gy>=CD)? -1 : cell[ci(gx,gy)];
-  for(let xi=0; xi<=CW; xi++){ let run=null; const flush=()=>{ if(run)brxEmitWall(run,true,rnd); run=null; };                                     // vertical wall lines
+  for(let xi=0; xi<=CW; xi++){ let run=null; const flush=()=>{ if(run)brxEmitWall(run,true,rnd,o); run=null; };                                     // vertical wall lines
     for(let gy=0; gy<CD; gy++){ const a=cAt(xi-1,gy), b=cAt(xi,gy);
-      if(a!==b){ const wx=BR_GX0+xi*BR_CS, z0=BR_GZ0+gy*BR_CS; if(run&&run.a===a&&run.b===b&&run.z1===z0)run.z1=z0+BR_CS; else { flush(); run={vert:true,x:wx,z0,z1:z0+BR_CS,a,b}; } } else flush(); } flush(); }
-  for(let yi=0; yi<=CD; yi++){ let run=null; const flush=()=>{ if(run)brxEmitWall(run,false,rnd); run=null; };                                    // horizontal wall lines
+      if(a!==b){ const wx=GX0+xi*BR_CS, z0=GZ0+gy*BR_CS; if(run&&run.a===a&&run.b===b&&run.z1===z0)run.z1=z0+BR_CS; else { flush(); run={vert:true,x:wx,z0,z1:z0+BR_CS,a,b}; } } else flush(); } flush(); }
+  for(let yi=0; yi<=CD; yi++){ let run=null; const flush=()=>{ if(run)brxEmitWall(run,false,rnd,o); run=null; };                                    // horizontal wall lines
     for(let gx=0; gx<CW; gx++){ const a=cAt(gx,yi-1), b=cAt(gx,yi);
-      if(a!==b){ const wz=BR_GZ0+yi*BR_CS, x0=BR_GX0+gx*BR_CS; if(run&&run.a===a&&run.b===b&&run.x1===x0)run.x1=x0+BR_CS; else { flush(); run={vert:false,z:wz,x0,x1:x0+BR_CS,a,b}; } } else flush(); } flush(); }
+      if(a!==b){ const wz=GZ0+yi*BR_CS, x0=GX0+gx*BR_CS; if(run&&run.a===a&&run.b===b&&run.x1===x0)run.x1=x0+BR_CS; else { flush(); run={vert:false,z:wz,x0,x1:x0+BR_CS,a,b}; } } else flush(); } flush(); }
   for(const r of R){ const rw=r.x1-r.x0, rd=r.z1-r.z0; if(rw<20||rd<20||rnd()<0.55)continue;                                                       // iconic support-pillar hall in the biggest rooms (rarer now that halls also get partitions)
     const nx=Math.max(1,Math.round(rw/9)-1), nz=Math.max(1,Math.round(rd/9)-1), mx=rw/(nx+1), mz=rd/(nz+1);
     for(let i=1;i<=nx;i++)for(let j=1;j<=nz;j++)BR.pillars.push({x:r.x0+mx*i,z:r.z0+mz*j,hw:0.6,zone:r.zone|0}); }
@@ -10328,7 +10428,7 @@ function brxGenerate(){ BR.rooms=[]; BR.walls=[]; BR.doors=[]; BR.lintels=[]; BR
     if(!_clearAt(bx,bz))continue;
     BR.bulbs.push({x:bx, z:bz, ceil:r.ceil, room:r.id, on:false}); }
   for(const r of R){ if(!r.lit||r.low)continue; for(let cx=r.cx;cx<r.cx+r.cw;cx++)for(let cy=r.cy;cy<r.cy+r.ch;cy++){
-    const x0=BR_GX0+(cx+0.5)*BR_CS, z0=BR_GZ0+(cy+0.5)*BR_CS;
+    const x0=GX0+(cx+0.5)*BR_CS, z0=GZ0+(cy+0.5)*BR_CS;
     let fx=null, fz=null; for(const o of _OFF){ if(_clearAt(x0+o[0], z0+o[1])){ fx=x0+o[0]; fz=z0+o[1]; break; } }
     if(fx===null) continue;                                                                                                                       // cell is walled in tight — no light here, and that reads as intentional dark
     const dead=rnd()<0.07;                                                                                                                        // ~7% of tubes are simply BURNT OUT — a dark cell inside a lit room
@@ -10338,7 +10438,7 @@ function brxGenerate(){ BR.rooms=[]; BR.walls=[]; BR.doors=[]; BR.lintels=[]; BR
   // NOTE: tables roll off their OWN per-room stream, not the shared rnd(). Sharing it meant any change upstream (adding
   // the frame roll, say) shifted every later draw and the table count swung from 4 to 0 on the same seed.
   for(const r of R){ if(r.entry)continue; const rw=r.x1-r.x0, rd=r.z1-r.z0;
-    const rng=tileRng(((r.cx*7349) ^ (r.cy*9127) ^ ((BR.seed||1)>>>3))>>>0);
+    const rng=tileRng(((r.acx*7349) ^ (r.acy*9127) ^ ((BR.seed||1)>>>3))>>>0);
     if(rw<10||rd<10||rng()>0.34)continue;
     const vertT=rng()<0.5, len=Math.min(vertT?rd:rw, 12)*(0.45+rng()*0.3);
     const tx=r.x0+rw*(0.3+rng()*0.4), tz=r.z0+rd*(0.3+rng()*0.4);
@@ -10353,7 +10453,7 @@ function brxGenerate(){ BR.rooms=[]; BR.walls=[]; BR.doors=[]; BR.lintels=[]; BR
   //      so they get a radius instead of a box pair.
   BR.boxes=BR.boxes||[];
   for(const r of R){ if(r.entry || r.zone!==2)continue; const rw=r.x1-r.x0, rd=r.z1-r.z0; if(rw<7||rd<7)continue;
-    const rng=tileRng(((r.cx*4517) ^ (r.cy*7919) ^ ((BR.seed||1)>>>5))>>>0);
+    const rng=tileRng(((r.acx*4517) ^ (r.acy*7919) ^ ((BR.seed||1)>>>5))>>>0);
     if(rng()>0.20)continue;
     const n=1+((rng()*2)|0);
     for(let k=0;k<n;k++){ const kind=(rng()*6)|0, rot=rng()*6.2832;
@@ -10362,7 +10462,7 @@ function brxGenerate(){ BR.rooms=[]; BR.walls=[]; BR.doors=[]; BR.lintels=[]; BR
       const rad = kind===5 ? (1.1+rng()*1.0) : 0.62;
       BR.props.push({x:px, z:pz, kind, rot, r:rad});
       BR.boxes.push({x:px, z:pz, hx:rad, hz:rad}); } } }
-function brxEmitWall(run, vert, rnd){ const s0=vert?run.z0:run.x0, s1=vert?run.z1:run.x1, fixed=vert?run.x:run.z, L=s1-s0;
+function brxEmitWall(run, vert, rnd, o){ const s0=vert?run.z0:run.x0, s1=vert?run.z1:run.x1, fixed=vert?run.x:run.z, L=s1-s0;
   const isDoor = run.a>=0 && run.b>=0 && BR._door && BR._door.has(run.a<run.b?run.a+'_'+run.b:run.b+'_'+run.a);
   const _R=BR.rooms, _zr=_R[run.a>=0?run.a:run.b], zone=_zr?(_zr.zone|0):0;                  // a wall wears the skin of the room it bounds (the `a` side, else `b` at the region edge)
   // NO SEAM LINES (Ben 07-27): every wall is a closed box, so where two runs meet at a corner or in line their END CAPS
@@ -10375,6 +10475,59 @@ function brxEmitWall(run, vert, rnd){ const s0=vert?run.z0:run.x0, s1=vert?run.z
   const wty=Math.max((_ra&&_ra.ceil)||BR_WY1, (_rb&&_rb.ceil)||BR_WY1);
   const pushWall=(a0,a1,eLo,eHi)=>{ if(a1-a0<=0.001)return; const b0=a0-(eLo?EX:0), b1=a1+(eHi?EX:0);
     BR.walls.push(vert?{x0:fixed,z0:b0,x1:fixed,z1:b1,zone,ty:wty}:{x0:b0,z0:fixed,x1:b1,z1:fixed,zone,ty:wty}); };
+  // ================= CHUNK BOUNDARY CROSSINGS (Ben 07-27) =================
+  // A run with a<0 or b<0 sits on the OUTER edge of this chunk's grid — cAt returns -1 past the grid, so the whole chunk
+  // perimeter arrives here as solid wall. That is why chunks abutted without joining. Now the perimeter asks the shared-
+  // edge oracle what belongs on it and punches exactly that. Both neighbours ask the SAME oracle (keyed by the lower
+  // chunk, see brxEdge), so the openings land at identical world coordinates from either side by construction.
+  //   DOOR   — a normal doorway, full height, may carry a leaf
+  //   TUNNEL — 1.6 wide x 2.0 tall bore through the thick wall; you walk it upright, it is a duct not a door
+  //   STAIR  — recorded, and treated as a doorway while stacked floors are off. Building a flight before brGenColumn
+  //            follows each chunk's baseY would be stairs to nowhere, so the opening keeps connectivity and the flight
+  //            waits for levels.
+  if(o && (run.a<0 || run.b<0)){
+    const along = vert ? (fixed-o.GX0) : (fixed-o.GZ0);                                     // which grid line this run sits on
+    const line = Math.round(along/BR_CS);
+    let dgx=0, dgz=0;
+    if(vert){ if(line===0) dgx=-1; else if(line===o.CW) dgx=1; }
+    else { if(line===0) dgz=-1; else if(line===o.CD) dgz=1; }
+    if(dgx||dgz){
+      const list=brxEdgeFrom(o.gx,o.gz,dgx,dgz)||[], base=vert?o.GZ0:o.GX0;
+      // CLIP, DO NOT REJECT. The perimeter is split into one run per room that touches it, and those runs differ between
+      // the two chunks. If a crossing had to fit wholly inside one run, a crossing straddling two runs on one side and
+      // sitting inside one run on the other would be punched on one side and left as plaster on the other — precisely the
+      // door-on-one-face bug the shared oracle exists to prevent. Each run instead punches whatever PART of a crossing
+      // overlaps it, so the union of the masonry has the identical gap however the two sides happen to be divided.
+      const cuts=[];
+      for(const c of list){ const w=base+(c.cell+c.at)*BR_CS;
+        const width = c.kind===BRX_TUNNEL ? 1.6 : BR_DOORW, a0=w-width/2, a1=w+width/2;
+        const ov0=Math.max(a0,s0), ov1=Math.min(a1,s1);
+        if(ov1-ov0 > 0.05) cuts.push({ov0, ov1, kind:c.kind, c, whole:(a0>=s0-1e-6 && a1<=s1+1e-6), mid:(a0+a1)/2, a0, a1});
+      }
+      if(cuts.length){
+        cuts.sort((p,q)=>p.ov0-q.ov0);
+        let cur=s0;
+        for(const cut of cuts){
+          if(cut.ov0>cur+0.001) pushWall(cur, cut.ov0, cur===s0?1:0, 0);                     // masonry up to the opening
+          const lowY = cut.kind===BRX_TUNNEL ? BR_WY0+2.0 : BR_DOORH;                        // a tunnel's header sits lower — it is a bore, not a doorway
+          BR.lintels.push({vert, fixed, s0:cut.ov0, s1:cut.ov1, zone, y0:lowY});             // header over just this portion
+          // the fittings (a leaf, a tunnel record, a stair record) belong to ONE run only — the one holding the centre —
+          // or a crossing split across two runs would get two doors hung in it.
+          const ownsIt = cut.mid>=s0 && cut.mid<s1;
+          if(ownsIt){
+            if(cut.kind===BRX_TUNNEL) BR.tunnels.push(vert?{x0:fixed,z0:cut.a0,x1:fixed,z1:cut.a1}:{x0:cut.a0,z0:fixed,x1:cut.a1,z1:fixed});
+            else { const _cx=vert?fixed:cut.mid, _cz=vert?cut.mid:fixed;
+              if(cut.kind===BRX_STAIR) BR.stairs.push({cx:_cx, cz:_cz, vert, dir:cut.c.dir, rise:cut.c.rise, zone});
+              if(cut.whole && rnd()<0.45){ const dw=cut.a1-cut.a0, hingeAtStart=rnd()<0.5;    // a leaf only where the full opening is in one run; fewer leaves on a boundary than inside a chunk — a threshold between wings reads better open
+                BR.doors.push({ hx:vert?fixed:(hingeAtStart?cut.a0:cut.a1), hz:vert?(hingeAtStart?cut.a0:cut.a1):fixed,
+                  vert, dw, hingeAtStart, swing:(rnd()<0.5?1:-1), cx:_cx, cz:_cz,
+                  seg:vert?{x0:fixed,z0:cut.a0,x1:fixed,z1:cut.a1}:{x0:cut.a0,z0:fixed,x1:cut.a1,z1:fixed},
+                  closed:(rnd()<0.7), kind:(rnd()*3)|0, zone, framed:(rnd()<0.6) }); } } }
+          cur=Math.max(cur, cut.ov1);
+        }
+        if(s1>cur+0.001) pushWall(cur, s1, 0, 1);
+        return; } }
+  }
   if(isDoor && L>=4){ const dw=BR_DOORW, ds=s0+(L-dw)/2;                                    // ONE doorway, centred in the shared wall
     const arch = rnd()<0.05;                                                                 // 5% of doorways are ARCHED (Ben 07-27) — the spandrels get filled to a semicircle, springing dw/2 below the head
     pushWall(s0,ds,1,0); pushWall(ds+dw,s1,0,1); BR.lintels.push({vert,fixed,s0:ds,s1:ds+dw,zone,arch});   // grow only the OUTER ends; the doorway edges stay put (they are the reveal)
@@ -10397,6 +10550,48 @@ function brxEmitWall(run, vert, rnd){ const s0=vert?run.z0:run.x0, s1=vert?run.z
     if(vert) BR.solids.push({x0:fixed,z0:ws,x1:fixed,z1:ws+ww}); else BR.solids.push({x0:ws,z0:fixed,x1:ws+ww,z1:fixed}); }
   else pushWall(s0,s1,1,1); }                                                                // solid wall between these two rooms (no doorway) — both ends grow into their neighbours, so no corner seam
 function brxRoomAt(x,z){ const R=BR.rooms||[]; for(let i=0;i<R.length;i++){ const r=R[i]; if(x>=r.x0&&x<r.x1&&z>=r.z0&&z<r.z1)return r; } return null; }
+// =====================================================================
+//  INFINITE HALLS — chunk cache, union, streaming (Ben 07-27)
+//  brxGenerate already takes a chunk descriptor. The rest is bookkeeping, and it is deliberately done WITHOUT touching
+//  brBuildEnv: the flat BR.* arrays become the UNION of the loaded chunks, so every downstream consumer — collision, the
+//  nav graph, the Pale, the light pool, the bulbs, eating off a table — keeps working with no change at all.
+//  brxGenerate writes into BR.*, so a chunk is generated by swapping the live arrays aside, running it, and capturing the
+//  result. Ugly in one place, zero risk everywhere else.
+//  Gated on BR.infinite. With it off the game is byte-for-byte the single fixed region it has always been.
+// =====================================================================
+const BRX_KEEP=1;                                                       // Chebyshev radius of chunks kept loaded (1 = 3x3)
+const BRX_FIELDS=['rooms','walls','doors','lintels','pillars','fixtures','crawls','tables','frames','windows','solids','props','boxes','bulbs','tunnels','stairs'];   // NOTE: not 'ramps' — ramps are built by brBuildEnv, not generated, so unioning chunk records would wipe the flights
+function brxChunkGen(gx,gz){ if(!BR.gen) BR.gen=new Map();
+  const k=gx+'_'+gz; const hit=BR.gen.get(k); if(hit) return hit;
+  const o=brxChunkOrigin(gx,gz), ent=brxChunkOf(BR_ENTRY.x,BR_ENTRY.z);
+  const stash={}; for(const f of BRX_FIELDS) stash[f]=BR[f];             // swap the live arrays aside…
+  const keyRoomStash=BR.keyRoom;
+  brxGenerate({ gx, gz, GX0:o.x, GZ0:o.z, CW:BRX_CELLS, CD:BRX_CELLS, seed:brxChunkSeed(gx,gz),
+                acx:gx*BRX_CELLS, acy:gz*BRX_CELLS, isEntry:(gx===ent.gx && gz===ent.gz) });
+  const rec={gx,gz}; for(const f of BRX_FIELDS) rec[f]=BR[f];            // …capture what it produced…
+  if(!(gx===ent.gx && gz===ent.gz)) BR.keyRoom=keyRoomStash;             // only the entry chunk is allowed to define the key
+  for(const f of BRX_FIELDS) BR[f]=stash[f];                             // …and put the live arrays back
+  BR.gen.set(k,rec); return rec; }
+// Rebuild the flat arrays as the union of the loaded set. Room ids are renumbered because the nav graph indexes by id and
+// every chunk numbers its own rooms from zero — without this, chunk 2's room 0 would silently shadow chunk 1's.
+function brxUnion(){ const keep=BR.loaded||[];
+  for(const f of BRX_FIELDS) BR[f]=[];
+  for(const rec of keep){ const base=BR.rooms.length, dy=brxLevelDy(rec.gx,rec.gz);
+    // Rendering gets its offset from the group transform; COLLISION is world-space, so the heights have to be shifted
+    // here. Always recomputed from a stored base (_ceil0 / _ty0), so repeated unions cannot drift or double-apply.
+    for(let i=0;i<rec.rooms.length;i++){ const r=rec.rooms[i]; r.id=base+i;
+      if(r._ceil0===undefined) r._ceil0=r.ceil;
+      r.ceil=r._ceil0+dy; r.fy=BR_WY0+dy; BR.rooms.push(r); }
+    for(const w of rec.walls){ if(w._ty0===undefined) w._ty0=(w.ty||BR_WY1); w.ty=w._ty0+dy; }
+    for(const f of BRX_FIELDS){ if(f==='rooms')continue; const a=rec[f]; for(let i=0;i<a.length;i++) BR[f].push(a[i]); } }
+  BR._nav=null; BR._navSeed=null; _brLitSet=null; _brLitRoom=-2; }       // both caches key off the room set, which just changed
+function brxStream(force){ if(!BR.infinite || !BR.inside) return false;
+  const c=brxChunkOf(player.pos.x, player.pos.z);
+  if(!force && BR._cgx===c.gx && BR._cgz===c.gz) return false;
+  BR._cgx=c.gx; BR._cgz=c.gz;
+  const keep=[]; for(let dx=-BRX_KEEP; dx<=BRX_KEEP; dx++) for(let dz=-BRX_KEEP; dz<=BRX_KEEP; dz++) keep.push(brxChunkGen(c.gx+dx, c.gz+dz));
+  BR.loaded=keep; brxUnion(); brBuildEnvAll();
+  return true; }
 let _brDoorMat=null;
 function brDoorMats(){ if(_brDoorMat)return _brDoorMat; const TL=new THREE.TextureLoader(), base='./assets/backrooms/';
   const tx=(p,srgb)=>{ const t=TL.load(base+p); t.wrapS=t.wrapT=THREE.RepeatWrapping; t.anisotropy=8; if(srgb)t.colorSpace=THREE.SRGBColorSpace; return t; };
@@ -10547,6 +10742,37 @@ function brTryPullCord(){ const B=BR.bulbs; if(!BR.inside||!B||!B.length)return 
   if(typeof playSample==='function') playSample('cord', {x:best.x,y:best.y,z:best.z}, 0.8);
   if(typeof flashName==='function')flashName(best.on?'the bulb catches':'darkness');
   return true; }
+// ---- STAIRWELL FLIGHTS (Ben 07-27) ----
+// A stair crossing links two chunks that sit on different storeys. The flight runs PERPENDICULAR to the boundary, through
+// the opening, as a straight run of steps with a landing at the top — a switchback needs more floor than a boundary has.
+// Steps are merged into one mesh per material. The walk surface is registered in BR.ramps as a linear ramp, because the
+// voxel layer has no blocks here at all; brxCollide lifts the player onto it exactly the way a tilted floor works.
+function brBuildStairs(grp, s, yLo, yHi){ const M=brPropMats(), rise=yHi-yLo;
+  if(Math.abs(rise)<0.2) return null;
+  const up = rise>0;
+  const RUN = Math.max(4.0, Math.abs(rise)*1.7);                                        // ~30 degrees; shallower than a domestic stair, which suits a building this size
+  const W = 2.2;                                                                        // flight width, wider than the doorway so the reveal is not the pinch point
+  // axis: along the wall NORMAL. vert boundary (constant x) → the flight runs in x.
+  const nx = s.vert?1:0, nz = s.vert?0:1;
+  const a0x = s.cx - nx*RUN/2, a0z = s.cz - nz*RUN/2;                                   // low end
+  const a1x = s.cx + nx*RUN/2, a1z = s.cz + nz*RUN/2;                                   // high end
+  const loX = up? a0x : a1x, loZ = up? a0z : a1z, hiX = up? a1x : a0x, hiZ = up? a1z : a0z;
+  const N = Math.max(4, Math.round(Math.abs(rise)/0.42));                               // step count → ~0.42 rise each
+  const geos=[], tread=Math.abs(RUN)/N, stepR=Math.abs(rise)/N;
+  const _m=new THREE.Matrix4();
+  for(let i=0;i<N;i++){
+    const t=(i+0.5)/N, x=loX+(hiX-loX)*t, z=loZ+(hiZ-loZ)*t, y=yLo+Math.abs(rise)*((i+1)/N)-stepR/2;
+    const g2=new THREE.BoxGeometry(s.vert?tread:W, stepR, s.vert?W:tread);
+    _m.makeTranslation(x, y, z); g2.applyMatrix4(_m); geos.push(g2); }
+  if(geos.length){ const m=new THREE.Mesh(_mergeGeos(geos), M.casing); m.castShadow=true; m.receiveShadow=true; m.frustumCulled=false; grp.add(m);
+    for(const g3 of geos) g3.dispose(); }
+  // side walls so you cannot step off into the void beside the flight
+  for(const sgn of [-1,1]){ const wx=s.vert? (loX+hiX)/2 : s.cx+sgn*W/2, wz=s.vert? s.cz+sgn*W/2 : (loZ+hiZ)/2;
+    const wall=new THREE.Mesh(new THREE.BoxGeometry(s.vert?Math.abs(RUN):0.16, Math.abs(rise)+2.4, s.vert?0.16:Math.abs(RUN)), M.casing);
+    wall.position.set(wx, yLo+(Math.abs(rise)+2.4)/2 - 0.2, wz); wall.castShadow=true; wall.frustumCulled=false; grp.add(wall); }
+  BR.ramps.push({ x0:loX, z0:loZ, x1:hiX, z1:hiZ, y0:yLo, y1:yLo+Math.abs(rise), hw:W/2, vert:!!s.vert });
+  return {loX,loZ,hiX,hiZ,N};
+}
 const BR_DOOR_OPEN=1.5;                                                                 // fully-open swing angle (radians)
 const BR_JW=0.06;                                                                       // doorframe lining thickness — SLIM (Ben 07-27: the frames were "way too big"); it lines the reveal, it is not an architrave
 function brBuildDoors(grp){ if(!BR.doors||!BR.doors.length)return; const M=brDoorMats(), H=BR_DOORH-BR_WY0, th=0.10;
@@ -10743,6 +10969,10 @@ function brBuildEnv(){ brClearEnv(); if(!BR.rooms||!BR.rooms.length)brxGenerate(
   brBuildFrames(grp);                                                                                    // leafless openings that kept their frame
   brBuildProps(grp);                                                                                     // furniture + junk piles (tile districts only)
   brBuildBulbs(grp);                                                                                     // the pull-cord bulbs in the crouch-only rooms
+  BR.ramps=[];                                                                                           // rebuilt with the flights below
+  for(const st of (BR.stairs||[])){ const dy=(st.rise||1)*BR_CH*(st.dir>0?1:-1);                          // dir/rise come from the shared edge oracle; while levels are OFF both chunks are on the same storey, so a flight would be a step to nowhere and is skipped
+    if(!BR.levels) continue;
+    brBuildStairs(grp, st, y0, y0+dy); }
   // THE DROP IS REAL — but the carve is NOT done here. The voxel layer lays the flat floor that gives Y collision, and
   // editing it at build time only reaches chunks that happen to be loaded; a distant shaft would rebuild its floor the
   // moment you walked over to it. brGenColumn consults brVoidAt instead, so the hole is part of generation and comes
@@ -10776,16 +11006,42 @@ function brBuildEnv(){ brClearEnv(); if(!BR.rooms||!BR.rooms.length)brxGenerate(
   if(hP.length){ const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.Float32BufferAttribute(hP,3)); g.setIndex(hI); g.computeVertexNormals(); const m=new THREE.Mesh(g,frameMat); m.frustumCulled=false; grp.add(m); }
   if(gP.length){ const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.Float32BufferAttribute(gP,3)); g.setIndex(gI); const m=new THREE.Mesh(g,panelMat); m.frustumCulled=false; grp.add(m); }
   brBuildDoors(grp);
-  scene.add(grp); BR.env=grp;
   grp.traverse(o=>{ if(o.isMesh||o.isInstancedMesh){ o.receiveShadow=true; if(o.material!==panelMat && o.material!==deadPanel && !(o.material&&o.material.isMeshBasicMaterial)) o.castShadow=true; } });   // walls / lintels / pillars / doors / housings CAST; floor+ceiling only receive. The emissive diffusers must not cast — they'd shadow their own light.
+  return grp; }
+const BR_SHADOW_LIGHTS=2;
+// The pooled troffer lights are GLOBAL, not per chunk. brBuildEnv used to create them, which was fine when it ran once —
+// per chunk it would have made 16 lights nine times over.
+function brEnsureLightPool(){ if(BR.lightPool && BR.lightPool.length) return;
   BR.lightPool=[]; for(let i=0;i<16;i++){ const L=new THREE.PointLight(0xffedcf, 0, 56, 2.0); L.visible=false; scene.add(L); BR.lightPool.push(L); }
   // REAL CAST SHADOWS from the two nearest troffers (Ben 07-27). Point-light shadows are 6 faces each, so the count is
   // deliberately tiny and the far plane is clamped to the local room — everything past that is carried by the pooled falloff.
   if(CFG.quality!=='Low'){ const SS=CFG.quality==='Ultra'?1024:512;
     for(let i=0;i<BR_SHADOW_LIGHTS;i++){ const L=BR.lightPool[i]; L.castShadow=true; L.shadow.mapSize.set(SS,SS);
       L.shadow.bias=-0.006; L.shadow.normalBias=0.06; L.shadow.camera.near=0.3; L.shadow.camera.far=26; } }
-  brxUpdateLights(player.pos.x, player.pos.z); }
-const BR_SHADOW_LIGHTS=2;
+}
+// ---- THE INSTALLER (Ben 07-27) ----
+// One group PER CHUNK, each offset in Y by its storey. That offset is what makes stacked floors nearly free for
+// rendering: every chunk's geometry is built in its own local frame exactly as before, and the group carries it up or
+// down. brBuildEnv writes from BR.*, so a chunk is built by swapping BR.* to that chunk's record — the same trick
+// brxChunkGen uses. Collision is world-space, so brxUnion offsets the room/wall heights to match (see brxLevelDy).
+function brxLevelDy(gx,gz){ return BR.levels ? (brxChunkBaseY(gx,gz) - BR_FLOOR) : 0; }
+function brBuildEnvAll(){
+  if(!BR.infinite || !BR.loaded || !BR.loaded.length){ brClearEnv(); brEnsureLightPool(); const g=brBuildEnv(); scene.add(g); BR.env=g; brxUpdateLights(player.pos.x,player.pos.z); return; }
+  brClearEnv(); brEnsureLightPool();
+  const parent=new THREE.Group(); scene.add(parent); BR.env=parent;
+  const stash={}; for(const f of BRX_FIELDS) stash[f]=BR[f];
+  const allRamps=[], allFlick=[];
+  for(const rec of BR.loaded){
+    for(const f of BRX_FIELDS) BR[f]=rec[f];
+    BR.ramps=[];
+    let g=null; try{ g=brBuildEnv(); }catch(e){ g=null; }
+    if(g){ const dy=brxLevelDy(rec.gx,rec.gz); g.position.y=dy;
+      for(const r of (BR.ramps||[])) allRamps.push({x0:r.x0,z0:r.z0,x1:r.x1,z1:r.z1,y0:r.y0+dy,y1:r.y1+dy,hw:r.hw,vert:r.vert});
+      for(const fl of (BR.flickers||[])) allFlick.push(fl);
+      parent.add(g); } }
+  for(const f of BRX_FIELDS) BR[f]=stash[f];
+  BR.ramps=allRamps; BR.flickers=allFlick;                    // both are per-frame consumers and must span the whole loaded set
+  brxUpdateLights(player.pos.x,player.pos.z); }
 // DYING-TUBE FLICKER — returns 1 (on) or 0 (fully OFF), never a dim. A slow per-fixture envelope decides when a tube is
 // "sick"; inside that window it strobes hard, and there are separate dead-out beats. Ben 07-27: they must blink OFF, not dim.
 function brFlick(ph,t){ const s=Math.sin(t*1.7+ph)*Math.sin(t*0.63+ph*1.7);
@@ -10857,6 +11113,15 @@ function brxCollide(p){ const W=BR.walls; if(!W||!W.length)return; const RAD=0.4
     if(r && r.tilt){ const T=r.tilt, t2 = T.along ? (p.pos.x-r.x0)/(r.x1-r.x0) : (p.pos.z-r.z0)/(r.z1-r.z0);
       const f = T.dir>0 ? t2 : 1-t2, surf = BR_WY0 + T.rise*Math.max(0,Math.min(1,f));
       if(p.pos.y < surf){ p.pos.y=surf; if(p.vel.y<0)p.vel.y=0; p.onGround=true; } }
+    // STAIRWELL FLIGHTS — the voxel layer has nothing here, so the walk surface is ours. Same one-way lift as a tilted
+    // floor: project onto the flight's axis, take the height at that point, and hold the player on it.
+    if(BR.ramps) for(let i=0;i<BR.ramps.length;i++){ const R2=BR.ramps[i];
+      const dx=R2.x1-R2.x0, dz=R2.z1-R2.z0, ll=dx*dx+dz*dz||1;
+      let t=((p.pos.x-R2.x0)*dx+(p.pos.z-R2.z0)*dz)/ll; if(t<-0.06||t>1.06) continue;
+      const ox=p.pos.x-(R2.x0+dx*Math.max(0,Math.min(1,t))), oz=p.pos.z-(R2.z0+dz*Math.max(0,Math.min(1,t)));
+      if(Math.hypot(ox,oz) > R2.hw) continue;                                     // outside the flight's width
+      const surf=R2.y0+(R2.y1-R2.y0)*Math.max(0,Math.min(1,t));
+      if(p.pos.y < surf && p.pos.y > surf-2.6){ p.pos.y=surf; if(p.vel.y<0)p.vel.y=0; p.onGround=true; } }
     // LADDER in a vertical room — hold W while inside the stringers and you climb; the landing at the head is solid
     if(r && r.ladder){ const L=r.ladder, dx=p.pos.x-L.x, dz=p.pos.z-L.z;
       if(Math.abs(dx)<0.55 && Math.abs(dz)<0.55 && p.pos.y<L.top-0.6){
@@ -10868,7 +11133,7 @@ function brxCollide(p){ const W=BR.walls; if(!W||!W.length)return; const RAD=0.4
 let _brPortalRT=null, _brPortalCam=null, _brPortalMat=null;
 const _bv0=new THREE.Vector3(), _bv1=new THREE.Vector3(), _bv3=new THREE.Vector3(), _bq=new THREE.Quaternion(), _bcp=new THREE.Vector4(), _bq4=new THREE.Vector4(), _bPlane=new THREE.Plane(), _bSize=new THREE.Vector2();
 function brRenderPortal(){ if(typeof renderer==='undefined'||!renderer||!BR.door||typeof camera==='undefined')return;
-  if(!BR.rooms||!BR.rooms.length){ brxGenerate(); brBuildEnv(); }
+  if(!BR.rooms||!BR.rooms.length){ brxGenerate(); brBuildEnvAll(); }
   renderer.getDrawingBufferSize(_bSize); const rw=Math.max(2,_bSize.x|0), rh=Math.max(2,_bSize.y|0);
   if(!_brPortalRT){ _brPortalRT=new THREE.WebGLRenderTarget(rw,rh,{depthBuffer:true}); _brPortalCam=new THREE.PerspectiveCamera(); }
   else if(_brPortalRT.width!==rw||_brPortalRT.height!==rh)_brPortalRT.setSize(rw,rh);
@@ -11126,7 +11391,7 @@ function brSpawnPale(){ if(!BR.pale)BR.pale={}; const p=BR.pale; if(!p.mesh){ p.
   p.x=player.pos.x-Math.sin(A)*dist; p.z=player.pos.z-Math.cos(A)*dist; p.state='hunt'; p.t=0; p.stare=0; p._sc=0;
   p.phase='hidden'; p.hideT=0.9+Math.random()*1.3; p.anim='hide'; p.animT=0; p._flailT=5+Math.random()*6; p._flailBurst=0;
   p.setAnim=(a)=>{ if(p.anim!==a){ p.anim=a; p.animT=0; } };
-  p.mesh.position.set(p.x, BR_FLOOR+1, p.z); p.mesh.rotation.set(0,0,0); p.mesh.scale.setScalar(1); p.mesh.visible=true; }
+  p.y=brPaleFloorY(p.x,p.z); if(p.y==null)p.y=BR_WY0; p.mesh.position.set(p.x, p.y, p.z); p.mesh.rotation.set(0,0,0); p.mesh.scale.setScalar(1); p.mesh.visible=true; }
 function brPaleKill(){ const p=BR.pale; if(p&&p.mesh&&typeof camera!=='undefined'){ const ld=lookDir();   // lunge the face into the camera
     p.mesh.position.set(camera.position.x+ld.x*1.1, camera.position.y-2.45, camera.position.z+ld.z*1.1); p.mesh.rotation.y=Math.atan2(-ld.x,-ld.z); p.mesh.scale.setScalar(1.7); }
   if(typeof AC!=='undefined'&&AC){ try{ burst(master,1.0,0.5,1300,5,300); tone(master,{f:190,type:'sawtooth',dur:0.6,vol:0.6,to:55}); }catch(e){} }
@@ -11137,9 +11402,24 @@ function brPaleKill(){ const p=BR.pale; if(p&&p.mesh&&typeof camera!=='undefined
 //  A room-adjacency graph over the doorways: nodes are rooms, edges are the openings between them. The Pale BFSes to the
 //  player's room and steers to the first doorway on that path, and it is pushed out of walls exactly like the player is.
 // =====================================================================
+// WHERE THE FLOOR IS UNDER THE PALE (Ben 07-27). Its Y was hardcoded to BR_FLOOR+1, which was fine while the whole maze
+// sat on one slab; with stacked floors it stood buried in, or floating over, any room on another storey. Rooms never
+// overlap in plan — each chunk owns its own footprint — so a single (x,z) still resolves to exactly one room, and that
+// room's fy is the floor. Flights are checked first so it walks a stair instead of clipping up it.
+function brPaleFloorY(x,z){
+  if(BR.ramps) for(let i=0;i<BR.ramps.length;i++){ const R2=BR.ramps[i];
+    const dx=R2.x1-R2.x0, dz=R2.z1-R2.z0, ll=dx*dx+dz*dz||1;
+    let t=((x-R2.x0)*dx+(z-R2.z0)*dz)/ll; if(t<-0.06||t>1.06) continue; t=Math.max(0,Math.min(1,t));
+    const ox=x-(R2.x0+dx*t), oz=z-(R2.z0+dz*t);
+    if(Math.hypot(ox,oz) <= R2.hw) return R2.y0+(R2.y1-R2.y0)*t; }
+  const r=brxRoomAt(x,z); return r ? (r.fy!=null? r.fy : BR_WY0) : null; }
 function brNavGraph(){ if(BR._nav && BR._navSeed===BR.seed) return BR._nav;
   const R=BR.rooms||[], adj=R.map(()=>[]);
-  for(const l of (BR.lintels||[])){ if(l.y0) continue;                                        // crawl holes need crouching — it walks upright, so they are not edges for it
+  // A lintel's y0 is its header height. Crawl holes are too low to walk and are not edges for something that stands —
+  // but the CHUNK BOUNDARY crossings also carry a y0 (tunnels sit at BR_WY0+2.0, boundary doors at BR_DOORH), so the old
+  // `if(l.y0) continue` silently excluded every cross-chunk opening and the Pale could never leave its own chunk.
+  // Test the actual clearance instead of merely whether y0 was set.
+  for(const l of (BR.lintels||[])){ if(l.y0 && l.y0 < BR_WY0+1.9) continue;
     const cx=l.vert? l.fixed : (l.s0+l.s1)/2, cz=l.vert? (l.s0+l.s1)/2 : l.fixed, o=BR_WT/2+0.9;
     const A=brxRoomAt(l.vert?cx-o:cx, l.vert?cz:cz-o), B=brxRoomAt(l.vert?cx+o:cx, l.vert?cz:cz+o);
     if(!A||!B||A===B)continue;
@@ -11172,21 +11452,23 @@ function brPalePeekSpot(px,pz,fromX,fromZ){ const L=BR.lintels; if(!L||!L.length
     const d=Math.hypot(cx-fromX, cz-fromZ); if(d<bd){ bd=d; best={x:cx,z:cz,vert:!!l.vert}; } }
   return best; }
 function brUpdatePale(dt){ const p=BR.pale||(BR.pale={state:'dormant',cd:45+Math.random()*45,t:0});
-  if(p.state==='qa'){ const m=p.mesh; if(!m)return; m.position.set(p.x,BR_FLOOR+1,p.z); m.rotation.y=Math.atan2(player.pos.x-p.x,player.pos.z-p.z); brPaleAnim(p,dt); return; }   // QA anim-lock: hold the forced clip
+  if(p.state==='qa'){ const m=p.mesh; if(!m)return; m.position.set(p.x,(p.y!=null?p.y:BR_FLOOR+1),p.z); m.rotation.y=Math.atan2(player.pos.x-p.x,player.pos.z-p.z); brPaleAnim(p,dt); return; }   // QA anim-lock: hold the forced clip
   if(p.state==='dormant'){ p.cd-=dt; const gate=(BR.t>180)||((BR.dist||0)>=100); if(p.cd<=0 && gate)brSpawnPale(); return; }   // it does not target you until 3 min in OR 100 blocks walked (Ben 07-27)
   if(p.state==='cooldown'){ p.cd-=dt; if(p.cd<=0){ p.state='dormant'; p.cd=(BR.hasKey?25:50)+Math.random()*40; } return; }
   const m=p.mesh; if(!m){ p.state='dormant'; p.cd=30; return; } p.t+=dt; if(!p.setAnim)p.setAnim=(a)=>{ if(p.anim!==a){ p.anim=a; p.animT=0; } };
   const dx=player.pos.x-p.x, dz=player.pos.z-p.z, dist=Math.hypot(dx,dz)||1e-3;
+  // FOLLOW THE FLOOR. Eased rather than snapped so a flight reads as a climb, and it never teleports up a storey.
+  { const fy=brPaleFloorY(p.x,p.z); if(fy!=null){ if(p.y==null)p.y=fy; else p.y += (fy-p.y)*Math.min(1, dt*7); } else if(p.y==null) p.y=BR_WY0; }
   // ---- THE WITHDRAWAL (Ben 07-27): it does NOT lean over and blink out. It throws its arms everywhere and SCREAMS for
   //      half a second, then it is gone. Runs to completion regardless of what you do.
   if(p.phase==='thrash'){ p.setAnim('flail'); p.thrashT-=dt;
-    m.position.set(p.x, BR_FLOOR+1, p.z); m.rotation.y=Math.atan2(dx,dz);
+    m.position.set(p.x, p.y, p.z); m.rotation.y=Math.atan2(dx,dz);
     brPaleAnim(p,dt);
     if(p.thrashT<=0){ brHidePale(); p.state='cooldown'; p.cd=(BR.hasKey?25:50)+Math.random()*40; }
     return; }
   const fwx=-Math.sin(player.yaw), fwz=-Math.cos(player.yaw);                                  // horizontal facing (pitch-independent)
   const observed=((fwx*(-dx)+fwz*(-dz))/dist)>0.5 && dist<72;   // pale within your view cone → FREEZE (SCP-173: it only moves when unseen)
-  m.position.set(p.x, BR_FLOOR+1, p.z);
+  m.position.set(p.x, p.y, p.z);
   // facing: normally straight at you. In a doorway it stands ALONG the wall instead, so the lean carries its body
   // through the opening, and the head twists back to hold your eyes.
   if(p.peek){ m.rotation.y = p.peek.vert ? 0 : Math.PI/2;
@@ -11196,7 +11478,7 @@ function brUpdatePale(dt){ const p=BR.pale||(BR.pale={state:'dormant',cd:45+Math
   else m.rotation.y=Math.atan2(dx,dz);                                                          // always faces you (anim adds the z-lean)
   { let ty=Math.atan2(dx,dz)-m.rotation.y; while(ty>Math.PI)ty-=6.2832; while(ty<-Math.PI)ty+=6.2832;   // body-relative aim at your EYE — the head override in brPaleAnim snaps onto this
     const eyeY=(typeof camera!=='undefined')?camera.position.y:(player.pos.y+1.6);
-    p.trackYaw=ty; p.trackPitch=Math.atan2(eyeY-(BR_FLOOR+1+2.35), Math.max(1,dist)); }
+    p.trackYaw=ty; p.trackPitch=Math.atan2(eyeY-((p.y!=null?p.y:BR_WY0)+2.35), Math.max(1,dist)); }
   // ---- CROUCHED & HIDDEN → RISES to hunt (the reveal) ----
   if(p.phase==='hidden'){ p.setAnim('hide'); p.hideT-=dt; if(p.hideT<=0||observed){ p.phase='rising'; p.animT=0; } brPaleAnim(p,dt); if(dist<1.5)brPaleKill(); return; }
   if(p.phase==='rising'){ p.setAnim('rise'); if(p.animT>1.15)p.phase='hunt'; brPaleAnim(p,dt); if(dist<1.5)brPaleKill(); return; }
@@ -11205,7 +11487,7 @@ function brUpdatePale(dt){ const p=BR.pale||(BR.pale={state:'dormant',cd:45+Math
   // more vanishing — it hunts until you have put 100 blocks between you, and only then does it break off.
   const committed = (BR.paleFlees|0) >= 2;
   const withdraw=()=>{ BR.paleFlees=(BR.paleFlees|0)+1; p.phase='thrash'; p.thrashT=0.5; p.peek=null; p.setAnim('flail');   // half a second of arms-everywhere + a scream, THEN gone
-    if(typeof playSample==='function') playSample('scream', {x:p.x,y:BR_FLOOR+2,z:p.z}, 0.95); };
+    if(typeof playSample==='function') playSample('scream', {x:p.x,y:p.y+1,z:p.z}, 0.95); };
   const breakOff=()=>{ BR.paleFlees=0; withdraw(); BR.paleFlees=0; };                         // the 100-block break-off resets the cycle rather than counting as a flee
   // ---- ROOM-TO-ROOM STEERING: never straight at you through masonry. BFS to your room, aim at the first doorway.
   const step=(spd)=>{ const myR=brxRoomAt(p.x,p.z), yourR=brxRoomAt(player.pos.x,player.pos.z);
@@ -11251,20 +11533,73 @@ function updateBackrooms(dt){
   brxCollide(player);                                                                                                    // segment collision — keep the player inside the rooms (runs AFTER physics(dt))
   brxUpdateLights(player.pos.x, player.pos.z);                                                                           // fluorescent pool follows the player
   brUpdateHum(dt);                                                                                                       // the buzz tracks the LIT tubes near you — blacked-out wings go silent
+  if(BR.infinite){ try{ brxStream(false); }catch(e){ BR.infinite=false; if(typeof flashName==='function')flashName('the halls refuse to extend'); } }   // one chunk-crossing check per frame; a failure falls back to the fixed region rather than wedging the loop
   if(player.pos.y < BR_FLOOR-26 && !player.dead) brKill('the drop');                                                     // fell down a shaft — the dark at the bottom is the bottom
   brUpdateDoors(dt); brUpdateKey(dt); brUpdateExit(dt); brUpdatePale(dt); }
 
 // ---- QA / testing hooks ----
+if(typeof window!=='undefined'){ window.__hcBRX={          // the chunk substrate, exposed for bench/tmp-brx-edges.mjs
+  edge:(a,b,c,d)=>brxEdge(a,b,c,d), edgeFrom:(gx,gz,dx,dz)=>brxEdgeFrom(gx,gz,dx,dz),
+  chunkOf:(x,z)=>brxChunkOf(x,z), origin:(gx,gz)=>brxChunkOrigin(gx,gz), seedOf:(gx,gz)=>brxChunkSeed(gx,gz),
+  SPAN:BRX_SPAN, CELLS:BRX_CELLS, entry:()=>({x:BR_ENTRY.x,z:BR_ENTRY.z}),
+  level:(gx,gz)=>brxChunkLevel(gx,gz), baseY:(gx,gz)=>brxChunkBaseY(gx,gz), LEVELS:BRX_LEVELS,
+  infinite:(on)=>{ BR.infinite=!!on; if(BR.infinite && BR.inside){ BR.gen=null; BR._cgx=null; brxStream(true); } return !!BR.infinite; },
+  stats:()=>({ infinite:!!BR.infinite, cached:BR.gen?BR.gen.size:0, loaded:(BR.loaded||[]).length,
+    chunk:[BR._cgx,BR._cgz], rooms:(BR.rooms||[]).length, walls:(BR.walls||[]).length,
+    at:brxChunkOf(player.pos.x,player.pos.z) }),
+  walkTo:(gx,gz)=>{ const o=brxChunkOrigin(gx,gz); player.pos.set(o.x+BRX_SPAN/2, BR_FLOOR+1.2, o.z+BRX_SPAN/2); player.vel.set(0,0,0);
+    if(BR.infinite) brxStream(true); return { at:brxChunkOf(player.pos.x,player.pos.z), rooms:(BR.rooms||[]).length }; },
+  // QA: the masonry gaps this chunk punches along one of its own perimeter lines, as world intervals. Two adjacent chunks
+  // must produce the identical gap set for the boundary they share — that is the whole point of the shared oracle.
+  gaps:(gx,gz,dgx,dgz)=>{ const rec=brxChunkGen(gx,gz), o=brxChunkOrigin(gx,gz);
+    const vert = dgx!==0;
+    const line = vert ? (o.x + (dgx>0?BRX_SPAN:0)) : (o.z + (dgz>0?BRX_SPAN:0));
+    const lo = vert ? o.z : o.x, hi = lo + BRX_SPAN;
+    const solid=[];                                                                          // the wall segments lying on that line
+    for(const w of rec.walls){ if(vert){ if(Math.abs(w.x0-line)>0.01 || Math.abs(w.x1-line)>0.01) continue; solid.push([Math.min(w.z0,w.z1), Math.max(w.z0,w.z1)]); }
+      else { if(Math.abs(w.z0-line)>0.01 || Math.abs(w.z1-line)>0.01) continue; solid.push([Math.min(w.x0,w.x1), Math.max(w.x0,w.x1)]); } }
+    solid.sort((a,b)=>a[0]-b[0]);
+    const gaps=[]; let cur=lo;                                                               // invert to gaps, clamped to this chunk's span
+    for(const sg of solid){ const a=Math.max(sg[0],lo), b=Math.min(sg[1],hi); if(b<=a)continue;
+      if(a>cur+0.06) gaps.push([+cur.toFixed(2), +a.toFixed(2)]); cur=Math.max(cur,b); }
+    if(hi>cur+0.06) gaps.push([+cur.toFixed(2), +hi.toFixed(2)]);
+    return gaps; },
+  crossings:(gx,gz)=>{ const rec=brxChunkGen(gx,gz); return { tunnels:rec.tunnels.length, stairs:rec.stairs.length, lintels:rec.lintels.length }; },
+  levels:(on)=>{ BR.levels=!!on; if(BR.inside){ try{ brBuildEnvAll(); }catch(e){ return {err:e.message}; } } return { levels:!!BR.levels, ramps:(BR.ramps||[]).length }; },
+  ramps:()=>(BR.ramps||[]).map(r=>({x0:+r.x0.toFixed(1),z0:+r.z0.toFixed(1),x1:+r.x1.toFixed(1),z1:+r.z1.toFixed(1),y0:+r.y0.toFixed(1),y1:+r.y1.toFixed(1)})),
+  // QA: drop the player onto a flight at fraction t and let brxCollide settle them. Tests the RAMP SURFACE specifically,
+  // without confounding it with the room walls a forced test flight inevitably cuts through.
+  standOnRamp:(i,t)=>{ const R2=(BR.ramps||[])[i|0]; if(!R2)return null;
+    const x=R2.x0+(R2.x1-R2.x0)*t, z=R2.z0+(R2.z1-R2.z0)*t, want=R2.y0+(R2.y1-R2.y0)*t;
+    player.pos.set(x, want+1.2, z); player.vel.set(0,0,0);
+    return { t, want:+want.toFixed(2) }; },
+  // QA: a 1-storey flight cannot be produced while levels are off, so force one into the live env and stand at its foot
+  forceStair:(rise)=>{ if(!BR.inside) brEnter();
+    // Build a flight beside the player, NOT at a distant crossing: teleporting to a far crossing crosses a chunk
+    // boundary, which fires brxStream -> brBuildEnv and disposes the very flight just built. Anchor it here instead.
+    const st={ cx:player.pos.x+2, cz:player.pos.z, vert:true, dir:1, rise:1, zone:0 };
+    if(BR.infinite) brxStream(true);                                              // settle any pending stream FIRST
+    // BR.env can be null between a clear and a rebuild; a QA hook must not depend on that timing
+    if(!BR.env){ BR.env=new THREE.Group(); scene.add(BR.env); }
+    BR.ramps=BR.ramps||[]; const g=brBuildStairs(BR.env, st, BR_WY0, BR_WY0+(rise||BR_CH));
+    if(!g) return null;
+    player.pos.set(g.loX, BR_WY0+0.6, g.loZ); player.vel.set(0,0,0);
+    player.yaw=Math.atan2(-(g.hiX-g.loX), -(g.hiZ-g.loZ)); player.pitch=0.12;
+    return { foot:[+g.loX.toFixed(1),+g.loZ.toFixed(1)], head:[+g.hiX.toFixed(1),+g.hiZ.toFixed(1)], steps:g.N, ramps:BR.ramps.length,
+             chunk:brxChunkOf(player.pos.x,player.pos.z) }; },
+  sig:(gx,gz)=>(BR.rooms||[]).filter(r=>r.acx>=gx*BRX_CELLS && r.acx<(gx+1)*BRX_CELLS && r.acy>=gz*BRX_CELLS && r.acy<(gz+1)*BRX_CELLS)
+    .map(r=>r.acx+','+r.acy+','+r.cw+'x'+r.ch+','+r.zone+','+(r.low?'L':'')+(r.drop?'D':'')+(r.shaft?'S':'')+(r.tilt?'T':'')).sort().join('|'),   // QA: a chunk's layout fingerprint, for revisit-determinism
+  KIND:{DOOR:BRX_DOOR,TUNNEL:BRX_TUNNEL,STAIR:BRX_STAIR} }; }
 if(typeof window!=='undefined'){ window.__hcBR={ door:()=>brSpawnDoorNearPlayer(), enter:()=>brEnter(), exit:()=>brExit(), key:()=>brGiveKey(),
   tp:(dx=0,dz=0)=>{ if(!BR.inside)brEnter(); player.pos.set(BR_ENTRY.x+dx,BR_FLOOR+1.2,BR_ENTRY.z+dz); if(typeof streamChunks==='function')for(let i=0;i<6;i++)streamChunks(160,160); },
   gotoKey:()=>{ if(!BR.inside)brEnter(); player.pos.set(BR_KEY.x-14,BR_FLOOR+1.2,BR_KEY.z); if(typeof streamChunks==='function')for(let i=0;i<6;i++)streamChunks(160,160); },
   pale:(dist)=>{ if(!BR.inside)brEnter(); brSpawnPale(); const A=player.yaw, D=dist||6; BR.pale.x=player.pos.x-Math.sin(A)*D; BR.pale.z=player.pos.z-Math.cos(A)*D; return BR.pale&&BR.pale.state; },
   anim:(a)=>{ if(!BR.inside)brEnter(); if(!BR.pale||!BR.pale.mesh)brSpawnPale(); const p=BR.pale; const yaw=player.yaw, D=5.5;   // place it right in front, facing the camera
     p.x=player.pos.x-Math.sin(yaw)*D; p.z=player.pos.z-Math.cos(yaw)*D; p.phase='hunt'; p.state='qa'; p.anim=a||'idle'; p.animT=0;
-    if(!p.setAnim)p.setAnim=(x)=>{ if(p.anim!==x){ p.anim=x; p.animT=0; } }; if(p.mesh){ p.mesh.position.set(p.x,BR_FLOOR+1,p.z); p.mesh.visible=true; brPaleAnim(p,0.016); } return a||'idle'; },   // QA: force a named clip (idle/crouch/hide/rise/stand/walk/run/peek/flail/glide/lunge/turn/banish)
+    if(!p.setAnim)p.setAnim=(x)=>{ if(p.anim!==x){ p.anim=x; p.animT=0; } }; if(p.mesh){ p.y=brPaleFloorY(p.x,p.z); if(p.y==null)p.y=BR_WY0; p.mesh.position.set(p.x,p.y,p.z); p.mesh.visible=true; brPaleAnim(p,0.016); } return a||'idle'; },   // QA: force a named clip (idle/crouch/hide/rise/stand/walk/run/peek/flail/glide/lunge/turn/banish)
   rooms:()=>{ const R=BR.rooms||[], W=BR.walls||[]; const areas=R.map(r=>((r.x1-r.x0)*(r.z1-r.z0))|0); const angled=W.filter(w=>Math.abs(w.x1-w.x0)>0.01 && Math.abs(w.z1-w.z0)>0.01).length;
     return {rooms:R.length, walls:W.length, angledWalls:angled, halfWalls:W.filter(w=>w.half).length, crawls:(BR.crawls||[]).length, doors:(BR.doors||[]).length, pillars:(BR.pillars||[]).length, fixtures:(BR.fixtures||[]).length, avgDoors:R.length?+(R.reduce((s,r)=>s+(r.doors||0),0)/R.length).toFixed(2):0, maxDoors:R.length?Math.max(0,...R.map(r=>r.doors||0)):0, minArea:areas.length?Math.min(...areas):0, maxArea:areas.length?Math.max(...areas):0}; },
-  seed:(v)=>{ BR.seed=(v>>>0)||1; BR.rooms=[]; if(BR.inside){ try{ brBuildEnv(); }catch(e){ return 'ERR:'+(e&&e.message); } } return BR.seed; },   // QA: force a maze seed + rebuild
+  seed:(v)=>{ BR.seed=(v>>>0)||1; BR.rooms=[]; BR.gen=null; BR._cgx=null; if(BR.inside){ try{ if(BR.infinite) brxStream(true); else brBuildEnvAll(); }catch(e){ return 'ERR:'+(e&&e.message); } } return BR.seed; },   // QA: force a maze seed + rebuild
   doorList:()=>(BR.doors||[]).map((d,i)=>({i,cx:+d.cx.toFixed(1),cz:+d.cz.toFixed(1),closed:d.closed,a:+(d.a||0).toFixed(2),kind:d.kind,dbl:!!d.dbl,leafW:+(d.leafW||0).toFixed(2)})),
   goDoor:(i)=>{ const d=(BR.doors||[])[i|0]; if(!d)return null; if(!BR.inside)brEnter();      // QA: stand square-on to a door, 3.2 back, eye level
     const nx=d.vert?1:0, nz=d.vert?0:1; player.pos.set(d.cx+nx*3.2, BR_FLOOR+1.2, d.cz+nz*3.2);
@@ -11292,7 +11627,7 @@ if(typeof window!=='undefined'){ window.__hcBR={ door:()=>brSpawnDoorNearPlayer(
     if(!best)return null;
     if(kind==='shaft'){ best.shaft={storeys:3}; best.ceil=BR_WY1; }
     else { best.tilt={along:true, rise:2.6, dir:1}; best.ceil=Math.min(BR_WY1, Math.max(best.ceil, BR_WY0+5.6)); }
-    try{ brBuildEnv(); }catch(e){ return {err:e.message}; }
+    try{ brBuildEnvAll(); }catch(e){ return {err:e.message}; }
     return {kind, x:+best.cx_w.toFixed(1), z:+best.cz_w.toFixed(1), w:+(best.x1-best.x0).toFixed(1), d:+(best.z1-best.z0).toFixed(1)}; },
   onLadder:()=>{ const r=(BR.rooms||[]).find(x=>x.ladder); if(!r)return null;                  // QA: stand the player on the ladder in a vertical room
     player.pos.set(r.ladder.x, BR_FLOOR+1.2, r.ladder.z); player.vel.set(0,0,0); player.yaw=0; player.pitch=0.5;
@@ -11303,7 +11638,7 @@ if(typeof window!=='undefined'){ window.__hcBR={ door:()=>brSpawnDoorNearPlayer(
   forceDrop:()=>{ const R=BR.rooms||[]; let best=null,ba=0;                                   // QA: a 1% feature is untestable by chance — convert the biggest eligible room and rebuild
     for(const r of R){ if(r.entry||r.low)continue; const a=(r.x1-r.x0)*(r.z1-r.z0); if((r.x1-r.x0)>=12&&(r.z1-r.z0)>=12&&a>ba){ba=a;best=r;} }
     if(!best)return null; best.drop=true; best.ledge=1.6; best.ceil=Math.min(BR_WY1,Math.max(best.ceil,BR_WY0+5));
-    try{ brBuildEnv(); }catch(e){ return {err:e.message}; }
+    try{ brBuildEnvAll(); }catch(e){ return {err:e.message}; }
     return {x:+best.cx_w.toFixed(1), z:+best.cz_w.toFixed(1), w:+(best.x1-best.x0).toFixed(1), d:+(best.z1-best.z0).toFixed(1)}; },
   goDrop:()=>{ const r=(BR.rooms||[]).find(x=>x.drop); if(!r)return null; if(!BR.inside)brEnter();
     player.pos.set(r.x0+0.8, BR_FLOOR+1.2, r.cz_w); player.yaw=-Math.PI/2; player.pitch=-0.22; return {x:r.cx_w,z:r.cz_w}; },   // stand ON the west ledge looking EAST across the void (lookDir = (-sin yaw, ., -cos yaw), so -PI/2 faces +x)
@@ -11314,9 +11649,34 @@ if(typeof window!=='undefined'){ window.__hcBR={ door:()=>brSpawnDoorNearPlayer(
   zones:()=>{ const c={0:0,1:0,2:0}; for(const r of (BR.rooms||[]))c[r.zone|0]=(c[r.zone|0]|0)+1; return c; },        // QA: how the PBR districts fell
   goTable:(i)=>{ const t=(BR.tables||[])[i|0]; if(!t)return null; if(!BR.inside)brEnter();
     player.pos.set(t.x + Math.sin(0.6)*7, BR_FLOOR+1.2, t.z + Math.cos(0.6)*7); player.yaw=0.6; player.pitch=-0.14; return {x:t.x,z:t.z}; },   // QA: stand off a table and look at it (lookDir for yaw is (-sin,-cos), so stand on the +(sin,cos) side)
+  // QA: put the Pale and the player on DIFFERENT storeys and ask the nav graph for a route between them. Lives inside the
+  // module because BR is module-scoped — reaching for it from page scope is the mistake this file keeps catching.
+  crossStorey:()=>{ const out={tries:0, routed:0, sameRoom:0, noRoute:0, noRoom:0, samples:[]};
+    const R=(BR.rooms||[]), byFy={};
+    for(const r of R){ const k=Math.round(r.fy!=null?r.fy:BR_WY0); (byFy[k]=byFy[k]||[]).push(r); }
+    const keys=Object.keys(byFy).map(Number).sort((a,b)=>a-b); out.storeys=keys;
+    if(keys.length<2) return out;
+    for(let i=0;i<keys.length-1;i++){
+      const A=byFy[keys[i]][0], B=byFy[keys[i+1]][0];
+      player.pos.set(B.cx_w, (B.fy!=null?B.fy:BR_WY0)+1.2, B.cz_w);
+      if(BR.pale){ BR.pale.x=A.cx_w; BR.pale.z=A.cz_w; BR.pale.y=(A.fy!=null?A.fy:BR_WY0);
+        if(BR.pale.mesh) BR.pale.mesh.position.set(A.cx_w, BR.pale.y, A.cz_w); }
+      out.tries++;
+      const a=brxRoomAt(A.cx_w,A.cz_w), b=brxRoomAt(B.cx_w,B.cz_w);
+      let hop='NOROOM';
+      if(a&&b){ if(a===b) hop='SAME'; else hop = brPathNext(a.id,b.id) ? 'ROUTE' : 'NOROUTE'; }
+      if(hop==='ROUTE')out.routed++; else if(hop==='SAME')out.sameRoom++; else if(hop==='NOROUTE')out.noRoute++; else out.noRoom++;
+      out.samples.push({fromFy:keys[i], toFy:keys[i+1], hop}); }
+    return out; },
   paleState:()=>{ const p=BR.pale; if(!p)return null; const f=(typeof _paleFaceImg!=='undefined'&&_paleFaceImg);
     return { state:p.state, phase:p.phase||'', anim:p.anim||'', peek:!!p.peek, lean:p.leanSide||0, thrashT:+((p.thrashT||0)).toFixed(2), gape:+((p.gape||0)).toFixed(2),
       dist:+Math.hypot((p.x||0)-player.pos.x,(p.z||0)-player.pos.z).toFixed(1), faceLoaded: !!(f&&f.width>0),
+      y:+((p.y!=null?p.y:0)).toFixed(2), floorY:(()=>{ const v=brPaleFloorY(p.x||0,p.z||0); return v==null?null:+v.toFixed(2); })(),
+      myRoom:(()=>{ const r=brxRoomAt(p.x||0,p.z||0); return r? {id:r.id, fy:+((r.fy||0)).toFixed(1)} : null; })(),
+      yourRoom:(()=>{ const r=brxRoomAt(player.pos.x,player.pos.z); return r? {id:r.id, fy:+((r.fy||0)).toFixed(1)} : null; })(),
+      navEdges:(()=>{ try{ const a=brNavGraph().adj; return a.reduce((n,e)=>n+e.length,0); }catch(e){ return -1; } })(),
+      pathHop:(()=>{ try{ const a=brxRoomAt(p.x||0,p.z||0), b=brxRoomAt(player.pos.x,player.pos.z);
+        if(!a||!b) return null; if(a===b) return 'same-room'; const d=brPathNext(a.id,b.id); return d? {x:+d.x.toFixed(1), z:+d.z.toFixed(1)} : 'NO ROUTE'; }catch(e){ return 'ERR'; } })(),
       joints: p.mesh? Object.keys(p.mesh.userData.joints||{}).length : 0 }; },   // QA: Pale behaviour + is the gif face actually decoded
   tpDoor:(i)=>{ const d=(BR.doors||[])[i||0]; if(!d)return null; const nx=d.vert?1:0, nz=d.vert?0:1; player.pos.set(d.cx-nx*2.6,BR_FLOOR+1.2,d.cz-nz*2.6); const dx=d.cx-player.pos.x,dz=d.cz-player.pos.z; player.yaw=Math.atan2(-dx,-dz); if(typeof streamChunks==='function')for(let k=0;k<4;k++)streamChunks(160,160); return {i,closed:d.closed}; },
   toggle:()=>brTryToggleDoor(),
