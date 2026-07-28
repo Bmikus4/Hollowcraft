@@ -376,7 +376,350 @@ try{ const sv=localStorage.getItem('hollowcraft_rd'); if(sv) CFG.RENDER_DIST=Mat
 const DEBUG = Q.get('debug');
 
 // =====================================================================
-//  DETERMINISTIC RNG + NOISE
+//  PERF — feature flags + zero-alloc profiler + scripted benchmark harness
+//  ONE flat object. Every optimisation the performance pass adds is switchable here at runtime, so any regression
+//  can be bisected by flipping one boolean; with every flag off the game must behave exactly like game.baseline.html.
+//  ?perf=1 turns on the profiler + overlay. ?perf=0 (or absent) leaves the profiler cold — the timers compile to a
+//  single `if(PERF.on)` test and allocate nothing.
+// =====================================================================
+const PERF = {
+  // ---- profiler ----
+  on:       Q.get('perf')!=null,        // master switch for timers + counters
+  overlay:  Q.get('perf')==='1',        // the on-screen readout
+  gpuTimers:true,                       // EXT_disjoint_timer_query_webgl2, feature-detected
+  loaf:     true,                       // PerformanceObserver('long-animation-frame')
+  // ---- optimisation flags (Phase 4/5 fills these in; every one defaults to BASELINE behaviour) ----
+  // (none yet — Phase 0 must not change a single line of game logic)
+};
+// ---------------------------------------------------------------------
+//  T — zero-alloc scoped CPU timers. Integer enum, preallocated Float64Array, never a string key, never an object.
+// ---------------------------------------------------------------------
+const TID = { input:0, sim:1, collision:2, entities:3, stream:4, meshApply:5, uniforms:6, cull:7, draw:8, hud:9,
+              audio:10, br:11, brPortal:12, brStream:13, brBuild:14, post:15, sky:16, shadow:17, misc:18 };
+const TN = ['input','sim','collision','entities','stream','meshApply','uniforms','cull','draw','hud',
+            'audio','br','brPortal','brStream','brBuild','post','sky','shadow','misc'];
+const NSYS = TN.length;
+const PROF_RING = 4096;
+const T = (function(){
+  const openAt = new Float64Array(NSYS);        // timestamp of the currently-open scope (0 = closed)
+  const depth  = new Int32Array(NSYS);          // re-entrancy guard: only the outermost begin/end pair counts
+  const cur    = new Float64Array(NSYS);        // this frame's accumulation
+  const ring   = new Float32Array(PROF_RING*NSYS);  // per-frame per-system history (256 KB)
+  const frames = new Float32Array(PROF_RING);   // per-frame wall-clock deltas
+  const gpuRing= new Float32Array(PROF_RING*5); // 0=total 1=pre 2=portal 3=scene 4=composer
+  const progs  = new Int32Array(PROF_RING);     // renderer.info.programs.length per frame — any growth IS a compile
+  let w = 0, n = 0;                             // write cursor, total frames written
+  return {
+    ring, frames, gpuRing, progs, NSYS,
+    idx(){ return w; }, count(){ return n; },
+    begin(id){ if(!PERF.on) return; if(depth[id]++ === 0) openAt[id] = performance.now(); },
+    end(id){   if(!PERF.on) return; if(--depth[id] <= 0){ depth[id]=0; cur[id] += performance.now()-openAt[id]; } },
+    // called once per frame, after everything: commit `cur` into the ring and zero it.
+    // frameMs is the rAF-to-rAF delta (the real frame time); cpuMs is this loop body's wall clock. Whatever the
+    // scoped timers did not account for lands in `misc`, so the breakdown always sums to the measured CPU time.
+    commit(frameMs, cpuMs, nProg){
+      if(!PERF.on) return;
+      const base = w*NSYS;
+      // NESTED scopes must not be counted twice: brPortal/brStream/collision live inside br, brBuild inside brStream.
+      let acc=0; for(let i=0;i<NSYS;i++)
+        if(i!==TID.misc && i!==TID.brPortal && i!==TID.brStream && i!==TID.brBuild && i!==TID.collision) acc+=cur[i];
+      cur[TID.misc] = cpuMs>acc ? cpuMs-acc : 0;
+      for(let i=0;i<NSYS;i++){ ring[base+i] = cur[i]; cur[i] = 0; depth[i] = 0; }
+      frames[w] = frameMs; progs[w] = nProg|0;
+      const g = PERF.gpu.acc, b5 = w*5;
+      gpuRing[b5] = g[0]+g[1]+g[2]+g[3]; gpuRing[b5+1]=g[0]; gpuRing[b5+2]=g[1]; gpuRing[b5+3]=g[2]; gpuRing[b5+4]=g[3];
+      w = (w+1) % PROF_RING; if(n < PROF_RING) n++;
+    },
+    reset(){ w=0; n=0; for(let i=0;i<NSYS;i++){ cur[i]=0; depth[i]=0; } }
+  };
+})();
+PERF.T = T; PERF.TID = TID; PERF.TN = TN;
+// ---------------------------------------------------------------------
+//  GPU TIMING — EXT_disjoint_timer_query_webgl2. Results are async: poll QUERY_RESULT_AVAILABLE, ALWAYS check
+//  GPU_DISJOINT_EXT and throw the sample away if it fired. Never block, never call getQueryParameter on the
+//  query issued this frame. Segments are SEQUENTIAL, never nested (WebGL allows one active TIME_ELAPSED query).
+//    seg 0 "pre"      — sky bake, shadow map, scope PiP, void raymarch: everything before the scene pass
+//    seg 1 "portal"   — brRenderPortal's second scene render, split out because it is the suspect
+//    seg 2 "scene"    — the motion-blur path's scene→_sceneRT render (the real main pass when _mbMode is on)
+//    seg 3 "composer" — composer.render(): main pass (classic path) + the whole post chain
+// ---------------------------------------------------------------------
+PERF.gpu = (function(){
+  let gl=null, ext=null, ok=false;
+  const NSEG=4, POOL=6;
+  const pool=[];                                   // pool[i] = {q, seg, pending}
+  const acc=new Float64Array(NSEG);                // last completed frame's per-segment ms
+  let open=-1, disjointCount=0, sampleCount=0;
+  return {
+    get ok(){ return ok; }, acc, get disjoints(){ return disjointCount; }, get samples(){ return sampleCount; },
+    init(context){
+      if(!PERF.on || !PERF.gpuTimers) return;
+      gl = context;
+      ext = gl.getExtension('EXT_disjoint_timer_query_webgl2') || gl.getExtension('EXT_disjoint_timer_query');
+      if(!ext || typeof gl.createQuery!=='function'){ ok=false; return; }
+      for(let i=0;i<POOL*NSEG;i++) pool.push({ q:gl.createQuery(), seg:-1, pending:false });
+      ok = true;
+    },
+    // begin segment `seg`; automatically closes whatever segment is open
+    mark(seg){
+      if(!ok) return; this.close();
+      let slot=null; for(let i=0;i<pool.length;i++) if(!pool[i].pending){ slot=pool[i]; break; }
+      if(!slot) return;                                   // pool exhausted — skip this sample rather than stall
+      slot.seg=seg; slot.pending=true; open=pool.indexOf(slot);
+      try{ gl.beginQuery(ext.TIME_ELAPSED_EXT || 0x88BF, slot.q); }catch(e){ slot.pending=false; open=-1; }
+    },
+    close(){
+      if(!ok || open<0) return;
+      try{ gl.endQuery(ext.TIME_ELAPSED_EXT || 0x88BF); }catch(e){}
+      open=-1;
+    },
+    // poll for finished queries — call once per frame, after close()
+    poll(){
+      if(!ok) return;
+      const disjoint = gl.getParameter(ext.GPU_DISJOINT_EXT || 0x8FBB);
+      for(let i=0;i<pool.length;i++){ const s=pool[i]; if(!s.pending || i===open) continue;
+        let avail=false; try{ avail = gl.getQueryParameter(s.q, gl.QUERY_RESULT_AVAILABLE); }catch(e){ s.pending=false; continue; }
+        if(!avail) continue;
+        s.pending=false;
+        if(disjoint){ disjointCount++; continue; }         // timing was invalidated by the driver — discard
+        let ns=0; try{ ns = gl.getQueryParameter(s.q, gl.QUERY_RESULT); }catch(e){ continue; }
+        acc[s.seg] = ns/1e6; sampleCount++;
+      }
+    }
+  };
+})();
+// ---------------------------------------------------------------------
+//  LoAF / long-task observation — proves whether a hitch is our JS, style/layout, or the compositor.
+// ---------------------------------------------------------------------
+PERF.jank = { loaf:[], longtasks:0, maxBlocking:0, _obs:null,
+  start(){ if(!PERF.on || !PERF.loaf || this._obs) return;
+    try{ this._obs = new PerformanceObserver(list=>{ for(const e of list.getEntries()){
+        if(e.blockingDuration>this.maxBlocking) this.maxBlocking=e.blockingDuration;
+        if(this.loaf.length<400) this.loaf.push({ start:+e.startTime.toFixed(1), dur:+e.duration.toFixed(1),
+          blocking:+(e.blockingDuration||0).toFixed(1), renderStart:+(e.renderStart||0).toFixed(1),
+          styleLayout:+(e.styleAndLayoutStart||0).toFixed(1),
+          scripts:(e.scripts||[]).slice(0,3).map(s=>({ src:String(s.sourceURL||'').slice(-40), fn:s.sourceFunctionName||'',
+            dur:+s.duration.toFixed(1), fwd:+(s.forcedStyleAndLayoutDuration||0).toFixed(1) })) });
+      } });
+      this._obs.observe({ type:'long-animation-frame', buffered:true });
+    }catch(e){ this._obs=null; }
+    try{ new PerformanceObserver(l=>{ this.longtasks += l.getEntries().length; }).observe({ type:'longtask', buffered:true }); }catch(e){}
+  },
+  reset(){ this.loaf.length=0; this.longtasks=0; this.maxBlocking=0; } };
+// ---------------------------------------------------------------------
+//  STATS — median/percentiles over a slice of the ring, without allocating during the frame.
+// ---------------------------------------------------------------------
+PERF.stats = function(arr, n){
+  const a = Array.prototype.slice.call(arr, 0, n).sort((x,y)=>x-y);   // called only at report time, never per frame
+  const q = p => a.length ? a[Math.min(a.length-1, Math.max(0, Math.round(p*(a.length-1))))] : 0;
+  let sum=0; for(let i=0;i<a.length;i++) sum+=a[i]; const mean = a.length?sum/a.length:0;
+  let v=0; for(let i=0;i<a.length;i++) v+=(a[i]-mean)*(a[i]-mean);
+  const over = t => { let c=0; for(let i=0;i<a.length;i++) if(a[i]>t) c++; return c; };
+  return { n:a.length, mean:+mean.toFixed(3), median:+q(0.5).toFixed(3), p95:+q(0.95).toFixed(3),
+           p99:+q(0.99).toFixed(3), p999:+q(0.999).toFixed(3), max:+(a[a.length-1]||0).toFixed(3),
+           sd:+Math.sqrt(a.length?v/a.length:0).toFixed(3),
+           over7_14:over(7.14), over8_33:over(8.33), over12:over(12), over16_6:over(16.6), over33:over(33) };
+};
+// ---------------------------------------------------------------------
+//  REFERENCE CONFIG — read the machine, don't assume it.
+// ---------------------------------------------------------------------
+PERF.refConfig = function(){
+  let gpu='unknown', glver='unknown', maxTex=0;
+  try{ const gl=renderer.getContext(); const dbg=gl.getExtension('WEBGL_debug_renderer_info');
+       gpu = dbg? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+       glver = gl.getParameter(gl.VERSION); maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE); }catch(e){}
+  let cw=0, ch=0; try{ const s=new THREE.Vector2(); renderer.getDrawingBufferSize(s); cw=s.x|0; ch=s.y|0; }catch(e){}
+  return { gpu, glver, maxTex, ua:navigator.userAgent, cores:navigator.hardwareConcurrency||0,
+    deviceMemory:navigator.deviceMemory||null, dpr:devicePixelRatio, css:[innerWidth,innerHeight],
+    drawingBuffer:[cw,ch], pixelScale:(typeof _pixelScale!=='undefined'?_pixelScale:1),
+    quality:CFG.quality, renderDist:CFG.RENDER_DIST,
+    minFrameDt:(typeof _minDt!=='undefined'?+(_minDt*1000).toFixed(3):null),
+    estRefreshHz:(typeof _minDt!=='undefined'?Math.round(1/_minDt):null),
+    gpuTimers:PERF.gpu.ok, sab:(typeof SharedArrayBuffer!=='undefined'), coi:(typeof crossOriginIsolated!=='undefined'?crossOriginIsolated:null) };
+};
+// ---------------------------------------------------------------------
+//  BENCH — deterministic scripted camera paths. Fixed timestep, no player input, fixed seed.
+//  Every scene drives player.pos/yaw directly; `noclip` measures collision but discards its push so the path
+//  stays reproducible. Results are pure data — the driver in bench/perf-run.mjs writes them to bench/results/.
+// ---------------------------------------------------------------------
+PERF.bench = (function(){
+  const S = { active:false, name:'', t:0, dt:1/140, scene:null, resolve:null, warm:0, noclip:false, info:null };
+  const SPEED_SPRINT = 7.2;                 // max sustained on-foot speed (physics: base 7.2 sprint; stim ×1.4 = 10.08)
+  const SPEED_MAX    = 10.08;
+  function pos(x,y,z){ player.pos.x=x; player.pos.y=y; player.pos.z=z; player.vel.x=0; player.vel.y=0; player.vel.z=0; }
+  const SCENES = {
+    // B1 STATIC — parked in a dense corridor junction. Isolates raw render cost, no streaming.
+    B1:{ dur:20, where:'br', setup(){ const o=brxChunkOrigin(brxChunkOf(BR_ENTRY.x,BR_ENTRY.z).gx, brxChunkOf(BR_ENTRY.x,BR_ENTRY.z).gz);
+           pos(BR_ENTRY.x, brEntryFloorY()+1.7, BR_ENTRY.z); player.yaw=0.7; player.pitch=0; },
+         tick(){} },
+    B1o:{ dur:20, where:'over', setup(){ pos(0, 0, 0); player.pos.y = surfaceH(0,0)+2; player.yaw=0.7; player.pitch=0; }, tick(){} },
+    // B2 SPRINT-LINE — straight line at max speed across N chunk borders. The cross-chunk gate.
+    B2:{ where:'br', borders:10, span:()=>BRX_SPAN, dir:[1,0],
+         setup(){ pos(BR_ENTRY.x, brEntryFloorY()+1.7, BR_ENTRY.z); player.yaw=-Math.PI/2; player.pitch=0; this.x0=player.pos.x; this.z0=player.pos.z; },
+         tick(t){ pos(this.x0 + SPEED_MAX*t, player.pos.y, this.z0); } },
+    B2o:{ where:'over', borders:60, span:()=>16, dir:[1,0],
+          setup(){ pos(0, surfaceH(0,0)+2, 0); player.yaw=-Math.PI/2; player.pitch=0; this.x0=0; this.z0=0; },
+          tick(t){ const x=this.x0+SPEED_MAX*t; pos(x, surfaceH(Math.floor(x),Math.floor(this.z0))+2, this.z0); } },
+    // B3 SPRINT-DIAG — 45 degrees, crossing X and Z borders simultaneously. Worst case for streaming.
+    B3:{ where:'br', borders:10, span:()=>BRX_SPAN, dir:[0.7071,0.7071],
+         setup(){ pos(BR_ENTRY.x, brEntryFloorY()+1.7, BR_ENTRY.z); player.yaw=-Math.PI/4; player.pitch=0; this.x0=player.pos.x; this.z0=player.pos.z; },
+         tick(t){ pos(this.x0 + SPEED_MAX*t*0.7071, player.pos.y, this.z0 + SPEED_MAX*t*0.7071); } },
+    B3o:{ where:'over', borders:60, span:()=>16, dir:[0.7071,0.7071],
+          setup(){ pos(0, surfaceH(0,0)+2, 0); player.yaw=-Math.PI/4; player.pitch=0; this.x0=0; this.z0=0; },
+          tick(t){ const x=this.x0+SPEED_MAX*t*0.7071, z=this.z0+SPEED_MAX*t*0.7071;
+                   pos(x, surfaceH(Math.floor(x),Math.floor(z))+2, z); } },
+    // B4 TELEPORT — instant jumps of 200+ chunks, 10 times. Worst-case cold-start / cache-miss storm.
+    B4:{ dur:30, where:'br', setup(){ pos(BR_ENTRY.x, brEntryFloorY()+1.7, BR_ENTRY.z); player.yaw=0; this.jumped=0; },
+         tick(t){ const want=Math.min(10, Math.floor(t/3)+1);
+           while(this.jumped<want){ this.jumped++; const j=this.jumped;
+             pos(BR_ENTRY.x + j*211*BRX_SPAN, player.pos.y, BR_ENTRY.z + ((j%2)?1:-1)*j*137*BRX_SPAN); } } },
+    // B5 SPIN — fast 360 yaw sweeps. Tests culling, program switches, popped-in geometry.
+    B5:{ dur:20, where:'br', setup(){ pos(BR_ENTRY.x, brEntryFloorY()+1.7, BR_ENTRY.z); player.pitch=0; },
+         tick(t){ player.yaw = t*2.2; } },
+    B5o:{ dur:20, where:'over', setup(){ pos(0, surfaceH(0,0)+2, 0); player.pitch=0; }, tick(t){ player.yaw=t*2.2; } },
+    // B6 STRESS — the portal live at close range + full env + night. Max second-render + lighting cost.
+    B6:{ dur:20, where:'portal', setup(){ this.d=BR.door; if(this.d){ pos(this.d.x+3.0, this.d.y+1.7, this.d.z+0.2); }
+           player.yaw = this.d? Math.atan2(-(this.d.x-player.pos.x), -(this.d.z-player.pos.z)) : 0; player.pitch=0; },
+         tick(t){ if(!this.d) return; const r=3.0+2.0*Math.sin(t*0.6);
+           pos(this.d.x+r*Math.cos(t*0.35), this.d.y+1.7, this.d.z+r*Math.sin(t*0.35));
+           player.yaw = Math.atan2(-(this.d.x-player.pos.x), -(this.d.z-player.pos.z)); } }
+  };
+  // Border-crossing rate along one axis is v*|d_axis|/S, so the TOTAL rate is v*(|dx|+|dz|)/S (PERF_MATH §4.2).
+  // A scene that asks for N borders therefore runs for N / f_cross seconds — the diagonal finishes sooner because
+  // it crosses two axes at once, which is exactly why it is the worst case per second.
+  function duration(sc){
+    if(sc.dur) return sc.dur;
+    const fCross = SPEED_MAX * (Math.abs(sc.dir[0])+Math.abs(sc.dir[1])) / sc.span();
+    return sc.borders / fCross;
+  }
+  return {
+    SCENES, SPEED_SPRINT, SPEED_MAX,
+    get active(){ return S.active; }, get state(){ return S; },
+    // begin a run; resolves via PERF.bench.poll() → returns null until done, then the result object
+    start(name, opts){
+      const sc = SCENES[name]; if(!sc) throw new Error('no such bench scene: '+name);
+      opts = opts||{};
+      S.name=name; S.scene=sc; S.t=0; S.warm=opts.warmFrames!=null?opts.warmFrames:30; S.dt=opts.dt||1/140;
+      S.dur = (opts.dur || duration(sc)) * (opts.durScale||1); S.noclip=true; S.active=true; S.result=null;
+      S.crossings=0; S._lastKey=null;
+      // renderer.info resets itself per render() call, so a plain read reports only the composer's final quad pass.
+      // __benchInfo makes the loop accumulate across every pass in the frame and snapshot it (see the MAIN LOOP).
+      window.__benchInfo = 1;
+      PERF.on=true; T.reset(); PERF.jank.reset(); PERF.jank.start();
+      S.startInfo = PERF.refConfig();
+      try{ sc.setup(); }catch(e){ S.setupErr=String(e&&e.message||e); }
+      return { name, dur:S.dur, dt:S.dt };
+    },
+    // called from the top of loop(); returns the dt the loop should use, or -1 to leave dt alone
+    tickPre(){
+      if(!S.active) return -1;
+      if(S.warm>0){ S.warm--; try{ S.scene.tick(0); }catch(e){} return S.dt; }
+      S.t += S.dt;
+      try{ S.scene.tick(S.t); }catch(e){}
+      // count real chunk crossings so the report can state chunks/second rather than assume it
+      try{ const k = (S.scene.where==='br') ? (()=>{ const c=brxChunkOf(player.pos.x,player.pos.z); return c.gx+'_'+c.gz; })()
+                                            : ((Math.floor(player.pos.x)>>4)+'_'+(Math.floor(player.pos.z)>>4));
+           if(S._lastKey!==null && k!==S._lastKey) S.crossings++; S._lastKey=k; }catch(e){}
+      if(S.t >= S.dur) S.finish = true;
+      return S.dt;
+    },
+    // called at the very end of loop()
+    tickPost(){
+      if(!S.active || !S.finish) return;
+      S.active=false; S.finish=false;
+      const n=T.count(), NS=T.NSYS;
+      const frame = PERF.stats(T.frames, n);
+      const sys = {}; const tmp = new Float32Array(n);
+      for(let s=0;s<NS;s++){ for(let f=0;f<n;f++) tmp[f]=T.ring[f*NS+s];
+        const st = PERF.stats(tmp, n); sys[TN[s]] = { median:st.median, mean:st.mean, p99:st.p99, max:st.max,
+          total:+(st.mean*n).toFixed(1) }; }
+      const g={}; for(let s=0;s<5;s++){ for(let f=0;f<n;f++) tmp[f]=T.gpuRing[f*5+s];
+        const st=PERF.stats(tmp,n); g[['gpuTotal','gpuPre','gpuPortal','gpuScene','gpuComposer'][s]]={median:st.median,p99:st.p99,max:st.max}; }
+      // the FIVE worst frames, each with its own per-system breakdown — one outlier is an anecdote, five is a pattern
+      const order=[]; for(let f=0;f<n;f++) order.push(f);
+      order.sort((a,b)=>T.frames[b]-T.frames[a]);
+      const worstFrames = order.slice(0,5).map(f=>{ const b={};
+        for(let s=0;s<NS;s++){ const v=T.ring[f*NS+s]; if(v>0.05) b[TN[s]]=+v.toFixed(2); }
+        return { ms:+T.frames[f].toFixed(2), index:f, gpu:+T.gpuRing[f*5].toFixed(2), programs:T.progs[f], breakdown:b }; });
+      const worst=worstFrames.length?worstFrames[0].ms:0, wi=worstFrames.length?worstFrames[0].index:0;
+      const worstBreak=worstFrames.length?worstFrames[0].breakdown:{};
+      // PROGRAM GROWTH — every increase after the loading screen is a runtime shader compile, i.e. a guaranteed hitch (H4)
+      let progFirst=T.progs[0], progLast=T.progs[0], progEvents=0;
+      for(let f=1;f<n;f++){ if(T.progs[f]>progLast) progEvents++; progLast=T.progs[f]; }
+      let info=null; try{ const S2=window.__benchInfoSnap, I=renderer.info;
+        info = S2 ? { calls:S2.calls, tris:S2.tris, geometries:S2.geoms, textures:S2.tex, programs:S2.progs }
+                  : { calls:I.render.calls, tris:I.render.triangles, geometries:I.memory.geometries,
+                      textures:I.memory.textures, programs:(I.programs||[]).length }; }catch(e){}
+      let heap=null; try{ if(performance.memory) heap={ used:+(performance.memory.usedJSHeapSize/1048576).toFixed(1),
+        total:+(performance.memory.totalJSHeapSize/1048576).toFixed(1) }; }catch(e){}
+      S.result = { scene:S.name, where:S.scene.where, durS:+S.dur.toFixed(2), fixedDt:S.dt, frames:n,
+        crossings:S.crossings, crossPerS:+(S.crossings/S.dur).toFixed(3),
+        frame, sys, gpu:g, gpuOk:PERF.gpu.ok, gpuDisjoints:PERF.gpu.disjoints,
+        worstFrame:{ ms:+worst.toFixed(2), index:wi, breakdown:worstBreak }, worstFrames,
+        programs:{ first:progFirst, last:progLast, growthEvents:progEvents, grew:progLast-progFirst },
+        gates:{ C1_median:frame.median<=7.143, C1_p99:frame.p99<=9.5, C2_max12:frame.max<=12, C2_zero16:frame.over16_6===0 },
+        onePctLowFps:+(1000/Math.max(0.001,frame.p99)).toFixed(1),
+        info, heap, jank:{ longtasks:PERF.jank.longtasks, maxBlocking:PERF.jank.maxBlocking,
+          worstLoaf:PERF.jank.loaf.slice().sort((a,b)=>b.dur-a.dur).slice(0,5) },
+        world:{ chunks:(typeof world!=='undefined'?world.size:0), brInside:(typeof BR!=='undefined'?!!BR.inside:false),
+                brChunks:(typeof BR!=='undefined'&&BR.gen?BR.gen.size:0), brEnvCache:(typeof BR!=='undefined'&&BR.envCache?BR.envCache.size:0) },
+        ref:S.startInfo, setupErr:S.setupErr||null };
+      S.setupErr=null;
+    },
+    result(){ return S.result||null; },
+    get noclip(){ return S.active && S.noclip; }
+  };
+})();
+// ---------------------------------------------------------------------
+//  BOTTLENECK MATRIX (prompt §3.1 / GPU Gems 2 ch.28) — starve one pipeline stage at a time and read the delta.
+//  Each mode is a pure render-state change, applied by the loop, reverted when set back to 'off'.
+// ---------------------------------------------------------------------
+PERF.matrix = { mode:'off' };   // 'off' | 'viewport1x1' | 'nullfrag' | 'halftris' | 'halfdraws'
+// ---------------------------------------------------------------------
+//  OVERLAY (?perf=1). Text is rebuilt at 5 Hz, never per frame — a per-frame string concat is itself a cost.
+// ---------------------------------------------------------------------
+let _perfPrevT = 0, _perfOvT = 0, _perfOvEl = null;
+function _perfOverlay(){
+  const now = performance.now(); if(now-_perfOvT < 200) return; _perfOvT = now;
+  if(!_perfOvEl){ _perfOvEl = document.createElement('div');
+    _perfOvEl.style.cssText='position:fixed;left:8px;top:8px;z-index:99999;font:11px/1.35 ui-monospace,Consolas,monospace;'+
+      'color:#9f9;background:rgba(0,0,0,.72);padding:6px 8px;white-space:pre;pointer-events:none;border:1px solid #2a4';
+    document.body.appendChild(_perfOvEl); }
+  const n=T.count(), NS=T.NSYS, m=Math.min(n,300), start=(T.idx()-m+PROF_RING)%PROF_RING;
+  const win=new Float32Array(m); for(let i=0;i<m;i++) win[i]=T.frames[(start+i)%PROF_RING];
+  const f=PERF.stats(win,m);
+  const sys=[]; for(let s=0;s<NS;s++){ let sum=0; for(let i=0;i<m;i++) sum+=T.ring[((start+i)%PROF_RING)*NS+s];
+    if(sum/m>0.03) sys.push([TN[s], sum/m]); }
+  sys.sort((a,b)=>b[1]-a[1]);
+  let txt='frame  med '+f.median.toFixed(2)+'  p99 '+f.p99.toFixed(2)+'  max '+f.max.toFixed(2)+'  ('+(1000/Math.max(0.01,f.median)).toFixed(0)+' fps)\n';
+  txt+='>7.14 '+f.over7_14+'  >12 '+f.over12+'  >16.6 '+f.over16_6+'   n='+m+'\n';
+  if(PERF.gpu.ok){ const g=PERF.gpu.acc; txt+='gpu    pre '+g[0].toFixed(2)+'  portal '+g[1].toFixed(2)+'  comp '+g[2].toFixed(2)+'  (dj '+PERF.gpu.disjoints+')\n'; }
+  else txt+='gpu    (timer query unavailable)\n';
+  try{ const I=renderer.info; txt+='draws '+I.render.calls+'  tris '+(I.render.triangles/1000|0)+'k  geo '+I.memory.geometries+'  tex '+I.memory.textures+'  prog '+(I.programs||[]).length+'\n'; }catch(e){}
+  for(let i=0;i<sys.length && i<10;i++) txt += '  '+sys[i][0].padEnd(10)+sys[i][1].toFixed(2)+'\n';
+  if(PERF.bench.active) txt += 'BENCH '+PERF.bench.state.name+'  t='+PERF.bench.state.t.toFixed(1)+'/'+PERF.bench.state.dur.toFixed(0)+'s\n';
+  _perfOvEl.textContent = txt;
+}
+PERF.overlayEl = ()=>_perfOvEl;
+// ---------------------------------------------------------------------
+//  QA HOOKS — everything bench/perf-run.mjs drives. Kept beside the profiler so the two cannot drift.
+// ---------------------------------------------------------------------
+window.__hcPERF = {
+  ref(){ return PERF.refConfig(); },
+  flags(){ const o={}; for(const k in PERF) if(typeof PERF[k]==='boolean'||typeof PERF[k]==='number') o[k]=PERF[k]; return o; },
+  set(k,v){ PERF[k]=v; return PERF[k]; },
+  arm(){ PERF.on=true; PERF.jank.start(); locked=true; return true; },     // headless runs never acquire pointer lock; physics is gated on it
+  start(name,opts){ locked=true; return PERF.bench.start(name,opts); },
+  active(){ return PERF.bench.active; },
+  result(){ return PERF.bench.result(); },
+  scenes(){ return Object.keys(PERF.bench.SCENES); },
+  live(){ const n=Math.min(T.count(),600); return PERF.stats(T.frames,n); },
+  reset(){ T.reset(); PERF.jank.reset(); return true; },
+  // drop the player into the Backrooms without walking a door
+  enterBR(){ try{ if(!BR.door) brSpawnDoorNearPlayer(); brEnter(); return {inside:BR.inside, x:player.pos.x, z:player.pos.z}; }catch(e){ return {err:String(e&&e.message||e)}; } },
+  spawnDoor(){ try{ brSpawnDoorNearPlayer(); return {x:BR.door.x, y:BR.door.y, z:BR.door.z}; }catch(e){ return {err:String(e&&e.message||e)}; } },
+  matrix(m){ PERF.matrix.mode=m||'off'; return PERF.matrix.mode; }
+};
+
 // =====================================================================
 function xhash(x, y, z, s) {
   let h = Math.imul(x|0, 374761393) ^ Math.imul(y|0, 2246822519) ^
@@ -1402,6 +1745,7 @@ let renderer;
     }
   }
 })();
+try{ PERF.gpu.init(renderer.getContext()); PERF.jank.start(); }catch(e){}   // GPU timer queries + LoAF, both no-ops unless ?perf
 canvas.addEventListener('webglcontextlost',(e)=>{ e.preventDefault(); try{ (typeof showErr==='function'?showErr:alert)('3D context lost (GPU hiccup) — press F5 to reload.'); }catch(_){}} ,false);
 renderer.setPixelRatio(Math.min(devicePixelRatio, CFG.quality==='Ultra'?2:1.25));
 renderer.setSize(innerWidth, innerHeight);
@@ -5137,25 +5481,39 @@ function updateScopeRT(){ const heldBolt=!!(ITEMS[view.id]&&ITEMS[view.id].gun==
   view.group.visible=gv; }
 let profT={};
 function loop(){ try{
-  const dt=Math.min(0.05,clock.getDelta());
+  const _fT0 = PERF.on ? performance.now() : 0;
+  if(PERF.on) PERF.gpu.mark(0);
+  let dt=Math.min(0.05,clock.getDelta());
+  if(PERF.bench.active){ const bdt=PERF.bench.tickPre(); if(bdt>0) dt=bdt; }
   if(_pendingBossWipe){ _pendingBossWipe=false; try{ if(typeof bossWipe==='function')bossWipe(); }catch(e){} }   // deferred boss cleanup (see die()) — run at loop top, OUTSIDE updateWretch, so nulling the boss can't crash the AI tick mid-frame
   globalU.uTime.value=clock.elapsedTime;
+  T.begin(TID.sky);
   updateSky(dt);
-  updateWeather(dt);                                                       // rain/overcast/lightning + fog banks (after sky so it can dim the fresh light values)
+  updateWeather(dt);                                                     // rain/overcast/lightning + fog banks (after sky so it can dim the fresh light values)
   updateSubmerge();                                                        // murky underwater view (overrides fog while the eye is submerged)
-  if(started && locked && !player.dead && !intro.active){ physics(dt); survivalTick(dt); achPoll(dt);         // intro cinematic owns the camera → no player control until you wake
+  T.end(TID.sky);
+  T.begin(TID.sim);
+  if(started && locked && !player.dead && !intro.active){ physics(dt); survivalTick(dt); achPoll(dt);        // intro cinematic owns the camera → no player control until you wake
     updateMining(dt);                                                       // left-hold = timed dig (see WORLD ENTITIES)
     if(lmbHeld){ const _hg=heldSlot(), _gi=_hg&&ITEMS[_hg.id]; if(_gi&&_gi.gun&&_gi.auto&&performance.now()>=nextShot){ if(fireGun())view.swing=1.2; nextShot=performance.now()+(_gi.rof||60); } }   // FULL-AUTO: hold left-click → repeat-fire at the gun's rate
     if(rmbHeld && performance.now()>=nextAct){ doPlace(); nextAct=performance.now()+240; } }   // right-hold = repeat place
+  T.end(TID.sim);
+  T.begin(TID.entities);
   if(started && !player.dead && !intro.active && !(typeof BR!=='undefined'&&BR.inside)){ if(!NET.on||NET.host)updateBrain(dt); updateWretch(dt); if(typeof heartbeatProximity==='function')heartbeatProximity(dt); if(NET.on&&!NET.host)netAnimalsTick(); else updateAnimals(dt); if(typeof updateHerobrine==='function'){ if(NET.on && herobrine.haunting && herobrine.owner!=null && herobrine.owner!==NET.id) hbMirrorTick(dt); else updateHerobrine(dt); } }   // co-op: director + animals run on the host; the HAUNT runs on its interactor, others mirror. THE BACKROOMS suspends ALL overworld-entity sim — the Wretch can never follow you in or grab you there (Ben 07-27)
   if(started && !player.dead && !intro.active) updateGhost(dt);            // hover vehicle — must run BEFORE the camera so a rider's slaved position is current this frame
   if(started) updateNVG(dt);                                               // night-vision overlay (green phosphor + heavy grain) while the goggles are worn+on
+  T.end(TID.entities);
+  T.begin(TID.input);
   if(!started){ updateMenuCam(dt); }                                       // menu cinematic owns the camera until you press play
   else { if(!intro.active) applyLook(dt); if(intro.active) updateIntro(dt); else updateCamera(dt); }
+  T.end(TID.input);
   applyWaterFog();
+  T.begin(TID.entities);
   updateDrops(dt); updateSpears(dt); updateStuckSpears(dt); updateParticles(dt); updateShells(dt); updateView(dt); if(typeof updateWings==='function')updateWings(dt); updateWatchers(dt); checkNotes(dt); updateSkyBirds(dt); updateLeaves(dt); if(typeof updateDungeonBugs==='function')updateDungeonBugs(dt);  // floating items, thrown/stuck spears, particles, ejected shell casings, held viewmodel, angel wings, watching-eyes, notes, sky birds, dungeon arachnids
   netUpdate(dt);                                                             // co-op: send my transform, interpolate peers, host broadcasts the Wretch/time
-  updateAudio(dt);
+  T.end(TID.entities);
+  T.begin(TID.audio); updateAudio(dt); T.end(TID.audio);
+  T.begin(TID.stream);
   const t0=performance.now();
   // adaptive stream budget: mesh/gen fewer chunks per frame when the frame is already tight (spreads the cost, fewer hitches),
   // more when there's headroom (fills the world faster). meshing is the pricier half so it gets the wider swing.
@@ -5168,10 +5526,17 @@ function loop(){ try{
   assignGlowPool();   // AFTER the producers (updateDrops ran earlier, updateCookingFx just above): 3 nearest glow sources win the fixed slots
   if((unloadTick=(unloadTick+1)%180)===0) unloadFar();
   drainUnloads();   // amortized: at most 3 chunk disposals per frame (unloadFar only queues)
+  T.end(TID.stream);
   const t1=performance.now();
+  T.begin(TID.sky);
   if(USE_SKYCUBE){ let da=Math.abs(worldTime-_skyBakeAng); if(da>CFG.DAY_LEN*0.5)da=CFG.DAY_LEN-da; if(!_skyBaked || da>CFG.DAY_LEN*0.0005){ _skyBakeAng=worldTime; _skyBaked=true; bakeSky(); } }   // rebake ~3x/sec → the sky gradient shifts smoothly through dawn/dusk instead of stepping
   else skyDome.position.copy(camera.position);
-  updateHighlight(); updateBars(); updateMinimap(dt); updateBossRegen(dt); updatePeel(dt); if(typeof updatePortal==='function')updatePortal(dt); if(typeof updateBossCorpse==='function')updateBossCorpse(dt); updateVoid(dt); if(typeof _stage2Sky==='function')_stage2Sky(dt); if(typeof updateBackrooms==='function'){ try{ updateBackrooms(dt); }catch(e){ if(!window._brErr){ window._brErr=String(e&&e.stack||e); console.error('[backrooms] update crashed — caught so the game keeps running:', e); } } } updateWretchBar();
+  T.end(TID.sky);
+  T.begin(TID.hud); updateHighlight(); updateBars(); updateMinimap(dt); T.end(TID.hud);
+  updateBossRegen(dt); updatePeel(dt); if(typeof updatePortal==='function')updatePortal(dt); if(typeof updateBossCorpse==='function')updateBossCorpse(dt); updateVoid(dt); if(typeof _stage2Sky==='function')_stage2Sky(dt);
+  T.begin(TID.br); if(typeof updateBackrooms==='function'){ try{ updateBackrooms(dt); }catch(e){ if(!window._brErr){ window._brErr=String(e&&e.stack||e); console.error('[backrooms] update crashed — caught so the game keeps running:', e); } } } T.end(TID.br);
+  updateWretchBar();
+  T.begin(TID.uniforms);
   if(gradePass){ gradePass.uniforms.uTime.value=clock.elapsedTime; gradePass.uniforms.uDark.value=1-globalU.uDay.value; gradePass.uniforms.uWhiteVoid.value=(typeof VOID!=='undefined'&&VOID.on)?(VOID.whiteout==null?1:VOID.whiteout):0; }   // grain+vignette rise as it darkens; PURE white glow on the initial void switch, then FADES to standard as the fractal zooms in (VOID.whiteout ramp)
   if(godrayPass){ camera.updateMatrixWorld();                                            // project the sky-sun direction to screen space for the god-ray origin
     _sunProj.copy(camera.position).addScaledVector(globalU.uSunDir.value, 2000).project(camera);
@@ -5200,13 +5565,19 @@ function loop(){ try{
     if(!wactive) U.uWParams.value.set(0.2,0.0,3.0);
     _prevVP.copy(_curVP); _prevMbW.copy(_mbW);
   }
+  T.end(TID.uniforms);
+  T.begin(TID.cull);
   cullChunks();                                                                        // occlusion + frustum BFS: hide chunks we can't see (also keeps them out of the shadow pass)
   // cadence-gated shadow refresh — but NEVER on a frame that just meshed a chunk (that would stack two big costs → the streaming spike). The sun barely moves, so deferring a frame or two is invisible.
   if(_editShadowT>=0){ _editShadowT++; if(!_streamMeshed || _editShadowT>4){ sunLight.shadow.needsUpdate=true; _editShadowT=-1; } }   // a block edit changed geometry: refresh the shadow map on the first non-meshing frame (or force after 4) so lighting RESPONDS to breaking/placing — the plain cadence below is gated on !_streamMeshed, so continuous mining (every frame meshes) would otherwise freeze the shadows forever ("lighting stops working when I break blocks", Ben 07-21)
   else if((shadowTick=(shadowTick+1)%SHADOW_EVERY)===0 && !_streamMeshed) sunLight.shadow.needsUpdate=true;
+  T.end(TID.cull);
+  T.begin(TID.draw);
   if(typeof updateScopeRT==='function') updateScopeRT();                   // render the magnified scope image to the lens texture BEFORE the main pass draws (and samples) the gun
-  if(_mbMode){ renderer.setRenderTarget(_sceneRT); renderer.render(scene, camera); renderer.setRenderTarget(null); }   // scene → our depth-carrying target (feeds motionPass); classic path renders inside composer
+  if(_mbMode){ if(PERF.on) PERF.gpu.mark(2); renderer.setRenderTarget(_sceneRT); renderer.render(scene, camera); renderer.setRenderTarget(null); }   // scene → our depth-carrying target (feeds motionPass); classic path renders inside composer
+  if(PERF.on) PERF.gpu.mark(3);
   composer.render();
+  T.end(TID.draw);
   // BENCH-ONLY: when the harness sets __benchInfo, accumulate renderer.info across ALL passes in the frame (autoReset off) and snapshot+reset here — otherwise info only ever shows the composer's final quad pass
   if(window.__benchInfo){ const _I=renderer.info; _I.autoReset=false; window.__benchInfoSnap={calls:_I.render.calls,tris:_I.render.triangles,geoms:_I.memory.geometries,tex:_I.memory.textures,progs:(_I.programs||[]).length}; _I.reset(); } else if(renderer.info.autoReset===false) renderer.info.autoReset=true;
   if(openUI==='inv' && typeof renderPView==='function') renderPView(dt);   // spin the armor mannequin while the inventory is open
@@ -5247,7 +5618,16 @@ function loop(){ try{
   }
   if(prof.style.display!=='none'){ prof.textContent='FPS '+Math.round(fpsAvg)+'\nchunks '+world.size+' draws '+renderer.info.render.calls+'\ntris '+(renderer.info.render.triangles/1000|0)+'k rd'+CFG.RENDER_DIST+'\nstream '+(t1-t0).toFixed(1)+'ms render '+(t2-t1).toFixed(1)+'ms\nXYZ '+player.pos.x.toFixed(0)+' '+player.pos.y.toFixed(0)+' '+player.pos.z.toFixed(0)+(player.fly?' FLY':'')+(player.creative?' CREA':''); }
   if(_fpsOn) _fpsEl.textContent=Math.round(fpsAvg)+' FPS';
-  updateMindFeed(dt);
+  T.begin(TID.hud); updateMindFeed(dt); T.end(TID.hud);
+  if(PERF.on){
+    PERF.gpu.close(); PERF.gpu.poll();
+    const _now=performance.now();
+    const _fd = _perfPrevT ? _now-_perfPrevT : (_now-_fT0); _perfPrevT=_now;
+    let _np=0; try{ _np=(renderer.info.programs||[]).length; }catch(e){}
+    T.commit(_fd, _now-_fT0, _np);
+    PERF.bench.tickPost();
+    if(PERF.overlay) _perfOverlay();
+  }
   } catch(e){ if(!window._loopErr){ window._loopErr=String(e&&e.stack||e); try{ console.error('[loop] exception caught — render loop kept alive (mouse/look stays responsive):', e); }catch(_){} } } }
 renderer.setAnimationLoop(loop);
 document.addEventListener('visibilitychange',()=>{ renderer.setAnimationLoop(document.hidden?null:loop); if(!document.hidden)clock.getDelta(); });
@@ -11007,7 +11387,7 @@ function brxStream(force){ if(!BR.infinite || !BR.inside) return false;
   if(!force && BR._cgx===c.gx && BR._cgz===c.gz) return false;
   BR._cgx=c.gx; BR._cgz=c.gz;
   const keep=[]; for(let dx=-BRX_KEEP; dx<=BRX_KEEP; dx++) for(let dz=-BRX_KEEP; dz<=BRX_KEEP; dz++) keep.push(brxChunkGen(c.gx+dx, c.gz+dz));
-  BR.loaded=keep; brxUnion(); brBuildEnvAll();
+  BR.loaded=keep; brxUnion(); T.begin(TID.brBuild); brBuildEnvAll(); T.end(TID.brBuild);
   return true; }
 let _brDoorMat=null;
 function brDoorMats(){ if(_brDoorMat)return _brDoorMat; const TL=new THREE.TextureLoader(), base='./assets/backrooms/';
@@ -11772,6 +12152,9 @@ function brxUpdateLights(px,pz){ if(!BR.lightPool||!BR.fixtures)return; const F=
   BR._litNear=litNear; BR._litD=Math.sqrt(nearest);      // drives the fluorescent HUM (see brUpdateHum) — dark wings fall silent
   if(BR.flickers)for(const fl of BR.flickers) fl.m.visible = brFlick(fl.f.ph||0,t)>0; }   // the diffuser panel blinks with its own light
 function brxCollide(p){ const W=BR.walls; if(!W||!W.length)return; const RAD=0.42+BR_WT/2, X=p.pos.x, Z=p.pos.z; let px=X, pz=Z;   // radius accounts for wall thickness
+  // BENCH ONLY: a scripted path must not be shoved off course by the walls it deliberately walks through. The whole
+  // resolve still RUNS (so its cost is measured honestly) — only the resulting position write is discarded.
+  const _nc=PERF.bench.noclip, _nx=p.pos.x, _ny=p.pos.y, _nz=p.pos.z;
   const segBlock=(ax,az,bx,bz,rad)=>{ const dx=bx-ax,dz=bz-az, ll=dx*dx+dz*dz||1; let t=((px-ax)*dx+(pz-az)*dz)/ll; t=t<0?0:t>1?1:t; const ox=px-(ax+dx*t), oz=pz-(az+dz*t), d2=ox*ox+oz*oz; if(d2<rad*rad){ const d=Math.sqrt(d2)||1e-4, k=(rad-d)/d; px+=ox*k; pz+=oz*k; } };
   for(let it=0; it<2; it++){
     for(let i=0;i<W.length;i++){ const s=W[i]; segBlock(s.x0,s.z0,s.x1,s.z1,RAD); }
@@ -11825,7 +12208,8 @@ function brxCollide(p){ const W=BR.walls; if(!W||!W.length)return; const RAD=0.4
       if(Math.abs(dx)<0.55 && Math.abs(dz)<0.55 && p.pos.y<L.top-0.6){
         if(keys.KeyW){ p.vel.y=3.2; p.onGround=false; } else if(p.vel.y<-1.2) p.vel.y=-1.2; } }   // and you never free-fall a shaft you are on the ladder in
     if(r && r.landing){ const L=r.landing;
-      if(Math.abs(p.pos.x-L.x)<L.hx && Math.abs(p.pos.z-L.z)<L.hz && p.pos.y<L.y && p.pos.y>L.y-1.2){ p.pos.y=L.y; if(p.vel.y<0)p.vel.y=0; p.onGround=true; } } } }
+      if(Math.abs(p.pos.x-L.x)<L.hx && Math.abs(p.pos.z-L.z)<L.hz && p.pos.y<L.y && p.pos.y>L.y-1.2){ p.pos.y=L.y; if(p.vel.y<0)p.vel.y=0; p.onGround=true; } } }
+  if(_nc){ p.pos.x=_nx; p.pos.y=_ny; p.pos.z=_nz; } }
 // ---- SEE-THROUGH PORTAL (Ben 07-26): render the BRX entry room from a camera aligned to the player's facing into an RT,
 //   then paint it onto the Void Door quad → you SEE the Backrooms room through the door before you step in. ----
 let _brPortalRT=null, _brPortalCam=null, _brPortalMat=null;
@@ -11853,7 +12237,7 @@ function brRenderPortal(){ if(typeof renderer==='undefined'||!renderer||!BR.door
   const sBg=scene.background,sFC=scene.fog.color.clone(),sFD=scene.fog.density,sSun=sunLight.intensity,sHemi=hemi.intensity,sAmb=(typeof ambient!=='undefined')?ambient.intensity:null,sChunks=chunkRoot.visible,sSky=(typeof skyDome!=='undefined')?skyDome.visible:null;
   const fc=_BR_FOG[0]; _brBg.setRGB(fc[0],fc[1],fc[2]); scene.background=_brBg; scene.fog.color.setRGB(fc[0],fc[1],fc[2]); scene.fog.density=0.04;   // dress the scene as the Backrooms just for this pass
   sunLight.intensity=0; hemi.intensity=0.12; if(typeof ambient!=='undefined')ambient.intensity=0.06; chunkRoot.visible=false; if(typeof skyDome!=='undefined')skyDome.visible=false;   // moody — let the fluorescents carry it, no wash
-  const pv=renderer.getRenderTarget(); try{ renderer.setRenderTarget(_brPortalRT); renderer.render(scene,_brPortalCam); }catch(e){} renderer.setRenderTarget(pv);
+  const pv=renderer.getRenderTarget(); if(PERF.on) PERF.gpu.mark(1); try{ renderer.setRenderTarget(_brPortalRT); renderer.render(scene,_brPortalCam); }catch(e){} renderer.setRenderTarget(pv); if(PERF.on) PERF.gpu.mark(0);
   scene.background=sBg; scene.fog.color.copy(sFC); scene.fog.density=sFD; sunLight.intensity=sSun; hemi.intensity=sHemi; if(typeof ambient!=='undefined'&&sAmb!=null)ambient.intensity=sAmb; chunkRoot.visible=sChunks; if(typeof skyDome!=='undefined'&&sSky!=null)skyDome.visible=sSky;
   // paint the RT onto the door quad by SCREEN-SPACE uv → the window lines up exactly with the hole in the world (real parallax)
   if(!_brPortalMat){ _brPortalMat=new THREE.ShaderMaterial({ uniforms:{uTex:{value:_brPortalRT.texture},uRes:{value:new THREE.Vector2(rw,rh)}}, side:THREE.DoubleSide, toneMapped:false, fog:false,
@@ -12240,17 +12624,17 @@ function updateBackrooms(dt){
     // file's player.yaw is not it (it reads back null through the debug hooks) — a gate built on it skipped the portal at
     // seemingly random times. Distance needs nothing but the door position, is trivially verifiable, and already removes the
     // cost for all the time the door is sitting somewhere else in the world.
-    if(brPortalWanted(Math.hypot(d.x-player.pos.x, d.z-player.pos.z))) brRenderPortal();
+    if(brPortalWanted(Math.hypot(d.x-player.pos.x, d.z-player.pos.z))){ T.begin(TID.brPortal); brRenderPortal(); T.end(TID.brPortal); }
     if(Math.hypot(player.pos.x-d.x,player.pos.z-d.z)<1.1&&Math.abs(player.pos.y-d.y)<2.2)brEnter(); }
   if(!BR.inside)return;
   if(player.dead){ brForceLeaveOnDeath(); return; }                                                                      // any death inside → clean out of the dimension (permadeath: key lost, halls sealed)
   BR.t+=dt; if(BR.silenceT>0)BR.silenceT-=dt;
   if(BR._ppos)BR.dist=(BR.dist||0)+Math.hypot(player.pos.x-BR._ppos.x, player.pos.z-BR._ppos.z); BR._ppos={x:player.pos.x,z:player.pos.z};   // track distance walked → the Pale's target gate
   BR.zone=0; brSetAtmo(0);                                                                                               // re-assert atmosphere each frame (updateSky/streaming repaint bg/fog + chunkRoot first)
-  brxCollide(player);                                                                                                    // segment collision — keep the player inside the rooms (runs AFTER physics(dt))
+  T.begin(TID.collision); brxCollide(player); T.end(TID.collision);                                                      // segment collision — keep the player inside the rooms (runs AFTER physics(dt))
   brxUpdateLights(player.pos.x, player.pos.z);                                                                           // fluorescent pool follows the player
   brUpdateHum(dt);                                                                                                       // the buzz tracks the LIT tubes near you — blacked-out wings go silent
-  if(BR.infinite){ try{ brxStream(false); }catch(e){ BR.infinite=false; if(typeof flashName==='function')flashName('the halls refuse to extend'); } }   // one chunk-crossing check per frame; a failure falls back to the fixed region rather than wedging the loop
+  if(BR.infinite){ try{ T.begin(TID.brStream); brxStream(false); T.end(TID.brStream); }catch(e){ T.end(TID.brStream); BR.infinite=false; if(typeof flashName==='function')flashName('the halls refuse to extend'); } }   // one chunk-crossing check per frame; a failure falls back to the fixed region rather than wedging the loop
   if(player.pos.y < BR_FLOOR-26 && !player.dead) brKill('the drop');                                                     // fell down a shaft — the dark at the bottom is the bottom
   brUpdateDoors(dt); brUpdateKey(dt); brUpdateExit(dt); brUpdatePale(dt); }
 
