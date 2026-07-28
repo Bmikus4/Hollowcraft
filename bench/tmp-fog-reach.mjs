@@ -43,10 +43,36 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     // the night bank must be BLACK, which is the fog COLOUR, not its density
     T('the night bank is black', night.colorLum < 0.09, {colorLum:+night.colorLum.toFixed(4), rgb:night.color});
     T('the day haze is not black', noon.colorLum > 0.35, {colorLum:+noon.colorLum.toFixed(4)});
+    // ---- THE COLOUR THE TREES FADE TO (Ben 07-28) ----
+    // Two separate things, both wrong in opposite directions. The HORIZON PINE silhouette faded toward a flat tenth of the fog
+    // colour at every hour, so by day it was a black cutout instead of melting into white haze. And the WEATHER fog colour
+    // barely moved with the hour (0.34 at midnight against a 0.03 sky), so in night rain the real worldgen trees washed out
+    // to a pale blue-white glowing mass — which is what Ben photographed.
+    T('by day the horizon pines fade toward WHITE haze', noon.pineFogLum > 0.35, {pineFog:noon.pineFog, lum:+noon.pineFogLum.toFixed(4)});
+    T('at night they fade toward near-black', night.pineFogLum < 0.05, {pineFog:night.pineFog, lum:+night.pineFogLum.toFixed(4)});
+    for(const [name,frac,limit] of [['night',0.90,0.10],['day',0.30,null]]){
+      await page.evaluate(`__hc.time(${frac*DAY_LEN})`); await sleep(400);
+      await page.evaluate(`__hc.fog(0.9)`); await sleep(900);                       // force a heavy weather bank
+      const wet=await page.evaluate(`__hc.fogInfo()`);
+      // The picture is taken at a MODEST bank, not the 0.9 the assertions use: at 0.9 the fog shell is 98% opaque by design
+      // and the frame is a flat wash, which shows nothing about what the trees fade to.
+      await page.evaluate(`__hc.fog(0.28)`); await sleep(800);
+      await page.evaluate(`(()=>{ const p=__hc.pos(); __hc.look(p.x+300,p.y+40,p.z+120); })()`); await sleep(700);
+      await page.screenshot({path:path.join(ROOT,'bench','results','fog-trees-'+name+'.png')});
+      await page.evaluate(`__hc.fog(0.9)`); await sleep(600);
+      console.log(name+' + heavy weather fog:', JSON.stringify({color:wet.color, lum:+wet.colorLum.toFixed(4), pineFog:wet.pineFog, wx:wet.wx}));
+      if(limit!=null){
+        T('in night rain the fog stays dark, so distant trees do not glow', wet.colorLum < limit, {colorLum:+wet.colorLum.toFixed(4), rgb:wet.color});
+        T('…and the horizon pines stay dark with it', wet.pineFogLum < limit, {pineFog:wet.pineFog}); }
+      else T('by day a weather bank is still pale', wet.colorLum > 0.30, {colorLum:+wet.colorLum.toFixed(4)});
+    }
+    await page.evaluate(`__hc.fog(0)`);
     // and the VISUALS Fog dial still moves it
+    await page.evaluate(`__hc.time(${0.9*DAY_LEN})`); await sleep(500);
+    const base2=await page.evaluate(`__hc.fogInfo()`);
     await page.evaluate(`__hc.vis({fogmul:2})`); await sleep(700);
     const doubled=await page.evaluate(`__hc.fogInfo()`);
-    T('the Fog dial still scales it', doubled.density > night.density*1.6, {at1:night.density, at2:doubled.density});
+    T('the Fog dial still scales it', doubled.density > base2.density*1.6, {at1:base2.density, at2:doubled.density});
     await page.evaluate(`__hc.vis({fogmul:1})`);
     T('zero page errors', errs.length===0, errs.slice(0,3));
     await browser.close();
