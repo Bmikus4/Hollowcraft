@@ -91,8 +91,17 @@ async function rowEdge(page){
         chan.push(Object.assign({frac:f}, await page.evaluate(`__hc.seaMatch()`)));
       }
       console.log('the three colours at the sea line, per channel:'); for(const r of chan) console.log('   ', JSON.stringify(r));
-      T('the backdrop ring IS the water\'s own far-edge colour', chan.every(r=>r.ringVsTarget<0.006), {worst:chan.reduce((a,b)=>a.ringVsTarget>b.ringVsTarget?a:b)});
+      T('the water surface fogs to the ring uniform itself, not a copy of the formula', chan.every(r=>r.surfaceReadsRing===true), {surfaceReadsRing:chan[0].surfaceReadsRing});
       T('the sky\'s horizon anchor IS the ring', chan.every(r=>r.anchorVsRing<0.006), {worst:chan.reduce((a,b)=>a.anchorVsRing>b.anchorVsRing?a:b)});
+      // Vibrance must raise CHROMA without moving VALUE — that is what keeps the seam matched at any dial setting.
+      // The ring is recomputed in updateHorizon, once per frame — so read it a frame AFTER setting the dial, not in the same
+      // evaluate, or both samples come back as whatever it was before either change.
+      await page.evaluate(`__hc.vis({seavib:0})`);   await sleep(400); const v0=await page.evaluate(`__hc.seaMatch()`);
+      await page.evaluate(`__hc.vis({seavib:1.2})`); await sleep(400); const v1=await page.evaluate(`__hc.seaMatch()`);
+      await page.evaluate(`__hc.vis({seavib:0.85})`); await sleep(300);
+      console.log('vibrance 0 vs 1.2:', JSON.stringify({v0:{sat:v0.sat,lum:v0.lum}, v1:{sat:v1.sat,lum:v1.lum}}));
+      T('the vibrance dial raises chroma', v1.sat > v0.sat+0.15, {sat0:v0.sat, sat12:v1.sat});
+      T('…and leaves the value alone, so the seam stays matched', Math.abs(v1.lum-v0.lum) < 0.004, {lum0:v0.lum, lum12:v1.lum});
     }
     const DAY_LEN = await page.evaluate(`(()=>{ const n=__hc.time(); return n.frac>0.001? n.worldTime/n.frac : 600; })()`);
 
@@ -128,7 +137,12 @@ async function rowEdge(page){
     // far edge fogs to the ring colour scaled by the deep-water knob. Converging those two means choosing whether the far
     // water comes UP to the ring or the ring comes DOWN to the water — a look decision, not a correctness one, so it is
     // measured and reported rather than picked here. Threshold has headroom instead of sitting on the current value.
-    T('no hard step at the horizon at any hour', nightMax<0.10 && dayMax<0.10, {nightMax:+nightMax.toFixed(4), dayMax:+dayMax.toFixed(4)});
+    // NIGHT ONLY, deliberately. This metric takes the largest row-to-row jump in the middle third of the frame, and by day the
+    // biggest jump there is the PINE TREELINE against a bright sky — a dark silhouette against light air, which is what a
+    // treeline is supposed to be. It cannot tell that apart from the sea line, so asserting on the day number would be
+    // asserting that the forest stops being visible. Ben's report was about the night horizon; that is what is pinned here,
+    // and the day figure is printed for the record.
+    T('the night horizon has no hard step', nightMax<0.06, {nightMax:+nightMax.toFixed(4), dayForTheRecord:+dayMax.toFixed(4)});
     // the sky must still actually change through the day (a knob at 0 or a broken uniform would flatten it)
     const lum=rows.map(r=>r.upper);
     T('the sky changes through the day', Math.max(...lum)-Math.min(...lum) > 0.05, {min:Math.min(...lum), max:Math.max(...lum)});

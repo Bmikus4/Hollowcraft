@@ -1538,14 +1538,16 @@ const leafDepthMat=_atlasDepthMat();
 // These are back in Settings > VISUALS, where the fix list asked for them. They live here as uniforms so the shaders read
 // them per-frame with no recompile, and their DEFAULTS are exactly the shipped look — so a player who never opens the panel
 // sees what they saw before. CFG.sky* holds the saved values; applyVisuals() copies them in.
-const _uSkyDark={value:0.2}, _uWaterDeep={value:0.2}, _uCloud={value:1.0}, _uStars={value:1.0};
+const _uSkyDark={value:0.2}, _uWaterDeep={value:0.2}, _uCloud={value:1.0}, _uStars={value:1.0}, _uSeaVib={value:0.85};
+const _seaTint=new THREE.Color();   // scratch for the horizon vibrance lerp — no per-frame allocation
 function _saveVis(k,v){ try{ localStorage.setItem('hollowcraft_vis_'+k, String(v)); }catch(e){} }
 (function restoreVis(){ const get=(k)=>{ try{ const s=localStorage.getItem('hollowcraft_vis_'+k); if(s==null)return null; const n=+s; return isNaN(n)?null:n; }catch(e){ return null; } };
   const a=get('skydark'); if(a!=null)_uSkyDark.value=a;
   const b=get('waterdeep'); if(b!=null)_uWaterDeep.value=b;
   const c=get('cloud'); if(c!=null)_uCloud.value=c;
   const d=get('stars'); if(d!=null)_uStars.value=d;
-  const e=get('fogmul'); if(e!=null)CFG.fogMul=e; })();
+  const e=get('fogmul'); if(e!=null)CFG.fogMul=e;
+  const f=get('seavib'); if(f!=null)_uSeaVib.value=f; })();
 const skyGeo = new THREE.SphereGeometry(FAR*1.4, 32, 16);
 const skyMat = new THREE.ShaderMaterial({
   side:THREE.BackSide, depthWrite:false, depthTest:false, fog:false,
@@ -1794,8 +1796,16 @@ function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.p
     // it worse in a way worth recording: I matched the ring's LUMINANCE to the water's and kept the navy HUE, which the
     // harness then passed, because the harness compared luminance. Equal brightness is not equal colour. A saturated blue at
     // the right value against a desaturated teal is still a stripe. Matched per channel, there is nothing left to mismatch.
-    const _bx=fc.r*0.5, _by=fc.g*0.5+0.012, _bz=fc.b*0.5+0.028;
-    _uWater.value.setRGB(_bx*_uWaterDeep.value, _by*_uWaterDeep.value, _bz*_uWaterDeep.value);
+    const _bx=fc.r*0.5, _by=fc.g*0.5+0.012, _bz=fc.b*0.5+0.028, k=_uWaterDeep.value;
+    _uWater.value.setRGB(_bx*k, _by*k, _bz*k);
+    // VIBRANCE (Ben 07-28: "the horizon colour is so close, it needs to be more vibrant"). The match is now structural — the
+    // water surface fogs to this exact uniform and the sky's anchor IS it — so the colour is free to be anything without
+    // reopening the seam. This takes the deep-ocean HUE at the value already computed: luminance is preserved, only chroma
+    // rises, so the three sides stay level with each other and the sea line stays invisible however far the dial goes.
+    { const L=_uWater.value.r*0.2126+_uWater.value.g*0.7152+_uWater.value.b*0.0722;
+      const dl=_deepSea.r*0.2126+_deepSea.g*0.7152+_deepSea.b*0.0722;
+      if(L>1e-5 && dl>1e-5){ const s2=L/dl;
+        _uWater.value.lerp(_seaTint.setRGB(_deepSea.r*s2, _deepSea.g*s2, _deepSea.b*s2), Math.min(1.5,_uSeaVib.value)); } }
     { const cd=_horizCamDir; camera.getWorldDirection(cd); oceanMat.uniforms.uCamYaw.value=Math.atan2(cd.z,cd.x); }   // view azimuth for the horizon bow
     // THE ANCHOR IS THE SEA. Nothing else. This value's entire job is to be what the sky converges to where it meets the
     // water, so anything else in it is a stripe: it used to be the sea pulled 25% toward an UNDARKENED bright sky tone and
@@ -1842,7 +1852,7 @@ const waterMat = new THREE.ShaderMaterial({
   uniforms:Object.assign({
     uTime:globalU.uTime, uSunDir:globalU.uSunDir, uMoonDir:globalU.uMoonDir,
     uDay:globalU.uDay, uCamPos:globalU.uCamPos, uFogColor:{value:scene.fog.color},
-    uFogDensity:{value:scene.fog.density}, uDeep:_uWaterDeep
+    uFogDensity:{value:scene.fog.density}, uDeep:_uWaterDeep, uRing:_uWater
   }),
   vertexShader:`
     attribute float aTop; attribute float aDepth; varying float vTop; varying float vDepth; varying vec3 vW; varying vec3 vN; varying float vFog; varying float vCrest;
@@ -1863,7 +1873,7 @@ const waterMat = new THREE.ShaderMaterial({
   fragmentShader:`
     precision highp float;
     varying float vTop; varying float vDepth; varying vec3 vW; varying vec3 vN; varying float vFog; varying float vCrest;
-    uniform vec3 uSunDir,uMoonDir,uCamPos; uniform float uDay,uTime; uniform vec3 uFogColor; uniform float uFogDensity, uDeep;
+    uniform vec3 uSunDir,uMoonDir,uCamPos; uniform float uDay,uTime; uniform vec3 uFogColor; uniform float uFogDensity, uDeep; uniform vec3 uRing;
     float h2(vec2 p){ return fract(sin(dot(p,vec2(12.9,78.2)))*43758.5); }
     float vn2(vec2 x){ vec2 i=floor(x),f=fract(x); f=f*f*(3.0-2.0*f); return mix(mix(h2(i),h2(i+vec2(1,0)),f.x),mix(h2(i+vec2(0,1)),h2(i+vec2(1,1)),f.x),f.y); }
     void main(){
@@ -1892,7 +1902,7 @@ const waterMat = new THREE.ShaderMaterial({
       float alpha = clamp(0.72 + 0.26*absorb + 0.08*F, 0.0, 0.99);    // NOT glass: even shallow water is mostly opaque so you never see through it to infinity; deep = solid
       if(vTop<0.5) alpha = max(alpha, 0.95);                          // side faces stay solid-looking
       float fd=uFogDensity*vFog; float ff=clamp(1.0-exp(-fd*fd),0.0,1.0);
-      col=mix(col, (uFogColor*0.5+vec3(0.0,0.012,0.028))*uDeep, ff);    // distant water fogs toward a DARK slate — the far EDGES of the water 5x DARKER (Ben 07-27), meeting the dark backdrop ring without a bright seam. uDeep 0.2 = shipped; Settings > VISUALS drives it.
+      col=mix(col, uRing, ff);    // ONE DEFINITION for the far edge: the ring colour computed in updateHorizon, handed in as a uniform. It used to recompute (uFogColor*0.5+tint)*uDeep here while the backdrop ring built its own value in JS, and the two drifted — same formula, different results, a visible band at the sea line. Now the surface fogs to exactly what stands beyond it, whatever that is, so the sea line cannot mismatch and the colour can be tuned in one place — the far EDGES of the water 5x DARKER (Ben 07-27), meeting the dark backdrop ring without a bright seam. uDeep 0.2 = shipped; Settings > VISUALS drives it.
       gl_FragColor=vec4(col,alpha);
     }`
 });
@@ -4034,6 +4044,7 @@ function buildPauseSettings(){ const el=document.getElementById('pausesettings')
   slider('Fog',0,2.0,0.05,CFG.fogMul,x=>Math.round(x*100)+'%',x=>{ CFG.fogMul=x; _saveVis('fogmul',x); });
   slider('Cloud cover',0,1.6,0.05,_uCloud.value,x=>Math.round(x/1*100)+'%',x=>{ _uCloud.value=x; _saveVis('cloud',x); });
   slider('Stars',0,2.0,0.05,_uStars.value,x=>Math.round(x/1*100)+'%',x=>{ _uStars.value=x; _saveVis('stars',x); });
+  slider('Horizon vibrance',0,1.5,0.05,_uSeaVib.value,x=>Math.round(x/0.85*100)+'%',x=>{ _uSeaVib.value=x; _saveVis('seavib',x); });   // chroma of the shared sky/sea colour at the horizon; luminance is preserved, so the seam stays matched at any setting
   { const got=Object.keys(achGot).length, det=document.createElement('details');   // ACHIEVEMENTS ledger — collapsed count line, open for the list; unfound easter eggs stay hidden as ? ? ?
     det.style.cssText='text-align:left;font:13px Georgia;color:#cbb98f;border-top:1px solid rgba(130,150,115,.14);padding-top:9px;';
     const sum=document.createElement('summary'); sum.style.cssText='cursor:pointer;letter-spacing:2px;color:#c0a050;font-size:11px;'; sum.textContent='ACHIEVEMENTS  '+got+' / '+ACHIEVEMENTS.length; det.appendChild(sum);
@@ -12394,9 +12405,69 @@ if(typeof window!=='undefined'){ window.__hcBR={ door:()=>brSpawnDoorNearPlayer(
     return {rooms:R.length, walls:W.length, angledWalls:angled, halfWalls:W.filter(w=>w.half).length, crawls:(BR.crawls||[]).length, doors:(BR.doors||[]).length, pillars:(BR.pillars||[]).length, fixtures:(BR.fixtures||[]).length, avgDoors:R.length?+(R.reduce((s,r)=>s+(r.doors||0),0)/R.length).toFixed(2):0, maxDoors:R.length?Math.max(0,...R.map(r=>r.doors||0)):0, minArea:areas.length?Math.min(...areas):0, maxArea:areas.length?Math.max(...areas):0}; },
   seed:(v)=>{ BR.seed=(v>>>0)||1; BR.rooms=[]; BR.gen=null; BR._cgx=null; brEnvCacheClear(); if(BR.inside){ try{ if(BR.infinite) brxStream(true); else brBuildEnvAll(); }catch(e){ return 'ERR:'+(e&&e.message); } } return BR.seed; },   // QA: force a maze seed + rebuild
   doorList:()=>(BR.doors||[]).map((d,i)=>({i,cx:+d.cx.toFixed(1),cz:+d.cz.toFixed(1),closed:d.closed,a:+(d.a||0).toFixed(2),kind:d.kind,dbl:!!d.dbl,leafW:+(d.leafW||0).toFixed(2)})),
+  // ---- PLAYER-EYE PROBES. Everything below goes through the SAME code path a player does, and identifies openings by their
+  // world POSITION rather than by an index into BR.doors — a teleport can cross a chunk boundary, rebuild the environment and
+  // reorder that array, so an index taken before the move points at a different door after it.
+  // QA: stand in the middle of a lit, ordinary room on a given storey and look slightly down at the floor.
+  goLit:(lvl)=>{ if(!BR.inside) brEnter();
+    for(const rec of (BR.loaded||[])){ if(brxChunkLevel(rec.gx,rec.gz)!==(lvl|0)) continue;
+      const r=(rec.rooms||[]).find(x=>x.lit && !x.low && !x.drop && !x.shaft && !x.tilt);
+      if(!r) continue;
+      const fy=brxChunkBaseY(rec.gx,rec.gz)+1;
+      player.pos.set(r.cx_w, fy+1.2, r.cz_w); player.vel.set(0,0,0); player.yaw=0; player.pitch=0.35;
+      return { gx:rec.gx, gz:rec.gz, x:+r.cx_w.toFixed(1), z:+r.cz_w.toFixed(1), fy, lit:!!r.lit, ceil:+(r.ceil||0).toFixed(1) }; }
+    return null; },
+  // QA: the REAL right-click door interaction, with the door's state either side of it.
+  useDoor:()=>{ const near=(()=>{ const ld=(typeof lookDir==='function')?lookDir():{x:-Math.sin(player.yaw),z:-Math.cos(player.yaw)};
+      let best=null,bd=2.9*2.9;
+      for(const d of (BR.doors||[])){ if(!d.pivots||!d.pivots.length)continue; const dx=d.cx-player.pos.x, dz=d.cz-player.pos.z, dd=dx*dx+dz*dz;
+        if(dd>bd)continue; const dl=Math.sqrt(dd)||1; if((ld.x*dx+ld.z*dz)/dl<0.15)continue; bd=dd; best=d; }
+      return best; })();
+    const snap=(d)=>d? {cx:+d.cx.toFixed(2), cz:+d.cz.toFixed(2), closed:!!d.closed, a:+(d.a||0).toFixed(3), target:+(d.target||0).toFixed(3), pivots:(d.pivots||[]).length, hasGrp:!!(d.pivots&&d.pivots[0]&&d.pivots[0].pivot&&d.pivots[0].pivot.parent)} : null;
+    const before=snap(near);
+    const ok=(typeof brTryToggleDoor==='function')? brTryToggleDoor() : 'no brTryToggleDoor';
+    return { ok, before, after:snap(near), doorsWithPivots:(BR.doors||[]).filter(d=>d.pivots&&d.pivots.length).length, doors:(BR.doors||[]).length }; },
+  // QA: place the player `back` blocks in front of an opening, facing it. kind 'door' | 'open' | 'empty'.
+  // NEAREST TO THE PLAYER, always. Picking the first entry in BR.doors and teleporting to it crosses chunk boundaries, which
+  // fires brxStream -> brxUnion -> brBuildEnvAll: the loaded set changes, the arrays are rebuilt, and the record just aimed at
+  // may no longer exist. The probe then walks at a door that is not there and reports the game as broken. Staying local to
+  // wherever the player already is keeps the environment still.
+  faceOpening:(kind,back)=>{ if(!BR.inside) brEnter(); const B2=back||2.6;
+    if(BR.infinite) brxStream(true);                                             // settle the loaded set to the player's own position FIRST
+    const px=player.pos.x, pz=player.pos.z, near=(x,z)=>Math.hypot(x-px,z-pz);
+    let cx,cz,vert,extra={};
+    if(kind==='empty'){ const L=(BR.lintels||[]).filter(l=>{ if(l.y0 && l.y0<BR_DOORH-0.01) return false;
+        const x=l.vert?l.fixed:(l.s0+l.s1)/2, z=l.vert?(l.s0+l.s1)/2:l.fixed;
+        if((BR.doors||[]).some(d=>Math.hypot(d.cx-x,d.cz-z)<0.8)) return false;
+        if((BR.frames||[]).some(f=>Math.hypot(f.cx-x,f.cz-z)<0.8)) return false;
+        return brPaleFloorY(x,z)!=null; });
+      L.sort((a,b)=>near(a.vert?a.fixed:(a.s0+a.s1)/2, a.vert?(a.s0+a.s1)/2:a.fixed) - near(b.vert?b.fixed:(b.s0+b.s1)/2, b.vert?(b.s0+b.s1)/2:b.fixed));
+      const hit=L[0]; if(!hit) return null;
+      vert=!!hit.vert; cx=hit.vert?hit.fixed:(hit.s0+hit.s1)/2; cz=hit.vert?(hit.s0+hit.s1)/2:hit.fixed;
+      extra={span:+(hit.s1-hit.s0).toFixed(2), arch:!!hit.arch}; }
+    else { const D=(BR.doors||[]).filter(d=>d.pivots&&d.pivots.length && (kind==='open'? (d.a!=null&&d.a>1.2) : true) && brPaleFloorY(d.cx,d.cz)!=null)
+              .sort((a,b)=>near(a.cx,a.cz)-near(b.cx,b.cz));
+      const hit=D[0]; if(!hit) return null;
+      if(kind==='open'){ hit.closed=false; hit.target=BR_DOOR_OPEN; hit.a=BR_DOOR_OPEN;
+        for(const L of (hit.pivots||[])) L.pivot.rotation.y=hit.base+L.hs*hit.swing*hit.a; }
+      vert=!!hit.vert; cx=hit.cx; cz=hit.cz; extra={a:+(hit.a||0).toFixed(2), dw:+(hit.dw||0).toFixed(2), dbl:!!hit.dbl}; }
+    const nx=vert?1:0, nz=vert?0:1, fy=brPaleFloorY(cx,cz);
+    // approach from whichever side the player is already on, so the move is short and never leaves the chunk
+    const sgn=(((px-cx)*nx+(pz-cz)*nz)>=0)?1:-1;
+    player.pos.set(cx+nx*B2*sgn, (fy==null?BR_WY0:fy)+1.2, cz+nz*B2*sgn); player.vel.set(0,0,0);
+    // lookDir is (-sin yaw, ., -cos yaw), so facing a delta (dx,dz) is yaw = atan2(-dx,-dz). Standing at +n*B2*sgn the delta
+    // to the opening is -n*B2*sgn, which gives atan2(+n*sgn). Getting this sign backwards points the player at the wall
+    // BEHIND them: the interaction ray finds nothing and W walks them away from the opening, which reads exactly like a door
+    // that will not open and a doorway that is blocked. (The same inversion is in goDoor below.)
+    player.yaw=Math.atan2(nx*sgn,nz*sgn); player.pitch=0;
+    return Object.assign({cx:+cx.toFixed(2), cz:+cz.toFixed(2), vert, back:B2, sgn, fy,
+                          moved:+Math.hypot(player.pos.x-px, player.pos.z-pz).toFixed(1)}, extra); },
+  // QA: how far along the approach axis the player has got. Starts at `back`, and < 0 means they are through the opening.
+  crossing:(t)=>{ const nx=t.vert?1:0, nz=t.vert?0:1, sgn=t.sgn||1;
+    return { along:+((((player.pos.x-t.cx)*nx+(player.pos.z-t.cz)*nz))*sgn).toFixed(2), y:+player.pos.y.toFixed(2) }; },
   goDoor:(i)=>{ const d=(BR.doors||[])[i|0]; if(!d)return null; if(!BR.inside)brEnter();      // QA: stand square-on to a door, 3.2 back, eye level
     const nx=d.vert?1:0, nz=d.vert?0:1; player.pos.set(d.cx+nx*3.2, BR_FLOOR+1.2, d.cz+nz*3.2);
-    player.yaw=Math.atan2(-nx*3.2,-nz*3.2); player.pitch=0.02; return {i,cx:d.cx,cz:d.cz,kind:d.kind,dbl:!!d.dbl}; },
+    player.yaw=Math.atan2(nx*3.2,nz*3.2); player.pitch=0.02; return {i,cx:d.cx,cz:d.cz,kind:d.kind,dbl:!!d.dbl}; },   // was atan2(-nx,-nz), which faced the player AWAY from the door — every "stand square-on to a door" shot was of the opposite wall (lookDir is (-sin yaw,.,-cos yaw), so facing delta (dx,dz) is atan2(-dx,-dz))
   openDoor:(i)=>{ const d=(BR.doors||[])[i|0]; if(!d)return null; d.closed=false; d.target=BR_DOOR_OPEN; return true; },
   tables:()=>(BR.tables||[]).map(t=>({x:+t.x.toFixed(1),z:+t.z.toFixed(1),len:+t.len.toFixed(1),candle:t.candle})),   // QA: dinner-table placements
   props:()=>(BR.props||[]).map(p=>({x:+p.x.toFixed(1),z:+p.z.toFixed(1),kind:p.kind})),                              // QA: furniture + junk piles
@@ -15040,8 +15111,9 @@ window.__hc={
     return { has:hasBackpack(), made:!!backpackStore, ui:openUI, title:(document.getElementById('ctitle')||{}).textContent||'',
              slots:(backpackStore||[]).map(s=>s?s.id+':'+s.n:null).filter(Boolean) }; },
   vis(o){ if(o){ if(o.skydark!=null)_uSkyDark.value=o.skydark; if(o.waterdeep!=null)_uWaterDeep.value=o.waterdeep;
-      if(o.cloud!=null)_uCloud.value=o.cloud; if(o.stars!=null)_uStars.value=o.stars; if(o.fogmul!=null)CFG.fogMul=o.fogmul; }
-    return { skydark:_uSkyDark.value, waterdeep:_uWaterDeep.value, cloud:_uCloud.value, stars:_uStars.value, fogmul:CFG.fogMul }; },
+      if(o.cloud!=null)_uCloud.value=o.cloud; if(o.stars!=null)_uStars.value=o.stars; if(o.fogmul!=null)CFG.fogMul=o.fogmul;
+      if(o.seavib!=null)_uSeaVib.value=o.seavib; }
+    return { skydark:_uSkyDark.value, waterdeep:_uWaterDeep.value, cloud:_uCloud.value, stars:_uStars.value, fogmul:CFG.fogMul, seavib:_uSeaVib.value }; },
   qaAt(x,y,z,i){ this.qa(i==null?90:i); if(this._qaLight) this._qaLight.position.set(x,y,z);
     if(this._qaKey){ this._qaKey.position.set(x+4,y+7,z+3); this._qaKey.target.position.set(x,y,z); this._qaKey.target.updateMatrixWorld(); }
     return {x,y,z,i:this._qaLight?this._qaLight.intensity:0}; },
@@ -15132,12 +15204,17 @@ window.__hc={
   // QA: the three colours that must agree either side of the sea line — the water surface's own far-edge fog target, the
   // backdrop ring, and the sky's horizon anchor. Compared PER CHANNEL: a luminance-only check passes over a saturated blue
   // ring against a desaturated ocean, which is exactly the stripe Ben photographed.
-  seaMatch(){ const fc=scene.fog.color, k=_uWaterDeep.value;
-    const target=[(fc.r*0.5)*k, (fc.g*0.5+0.012)*k, (fc.b*0.5+0.028)*k];
-    const ring=[_uWater.value.r,_uWater.value.g,_uWater.value.b], anch=[_uHorizonBlend.value.r,_uHorizonBlend.value.g,_uHorizonBlend.value.b];
+  // The match is STRUCTURAL now: the water surface's far-edge target is the uRing uniform, which IS this same colour object,
+  // and the sky's anchor is copied from it. So this reports the identity as well as the values — an assertion on the numbers
+  // alone could be satisfied by two expressions that happen to agree today and drift tomorrow, which is what went wrong.
+  seaMatch(){ const ring=[_uWater.value.r,_uWater.value.g,_uWater.value.b], anch=[_uHorizonBlend.value.r,_uHorizonBlend.value.g,_uHorizonBlend.value.b];
     const dev=(a,b)=>Math.max(Math.abs(a[0]-b[0]),Math.abs(a[1]-b[1]),Math.abs(a[2]-b[2]));
-    return { target:target.map(v=>+v.toFixed(4)), ring:ring.map(v=>+v.toFixed(4)), anchor:anch.map(v=>+v.toFixed(4)),
-             ringVsTarget:+dev(ring,target).toFixed(4), anchorVsRing:+dev(anch,ring).toFixed(4), day:+globalU.uDay.value.toFixed(3) }; },
+    const surfaceReadsRing = !!(waterMat && waterMat.uniforms && waterMat.uniforms.uRing && waterMat.uniforms.uRing.value===_uWater.value);
+    const L=(c)=>c[0]*0.2126+c[1]*0.7152+c[2]*0.0722;
+    const sat=(c)=>{ const m=Math.max(c[0],c[1],c[2]); return m>1e-5? +(1-Math.min(c[0],c[1],c[2])/m).toFixed(3) : 0; };
+    return { ring:ring.map(v=>+v.toFixed(4)), anchor:anch.map(v=>+v.toFixed(4)), surfaceReadsRing,
+             anchorVsRing:+dev(anch,ring).toFixed(4), lum:+L(ring).toFixed(4), sat:sat(ring),
+             vib:_uSeaVib.value, day:+globalU.uDay.value.toFixed(3) }; },
   seaColor(){ return { deep:[+_uWater.value.r.toFixed(3),+_uWater.value.g.toFixed(3),+_uWater.value.b.toFixed(3)], horizon:[+_uHorizonBlend.value.r.toFixed(3),+_uHorizonBlend.value.g.toFixed(3),+_uHorizonBlend.value.b.toFixed(3)], day:+globalU.uDay.value.toFixed(2) }; },   // QA: under-horizon deep-blue readout
   holeProbe(dist){ dist=(dist==null?2:dist); for(let i=0;i<9;i++){ if(!inv[i]){ selSlot=i; break; } }   // QA: pillar + bullet hole in front at eye height, stand back `dist`, look straight at it (daytime, empty hand)
     const px0=Math.round(player.pos.x), pz0=Math.round(player.pos.z), gy=Math.round(groundYAt(px0+0.5,pz0+0.5,player.pos.y));
