@@ -1538,7 +1538,10 @@ const leafDepthMat=_atlasDepthMat();
 // These are back in Settings > VISUALS, where the fix list asked for them. They live here as uniforms so the shaders read
 // them per-frame with no recompile, and their DEFAULTS are exactly the shipped look — so a player who never opens the panel
 // sees what they saw before. CFG.sky* holds the saved values; applyVisuals() copies them in.
-const _uSkyDark={value:0.2}, _uWaterDeep={value:0.2}, _uCloud={value:1.0}, _uStars={value:1.0}, _uSeaVib={value:0.85};
+// _uSeaVib DEFAULTS TO 0 (Ben 07-28). Pushing the horizon colour toward the deep-ocean hue at constant luminance did make it
+// vibrant, and against a desaturated sea that is precisely the "neon glow" strip he photographed: the ring was a saturated
+// blue while the water it met was not. Matched to the water beats vivid, so the dial ships off and he can taste it upward.
+const _uSkyDark={value:0.2}, _uWaterDeep={value:0.2}, _uCloud={value:1.0}, _uStars={value:1.0}, _uSeaVib={value:0.0};
 const _seaTint=new THREE.Color();   // scratch for the horizon vibrance lerp — no per-frame allocation
 function _saveVis(k,v){ try{ localStorage.setItem('hollowcraft_vis_'+k, String(v)); }catch(e){} }
 (function restoreVis(){ const get=(k)=>{ try{ const s=localStorage.getItem('hollowcraft_vis_'+k); if(s==null)return null; const n=+s; return isNaN(n)?null:n; }catch(e){ return null; } };
@@ -1554,7 +1557,7 @@ const skyMat = new THREE.ShaderMaterial({
   uniforms:{
     uSunDir:globalU.uSunDir, uMoonDir:globalU.uMoonDir, uDay:globalU.uDay, uTime:globalU.uTime,
     uMoonTex:{value:null}, uHasMoon:{value:0}, uFogCol:{value:scene.fog.color}, uHorizonBlend:_uHorizonBlend,
-    uSkyDark:_uSkyDark, uCloud:_uCloud, uStars:_uStars
+    uSkyDark:_uSkyDark, uCloud:_uCloud, uStars:_uStars, uCamYaw:{value:0}
   },
   vertexShader:`
     varying vec3 vDir;
@@ -1562,7 +1565,7 @@ const skyMat = new THREE.ShaderMaterial({
   fragmentShader:`
     precision highp float;
     varying vec3 vDir;
-    uniform vec3 uSunDir, uMoonDir; uniform float uDay, uTime, uHasMoon; uniform vec3 uFogCol, uHorizonBlend; uniform float uSkyDark, uCloud, uStars;
+    uniform vec3 uSunDir, uMoonDir; uniform float uDay, uTime, uHasMoon; uniform vec3 uFogCol, uHorizonBlend; uniform float uSkyDark, uCloud, uStars; uniform float uCamYaw;
     uniform sampler2D uMoonTex;
     // hash noise
     float h13(vec3 p){ p=fract(p*0.3183099+0.1); p*=17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
@@ -1578,6 +1581,7 @@ const skyMat = new THREE.ShaderMaterial({
       float sd   = max(dot(dir,uSunDir),0.0);      // how near this ray points to the sun
       float md   = dot(dir,uMoonDir);
       float lowBand = 1.0-smoothstep(0.0,0.34,dir.y);
+      float az   = atan(dir.z, dir.x);             // view azimuth, for the planetary bow at the horizon (same one the ocean ring uses)
       // TWO ACCUMULATORS. col is the SKY - the gradient, the scattering, the clouds - and it is what the darkness knob and
       // the horizon anchor act on. add is the LIGHTS IN the sky: sun disc, moon, stars, the Milky Way. Those must not be
       // scaled by the darkness knob or they would go out with it, which is why the old shader added them after the multiply;
@@ -1669,7 +1673,19 @@ const skyMat = new THREE.ShaderMaterial({
       // multiplied by 0.2 there AND darkened again by uSkyDark here, so the sky met the sea at 1/25th of the sea's value and
       // the horizon read as a hard step, worst at night. The anchor is no longer pre-darkened, and the mix happens AFTER
       // uSkyDark, so both sides of the seam land on the same value at every hour.
-      col=mix(col, uHorizonBlend, (1.0-smoothstep(0.0,0.10,dir.y))*0.85);
+      // ZERO BLENDING, AND A CURVED HORIZON (Ben 07-28). This used to ease the lowest 10 degrees of sky 85% of the way toward
+      // the anchor — a soft haze band, which by day read as a bright strip sitting on the water. He wants no blend at all: the
+      // sky is sky, and where it meets the sea it IS the sea colour. So the transition is tight (about half a degree) and goes
+      // the whole way, which removes the band entirely.
+      // The mask also uses the same PLANETARY BOW as the ocean ring below it, so the join curves down toward the view edges
+      // like a globe instead of cutting straight across the frame.
+      float bow = dir.y + 0.026*(1.0-cos(az-uCamYaw));
+      // …and the convergence has to be WIDE, not tight. Squeezing it to half a degree left the sky's own lowest gradient
+      // exposed right above the water: desaturated in this shader, but the post-process grade's vibrance lifts it to a
+      // saturated blue, which is the neon strip. Layer-by-layer bisection put it here — hiding the ocean ring or the pines
+      // left it untouched, hiding the sky dome removed it. So the lowest ~3 degrees ease all the way into the sea colour,
+      // which is fixed and dark, so there is nothing left to glow at any hour.
+      col=mix(col, uHorizonBlend, 1.0-smoothstep(0.0,0.055,bow));
       col += add;
       gl_FragColor = vec4(col,1.0);
     }`
@@ -1747,6 +1763,9 @@ const oceanMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, si
   '  float a=smoothstep(0.0,-0.006,elev);',                                        // solid essentially at the waterline
   '  gl_FragColor=vec4(water,a); }'].join('\n') });
 const oceanLayer=new THREE.Mesh(_horizGeo, oceanMat); oceanLayer.frustumCulled=false; oceanLayer.renderOrder=-6; scene.add(oceanLayer);
+// THE FIXED HORIZON SEA COLOUR (Ben 07-28) — waterMat's own grazing-angle sky reflection at its NIGHT end. Used at every
+// hour on purpose: the horizon band must not brighten with the sun, and the water it meets is this colour, so they match 24/7.
+const _seaHorizon=new THREE.Color(0.03,0.05,0.09);
 const _deepSea=new THREE.Color(0.008,0.055,0.27), _horizCamDir=new THREE.Vector3();   // the DEEP BLUE below the horizon — a DARKER, deeper deep-ocean navy (Ben 07-21): low R/G, still blue-dominant but lower value so the under-horizon band reads as deep ocean at ALL hours
 // PINE TREELINE — a distant forest silhouette on the horizon, shown ONLY toward azimuths where REAL land continues
 // past the fog wall. A per-azimuth mask samples the actual terrain heightfield (surfaceH, pure noise — no chunks needed)
@@ -1787,33 +1806,30 @@ const pineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, sid
 const pineLayer=new THREE.Mesh(_horizGeo, pineMat); pineLayer.frustumCulled=false; pineLayer.renderOrder=-5; scene.add(pineLayer);   // over the ocean seam
 let _pineLastX=1e9, _pineLastZ=1e9, _pineLastRD=0;
 function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.position.copy(camera.position); const day=globalU.uDay.value;
-  { const fc=scene.fog.color;   // PERFECT MATCH BY CONSTRUCTION (Ben 07-20): the backdrop ring's deep colour = exactly what the REAL water fogs to at its far edge (same formula as waterMat's fog target) — the seam cannot mismatch in any weather/time
-    // THE RING IS THE WATER'S OWN FAR-EDGE COLOUR. Exactly. Same expression as waterMat's fog target, including the
-    // deep-water knob the surface scales it by (Ben 07-28: "the ring comes down to the water").
+  { // ---- THE HORIZON COLOUR: THE NIGHT SEA, AT EVERY HOUR ----
+    // Ben 07-28: "much darker even during the day ... zero blending on this even during the day, just make sure it is colour
+    // matched to the water 24/7 ... copy the bottom of it at night, with lighting overrides to the day."
     //
-    // It used to be that target pulled hard toward _deepSea, a saturated royal navy (0.008, 0.055, 0.27). That is what Ben
-    // photographed as a flat blue stripe between a warm sky and a desaturated teal ocean — and my first attempt at this made
-    // it worse in a way worth recording: I matched the ring's LUMINANCE to the water's and kept the navy HUE, which the
-    // harness then passed, because the harness compared luminance. Equal brightness is not equal colour. A saturated blue at
-    // the right value against a desaturated teal is still a stripe. Matched per channel, there is nothing left to mismatch.
-    const _bx=fc.r*0.5, _by=fc.g*0.5+0.012, _bz=fc.b*0.5+0.028, k=_uWaterDeep.value;
-    _uWater.value.setRGB(_bx*k, _by*k, _bz*k);
-    // VIBRANCE (Ben 07-28: "the horizon colour is so close, it needs to be more vibrant"). The match is now structural — the
-    // water surface fogs to this exact uniform and the sky's anchor IS it — so the colour is free to be anything without
-    // reopening the seam. This takes the deep-ocean HUE at the value already computed: luminance is preserved, only chroma
-    // rises, so the three sides stay level with each other and the sea line stays invisible however far the dial goes.
+    // The history is worth keeping, because each step fixed the previous one's damage and introduced its own. It began as the
+    // sea pulled 25% toward a bright sky tone and then multiplied by 0.2, which put it at a fifth of the sea's value: a hard
+    // step down into black at the night horizon. Removing the 0.2 left the undarkened sky tone showing as a pale band across
+    // the DAYTIME horizon. Rebuilding it from the live fog colour matched per channel, but then it tracked the daylight haze —
+    // and with the vibrance push on top, the day band came out as a neon blue strip over near-black water, which is what Ben
+    // photographed. Every one of those versions derived the colour from something that changes with the sun.
+    //
+    // So it no longer does. It is the water shader's own grazing-angle reflection at its NIGHT end, a fixed vec3(0.03,0.05,0.09),
+    // at every hour. The band cannot brighten with the sun because nothing in it knows what time it is. The deep-water dial
+    // scales it, with 0.2 as unity, and the vibrance dial pushes chroma at constant luminance.
+    _uWater.value.copy(_seaHorizon).multiplyScalar(_uWaterDeep.value/0.2);
     { const L=_uWater.value.r*0.2126+_uWater.value.g*0.7152+_uWater.value.b*0.0722;
       const dl=_deepSea.r*0.2126+_deepSea.g*0.7152+_deepSea.b*0.0722;
       if(L>1e-5 && dl>1e-5){ const s2=L/dl;
-        _uWater.value.lerp(_seaTint.setRGB(_deepSea.r*s2, _deepSea.g*s2, _deepSea.b*s2), Math.min(1.5,_uSeaVib.value)); } }
-    { const cd=_horizCamDir; camera.getWorldDirection(cd); oceanMat.uniforms.uCamYaw.value=Math.atan2(cd.z,cd.x); }   // view azimuth for the horizon bow
-    // THE ANCHOR IS THE SEA. Nothing else. This value's entire job is to be what the sky converges to where it meets the
-    // water, so anything else in it is a stripe: it used to be the sea pulled 25% toward an UNDARKENED bright sky tone and
-    // then multiplied by 0.2. That 0.2 put it at a fifth of the sea's value — the hard step at the night horizon Ben
-    // reported — and taking the 0.2 away instead left the undarkened sky tone showing as a pale band across the daytime
-    // horizon, because the sky beside it is darkened by uSkyDark and the anchor was not. Equal to the sea, at every hour,
-    // is the only value that cannot draw a line on either side.
-    _uHorizonBlend.value.copy(_uWater.value); }
+        _uWater.value.lerp(_seaTint.setRGB(_deepSea.r*s2,_deepSea.g*s2,_deepSea.b*s2), Math.min(1.5,_uSeaVib.value)); } }
+    // The water surface fogs to this exact uniform (waterMat's uRing) and the sky's anchor IS it, so all three sides of the sea
+    // line are one colour by construction rather than by three expressions agreeing.
+    _uHorizonBlend.value.copy(_uWater.value);
+    { const cd=_horizCamDir; camera.getWorldDirection(cd); const yw=Math.atan2(cd.z,cd.x);
+      oceanMat.uniforms.uCamYaw.value=yw; skyMat.uniforms.uCamYaw.value=yw; } }   // view azimuth for the horizon bow — the sky's band now curves with the ocean's, so the whole horizon reads as a globe edge
   _uSky.value.setRGB(lerp(0.12,0.60,day), lerp(0.15,0.68,day), lerp(0.20,0.78,day));            // horizon-band air (legacy uniform)
   { const dim=0.10+0.90*day, base=[0.050,0.102,0.046]; _uPine.value.setRGB(base[0]*dim, base[1]*dim, base[2]*dim);   // DARK forest green matching the real edge trees (Ben 07-20 rev3); at NIGHT it goes near-BLACK silhouette
     { const _ef=1-Math.exp(-Math.pow(CFG.RENDER_DIST*CK*scene.fog.density,2)); pineMat.uniforms.uFogAmt.value=clamp(_ef*0.93,0,0.97);   // MATCH the farthest rendered chunks' fog wash exactly (exp2 at the wall distance — includes weather + day/night via density), held a hair under so the tip-gradient still reads
@@ -1890,7 +1906,13 @@ const waterMat = new THREE.ShaderMaterial({
       float F=0.02+0.98*pow(1.0-cosT,5.0);
       vec3 deep=vec3(0.004,0.015,0.019), shallow=vec3(0.02,0.065,0.07);
       vec3 base=mix(deep,shallow,uDay*0.5);
-      vec3 skyRefl=mix(vec3(0.03,0.05,0.09),vec3(0.07,0.10,0.136),uDay);   // daytime sky-reflection 5x DARKER (Ben 07-27): the grazing-angle sheen that made the water + its far edges read bright
+      // THE GRAZING SHEEN NO LONGER BRIGHTENS WITH THE DAY (Ben 07-28: "much darker even during the day ... copy the bottom of
+      // it at night, with lighting overrides to the day"). At the horizon the Fresnel term goes to 1, so this reflection IS
+      // what the far water is, and it used to lift from 0.03,0.05,0.09 at night to 0.07,0.10,0.136 by day — twice the value of
+      // the backdrop it meets. The post-process grade then boosted the saturation of the brightest blue in an otherwise
+      // desaturated frame, which is the neon strip along the daytime horizon. It is now uRing: the same fixed colour the ring
+      // and the sky's anchor use, so the water, the ring and the sky are one value at the sea line at every hour.
+      vec3 skyRefl=uRing;
       vec3 col=mix(base, skyRefl, F);
       // NO specular glints and NO white foam crests — they read as "shiny white flashes". Removed on purpose.
       // MOONGLADE (night only): the one specular term we keep — a soft glinting path where the moon reflects
@@ -11341,7 +11363,14 @@ function brBuildEnv(){ if(!BR.rooms||!BR.rooms.length)brxGenerate(); const grp=n
     const horiz=(y)=>{ P.push(aL[0],y,aL[1], bL[0],y,bL[1], bR[0],y,bR[1], aR[0],y,aR[1]);
       U.push(uAt(aL),0, uAt(bL),0, uAt(bR),TH/T, uAt(aR),TH/T); I.push(v,v+1,v+2,v,v+2,v+3); v+=4; };
     face(aL,bL); face(bR,aR);
-    if(caps!=null? caps : !soffit){ face(bL,bR); face(aR,aL); }                                 // END CAPS — historically skipped for lintels, because a header's caps landed exactly on the stub caps either side of the opening and the coplanar pair z-fought into the LINE ABOVE EVERY DOOR (Ben 07-27). A header that OVERLAPS the masonry buries its caps inside it instead, so it can and must have them: without them the box is open-ended, and its faces are DoubleSide, so you see its own interior through the gap as a bright hairline (Ben: "stray lines").
+    // THE CAPS SIT A HAIR INSIDE THE LONG FACES. A wall's end cap is the doorway reveal and it spans the wall's full height —
+    // so above a door head, where the header fills that reveal, the cap's own edge lies exactly IN the wall-face plane. Two
+    // coplanar edges in one merged geometry with one material is a z-fight, and it draws the line Ben sees running up both
+    // sides of every opening to the ceiling. At 5x magnification it is DASHED, alternating pixel by pixel, which is the
+    // signature — a texture seam or a T-junction crack would be a solid line. Pulling the cap in by 1% of the wall thickness
+    // (under 2mm) decides the depth test without opening a gap, because the long face is immediately behind it.
+    { const CI=(BR._dbg&&BR._dbg.capInset!=null)?BR._dbg.capInset:0.99, aLc=[x0+nx*CI,z0+nz*CI], aRc=[x0-nx*CI,z0-nz*CI], bLc=[x1+nx*CI,z1+nz*CI], bRc=[x1-nx*CI,z1-nz*CI];
+      if((caps!=null? caps : !soffit) && !(BR._dbg&&BR._dbg.noCaps)){ face(bLc,bRc); face(aRc,aLc); } }                        // END CAPS — historically skipped for lintels, because a header's caps landed exactly on the stub caps either side of the opening and the coplanar pair z-fought into the LINE ABOVE EVERY DOOR (Ben 07-27). A header that OVERLAPS the masonry buries its caps inside it instead, so it can and must have them: without them the box is open-ended, and its faces are DoubleSide, so you see its own interior through the gap as a bright hairline.
     if(soffit) horiz(by);                                                                               // underside face (doorway header soffit)
     if(capTop) horiz(ty); };                                                                            // TOP face — HALF WALLS WERE OPEN (Ben 07-27): you look over one and see straight down into the hollow box. The old `cap` flag emitted this quad at `by`, i.e. buried in the floor, so the top never got a surface.
   // DROP SHAFTS — emitted here rather than in the room loop above, because wallBox is only in scope from this point on
@@ -11372,7 +11401,7 @@ function brBuildEnv(){ if(!BR.rooms||!BR.rooms.length)brxGenerate(); const grp=n
       r.landing={x:lx, z:lz, y:topY-1.35, hx:0.85, hz:0.85}; } }
   for(const s of BR.walls){ useZone(s.zone); wallBox(s.x0,s.z0,s.x1,s.z1,(s.by!=null?s.by:y0),lTy(s),false,!!s.half); endZone(s.zone); }   // full-height walls rise to the taller of the rooms they bound (HALF walls carry a much lower ty + a real capped top you see over); `by` lets a wall start above the floor — a stairwell's side lining spans two storeys
   const _roomCeil=(x,z)=>{ const r=brxRoomAt(x,z); return r? lCeil(r) : y1; };
-  for(const l of (BR.lintels||[])){ let x0,z0,x1,z1; if(l.vert){ x0=x1=l.fixed; z0=l.s0; z1=l.s1; } else { z0=z1=l.fixed; x0=l.s0; x1=l.s1; }
+  for(const l of (BR.lintels||[])){ if(BR._dbg&&BR._dbg.noLintels) break; let x0,z0,x1,z1; if(l.vert){ x0=x1=l.fixed; z0=l.s0; z1=l.s1; } else { z0=z1=l.fixed; x0=l.s0; x1=l.s1; }
     // A ROUND ARCHWAY (Ben 07-28: "archways should be round, not blocky"). Two things were wrong with the old one. It was
     // nine axis-aligned boxes stepping down to the curve, which reads as a flight of stairs over the door. And it SPRANG
     // dw/2 BELOW the head, so the masonry came down to 1.57 above the floor at the edges of the opening — an arch that ate
@@ -11386,7 +11415,7 @@ function brBuildEnv(){ if(!BR.rooms||!BR.rooms.length)brxGenerate(); const grp=n
     // to run up both sides of it was never a geometry fault at all: it was the wall UVs restarting at each piece. See uAt in
     // wallBox. Standing the header 2mm proud "to fix" it only added a second line, its own lit edge.
     useZone(l.zone); wallBox(x0,z0,x1,z1,hdY,lTop,true,false);                                          // header above each doorway/crawl — WITH soffit so the opening has a finished top (an archway's finished top is the intrados below; its soffit at the crown is enclosed and never seen)
-    if(l.arch){ const span=l.s1-l.s0, cen=l.s0+ARC, N=18, W2=BR_WT/2, crown=BR_DOORH+ARC;
+    if(l.arch && !(BR._dbg&&BR._dbg.noArch)){ const span=l.s1-l.s0, cen=l.s0+ARC, N=18, W2=BR_WT/2, crown=BR_DOORH+ARC;
       const yAt=(s)=>{ const off=s-cen; return BR_DOORH+Math.sqrt(Math.max(0,ARC*ARC-off*off)); };
       const PX=(s,n)=> l.vert? (l.fixed+n) : s, PZ=(s,n)=> l.vert? s : (l.fixed+n);
       // materials here are DoubleSide, so winding only decides the shading normal, never visibility
@@ -12366,6 +12395,31 @@ if(typeof window!=='undefined'){ window.__hcBRX={          // the chunk substrat
              chunk:brxChunkOf(player.pos.x,player.pos.z) }; },
   sig:(gx,gz)=>(BR.rooms||[]).filter(r=>r.acx>=gx*BRX_CELLS && r.acx<(gx+1)*BRX_CELLS && r.acy>=gz*BRX_CELLS && r.acy<(gz+1)*BRX_CELLS)
     .map(r=>r.acx+','+r.acy+','+r.cw+'x'+r.ch+','+r.zone+','+(r.low?'L':'')+(r.drop?'D':'')+(r.shaft?'S':'')+(r.tilt?'T':'')).sort().join('|'),   // QA: a chunk's layout fingerprint, for revisit-determinism
+  // QA: WALL ENDS POKING THROUGH WALLS (Ben 07-28). Every wall run is grown by EX = BR_WT/2 at its outer ends so corners
+  // close instead of showing a gap. When the wall it runs into is met at a T rather than a corner, that same growth carries
+  // the end CAP past the far face of the other wall — a thin slab of masonry standing proud on the other side, which is what
+  // "the edges of walls peek through other walls" looks like. Pure geometry: for every near-perpendicular pair, how far does
+  // one wall's end reach past the other's far face.
+  wallPokes:()=>{ const W=BR.walls||[], out={walls:W.length, pairs:0, pokes:0, worst:0, sample:[]};
+    const HW=BR_WT/2;
+    for(let i=0;i<W.length;i++){ const a=W[i], ax=a.x1-a.x0, az=a.z1-a.z0, aL=Math.hypot(ax,az)||1, aux=ax/aL, auz=az/aL;
+      for(let j=0;j<W.length;j++){ if(i===j) continue; const b=W[j], bx=b.x1-b.x0, bz=b.z1-b.z0, bL=Math.hypot(bx,bz)||1, bux=bx/bL, buz=bz/bL;
+        if(Math.abs(aux*bux+auz*buz) > 0.26) continue;                    // only near-perpendicular pairs
+        out.pairs++;
+        for(const e of [[a.x0,a.z0],[a.x1,a.z1]]){                        // each end of a
+          const t=((e[0]-b.x0)*bux+(e[1]-b.z0)*buz);
+          if(t < -HW || t > bL+HW) continue;                              // the end is not alongside b at all
+          const perp=(e[0]-b.x0)*(-buz)+(e[1]-b.z0)*(bux);                // signed distance from b's centre line
+          const over=Math.abs(perp)-HW;                                   // …past b's far face
+          // AND THE TWO MUST ACTUALLY MEET. Without this the audit counted every wall end that merely lay ALONGSIDE another
+          // wall's span, however far away — it reported overshoots of 192 blocks, which is a parallel wall across the room,
+          // not an edge poking through. A real poke lands just past the far face; anything beyond a wall thickness is a
+          // different wall entirely.
+          if(over > 0.02 && over < BR_WT){ out.pokes++;
+            if(over>out.worst){ out.worst=+over.toFixed(3);
+              out.sample.unshift({ over:+over.toFixed(3), x:+e[0].toFixed(2), z:+e[1].toFixed(2),
+                                   look:+Math.atan2(-(-buz),-(bux)).toFixed(3), zone:a.zone|0 }); out.sample=out.sample.slice(0,6); } } } } }
+    return out; },
   // QA: per-loaded-chunk storey bookkeeping. r.ceil and w.ty are stored LOCAL at generation and rewritten to WORLD by
   // brxUnion, while brBuildEnv builds in LOCAL space inside a group that is itself offset by dy — so this is where a
   // double-applied storey offset shows up, and nothing else in the suite looks at it.
@@ -12471,6 +12525,29 @@ if(typeof window!=='undefined'){ window.__hcBR={ door:()=>brSpawnDoorNearPlayer(
     player.yaw=Math.atan2(nx*sgn,nz*sgn); player.pitch=0;
     return Object.assign({cx:+cx.toFixed(2), cz:+cz.toFixed(2), vert, back:B2, sgn, fy,
                           moved:+Math.hypot(player.pos.x-px, player.pos.z-pz).toFixed(1)}, extra); },
+  // QA: build the environment with individual surfaces suppressed, to find which one draws an artefact. Bisecting beats
+  // theorising — I guessed the cause of the line above doorways twice and was wrong twice.
+  //   {noCaps} wall end caps (the doorway reveals) · {noLintels} the headers · {noArch} the arch surfaces · {capInset} 1.0 = flush
+  dbgGeom:(o)=>{ BR._dbg=Object.assign({}, BR._dbg||{}, o||{});
+    brEnvCacheClear(); try{ if(BR.infinite) brxStream(true); else brBuildEnvAll(); }catch(e){ return {err:e.message}; }
+    return Object.assign({}, BR._dbg); },
+  // QA: the pooled troffer shadow maps — toggle casting and tune the bias live. The line above a doorway is most likely a
+  // shadow-map seam at a geometry edge rather than the geometry itself, and this is what separates the two: turn casting off
+  // and if the line goes with it, it was never in the masonry.
+  shadows:(on,bias,normalBias)=>{ const P=BR.lightPool||[]; let cast=0;
+    for(const L of P){ if(!L.shadow) continue;
+      if(on!=null) L.castShadow=!!on && L===P[0] || !!on && L===P[1] ? true : (on===false? false : L.castShadow);
+      if(bias!=null) L.shadow.bias=bias;
+      if(normalBias!=null) L.shadow.normalBias=normalBias;
+      if(L.castShadow) cast++; }
+    return { pool:P.length, casting:cast, bias:P[0]&&P[0].shadow?P[0].shadow.bias:null, normalBias:P[0]&&P[0].shadow?P[0].shadow.normalBias:null }; },
+  // QA: stand `back` blocks from a world point, at eye height, looking at it along `yaw`.
+  goPoint:(x,z,back,yaw)=>{ if(!BR.inside) brEnter();
+    const fy=brPaleFloorY(x,z), B2=back||3.5, a=(yaw||0);
+    const dx=-Math.sin(a), dz=-Math.cos(a);                                     // lookDir convention
+    player.pos.set(x-dx*B2, (fy==null?BR_WY0:fy)+1.2, z-dz*B2); player.vel.set(0,0,0);
+    player.yaw=a; player.pitch=0;
+    return { fy:(fy==null?BR_WY0:fy), x:+player.pos.x.toFixed(2), z:+player.pos.z.toFixed(2) }; },
   // QA: how far along the approach axis the player has got. Starts at `back`, and < 0 means they are through the opening.
   crossing:(t)=>{ const nx=t.vert?1:0, nz=t.vert?0:1, sgn=t.sgn||1;
     return { along:+((((player.pos.x-t.cx)*nx+(player.pos.z-t.cz)*nz))*sgn).toFixed(2), y:+player.pos.y.toFixed(2) }; },
@@ -15096,6 +15173,19 @@ window.__hc={
   // ---- ENTITY RENDER QA ----
   _qaLight:null,
   qa(on){ if(on){ if(!this._qaLight){ this._qaLight=new THREE.PointLight(0xffe8d0,0,60,2); scene.add(this._qaLight); this._qaKey=new THREE.DirectionalLight(0xffffff,0); scene.add(this._qaKey); } this._qaLight.intensity=on===true?90:on; this._qaKey.intensity=1.4; } else { if(this._qaLight){this._qaLight.intensity=0;} if(this._qaKey)this._qaKey.intensity=0; } return !!this._qaLight; },
+  // QA/bench: show/hide the horizon layers independently. Four separate meshes stack up at the sea line — the sky dome, the
+  // ocean backdrop ring, the pine silhouette and the weather fog shell — and a band there can belong to any of them. Hiding
+  // one at a time says which, in one run, instead of a chain of plausible guesses.
+  layers(o){ o=o||{}; const set=(m,v)=>{ if(typeof m!=='undefined' && m && v!=null) m.visible=!!v; };
+    set(typeof skyDome!=='undefined'?skyDome:null, o.sky);
+    set(typeof oceanLayer!=='undefined'?oceanLayer:null, o.ocean);
+    set(typeof pineLayer!=='undefined'?pineLayer:null, o.pines);
+    set(typeof fogShell!=='undefined'?fogShell:null, o.shell);
+    set(typeof waterGroup!=='undefined'?waterGroup:null, o.water);
+    return { sky:(typeof skyDome!=='undefined'&&skyDome)?skyDome.visible:null,
+             ocean:(typeof oceanLayer!=='undefined'&&oceanLayer)?oceanLayer.visible:null,
+             pines:(typeof pineLayer!=='undefined'&&pineLayer)?pineLayer.visible:null,
+             shell:(typeof fogShell!=='undefined'&&fogShell)?fogShell.visible:null }; },
   // QA/bench: put the QA light AT a world point. qa() only sets its intensity — it is positioned by frame(), so any harness
   // shooting something that is not the Wretch was lighting the world origin and photographing a black room.
   // QA/bench + the VISUALS panel's own values, readable and settable: {skydark, waterdeep, cloud, stars, fogmul}
