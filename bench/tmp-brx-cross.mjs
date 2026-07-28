@@ -44,7 +44,12 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
           out.pairs++; out.gapCount+=mine.length;
           const d=ov(mine,theirs);
           if(d<=1) out.match++; else if(out.bad.length<4) out.bad.push({gx,gz,dgx,dgz,mine,theirs,diffCells:d});
-          if(!mine.length) out.noGap.push([gx,gz,dgx,dgz]);
+          // A BOUNDARY BETWEEN TWO STOREYS IS NOT CROSSED THROUGH THE WALL. Its only way through is the stairwell, and the
+          // well's opening belongs to the LOWER of the two — the upper side's wall stands a full storey above the flight and
+          // stays solid, which is what caps the head of the well. So ask the lower side for the gap, whichever key it holds.
+          const a=window.__hcBRX.baseY(gx,gz), b=window.__hcBRX.baseY(gx+dgx,gz+dgz);
+          const low = a<=b ? mine : theirs;
+          if(!low.length) out.noGap.push([gx,gz,dgx,dgz,a,b]);
         } }
       return out; })()`);
 
@@ -66,13 +71,18 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     const walk = await page.evaluate(`(()=>{ const out=[];
       for(const [gx,gz] of [[0,0],[1,0],[2,0],[2,1],[3,1],[-1,-1],[-2,-1]]){
         window.__hcBRX.walkTo(gx,gz);
-        const g=[ window.__hcBRX.gaps(gx,gz,1,0).length, window.__hcBRX.gaps(gx,gz,-1,0).length,
-                  window.__hcBRX.gaps(gx,gz,0,1).length, window.__hcBRX.gaps(gx,gz,0,-1).length ];
-        out.push({at:[gx,gz], exits:g.reduce((a,b)=>a+b,0), perSide:g}); }
+        const D=[[1,0],[-1,0],[0,1],[0,-1]];
+        const g=D.map(d=>window.__hcBRX.gaps(gx,gz,d[0],d[1]).length);
+        // a side with no gap is only acceptable if it is a STOREY CHANGE — then the way through is up the well, not through
+        // the wall, and the wall being solid is the point
+        const step=D.map(d=>window.__hcBRX.baseY(gx+d[0],gz+d[1])!==window.__hcBRX.baseY(gx,gz));
+        out.push({at:[gx,gz], exits:g.reduce((a,b)=>a+b,0), perSide:g, step,
+                  wells:window.__hcBRX.crossings(gx,gz).stairs}); }
       return out; })()`);
     console.log('exits per chunk:', JSON.stringify(walk));
     T('every chunk has at least 2 ways out', walk.every(w=>w.exits>=2), walk.filter(w=>w.exits<2));
-    T('every side of every chunk has an opening', walk.every(w=>w.perSide.every(n=>n>0)), walk.filter(w=>w.perSide.some(n=>n===0)));
+    T('every side of every chunk is either walked through or climbed through',
+      walk.every(w=>w.perSide.every((n,i)=>n>0 || w.step[i])), walk.filter(w=>w.perSide.some((n,i)=>n===0 && !w.step[i])));
 
     const st=await page.evaluate(`window.__hcBRX.stats()`);
     await page.evaluate(`window.__hcBRX.walkTo(0,0)`); await sleep(4000);   // settle: no rebuilds in flight

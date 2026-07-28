@@ -76,41 +76,62 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
       // geometry. Stand mid-flight and strafe hard into each side: you must stay on the treads, not step off into the well.
       for(const key of ['KeyA','KeyD']){
         await page.evaluate(`window.__hcBRX.standOnRampAt(${JSON.stringify(near)},0.5)`); await sleep(500);
-        await page.keyboard.down(key); for(let i=0;i<6;i++) await sleep(300); await page.keyboard.up(key); await sleep(400);
-        const q=await page.evaluate(`__hc.pos()`);
+        await page.keyboard.down(key); for(let i=0;i<6;i++) await sleep(300); await page.keyboard.up(key);
+        // WAIT FOR REST. A fixed sleep after keyup samples the player mid-drop off the end of the flight, which reads as
+        // hovering in a place the well does not have.
+        let q=null, prevY=null, still=0;
+        for(let k=0;k<24;k++){ await sleep(120); q=await page.evaluate(`__hc.pos()`);
+          if(prevY!==null && Math.abs(q.y-prevY)<0.01){ if(++still>=3) break; } else still=0; prevY=q.y; }
         const dxr=near.x1-near.x0, dzr=near.z1-near.z0, ll=dxr*dxr+dzr*dzr||1;
         const tt=Math.max(0,Math.min(1,((q.x-near.x0)*dxr+(q.z-near.z0)*dzr)/ll));
         const offd=Math.hypot(q.x-(near.x0+dxr*tt), q.z-(near.z0+dzr*tt));
         const surf=near.y0+(near.y1-near.y0)*tt;
-        T('strafing '+key+' does not push the player off the flight', offd<1.6 && Math.abs(q.y-surf)<1.0,
-          {off:+offd.toFixed(2), hw:1.1, y:+q.y.toFixed(2), surf:+surf.toFixed(2)});
+        // Strafing is camera-relative, so on a flight the player may well travel ALONG it and walk off one end — off the foot
+        // onto the lower floor, off the head onto the upper one. Both are correct. What must never happen is ending up
+        // somewhere that is neither: the test is that you are on a surface the well actually has, not pinned to mid-flight.
+        const legit=[surf, Math.min(near.y0,near.y1), Math.max(near.y0,near.y1)];
+        const ok = offd<near.hw+0.3 && legit.some(v=>Math.abs(q.y-v)<0.6);
+        T('strafing '+key+' leaves the player on the flight or on a floor it joins', ok,
+          ok? {off:+offd.toFixed(2), y:+q.y.toFixed(2)}
+            : {off:+offd.toFixed(2), hw:near.hw, y:+q.y.toFixed(2), surf:+surf.toFixed(2), legit, col:await page.evaluate(`window.__hcBRX.colHere()`)});
       }
       // ...and press the branch directly: the walls are render-only meshes, so this tests the COLLISION in the ramp loop.
       const NEAR=JSON.stringify(near);
       // t=0.25, NOT 0.5: the crossing sits ON the chunk boundary, so offsetting sideways at t=0.5 lands inside the
       // boundary wall beside the opening and it is the WALL push-out being measured, not the balustrade.
-      await page.evaluate(`window.__hcBRX.standBesideRamp(${NEAR},0.25,1.3,0.1)`); await sleep(500);
+      // The rail sits where the FOOTPRINT puts it, so read it off the flight rather than hardcoding a half-width that only
+      // matched one 2.2-wide flight. Place the player INSIDE the well but past the rail: past the lining is not a case any
+      // more — that is real wall now and it keeps you 0.6 clear from the outside.
+      await page.evaluate(`window.__hcBRX.standBesideRamp(${NEAR},0.25,${near.rail+0.2},0.1)`); await sleep(500);
       const inside=await page.evaluate(`window.__hcBRX.rampOffset(${NEAR})`);
-      T('level with the treads, just outside the rail, you are pulled back onto the flight', inside.off<=1.1,
-        Object.assign({hw:1.1}, inside));
+      T('inside the well, past the rail, you are pulled back onto the flight', inside.off<=near.rail+0.05,
+        Object.assign({hw:near.hw, rail:near.rail}, inside));
       T('...and still standing on the tread, not dropped', Math.abs(inside.y-inside.surf)<1.0, inside);
       // THE SHAFT ITSELF, asserted on the voxels rather than on where a dropped player happens to land. The earlier
       // version placed the player at off 2.2 and checked it was not snapped onto the flight — but that column turned out to
       // be uncarved concrete, so it was asserting a push-out from inside solid rock and proved nothing about the flight.
-      const scan = async(off)=>page.evaluate(`window.__hcBRX.colScan(${NEAR},0.25,${off})`);
-      const onIt=await scan(0), beside=await scan(1.3), past=await scan(3.0);
+      // A STAIRWELL IS AN ENCLOSED PASSAGE. It is opened through the UPPER storey's floor, which is the slab in its way —
+      // NOT through the lower storey's ceiling, which is the roof over the staircase and has to stay. This used to assert the
+      // opposite and passed over a flight with no roof along four fifths of its length.
+      const tHi = near.y1>near.y0 ? 0.75 : 0.25, tLo = 1-tHi;
+      const scan = async(t,off)=>page.evaluate(`window.__hcBRX.colScan(${NEAR},${t},${off})`);
+      const onHi=await scan(tHi,0), onLo=await scan(tLo,0), beside=await scan(tHi,1.3), past=await scan(tLo,3.0);
       const clear=(c,lo,hi)=>{ for(let y=lo;y<=hi;y++) if(c.solid.includes(y)) return y; return null; };
-      T('the stairwell shaft is open through the storey the flight descends past',
-        clear(onIt,onIt.span.lo+1,onIt.span.hi)===null && clear(beside,onIt.span.lo+1,onIt.span.hi)===null,
-        {onFlight:onIt.solid, beside:beside.solid, span:onIt.span});
-      T('the bottom of the shaft is FLUSH with the storey it joins, not a block below it',
-        onIt.solid.length>0 && Math.max(...onIt.solid)===onIt.span.lo, {solid:onIt.solid, lo:onIt.span.lo, footOfFlight:Math.min(near.y0,near.y1)});
+      T('on the upper side the well is open through that storey\'s own floor slab',
+        clear(onHi,onHi.span.lo+1,onHi.span.hi)===null && clear(beside,onHi.span.lo+1,onHi.span.hi)===null,
+        {onFlight:onHi.solid, beside:beside.solid, span:onHi.span});
+      T('on the lower side the staircase keeps its floor AND its roof',
+        onLo.solid.includes(onLo.span.lo) && onLo.solid.includes(onLo.span.lo+BR_CH_EXPECT),
+        {solid:onLo.solid, floorBlk:onLo.span.lo, roofBlk:onLo.span.lo+BR_CH_EXPECT});
+      T('the bottom of the well is FLUSH with the storey it joins, not a block below it',
+        onHi.solid.length>0 && Math.max(...onHi.solid.filter(y=>y<=onHi.span.hi))===onHi.span.lo,
+        {solid:onHi.solid, lo:onHi.span.lo, footOfFlight:Math.min(near.y0,near.y1)});
       // The carve is quantized to whole columns and always overshoots the rails, so the guarantee is not "no slot" but
       // "nothing to fall through": every carved column beside the flight has the stair surface under it.
       for(const o of [1.8, 2.2]){
-        const cv=await scan(o);
-        if(!cv.solid.includes(onIt.span.hi)){                                    // this column IS carved — so it must be caught
-          await page.evaluate(`window.__hcBRX.standBesideRamp(${NEAR},0.25,${o},0.4)`); await sleep(500);
+        const cv=await scan(tHi,o);
+        if(!cv.solid.includes(onHi.span.hi)){                                    // this column IS carved — so it must be caught
+          await page.evaluate(`window.__hcBRX.standBesideRamp(${NEAR},${tHi},${o},0.4)`); await sleep(500);
           const q=await page.evaluate(`window.__hcBRX.rampOffset(${NEAR})`);
           // The property that matters is "you do not fall a storey", not "you land exactly on the tread": at the outer edge
           // of the carve the player's 0.42 radius overlaps the intact concrete next door, so being held at floor level there
@@ -120,7 +141,7 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
         } else T('off '+o+' is outside the carve — intact floor', true, {solid:cv.solid.length});
       }
       T('past the shaft the floor slab is intact — the carve is the flight footprint, not a trench',
-        past.span===null && past.solid.includes(onIt.span.hi), {solid:past.solid, span:past.span});
+        past.span===null && past.solid.includes(onHi.span.hi), {solid:past.solid, span:past.span});
       await page.screenshot({ path: path.join(OUT,'v1-stairs-top.png') });
     }
     const fps=[]; for(let i=0;i<4;i++){ await sleep(700); fps.push((await page.evaluate(`__hc.st()`)).fps); }
