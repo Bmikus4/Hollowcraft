@@ -369,6 +369,7 @@ if (Q.get('rd')) CFG.RENDER_DIST = Math.max(2, Math.min(16, +Q.get('rd')));
 try{ const sq=localStorage.getItem('hollowcraft_q'); if(sq&&['Low','Medium','High','Ultra'].indexOf(sq)>=0) CFG.quality=sq; }catch(e){}   // restore the chosen quality tier (a ?q override still wins below)
 if (Q.get('q')) CFG.quality = Q.get('q');
 CFG.RD_MAX = 12;   // ceiling for the slider + RING + FAR + camera far. Decoupled from the boot default so the slider/adaptive can climb to 12 without the low default locking the ceiling.
+CFG.fogMul = 1.0;  // Settings > VISUALS "Fog" — scales the day/night fog density. 1.0 = the shipped look (already halved per fix-list #7).
 CFG.RENDER_DIST = Math.min(CFG.RENDER_DIST, CFG.RD_MAX);   // a ?rd override still can't exceed the ceiling
 try{ const sv=localStorage.getItem('hollowcraft_rd'); if(sv) CFG.RENDER_DIST=Math.max(3,Math.min(CFG.RD_MAX,+sv)); }catch(e){}   // restore the chosen RD, capped at the ceiling (the adaptive system can still climb back to RD_MAX)
 const DEBUG = Q.get('debug');
@@ -1533,16 +1534,25 @@ const leafDepthMat=_atlasDepthMat();
 // =====================================================================
 //  SKY DOME  — analytic Rayleigh/Mie + raymarched clouds + moon + stars
 // =====================================================================
-// SKY / DEEP-WATER darkness are fixed constants again (Ben 07-27: the Settings > VISUALS dials were removed and the
-// values reverted to defaults). Kept as uniforms only because the shaders already reference them.
-const _uSkyDark={value:0.2}, _uWaterDeep={value:0.2};
+// ---- THE VISUAL KNOBS (fix-list #8) ----
+// These are back in Settings > VISUALS, where the fix list asked for them. They live here as uniforms so the shaders read
+// them per-frame with no recompile, and their DEFAULTS are exactly the shipped look — so a player who never opens the panel
+// sees what they saw before. CFG.sky* holds the saved values; applyVisuals() copies them in.
+const _uSkyDark={value:0.2}, _uWaterDeep={value:0.2}, _uCloud={value:1.0}, _uStars={value:1.0};
+function _saveVis(k,v){ try{ localStorage.setItem('hollowcraft_vis_'+k, String(v)); }catch(e){} }
+(function restoreVis(){ const get=(k)=>{ try{ const s=localStorage.getItem('hollowcraft_vis_'+k); if(s==null)return null; const n=+s; return isNaN(n)?null:n; }catch(e){ return null; } };
+  const a=get('skydark'); if(a!=null)_uSkyDark.value=a;
+  const b=get('waterdeep'); if(b!=null)_uWaterDeep.value=b;
+  const c=get('cloud'); if(c!=null)_uCloud.value=c;
+  const d=get('stars'); if(d!=null)_uStars.value=d;
+  const e=get('fogmul'); if(e!=null)CFG.fogMul=e; })();
 const skyGeo = new THREE.SphereGeometry(FAR*1.4, 32, 16);
 const skyMat = new THREE.ShaderMaterial({
   side:THREE.BackSide, depthWrite:false, depthTest:false, fog:false,
   uniforms:{
     uSunDir:globalU.uSunDir, uMoonDir:globalU.uMoonDir, uDay:globalU.uDay, uTime:globalU.uTime,
     uMoonTex:{value:null}, uHasMoon:{value:0}, uFogCol:{value:scene.fog.color}, uHorizonBlend:_uHorizonBlend,
-    uSkyDark:_uSkyDark
+    uSkyDark:_uSkyDark, uCloud:_uCloud, uStars:_uStars
   },
   vertexShader:`
     varying vec3 vDir;
@@ -1550,37 +1560,58 @@ const skyMat = new THREE.ShaderMaterial({
   fragmentShader:`
     precision highp float;
     varying vec3 vDir;
-    uniform vec3 uSunDir, uMoonDir; uniform float uDay, uTime, uHasMoon; uniform vec3 uFogCol, uHorizonBlend; uniform float uSkyDark;
+    uniform vec3 uSunDir, uMoonDir; uniform float uDay, uTime, uHasMoon; uniform vec3 uFogCol, uHorizonBlend; uniform float uSkyDark, uCloud, uStars;
     uniform sampler2D uMoonTex;
     // hash noise
     float h13(vec3 p){ p=fract(p*0.3183099+0.1); p*=17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
     float n3(vec3 x){ vec3 i=floor(x),f=fract(x); f=f*f*(3.0-2.0*f);
       return mix(mix(mix(h13(i+vec3(0,0,0)),h13(i+vec3(1,0,0)),f.x),mix(h13(i+vec3(0,1,0)),h13(i+vec3(1,1,0)),f.x),f.y),
                  mix(mix(h13(i+vec3(0,0,1)),h13(i+vec3(1,0,1)),f.x),mix(h13(i+vec3(0,1,1)),h13(i+vec3(1,1,1)),f.x),f.y),f.z); }
-    float fbmC(vec3 p){ float v=0.0,a=0.5; for(int i=0;i<4;i++){ v+=a*n3(p); p*=2.02; a*=0.5;} return v; }   // 4 octaves (was 5) — cloud/mountain fBm, sampled several times per fragment
+    float fbmC(vec3 p){ float v=0.0,a=0.5; for(int i=0;i<4;i++){ v+=a*n3(p); p*=2.02; a*=0.5;} return v; }   // 4 octaves (was 5) - cloud fBm, sampled several times per fragment
+    float fbm2(vec3 p){ float v=0.0,a=0.6; for(int i=0;i<2;i++){ v+=a*n3(p); p*=2.31; a*=0.5;} return v; }   // 2 octaves - the cheap one, for high cirrus and the Milky Way dust
     void main(){
       vec3 dir = normalize(vDir);
       float up = clamp((dir.y+0.1)/1.1,0.0,1.0);   // sky (day & night) stretches 10% BELOW the midline before the ground haze takes over
-      // Rayleigh-ish gradient day, deep blue-black night
-      vec3 zenD=vec3(0.11,0.34,0.72), horD=vec3(0.62,0.74,0.88);
-      vec3 zenN=vec3(0.006,0.012,0.03), horN=vec3(0.02,0.035,0.07);
+      float sunH = uSunDir.y;                      // sun elevation, -1..1
+      float sd   = max(dot(dir,uSunDir),0.0);      // how near this ray points to the sun
+      float md   = dot(dir,uMoonDir);
+      float lowBand = 1.0-smoothstep(0.0,0.34,dir.y);
+      // TWO ACCUMULATORS. col is the SKY - the gradient, the scattering, the clouds - and it is what the darkness knob and
+      // the horizon anchor act on. add is the LIGHTS IN the sky: sun disc, moon, stars, the Milky Way. Those must not be
+      // scaled by the darkness knob or they would go out with it, which is why the old shader added them after the multiply;
+      // giving them their own accumulator does the same thing without forcing the horizon anchor to happen before it.
+      vec3 add = vec3(0.0);
+      // ---- BASE GRADIENT: Rayleigh-ish by day, deep blue-black at night ----
+      vec3 zenD=vec3(0.10,0.32,0.71), horD=vec3(0.64,0.76,0.89);
+      vec3 zenN=vec3(0.005,0.011,0.030), horN=vec3(0.018,0.032,0.066);
       vec3 zen=mix(zenN,zenD,uDay), hor=mix(horN,horD,uDay);
       vec3 col=mix(hor,zen,pow(up,0.55));
-      // (distant mountain/island silhouettes removed — lone island in open sea; horizon is clean sky + the ocean ring)
-      // curvature: fade the sky down past the horizon into ground haze
-      if(dir.y<-0.1) col=mix(col, hor*0.42, clamp(-(dir.y+0.1)*3.2,0.0,1.0));   // ground haze only starts 10% below the midline
-      // HORIZON HAZE BAND — blend the LOW sky toward the terrain fog colour so the render edge (and any gap through the
-      // last trees) melts into a matching haze instead of showing a bright sky-hole. Fades out by ~9 deg up; upper sky untouched.
-      col=mix(col, uHorizonBlend, (1.0-smoothstep(0.0,0.10,dir.y))*0.85);   // VALUE CONVERGENCE (painterly horizon rule): the lowest sky eases DOWN onto the shared dark horizon anchor — the join with the sea is a meeting of near-equal dark values, never a brighter haze band
-      col*=uSkyDark;   // SKYBOX BACKGROUND DARKER (Ben 07-27) — the gradient backdrop (incl. the sky behind the water) knocked down ×2; sun disc, dusk Mie + stars are added AFTER so they stay bright. Now a uniform so Settings > Visuals can drive it (0.2 = the shipped look).
-      // dusk/dawn Mie: blood-orange near sun on horizon
-      float sd=max(dot(dir,uSunDir),0.0);
-      float dusk=pow(1.0-abs(uSunDir.y),2.0);
-      col += vec3(0.95,0.42,0.16)*dusk*pow(sd,4.0)*(1.0-up)*1.2;
-      col += vec3(1.0,0.9,0.75)*pow(sd,900.0)*8.0;          // sun disc (day)
-      // moon — a real disc with a cratered face: project the view ray onto the tangent plane at the
+      if(dir.y<-0.1) col=mix(col, hor*0.42, clamp(-(dir.y+0.1)*3.2,0.0,1.0));   // curvature: fade past the horizon into ground haze
+      // ---- FORWARD SCATTER (Ben 07-28, "a beautiful in-game sky") ----
+      // The sky is BRIGHTER toward the sun and dimmest at 90 degrees from it. The dome had none of this, which is the main
+      // reason a clear day read as a flat blue lid: wherever you looked, it was the same blue.
+      float fw = pow(sd,3.0)*0.30 + pow(sd,11.0)*0.40;
+      col += mix(vec3(0.95,0.60,0.30), vec3(0.55,0.72,0.96), clamp(sunH*2.2,0.0,1.0)) * fw * uDay;
+      // ---- GOLDEN HOUR, DIRECTIONAL ---- the warm band follows the sun's AZIMUTH instead of ringing the whole horizon, and
+      // the opposite side goes violet, which is what makes the warm side read as warm rather than merely orange.
+      float dusk = pow(1.0-abs(sunH),3.0);
+      col += vec3(1.00,0.41,0.13)*dusk*lowBand*(0.18+0.95*pow(sd,2.0));
+      col += vec3(0.28,0.15,0.42)*dusk*lowBand*(1.0-sd)*0.38;
+      // ---- NIGHT ---- gated, so a clear day pays none of it
+      if(uDay < 0.55){
+        float nt = 1.0-uDay;
+        col += vec3(0.045,0.072,0.100)*lowBand*nt;                                    // AIRGLOW: a night horizon is never pure black
+        col += vec3(0.26,0.30,0.42)*pow(max(md,0.0),4.0)*nt*uHasMoon*0.45;            // MOONLIGHT scatters into the sky around the moon
+        float bandD = dot(dir, normalize(vec3(0.42,0.36,-0.83)));                     // MILKY WAY: a broad dusty band on a tilted great circle
+        float band  = exp(-bandD*bandD*11.0)*step(0.0,dir.y);
+        if(band > 0.02){ float dust=fbm2(dir*2.7);
+          add += vec3(0.36,0.38,0.55)*band*smoothstep(0.34,0.92,dust)*0.30*nt*uStars; }
+      }
+      // ---- SUN DISC + DUSK MIE ----
+      add += vec3(1.0,0.92,0.78)*pow(sd,900.0)*8.0*step(-0.12,sunH);
+      add += vec3(0.95,0.42,0.16)*dusk*pow(sd,4.0)*(1.0-up)*0.9;
+      // moon - a real disc with a cratered face: project the view ray onto the tangent plane at the
       // moon direction, so the texture maps ACROSS the disc (the old fract(muv*3) sampled ~one texel flat).
-      float md=dot(dir,uMoonDir);
       if(md>0.9993){
         vec3 mdir=normalize(uMoonDir);
         vec3 mtx=normalize(cross(mdir, vec3(0.0,1.0,0.0)));
@@ -1589,27 +1620,55 @@ const skyMat = new THREE.ShaderMaterial({
         float rr=length(duv);
         if(rr<1.0){
           vec3 mc = (uHasMoon>0.5) ? texture2D(uMoonTex, duv*0.5+0.5).rgb : vec3(0.9,0.9,0.86);
-          float z=sqrt(max(0.0,1.0-rr*rr));                    // sphere normal.z → a gentle terminator so it reads round, not a flat coin
+          float z=sqrt(max(0.0,1.0-rr*rr));                    // sphere normal.z so it reads round, not a flat coin
           float lam=clamp(0.45+0.55*z,0.0,1.0);
-          col = mix(col, mc*1.7*lam, smoothstep(1.0,0.86,rr));
+          add += mc*1.9*lam*smoothstep(1.0,0.86,rr);
         }
       }
-      col += vec3(0.75,0.8,0.95)*pow(max(md,0.0),140.0)*(1.0-uDay)*0.7;  // moon halo
-      // stars
+      add += vec3(0.75,0.8,0.95)*pow(max(md,0.0),140.0)*(1.0-uDay)*0.7;  // moon halo
+      // ---- STARS: coloured and twinkling, not identical white dots ----
       float st=h13(floor(dir*280.0));
-      col += vec3(0.9,0.92,1.0)*step(0.9977,st)*(1.0-uDay)*(0.4+0.5*fract(st*71.0))*step(0.02,dir.y);
-      // volumetric-ish clouds: layered domain-warped fBm, moonlit rim
+      if(st>0.9972){
+        float mag=fract(st*71.0);                                                     // per-star brightness
+        float tw =0.72+0.28*sin(uTime*(2.4+mag*5.0)+st*77.0);                         // and its own twinkle rate
+        vec3 sc =mix(vec3(0.72,0.82,1.0), vec3(1.0,0.86,0.68), fract(st*311.0));      // blue-white through to amber
+        add += sc*(0.30+0.75*mag)*tw*(1.0-uDay)*step(0.02,dir.y)*uStars;
+      }
+      // ---- CLOUDS: two layers ---- low cumulus with a lit rim and a dark base, plus thin high cirrus. One layer gave the
+      // whole sky a single texture at a single altitude; the difference in speed and shape between two is most of what makes
+      // a sky read as weather rather than as a texture.
+      float cloud=0.0; vec3 cloudCol=vec3(0.0);
       if(dir.y>0.02){
+        vec3 lightDir = mix(uMoonDir,uSunDir,uDay);
+        float rim = pow(max(dot(dir,lightDir),0.0),3.0);
         vec3 cp = dir/(dir.y*0.9+0.1);
         vec2 uvc = cp.xz*0.55 + vec2(uTime*0.006, uTime*0.002);
         float d = fbmC(vec3(uvc*1.3, uTime*0.02));
-        d = smoothstep(0.52,0.95,d) * smoothstep(0.02,0.25,dir.y);
-        vec3 lightDir = mix(uMoonDir,uSunDir,uDay);
-        float rim = pow(max(dot(dir,lightDir),0.0),3.0);
-        vec3 cloudCol = mix(vec3(0.05,0.07,0.10), vec3(0.9,0.9,0.95), uDay);
-        cloudCol += vec3(0.9,0.85,0.7)*rim*(0.4+0.6*uDay);
-        col = mix(col, cloudCol, d*0.85);
+        d = smoothstep(0.52,0.95,d) * smoothstep(0.02,0.25,dir.y) * uCloud;
+        vec3 lit  = mix(vec3(0.06,0.08,0.12), vec3(0.94,0.94,0.97), uDay);            // lit from the sun/moon side
+        vec3 base = mix(vec3(0.02,0.03,0.05), vec3(0.46,0.49,0.56), uDay);            // and dark underneath
+        cloudCol = mix(base, lit, 0.35+0.65*rim);
+        cloudCol = mix(cloudCol, vec3(1.0,0.62,0.34), dusk*rim*0.55);                 // gold on the sun side at dusk
+        cloud = d*0.85;
+        if(dir.y>0.10){                                                               // CIRRUS: higher, faster, stretched into streaks
+          vec2 uvh = cp.xz*0.22 + vec2(uTime*0.019, uTime*0.004);
+          float c2 = fbm2(vec3(uvh.x*0.55, uvh.y*2.6, uTime*0.011));
+          c2 = smoothstep(0.46,0.86,c2) * smoothstep(0.10,0.42,dir.y) * uCloud * 0.55;
+          vec3 cc2 = mix(mix(vec3(0.10,0.12,0.16), vec3(1.0,0.99,0.98), uDay), vec3(1.0,0.72,0.45), dusk*rim*0.7);
+          cloudCol = mix(cloudCol, cc2, clamp(c2-cloud,0.0,1.0));
+          cloud = clamp(cloud + c2*(1.0-cloud), 0.0, 1.0);
+        }
       }
+      col = mix(col, cloudCol, cloud);
+      add *= (1.0-cloud*0.92);                                                        // a cloud covers the stars and discs behind it
+      col *= uSkyDark;   // SKYBOX BACKGROUND DARKER (Ben 07-27) - the gradient knocked down; the lights in add are untouched
+      // VALUE CONVERGENCE AT THE SEA LINE (Ben 07-28: "the night skybox fading into the water"). uHorizonBlend is built in
+      // updateHorizon to be EXACTLY what the water fogs to at its far edge - that is its whole purpose. It was then
+      // multiplied by 0.2 there AND darkened again by uSkyDark here, so the sky met the sea at 1/25th of the sea's value and
+      // the horizon read as a hard step, worst at night. The anchor is no longer pre-darkened, and the mix happens AFTER
+      // uSkyDark, so both sides of the seam land on the same value at every hour.
+      col=mix(col, uHorizonBlend, (1.0-smoothstep(0.0,0.10,dir.y))*0.85);
+      col += add;
       gl_FragColor = vec4(col,1.0);
     }`
 });
@@ -1728,11 +1787,13 @@ function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.p
     _uWater.value.setRGB(fc.r*0.5, fc.g*0.5+0.012, fc.b*0.5+0.028);
     _uWater.value.lerp(_deepSea, Math.min(1, 0.42+0.5*day));   // the deep water below the horizon reads as a resonant DEEP BLUE — strongly by DAY (~0.92) but also clearly at NIGHT (~0.42) so the dark under-horizon band is a vivid deep blue at all hours (Ben 07-21); the seam still anchors on uHorizonBlend, only the depths darken to blue
     { const cd=_horizCamDir; camera.getWorldDirection(cd); oceanMat.uniforms.uCamYaw.value=Math.atan2(cd.z,cd.x); }   // view azimuth for the horizon bow
-    _uHorizonBlend.value.setRGB(   // shared sky/sea anchor: the ring's own value pulled 25% toward the sky's horizon tone — always ≥ the sea, ≤ the low sky
-      _uWater.value.r*0.75+lerp(0.02,0.62,day)*0.25,
-      _uWater.value.g*0.75+lerp(0.035,0.74,day)*0.25,
-      _uWater.value.b*0.75+lerp(0.07,0.88,day)*0.25);
-    _uHorizonBlend.value.multiplyScalar(0.2); }   // Ben 07-27: the sky-blue that fades out behind the ocean (the horizon anchor) — 5x DARKER
+    // THE ANCHOR IS THE SEA. Nothing else. This value's entire job is to be what the sky converges to where it meets the
+    // water, so anything else in it is a stripe: it used to be the sea pulled 25% toward an UNDARKENED bright sky tone and
+    // then multiplied by 0.2. That 0.2 put it at a fifth of the sea's value — the hard step at the night horizon Ben
+    // reported — and taking the 0.2 away instead left the undarkened sky tone showing as a pale band across the daytime
+    // horizon, because the sky beside it is darkened by uSkyDark and the anchor was not. Equal to the sea, at every hour,
+    // is the only value that cannot draw a line on either side.
+    _uHorizonBlend.value.copy(_uWater.value); }
   _uSky.value.setRGB(lerp(0.12,0.60,day), lerp(0.15,0.68,day), lerp(0.20,0.78,day));            // horizon-band air (legacy uniform)
   { const dim=0.10+0.90*day, base=[0.050,0.102,0.046]; _uPine.value.setRGB(base[0]*dim, base[1]*dim, base[2]*dim);   // DARK forest green matching the real edge trees (Ben 07-20 rev3); at NIGHT it goes near-BLACK silhouette
     { const _ef=1-Math.exp(-Math.pow(CFG.RENDER_DIST*CK*scene.fog.density,2)); pineMat.uniforms.uFogAmt.value=clamp(_ef*0.93,0,0.97);   // MATCH the farthest rendered chunks' fog wash exactly (exp2 at the wall distance — includes weather + day/night via density), held a hair under so the tip-gradient still reads
@@ -3005,7 +3066,7 @@ function updateSky(dt){
   _vfogAmt.value=Math.min(1,wf*1.4);                                                // held-item fog follows WEATHER FOG only (Ben 07-20): crisp viewmodel in clear air
   if(wf>0.01){ fc.lerp(_fogGrey.setRGB(0.34+0.2*day, 0.36+0.2*day, 0.40+0.2*day), Math.min(0.88,wf*0.95)); }
   if(scene.background&&scene.background.isColor)scene.background.copy(fc);   // guard: a skybox CubeTexture background isn't a Color — don't call .copy on it
-  scene.fog.density=lerp(1.10,0.85,day)/(CFG.RENDER_DIST*CK) * (1+wf*wf*18);   // HALVED (Ben 07-27, fix-list #7): was lerp(2.2,1.7) — the bank sat so close it greyed out anything past a few chunks. cullChunks still turns the fog wall into a draw-distance CUT.
+  scene.fog.density=lerp(1.10,0.85,day)/(CFG.RENDER_DIST*CK) * (1+wf*wf*18) * CFG.fogMul;   // CFG.fogMul = the Settings > VISUALS Fog dial (1.0 = shipped). HALVED (Ben 07-27, fix-list #7): was lerp(2.2,1.7) — the bank sat so close it greyed out anything past a few chunks. cullChunks still turns the fog wall into a draw-distance CUT.
   waterMat.uniforms.uFogDensity.value=scene.fog.density;
   // hide the SKY behind the fog (and fade it back gradually as the bank clears)
   fogShell.position.copy(camera.position); fogShell.material.color.copy(fc);
@@ -3943,6 +4004,15 @@ function buildPauseSettings(){ const el=document.getElementById('pausesettings')
     const l=document.createElement('span'); l.textContent='Soft shadows'; const c=document.createElement('input'); c.type='checkbox'; c.checked=_softShadows; c.style.cssText='width:18px;height:18px;accent-color:#8a6';
     c.onchange=()=>{ if(typeof setSoftShadows==='function')setSoftShadows(c.checked); }; d.appendChild(l); d.appendChild(c); el.appendChild(d); }
   slider('Film grain',0,0.14,0.005,(gradePass?gradePass.uniforms.uGrain.value:0.06),x=>Math.round(x/0.06*100)+'%',x=>{ if(typeof setGrain==='function')setGrain(x); });
+  // ---- VISUALS (fix-list #8: "expose the new visual knobs (sky/water/fog darkness) in the menu settings") ----
+  // Each reads and writes the live uniform, so it takes effect while the panel is open, and persists to localStorage. 100%
+  // on every one of them is the shipped look, so the panel opens showing the game as it already is.
+  { const hd=document.createElement('div'); hd.textContent='VISUALS'; hd.style.cssText='letter-spacing:2px;color:#c0a050;font:11px Georgia;border-top:1px solid rgba(130,150,115,.14);padding-top:9px;'; el.appendChild(hd); }
+  slider('Sky darkness',0.05,1.0,0.025,_uSkyDark.value,x=>Math.round(x/0.2*100)+'%',x=>{ _uSkyDark.value=x; _saveVis('skydark',x); });
+  slider('Deep water darkness',0.05,1.0,0.025,_uWaterDeep.value,x=>Math.round(x/0.2*100)+'%',x=>{ _uWaterDeep.value=x; _saveVis('waterdeep',x); });
+  slider('Fog',0,2.0,0.05,CFG.fogMul,x=>Math.round(x*100)+'%',x=>{ CFG.fogMul=x; _saveVis('fogmul',x); });
+  slider('Cloud cover',0,1.6,0.05,_uCloud.value,x=>Math.round(x/1*100)+'%',x=>{ _uCloud.value=x; _saveVis('cloud',x); });
+  slider('Stars',0,2.0,0.05,_uStars.value,x=>Math.round(x/1*100)+'%',x=>{ _uStars.value=x; _saveVis('stars',x); });
   { const got=Object.keys(achGot).length, det=document.createElement('details');   // ACHIEVEMENTS ledger — collapsed count line, open for the list; unfound easter eggs stay hidden as ? ? ?
     det.style.cssText='text-align:left;font:13px Georgia;color:#cbb98f;border-top:1px solid rgba(130,150,115,.14);padding-top:9px;';
     const sum=document.createElement('summary'); sum.style.cssText='cursor:pointer;letter-spacing:2px;color:#c0a050;font-size:11px;'; sum.textContent='ACHIEVEMENTS  '+got+' / '+ACHIEVEMENTS.length; det.appendChild(sum);
@@ -14911,6 +14981,10 @@ window.__hc={
   qa(on){ if(on){ if(!this._qaLight){ this._qaLight=new THREE.PointLight(0xffe8d0,0,60,2); scene.add(this._qaLight); this._qaKey=new THREE.DirectionalLight(0xffffff,0); scene.add(this._qaKey); } this._qaLight.intensity=on===true?90:on; this._qaKey.intensity=1.4; } else { if(this._qaLight){this._qaLight.intensity=0;} if(this._qaKey)this._qaKey.intensity=0; } return !!this._qaLight; },
   // QA/bench: put the QA light AT a world point. qa() only sets its intensity — it is positioned by frame(), so any harness
   // shooting something that is not the Wretch was lighting the world origin and photographing a black room.
+  // QA/bench + the VISUALS panel's own values, readable and settable: {skydark, waterdeep, cloud, stars, fogmul}
+  vis(o){ if(o){ if(o.skydark!=null)_uSkyDark.value=o.skydark; if(o.waterdeep!=null)_uWaterDeep.value=o.waterdeep;
+      if(o.cloud!=null)_uCloud.value=o.cloud; if(o.stars!=null)_uStars.value=o.stars; if(o.fogmul!=null)CFG.fogMul=o.fogmul; }
+    return { skydark:_uSkyDark.value, waterdeep:_uWaterDeep.value, cloud:_uCloud.value, stars:_uStars.value, fogmul:CFG.fogMul }; },
   qaAt(x,y,z,i){ this.qa(i==null?90:i); if(this._qaLight) this._qaLight.position.set(x,y,z);
     if(this._qaKey){ this._qaKey.position.set(x+4,y+7,z+3); this._qaKey.target.position.set(x,y,z); this._qaKey.target.updateMatrixWorld(); }
     return {x,y,z,i:this._qaLight?this._qaLight.intensity:0}; },
