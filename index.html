@@ -447,10 +447,14 @@ PERF.gpu = (function(){
   let gl=null, ext=null, ok=false;
   const NSEG=4, POOL=6;
   const pool=[];                                   // pool[i] = {q, seg, pending}
-  const acc=new Float64Array(NSEG);                // last completed frame's per-segment ms
-  let open=-1, disjointCount=0, sampleCount=0;
+  const acc=new Float64Array(NSEG);                // most recent completed sample per segment, in ms
+  const lastMark=new Int32Array(NSEG);             // frame index a segment was last issued on
+  let open=-1, disjointCount=0, sampleCount=0, frameNo=0;
   return {
     get ok(){ return ok; }, acc, get disjoints(){ return disjointCount; }, get samples(){ return sampleCount; },
+    // A segment that STOPS being issued must decay to zero. Without this the last portal sample sat in acc
+    // forever and every later scene reported the portal's 77 ms as if it were still being paid.
+    endFrame(){ frameNo++; for(let s=0;s<NSEG;s++) if(frameNo-lastMark[s] > 8) acc[s]=0; },
     init(context){
       if(!PERF.on || !PERF.gpuTimers) return;
       gl = context;
@@ -464,7 +468,7 @@ PERF.gpu = (function(){
       if(!ok) return; this.close();
       let slot=null; for(let i=0;i<pool.length;i++) if(!pool[i].pending){ slot=pool[i]; break; }
       if(!slot) return;                                   // pool exhausted — skip this sample rather than stall
-      slot.seg=seg; slot.pending=true; open=pool.indexOf(slot);
+      slot.seg=seg; slot.pending=true; open=pool.indexOf(slot); lastMark[seg]=frameNo;
       try{ gl.beginQuery(ext.TIME_ELAPSED_EXT || 0x88BF, slot.q); }catch(e){ slot.pending=false; open=-1; }
     },
     close(){
@@ -577,9 +581,11 @@ PERF.bench = (function(){
          tick(t){ player.yaw = t*2.2; } },
     B5o:{ dur:20, where:'over', setup(){ pos(0, surfaceH(0,0)+2, 0); player.pitch=0; }, tick(t){ player.yaw=t*2.2; } },
     // B6 STRESS — the portal live at close range + full env + night. Max second-render + lighting cost.
-    B6:{ dur:20, where:'portal', setup(){ this.d=BR.door; if(this.d){ pos(this.d.x+3.0, this.d.y+1.7, this.d.z+0.2); }
+    // The orbit radius must never dip under brEnter's 1.1 m trigger, or the stress scene walks itself through
+    // the door and every scene after it silently measures the wrong dimension.
+    B6:{ dur:20, where:'portal', setup(){ this.d=BR.door; if(this.d){ pos(this.d.x+4.0, this.d.y+1.7, this.d.z+0.2); }
            player.yaw = this.d? Math.atan2(-(this.d.x-player.pos.x), -(this.d.z-player.pos.z)) : 0; player.pitch=0; },
-         tick(t){ if(!this.d) return; const r=3.0+2.0*Math.sin(t*0.6);
+         tick(t){ if(!this.d) return; const r=4.0+1.5*Math.sin(t*0.6);
            pos(this.d.x+r*Math.cos(t*0.35), this.d.y+1.7, this.d.z+r*Math.sin(t*0.35));
            player.yaw = Math.atan2(-(this.d.x-player.pos.x), -(this.d.z-player.pos.z)); } }
   };
@@ -606,6 +612,8 @@ PERF.bench = (function(){
       window.__benchInfo = 1;
       PERF.on=true; T.reset(); PERF.jank.reset(); PERF.jank.start();
       S.startInfo = PERF.refConfig();
+      try{ player.health=20; player.dead=false; player.hunger=20; player.water=20; }catch(e){}   // a scene must not start already dying
+      try{ if(typeof BR!=='undefined') BR._benchKills=0; }catch(e){}
       try{ sc.setup(); }catch(e){ S.setupErr=String(e&&e.message||e); }
       return { name, dur:S.dur, dt:S.dt };
     },
@@ -661,7 +669,8 @@ PERF.bench = (function(){
         info, heap, jank:{ longtasks:PERF.jank.longtasks, maxBlocking:PERF.jank.maxBlocking,
           worstLoaf:PERF.jank.loaf.slice().sort((a,b)=>b.dur-a.dur).slice(0,5) },
         world:{ chunks:(typeof world!=='undefined'?world.size:0), brInside:(typeof BR!=='undefined'?!!BR.inside:false),
-                brChunks:(typeof BR!=='undefined'&&BR.gen?BR.gen.size:0), brEnvCache:(typeof BR!=='undefined'&&BR.envCache?BR.envCache.size:0) },
+                brChunks:(typeof BR!=='undefined'&&BR.gen?BR.gen.size:0), brEnvCache:(typeof BR!=='undefined'&&BR.envCache?BR.envCache.size:0),
+                brSuppressedKills:(typeof BR!=='undefined'?(BR._benchKills|0):0), playerDead:(typeof player!=='undefined'?!!player.dead:null) },
         ref:S.startInfo, setupErr:S.setupErr||null };
       S.setupErr=null;
     },
@@ -716,6 +725,7 @@ window.__hcPERF = {
   reset(){ T.reset(); PERF.jank.reset(); return true; },
   // drop the player into the Backrooms without walking a door
   enterBR(){ try{ if(!BR.door) brSpawnDoorNearPlayer(); brEnter(); return {inside:BR.inside, x:player.pos.x, z:player.pos.z}; }catch(e){ return {err:String(e&&e.message||e)}; } },
+  exitBR(){ try{ if(BR.inside) brExit(); return {inside:BR.inside}; }catch(e){ return {err:String(e&&e.message||e)}; } },
   spawnDoor(){ try{ brSpawnDoorNearPlayer(); return {x:BR.door.x, y:BR.door.y, z:BR.door.z}; }catch(e){ return {err:String(e&&e.message||e)}; } },
   matrix(m){ PERF.matrix.mode=m||'off'; return PERF.matrix.mode; }
 };
@@ -5620,7 +5630,7 @@ function loop(){ try{
   if(_fpsOn) _fpsEl.textContent=Math.round(fpsAvg)+' FPS';
   T.begin(TID.hud); updateMindFeed(dt); T.end(TID.hud);
   if(PERF.on){
-    PERF.gpu.close(); PERF.gpu.poll();
+    PERF.gpu.close(); PERF.gpu.poll(); PERF.gpu.endFrame();
     const _now=performance.now();
     const _fd = _perfPrevT ? _now-_perfPrevT : (_now-_fT0); _perfPrevT=_now;
     let _np=0; try{ _np=(renderer.info.programs||[]).length; }catch(e){}
@@ -12283,7 +12293,11 @@ function brUpdateSmiler(dt){ const sm=BR.sm||(BR.sm={state:'dormant',t:0,x:0,z:0
     case 'cooldown': brHideSmiler(); if(sm.t>=(BR.hasKey?30:60)+Math.random()*60){ sm.t=0; sm.state='dormant'; BR.encT=(BR.hasKey?30:60)+Math.random()*60; } break;
   }
   if((sm.state==='watching'||sm.state==='tracking')&&brCellLit(Math.floor(sm.x),Math.floor(sm.z))){ sm.state='stalking'; sm.t=0; brHideSmiler(); } }   // a fixture (or your torch's cell) lights its tile → vanish
-function brKill(cause){ if(!BR.inside)return; if(typeof damage==='function'){ player.health=0; if(typeof die==='function')die(cause||'the Pale'); else player.dead=true; } }
+// A scripted benchmark cannot survive a random killer. The Pale's cooldown is Math.random()*45s, so partway
+// through a suite it murders the player, brForceLeaveOnDeath dumps you out of the dimension, and every scene
+// after that measures an empty overworld while cheerfully reporting Backrooms numbers. The Pale and the Smiler
+// still walk and still cost what they cost — only the kill is suppressed, and only while a bench run is active.
+function brKill(cause){ if(!BR.inside)return; if(PERF.bench.active){ BR._benchKills=(BR._benchKills|0)+1; return; } if(typeof damage==='function'){ player.health=0; if(typeof die==='function')die(cause||'the Pale'); else player.dead=true; } }
 
 // ---- KEY TO OLYMPUS: marble pedestal in the far room; pickup silences the halls, then the Smiler escalates ----
 function brKeyMesh(){ const g=new THREE.Group(); const gold=new THREE.MeshBasicMaterial({color:0xffd23a,fog:false,toneMapped:false});

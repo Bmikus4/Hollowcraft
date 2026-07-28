@@ -114,6 +114,7 @@ function findBrowser(){
         world=step.world;
       }
       const runs=[];
+      let repairs=0;
       for(let r=0; r<RUNS+1; r++){
         const meta = await page.evaluate(`window.__hcPERF.start(${JSON.stringify(step.id)}, {durScale:${DURSCALE}})`)
           .catch(e=>({err:String(e)}));
@@ -127,6 +128,19 @@ function findBrowser(){
         }
         const res = await page.evaluate(`window.__hcPERF.result()`);
         if(!res){ console.log('  NO RESULT', step.id); break; }
+        // A run that measured the WRONG WORLD is worse than no run — it reports plausible numbers for a scene
+        // that never happened. The Pale used to kill the player mid-suite and every Backrooms scene after it
+        // quietly benchmarked an empty overworld. Refuse the sample instead.
+        const wantBR = (step.world==='br');
+        if(!!res.world.brInside !== wantBR){
+          res._invalid = `expected brInside=${wantBR}, got ${res.world.brInside}`;
+          console.log('  INVALID', step.id, 'run'+r+':', res._invalid, '— repairing world and retrying');
+          if(wantBR) await page.evaluate(`window.__hcPERF.enterBR()`); else await page.evaluate(`window.__hcPERF.exitBR()`);
+          await sleep(2000);
+          if(++repairs > 3){ console.log('  GIVING UP on', step.id, '— world will not hold'); break; }
+          if(r>0) r--;                       // do not let a repaired attempt consume a reported run
+          continue;
+        }
         res._run = r; res._warm = (r===0);
         runs.push(res);
         console.log(`  ${step.id} run${r}${r===0?' (warm, discarded)':''}: med ${res.frame.median} p99 ${res.frame.p99} max ${res.frame.max} >12ms ${res.frame.over12} draws ${res.info?res.info.calls:'?'} gpu ${res.gpu.gpuTotal.median}`);
