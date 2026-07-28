@@ -3,7 +3,8 @@
 //   2. ANTISYMMETRY — a stairwell that climbs out of A is the same stairwell that descends into B
 //   3. DETERMINISM  — the same query answers the same way every time, and re-seeding reproduces it exactly
 //   4. CONNECTIVITY — every edge has at least one crossing, so no chunk can be sealed off
-//   5. MIX          — the connector kinds land near 60% door / 20% tunnel / 20% stairs, and stairs split 50/50 up/down
+//   5. MIX          — doors stay the commonest crossing; the stair share follows from BRX_LVD (see the mix test), and
+//                     stairs split 50/50 up/down
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import http from 'node:http';
@@ -78,7 +79,13 @@ const T=(name,ok,detail)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+' —
     T('chunkOf/origin round-trip', R.originRound===true);
     const tot=R.kinds[0]+R.kinds[1]+R.kinds[2];
     const pd=100*R.kinds[0]/tot, pt=100*R.kinds[1]/tot, ps=100*R.kinds[2]/tot;
-    T('connector mix ~60/20/20', pd>52&&pd<68 && pt>14&&pt<26 && ps>14&&ps<26, {door:+pd.toFixed(1),tunnel:+pt.toFixed(1),stair:+ps.toFixed(1),n:tot});
+    // The stair share is NOT a free parameter — it falls out of BRX_LVD. Every crossing on a storey-changing boundary has
+    // to be a stairwell (else it leads nowhere), so smaller level districts mean proportionally more stairs. At LVD=4 the
+    // mix measured 64/22/15; at LVD=2, which Ben asked for so stairs come up sooner, it is 54/17/30. Assert a band that
+    // holds for either, plus the invariant that actually matters: doors stay the commonest crossing.
+    T('connector mix: doors dominant, tunnels present, stairs 12-35%',
+      pd>50 && pd<70 && pt>12 && pt<26 && ps>12 && ps<35 && pd>ps,
+      {door:+pd.toFixed(1),tunnel:+pt.toFixed(1),stair:+ps.toFixed(1),n:tot,LVD:2});
     const pu=100*R.up/(R.up+R.down);
     T('stairs split ~50/50 up/down', pu>40&&pu<60, {up:R.up,down:R.down,pctUp:+pu.toFixed(1)});
     T('chunk levels are deterministic and baseY follows', R.lvBad.length===0, {ok:R.lvDet, bad:R.lvBad.slice(0,2)});
