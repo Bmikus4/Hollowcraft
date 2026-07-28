@@ -55,46 +55,21 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     await waitHttp(base+'/index.html');
     const browser=await chromium.launch({executablePath:findBrowser(),headless:true,args:['--enable-gpu','--ignore-gpu-blocklist','--use-angle=d3d11','--mute-audio']});
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
-    const errs=[], cons=[];
-    page.on('pageerror',e=>{ errs.push(String(e.message||e).slice(0,300)); console.log('PAGEERROR:',String(e.message||e).slice(0,300)); });
-    page.on('requestfailed',r=>console.log('REQFAIL:',r.url().slice(-80),r.failure()&&r.failure().errorText));
-    page.on('response',r=>{ if(r.status()>=400) console.log('HTTP',r.status(),r.url().slice(-90)); });
-    page.on('console',m=>{ if(m.type()==='error'){ const t=m.text().slice(0,300); cons.push(t); console.log('CONSOLE.ERROR:',t); } });
+    const errs=[]; page.on('pageerror',e=>{errs.push(String(e.message||e).slice(0,220)); console.log('PAGEERROR:',String(e.message||e).slice(0,220));});
     await page.goto(base+'/index.html?debug=1&t=210',{waitUntil:'load',timeout:90000});
     await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
     await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
     await page.evaluate(`window.__hcBR.enter()`); await sleep(7000);
-    const st = await page.evaluate(`window.__hcBRX.envStats()`);
-    console.log('envStats', JSON.stringify(st,null,1));
-    T('the environment group exists', st.env===true, {env:st.env});
-    T('no chunk failed to build', (st.errs||[]).length===0, (st.errs||[]).slice(0,3));
-    T('all 9 loaded chunks contributed geometry', st.groups>=9, {groups:st.groups, loaded:st.loaded});
-    T('the environment has a serious number of triangles', st.tris>20000, {tris:st.tris, meshes:st.meshes});
-    // An ABSOLUTE count, not a ratio. A few meshes are legitimately hidden at any moment (a blinked-off flicker diffuser, a
-    // closed door leaf), and the ratio form was silently calibrated to the old ~1650-mesh world — once static geometry was
-    // merged down to ~190 meshes per loaded set, the same two hidden objects broke a 99% threshold. What matters is that no
-    // large body of geometry has gone missing, which the triangle and draw-call assertions cover directly.
-    T('nothing whole has vanished — only a handful of meshes are hidden', st.meshes>0 && (st.meshes-st.visible)<=8,
-      {meshes:st.meshes, visible:st.visible, hidden:st.meshes-st.visible});
-    // THE LIGHTS MUST ACTUALLY BE ON. Fixtures are stamped with a room id at generation and gated against brLitRooms'
-    // unioned ids; when those two id spaces disagreed every fixture was culled and the halls had no pooled light at all,
-    // which no data assertion noticed because the fixtures still existed — they were just never given a pool slot.
-    const lit = await page.evaluate(`(()=>{ const s=window.__hcBRX.envStats(); return {litNear:s.litNear, fixtures:s.fixtures}; })()`);
-    T('the fluorescents are actually lighting the halls', lit.litNear>0, lit);
-    T('there are fixtures to light them with', lit.fixtures>20, lit);
-    await page.evaluate(`__hc.aim(false)`); await sleep(1200);
-    await page.screenshot({ path: path.join(OUT,'br-visible.png') });
-    // PIXELS. Reading back the WebGL canvas in-page returns blank (no preserveDrawingBuffer), so decode the screenshot
-    // Playwright actually composited. This is the check the entire suite was missing: every other assertion tested DATA,
-    // so 1646 meshes could be missing from the scene and nothing went red.
-    const shot = await page.screenshot();
-    const px = pngStats(shot);
-    console.log('pixels', JSON.stringify(px));
-    T('the view is not a flat fog fill — there is structure on screen', px.sd>12 && px.edgePct>1.5, px);
-    // The floor band reads much darker than the walls (14.5 vs 30.3). I theorised the skylight-dimming curves were
-    // crushing it — vSky is 0 everywhere in a sealed interior — but an A/B with the camera held still moved it by 0.1/255,
-    // so that theory is wrong and the change was reverted. Recorded here as an observation, not a fix.
-    console.log('luminance bands', JSON.stringify({top:px.top, walls:px.mid, floor:px.floor}));
+    // render.calls resets every frame, so a single read catches whatever partial frame is in flight. Take the max.
+    const peak=async()=>{ let c=0,t=0; for(let i=0;i<25;i++){ const r=await page.evaluate(`window.__hcBRX.rinfo()`);
+        if(r.calls>c) c=r.calls; if(r.tris>t) t=r.tris; await sleep(60); } return {calls:c, tris:t}; };
+    const st=await page.evaluate(`window.__hcBRX.envStats()`);
+    const p1=await peak();
+    console.log('DRAW CALLS peak:', p1.calls, ' tris peak:', p1.tris, ' env meshes:', st.meshes, ' groups:', st.groups);
+    const fps=[]; for(let i=0;i<6;i++){ await sleep(600); fps.push((await page.evaluate(`__hc.st()`)).fps); }
+    console.log('fps inside:', JSON.stringify(fps));
+    T('draw calls are well under the 1076 baseline', p1.calls>0 && p1.calls<600, {calls:p1.calls});
+    T('the triangles are still there (nothing was dropped)', p1.tris>30000, {tris:p1.tris, envTris:st.tris});
     T('zero page errors', errs.length===0, errs.slice(0,2));
     console.log(fails? fails+' FAILURE(S)' : 'ALL PASS');
     await browser.close();

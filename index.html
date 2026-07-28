@@ -3719,7 +3719,8 @@ function achPoll(dt){ _achT+=dt; if(_achT<0.7)return; _achT=0; if(player.creativ
   function startGame(mode,room){ try{ const ork=$b('orkey'); if(ork&&ork.value.trim())localStorage.setItem('hollowcraft_or_key',ork.value.trim()); }catch(e){}
     try{ const pn=$b('playername'); playerName=(pn&&pn.value.trim())||('player'+(NET.id||Math.floor(Math.random()*99))); localStorage.setItem('hollowcraft_name',playerName); }catch(e){}
     try{ window._allowCreative=!!window._startCreative; player.creative=window._allowCreative; }catch(e){ window._allowCreative=false; player.creative=false; }   // CREATIVE only if the Creative button started it; SURVIVAL locks fly + creative menu (Ben 07-27: separate buttons, no checkbox)
-    window._mp={mode:mode||'solo',room:room||null}; boot.style.display='none'; started=true; if(typeof _dio!=='undefined'&&_dio)_dio.visible=false;
+    window._mp={mode:mode||'solo',room:room||null}; boot.style.display='none'; started=true;
+    try{ brPrewarmEntry(); }catch(e){ console.error('[BRX] prewarm', e); }   // build the Backrooms entry chunks now, hidden, so stepping through the portal costs nothing (Ben's suggestion) if(typeof _dio!=='undefined'&&_dio)_dio.visible=false;
     if(typeof _sigilShow==='function')_sigilShow();   // THE SUMMONING goes up now, not at boot — it is the preload window (see the gate in the render loop)
     requestLock();
     const RES=window._resume; window._resume=null;
@@ -10072,16 +10073,26 @@ function brVoidAt(wx,wz){ const R=BR.rooms; if(!R||!R.length)return false;
 // two lids the flight actually passes through.
 function brStairRun(rise){ return Math.max(4.0, Math.abs(rise)*1.7); }      // ONE definition: the builder and the voxel carve must agree, or the shaft is either too short to walk or a trench in the carpet
 const BRX_STAIR_HW=1.3;                                                      // half-width of the shaft: flight hw 1.1 + its 0.16 rail, and NO MORE. At 2.0 the carve ran 0.74 past each rail, leaving a slot of open shaft in the carpet beside the stairs that a 0.42-radius player fits straight down.
-function brStairSpanAt(wx,wz){ const S=BR.stairs; if(!S||!S.length||!BR.levels)return null;
-  for(let i=0;i<S.length;i++){ const st=S[i];
-    const half=brStairRun((st.rise||1)*BR_CH)/2 + 1.0;                     // the flight's true extent, not a blanket 18 (which cut ~10 blocks of open trench past each end once the FLOOR started opening too)
-    if(Math.abs(wx-st.cx)<=(st.vert?half:BRX_STAIR_HW) && Math.abs(wz-st.cz)<=(st.vert?BRX_STAIR_HW:half)){
-      // the two storeys this flight joins, read from the chunks either side of the boundary it sits on
-      const e=1.0, ax=st.cx+(st.vert?-e:0), az=st.cz+(st.vert?0:-e), bx=st.cx+(st.vert?e:0), bz=st.cz+(st.vert?0:e);
-      const ca=brxChunkOf(ax,az), cb=brxChunkOf(bx,bz);
-      const ya=brxChunkBaseY(ca.gx,ca.gz), yb=brxChunkBaseY(cb.gx,cb.gz);
-      if(ya===yb) continue;                                                  // no storey change here — nothing to open
-      return { lo:Math.min(ya,yb), hi:Math.max(ya,yb) }; } }
+function brStairSpanAt(wx,wz){ if(!BR.levels) return null;
+  // ASK THE ORACLE, NOT THE LOADED RECORDS. This used to scan BR.stairs, which only exists after brxUnion has run over the
+  // loaded set — so a voxel chunk generated before its BR chunk was unioned saw no crossing, kept its floor/ceiling slab, and
+  // nothing ever remeshed it. The result was an intermittently solid stairwell: the same seed would sometimes leave a flight
+  // buried, measured as a tread reading y49 instead of y47.75. The shared-edge oracle is pure and answers for any chunk pair
+  // whether or not either is loaded, so the carve is now load-order independent by construction.
+  const c=brxChunkOf(wx,wz), o=brxChunkOrigin(c.gx,c.gz);
+  for(const d of [[1,0],[-1,0],[0,1],[0,-1]]){
+    const dgx=d[0], dgz=d[1], vert=(dgx!==0);                                 // vert boundary = constant x, so the flight runs along x
+    const lineX = dgx>0 ? o.x+BRX_SPAN : (dgx<0 ? o.x : 0);
+    const lineZ = dgz>0 ? o.z+BRX_SPAN : (dgz<0 ? o.z : 0);
+    const list=brxEdgeFrom(c.gx,c.gz,dgx,dgz)||[];
+    for(const cr of list){ if(cr.kind!==BRX_STAIR) continue;
+      const w=(vert? o.z : o.x) + (cr.cell+cr.at)*BR_CS;                       // same position brxEmitWall derives for the record
+      const scx=vert? lineX : w, scz=vert? w : lineZ;
+      const half=brStairRun((cr.rise||1)*BR_CH)/2 + 1.0;
+      if(Math.abs(wx-scx)<=(vert?half:BRX_STAIR_HW) && Math.abs(wz-scz)<=(vert?BRX_STAIR_HW:half)){
+        const ya=brxChunkBaseY(c.gx,c.gz), yb=brxChunkBaseY(c.gx+dgx,c.gz+dgz);
+        if(ya===yb) continue;                                                  // no storey change here — nothing to open
+        return { lo:Math.min(ya,yb), hi:Math.max(ya,yb) }; } } }
   return null; }
 function brOpenTopAt(wx,wz){ const R=BR.rooms; if(!R||!R.length)return false;
   for(let i=0;i<R.length;i++){ const r=R[i]; if(!r.shaft)continue;
@@ -10294,7 +10305,16 @@ function brxChunkLevel(gx,gz){ return brxHash((BR.seed||1)>>>0, Math.floor(gx/BR
 function brxChunkBaseY(gx,gz){ return BR_FLOOR + brxChunkLevel(gx,gz)*BR_CH; }
 // The crossings along ONE shared edge. axis 0 = the edge between (gx,gz) and (gx+1,gz); axis 1 = between (gx,gz) and
 // (gx,gz+1). Always called with the LOWER chunk, via brxEdge.
+// MEMOISED. The voxel carve asks the oracle for all four boundaries of a column's chunk, so a 16x16 chunk fires ~1024 of
+// these — each one was building a fresh tileRng and re-rolling the list. Same seed + same edge always yields the same answer,
+// so cache it; the key includes the seed so brxSeed() invalidates naturally.
+const _brxEdgeMemo=new Map();
 function brxEdgeCrossingsLow(gx,gz,axis){
+  const mk=((BR.seed||1)>>>0)+'_'+gx+'_'+gz+'_'+axis; const hit=_brxEdgeMemo.get(mk); if(hit) return hit;
+  const out=_brxEdgeCrossingsLowCompute(gx,gz,axis);
+  if(_brxEdgeMemo.size>20000) _brxEdgeMemo.clear();                          // bounded: a wandering player would otherwise grow it forever
+  _brxEdgeMemo.set(mk,out); return out; }
+function _brxEdgeCrossingsLowCompute(gx,gz,axis){
   const rnd=tileRng(brxHash((BR.seed||1)>>>0, gx*2+axis, gz*2+axis, 0xE39E));
   const n=1+((rnd()*3)|0);                                                            // 1..3 crossings — enough to connect, sparse enough to be a labyrinth
   // The storey gap across THIS boundary. `rise` is measured going from the lower-keyed chunk to the higher-keyed one, the
@@ -11152,6 +11172,96 @@ function brEnvCacheClear(){ if(!BR.envCache) return;
   for(const e of BR.envCache.values()){ if(e.g){ if(e.g.parent) e.g.parent.remove(e.g);
     e.g.traverse(o=>{ if(o.geometry) o.geometry.dispose(); }); } }
   BR.envCache.clear(); }
+// STATIC MERGE. A chunk was arriving as ~190 separate meshes — every junk pile, door frame, table leg, troffer and bone its
+// own draw call — which measured 1076 draw calls for 42k triangles across the loaded set. Almost none of it moves, so after a
+// chunk is built its static children are merged into ONE mesh per material. Anything that animates is left alone: door
+// groups swing, bulb assemblies hang and toggle, flicker diffusers blink their visibility.
+function _brMergeInto(list){                                                  // like _mergeGeos but tolerates missing uv, and copies in BULK
+  // Per-vertex getX/getY/getZ into plain arrays cost more than the draw calls it saves: it pushed the entry hitch from 128ms
+  // to 176ms. Attributes are already transformed in place by the caller, so the underlying buffers can be copied wholesale.
+  let n=0; const prepped=[];
+  for(let g of list){ g=g.index? g.toNonIndexed():g; prepped.push(g); n+=g.getAttribute('position').count; }
+  const P=new Float32Array(n*3), N=new Float32Array(n*3), U=new Float32Array(n*2);
+  let vo=0;
+  for(const g of prepped){ const p=g.getAttribute('position'), nn=g.getAttribute('normal'), u=g.getAttribute('uv'), c=p.count;
+    P.set(p.array.subarray? p.array.subarray(0,c*3) : p.array, vo*3);
+    if(nn) N.set(nn.array.subarray? nn.array.subarray(0,c*3) : nn.array, vo*3);
+    else for(let i=0;i<c;i++){ N[(vo+i)*3]=0; N[(vo+i)*3+1]=1; N[(vo+i)*3+2]=0; }
+    if(u) U.set(u.array.subarray? u.array.subarray(0,c*2) : u.array, vo*2);
+    vo+=c; }
+  const o=new THREE.BufferGeometry();
+  o.setAttribute('position',new THREE.BufferAttribute(P,3));
+  o.setAttribute('normal',new THREE.BufferAttribute(N,3));
+  o.setAttribute('uv',new THREE.BufferAttribute(U,2));
+  return o; }
+function brMergeStatic(grp){
+  const keep=new Set();                                                       // objects that must survive as themselves
+  const protect=o=>{ while(o && o!==grp){ keep.add(o); o=o.parent; } };
+  for(const d of (BR.doors||[])) if(d.grp) protect(d.grp);                    // swings
+  for(const b of (BR.bulbs||[])) if(b.grp) protect(b.grp);                    // hangs, and its glass swaps material when lit
+  for(const f of (BR.flickers||[])) if(f.m) protect(f.m);                     // visibility blinks per frame
+  grp.updateMatrixWorld(true);
+  const inv=new THREE.Matrix4().copy(grp.matrixWorld).invert(), rel=new THREE.Matrix4();
+  const buckets=new Map(), doomed=[];
+  const walk=(o)=>{ for(const c of o.children.slice()){
+      if(keep.has(c)) { walk(c); continue; }                                  // inside a protected subtree: leave entirely alone
+      if(c.isMesh && c.visible && c.geometry && c.material && !Array.isArray(c.material)){
+        rel.multiplyMatrices(inv, c.matrixWorld);
+        const g=c.geometry.clone(); g.applyMatrix4(rel);
+        let e=buckets.get(c.material); if(!e){ e={ mat:c.material, geos:[], cast:false, recv:false }; buckets.set(c.material,e); }
+        e.geos.push(g); e.cast=e.cast||!!c.castShadow; e.recv=e.recv||!!c.receiveShadow;
+        doomed.push(c); continue; }
+      walk(c); } };
+  walk(grp);
+  if(buckets.size===0) return 0;
+  for(const c of doomed){ if(c.parent) c.parent.remove(c); if(c.geometry) c.geometry.dispose(); }
+  let made=0;
+  for(const e of buckets.values()){
+    const m=new THREE.Mesh(_brMergeInto(e.geos), e.mat);
+    m.castShadow=e.cast; m.receiveShadow=e.recv; m.frustumCulled=false;
+    grp.add(m); made++;
+    for(const g of e.geos) g.dispose(); }
+  return made; }
+// BUILD ONE CHUNK'S GEOMETRY AND CACHE IT, touching nothing else. Swaps the live BR arrays aside exactly like brxChunkGen,
+// so it is safe to call while standing in the overworld — which is the point: Ben asked whether the first Backrooms chunk
+// could be built when the game loads, and it can. The 169ms cost of walking through the portal is almost entirely this work,
+// so doing it during the load screen makes the entry free rather than merely cheaper.
+function brxBuildChunkGroup(rec){
+  const ck=rec.gx+'_'+rec.gz;
+  if(!BR.envCache) BR.envCache=new Map();
+  const hit=BR.envCache.get(ck); if(hit) return hit;
+  const stash={}; for(const f of BRX_FIELDS) stash[f]=BR[f];
+  const flickStash=BR.flickers, rampStash=BR.ramps;
+  let ent=null;
+  try{
+    for(const f of BRX_FIELDS) BR[f]=rec[f];
+    BR.ramps=[];
+    const g=brBuildEnv();
+    const dy=brxLevelDy(rec.gx,rec.gz); g.position.y=dy;
+    try{ brMergeStatic(g); }catch(e){ console.error('[BRX] static merge failed for '+ck, e); }
+    ent={ g, ramps:(BR.ramps||[]).map(r=>({...r, y0:r.y0+dy, y1:r.y1+dy})), flickers:(BR.flickers||[]).slice() };
+    BR.envCache.set(ck, ent);
+  }catch(e){
+    BR._buildErr=BR._buildErr||[]; if(BR._buildErr.length<8) BR._buildErr.push({gx:rec.gx, gz:rec.gz, err:String(e&&e.message||e)});
+    console.error('[BRX] chunk '+ck+' failed to build:', e); ent=null;
+  }finally{
+    for(const f of BRX_FIELDS) BR[f]=stash[f]; BR.flickers=flickStash; BR.ramps=rampStash;
+  }
+  return ent; }
+// PREWARM at load, one chunk per tick so the load screen never stalls on it. Groups are cached UNPARENTED, so nothing is
+// rendered and nothing is added to the scene until you actually enter.
+function brPrewarmEntry(){
+  if(BR._prewarmQ) return; if(!BR.infinite) return;
+  const ent=brxChunkOf(BR_ENTRY.x, BR_ENTRY.z), q=[];
+  for(let dx=-BRX_KEEP; dx<=BRX_KEEP; dx++) for(let dz=-BRX_KEEP; dz<=BRX_KEEP; dz++) q.push([ent.gx+dx, ent.gz+dz]);
+  q.sort((a,b)=>(Math.abs(a[0]-ent.gx)+Math.abs(a[1]-ent.gz))-(Math.abs(b[0]-ent.gx)+Math.abs(b[1]-ent.gz)));   // the chunk you spawn in first
+  BR._prewarmQ=q; BR._prewarmDone=0;
+  const step=()=>{ if(!BR._prewarmQ || !BR._prewarmQ.length){ BR._prewarmQ=[]; return; }
+    if(BR.inside) { BR._prewarmQ=[]; return; }                               // entering takes over; do not compete with it
+    const c=BR._prewarmQ.shift();
+    try{ brxBuildChunkGroup(brxChunkGen(c[0], c[1])); BR._prewarmDone++; }catch(e){ console.error('[BRX] prewarm failed', e); }
+    setTimeout(step, 60); };
+  setTimeout(step, 60); }
 function brBuildEnvAll(){
   if(!BR.infinite || !BR.loaded || !BR.loaded.length){ brClearEnv(); brEnsureLightPool(); const g=brBuildEnv(); scene.add(g); BR.env=g; brxUpdateLights(player.pos.x,player.pos.z); return; }
   brEnvCacheDetach();                                                       // MUST precede brClearEnv, which disposes geometry
@@ -11162,8 +11272,8 @@ function brBuildEnvAll(){
   const allRamps=[], allFlick=[], live=new Set();
   for(const rec of BR.loaded){
     const ck=rec.gx+'_'+rec.gz; live.add(ck);
-    let ent=BR.envCache.get(ck);
-    if(ent){ parent.add(ent.g);                                             // already built: re-parent, do not rebuild
+    let ent=BR.envCache.get(ck) || brxBuildChunkGroup(rec);                 // built earlier (or prewarmed at load): just re-parent
+    if(ent){ parent.add(ent.g);
       for(const r of ent.ramps) allRamps.push(r);
       for(const fl of ent.flickers) allFlick.push(fl);
       continue; }
@@ -11176,6 +11286,7 @@ function brBuildEnvAll(){
       BR._buildErr=BR._buildErr||[]; if(BR._buildErr.length<8) BR._buildErr.push({gx:rec.gx, gz:rec.gz, err:String(e&&e.message||e), stack:String(e&&e.stack||'').split(String.fromCharCode(10)).slice(0,3).join(' | ')});
       console.error('[BRX] chunk '+rec.gx+','+rec.gz+' failed to build:', e); }
     if(g){ const dy=brxLevelDy(rec.gx,rec.gz); g.position.y=dy;
+      try{ brMergeStatic(g); }catch(e){ console.error('[BRX] static merge failed for '+rec.gx+','+rec.gz, e); }
       // SPREAD, not a hand-written field list: the old copy enumerated x0..vert and silently dropped every field added
       // later (it ate chw, so the walk surface shrank back to the visual rails and you fell through the carve).
       ent={ g, ramps:(BR.ramps||[]).map(r=>({...r, y0:r.y0+dy, y1:r.y1+dy})), flickers:(BR.flickers||[]).slice() };
@@ -11743,6 +11854,7 @@ if(typeof window!=='undefined'){ window.__hcBRX={          // the chunk substrat
     if(BR.inside){ try{ brBuildEnvAll(); }catch(e){ return {err:e.message}; } } return { levels:!!BR.levels, ramps:(BR.ramps||[]).length }; },
   // QA: is the see-through portal still rendering when it should be? Counts brRenderPortal calls, and can place the player
   // near the door either facing it or with their back to it.
+  prewarm:()=>({ queued:(BR._prewarmQ||[]).length, done:BR._prewarmDone|0, cached:BR.envCache?BR.envCache.size:0 }),   // QA: load-time prewarm progress
   portalGate:(dist)=>brPortalWanted(dist),                                  // QA: the decision itself. The per-frame COST is not measurable headless — updateBackrooms only ticks under pointer lock.
   portalProbe:(where)=>{ const d=BR.door; if(!d) return null;
     if(where==='facing'){ player.pos.set(d.x-Math.sin(d.yaw)*7, d.y, d.z-Math.cos(d.yaw)*7); player.yaw=Math.atan2(-(d.x-player.pos.x),-(d.z-player.pos.z)); player.pitch=0; if(typeof camera!=='undefined'&&camera){ camera.position.copy(player.pos); camera.rotation.set(0,player.yaw,0); camera.updateMatrixWorld(true); } }
@@ -14144,7 +14256,7 @@ function updateReasoning(dt){
 }
 
 // DEBUG auto-start (headless verification)
-if(DEBUG){ boot.style.display='none'; started=true; if(Q.get('wretch')){ wretch.debug=true; wretch.spawnT=0.3; director.directive.bearing=270; player.pitch=-0.12; } }
+if(DEBUG){ boot.style.display='none'; started=true; try{ brPrewarmEntry(); }catch(e){ console.error('[BRX] prewarm', e); } if(Q.get('wretch')){ wretch.debug=true; wretch.spawnT=0.3; director.directive.bearing=270; player.pitch=-0.12; } }
 // headless introspection + entity render harness hook
 window.__hc={
   save(){ try{ return saveGame() ? 'saved '+Object.keys(edits).length+' edits' : 'save refused'; }catch(e){ return e.message; } },

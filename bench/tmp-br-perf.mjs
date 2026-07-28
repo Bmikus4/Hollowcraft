@@ -59,7 +59,10 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     await page.goto(base+'/index.html?debug=1&t=210',{waitUntil:'load',timeout:90000});
     await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
     await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
-    await sleep(2500);
+    // let the load-time prewarm finish, then confirm it actually built the entry chunks BEFORE we enter
+    await sleep(1500);
+    for(let i=0;i<40;i++){ const pw=await page.evaluate(`window.__hcBRX.prewarm()`); if(pw.queued===0) break; await sleep(250); }
+    console.log('PREWARM:', JSON.stringify(await page.evaluate(`window.__hcBRX.prewarm()`)));
     const fpsOut=[]; for(let i=0;i<4;i++){ await sleep(500); fpsOut.push((await page.evaluate(`__hc.st()`)).fps); }
     console.log('A. overworld fps (no portal):', JSON.stringify(fpsOut));
 
