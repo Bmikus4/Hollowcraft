@@ -82,11 +82,17 @@ async function rowEdge(page){
       }
       console.log('sky/sea anchor vs the sea it must meet:'); for(const r of anchorRows) console.log('   ', JSON.stringify(r));
       const worstRatio=anchorRows.reduce((a,b)=>Math.abs(Math.log(a.ratio))>Math.abs(Math.log(b.ratio))?a:b);
-      // The anchor is a lerp from the sea toward the low sky, so by day it sits ABOVE the sea and that is intended ("always
-      // >= the sea, <= the low sky"). What must never happen is the anchor falling BELOW the sea — that is a step DOWN into
-      // black exactly at the water line, and pre-darkening it by 0.2 put it at a fifth of the sea's value at night.
-      T('the horizon anchor is never darker than the sea it meets', anchorRows.every(r=>r.ratio>0.9), {worst:anchorRows.reduce((a,b)=>a.ratio<b.ratio?a:b), all:anchorRows});
-      T('...and never runs away from it either', anchorRows.every(r=>r.ratio<3.2), {worst:worstRatio});
+      // PER CHANNEL, not luminance. A luminance-only check passed over a saturated navy ring sitting against a desaturated
+      // teal ocean — equal brightness, visibly a stripe. The three colours either side of the sea line must be the same
+      // COLOUR: the water surface's far-edge fog target, the backdrop ring, and the sky's horizon anchor.
+      const chan=[];
+      for(const f of [0.12,0.25,0.4,0.5,0.75,0.9]){
+        await page.evaluate(`__hc.time(${f*DAY_LEN})`); await sleep(320);
+        chan.push(Object.assign({frac:f}, await page.evaluate(`__hc.seaMatch()`)));
+      }
+      console.log('the three colours at the sea line, per channel:'); for(const r of chan) console.log('   ', JSON.stringify(r));
+      T('the backdrop ring IS the water\'s own far-edge colour', chan.every(r=>r.ringVsTarget<0.006), {worst:chan.reduce((a,b)=>a.ringVsTarget>b.ringVsTarget?a:b)});
+      T('the sky\'s horizon anchor IS the ring', chan.every(r=>r.anchorVsRing<0.006), {worst:chan.reduce((a,b)=>a.anchorVsRing>b.anchorVsRing?a:b)});
     }
     const DAY_LEN = await page.evaluate(`(()=>{ const n=__hc.time(); return n.frac>0.001? n.worldTime/n.frac : 600; })()`);
 
