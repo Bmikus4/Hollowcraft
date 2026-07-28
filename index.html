@@ -10692,12 +10692,25 @@ function brxGenerate(o){ BR.rooms=[]; BR.walls=[]; BR.doors=[]; BR.lintels=[]; B
   BR._door=door;
   // ---- derive wall runs from the cell→room grid (grid-edge based → always aligned, gap-free, non-overlapping) ----
   const cAt=(gx,gy)=> (gx<0||gy<0||gx>=CW||gy>=CD)? -1 : cell[ci(gx,gy)];
-  for(let xi=0; xi<=CW; xi++){ let run=null; const flush=()=>{ if(run)brxEmitWall(run,true,rnd,o); run=null; };                                     // vertical wall lines
+  // RUNS ARE EMITTED A LINE AT A TIME, not one at a time (Ben 07-28: the dashed lines standing either side of every opening).
+  // A wall LINE is cut into one run per pair of rooms it separates, and each run used to grow BR_WT/2 at both outer ends to
+  // bury its end cap. Where the rooms change but the masonry carries straight on, BOTH runs grew toward each other, so the
+  // two boxes overlapped by a full wall thickness with their long faces coplanar across that band — one material, one merged
+  // geometry, a z-fight. Measured: ~220 such overlaps in every region, every one exactly 0.36 wide and full height, which is
+  // why the artefact stands beside every doorway and why it reads as a PAIR of lines a wall-thickness apart.
+  //   Growth only ever made sense at a CORNER, where the wall being met is perpendicular. Buffering the line lets each run
+  // see its neighbours, so an end that continues into a COLLINEAR run neither grows nor caps: the neighbour's masonry is
+  // already flush against it and hides exactly what the cap was there to hide.
+  const emitLine=(L,vert)=>{ for(let i=0;i<L.length;i++){ const r=L[i], rs0=vert?r.z0:r.x0, rs1=vert?r.z1:r.x1;
+      r.abLo = i>0          && Math.abs((vert?L[i-1].z1:L[i-1].x1) - rs0) < 1e-6;
+      r.abHi = i<L.length-1 && Math.abs((vert?L[i+1].z0:L[i+1].x0) - rs1) < 1e-6;
+      brxEmitWall(r,vert,rnd,o); } };
+  for(let xi=0; xi<=CW; xi++){ const L=[]; let run=null; const flush=()=>{ if(run)L.push(run); run=null; };                                     // vertical wall lines
     for(let gy=0; gy<CD; gy++){ const a=cAt(xi-1,gy), b=cAt(xi,gy);
-      if(a!==b){ const wx=GX0+xi*BR_CS, z0=GZ0+gy*BR_CS; if(run&&run.a===a&&run.b===b&&run.z1===z0)run.z1=z0+BR_CS; else { flush(); run={vert:true,x:wx,z0,z1:z0+BR_CS,a,b}; } } else flush(); } flush(); }
-  for(let yi=0; yi<=CD; yi++){ let run=null; const flush=()=>{ if(run)brxEmitWall(run,false,rnd,o); run=null; };                                    // horizontal wall lines
+      if(a!==b){ const wx=GX0+xi*BR_CS, z0=GZ0+gy*BR_CS; if(run&&run.a===a&&run.b===b&&run.z1===z0)run.z1=z0+BR_CS; else { flush(); run={vert:true,x:wx,z0,z1:z0+BR_CS,a,b}; } } else flush(); } flush(); emitLine(L,true); }
+  for(let yi=0; yi<=CD; yi++){ const L=[]; let run=null; const flush=()=>{ if(run)L.push(run); run=null; };                                    // horizontal wall lines
     for(let gx=0; gx<CW; gx++){ const a=cAt(gx,yi-1), b=cAt(gx,yi);
-      if(a!==b){ const wz=GZ0+yi*BR_CS, x0=GX0+gx*BR_CS; if(run&&run.a===a&&run.b===b&&run.x1===x0)run.x1=x0+BR_CS; else { flush(); run={vert:false,z:wz,x0,x1:x0+BR_CS,a,b}; } } else flush(); } flush(); }
+      if(a!==b){ const wz=GZ0+yi*BR_CS, x0=GX0+gx*BR_CS; if(run&&run.a===a&&run.b===b&&run.x1===x0)run.x1=x0+BR_CS; else { flush(); run={vert:false,z:wz,x0,x1:x0+BR_CS,a,b}; } } else flush(); } flush(); emitLine(L,false); }
   for(const r of R){ const rw=r.x1-r.x0, rd=r.z1-r.z0; if(rw<20||rd<20||rnd()<0.55)continue;                                                       // iconic support-pillar hall in the biggest rooms (rarer now that halls also get partitions)
     const nx=Math.max(1,Math.round(rw/9)-1), nz=Math.max(1,Math.round(rd/9)-1), mx=rw/(nx+1), mz=rd/(nz+1);
     for(let i=1;i<=nx;i++)for(let j=1;j<=nz;j++){ const _px=r.x0+mx*i, _pz=r.z0+mz*j;
@@ -10817,8 +10830,14 @@ function brxEmitWall(run, vert, rnd, o){ const s0=vert?run.z0:run.x0, s1=vert?ru
   // a wall rises to the HIGHER of the two ceilings it bounds, so neither room is left open at the top
   const _ra=_R[run.a], _rb=_R[run.b];
   const wty=Math.max((_ra&&_ra.ceil)||BR_WY1, (_rb&&_rb.ceil)||BR_WY1);
-  const pushWall=(a0,a1,eLo,eHi)=>{ if(a1-a0<=0.001)return; const b0=a0-(eLo?EX:0), b1=a1+(eHi?EX:0);
-    BR.walls.push(vert?{x0:fixed,z0:b0,x1:fixed,z1:b1,zone,ty:wty}:{x0:b0,z0:fixed,x1:b1,z1:fixed,zone,ty:wty}); };
+  // eLo/eHi mark the run's own OUTER ends (a doorway edge passes 0 — that cap IS the reveal you see through the opening).
+  // An outer end that continues into a collinear run must NOT grow, or the two boxes overlap and their faces z-fight; it
+  // must not carry a cap either, since the neighbour is flush against it. capLo/capHi ride on the record to brBuildEnv.
+  const pushWall=(a0,a1,eLo,eHi)=>{ if(a1-a0<=0.001)return;
+    const jLo=!!(eLo && run.abLo), jHi=!!(eHi && run.abHi);
+    const b0=a0-((eLo&&!jLo)?EX:0), b1=a1+((eHi&&!jHi)?EX:0);
+    const w=vert?{x0:fixed,z0:b0,x1:fixed,z1:b1,zone,ty:wty}:{x0:b0,z0:fixed,x1:b1,z1:fixed,zone,ty:wty};
+    if(jLo)w.capLo=false; if(jHi)w.capHi=false; BR.walls.push(w); };
   // ================= CHUNK BOUNDARY CROSSINGS (Ben 07-27) =================
   // A run with a<0 or b<0 sits on the OUTER edge of this chunk's grid — cAt returns -1 past the grid, so the whole chunk
   // perimeter arrives here as solid wall. That is why chunks abutted without joining. Now the perimeter asks the shared-
@@ -11428,7 +11447,11 @@ function brBuildEnv(){ if(!BR.rooms||!BR.rooms.length)brxGenerate(); const grp=n
     // signature — a texture seam or a T-junction crack would be a solid line. Pulling the cap in by 1% of the wall thickness
     // (under 2mm) decides the depth test without opening a gap, because the long face is immediately behind it.
     { const CI=(BR._dbg&&BR._dbg.capInset!=null)?BR._dbg.capInset:0.99, aLc=[x0+nx*CI,z0+nz*CI], aRc=[x0-nx*CI,z0-nz*CI], bLc=[x1+nx*CI,z1+nz*CI], bRc=[x1-nx*CI,z1-nz*CI];
-      if((caps!=null? caps : !soffit) && !(BR._dbg&&BR._dbg.noCaps)){ face(bLc,bRc); face(aRc,aLc); } }                        // END CAPS — historically skipped for lintels, because a header's caps landed exactly on the stub caps either side of the opening and the coplanar pair z-fought into the LINE ABOVE EVERY DOOR (Ben 07-27). A header that OVERLAPS the masonry buries its caps inside it instead, so it can and must have them: without them the box is open-ended, and its faces are DoubleSide, so you see its own interior through the gap as a bright hairline.
+      // caps may be true/false for both ends, or {lo,hi} to cap one end only — a run whose end continues into a collinear
+      // neighbour wants no cap there (see pushWall): the neighbour's masonry is flush against it, and two coincident caps
+      // facing opposite ways draw their own hairline at exactly the join we are trying to remove.
+      const _c=(caps!=null? caps : !soffit), _cLo=(_c&&_c.lo!==undefined)?_c.lo:!!_c, _cHi=(_c&&_c.hi!==undefined)?_c.hi:!!_c;
+      if(!(BR._dbg&&BR._dbg.noCaps)){ if(_cHi) face(bLc,bRc); if(_cLo) face(aRc,aLc); } }                        // END CAPS — historically skipped for lintels, because a header's caps landed exactly on the stub caps either side of the opening and the coplanar pair z-fought into the LINE ABOVE EVERY DOOR (Ben 07-27). A header that OVERLAPS the masonry buries its caps inside it instead, so it can and must have them: without them the box is open-ended, and its faces are DoubleSide, so you see its own interior through the gap as a bright hairline.
     if(soffit) horiz(by);                                                                               // underside face (doorway header soffit)
     if(capTop) horiz(ty); };                                                                            // TOP face — HALF WALLS WERE OPEN (Ben 07-27): you look over one and see straight down into the hollow box. The old `cap` flag emitted this quad at `by`, i.e. buried in the floor, so the top never got a surface.
   // DROP SHAFTS — emitted here rather than in the room loop above, because wallBox is only in scope from this point on
@@ -11457,7 +11480,9 @@ function brBuildEnv(){ if(!BR.rooms||!BR.rooms.length)brxGenerate(); const grp=n
       const lip=new THREE.Mesh(new THREE.BoxGeometry(1.7,0.10,1.7), brZoneMat(z).floor);                  // a small landing at the head of the ladder, so the top is somewhere you can stand
       lip.position.set(lx, topY-1.4, lz); lip.castShadow=true; lip.receiveShadow=true; lip.frustumCulled=false; grp.add(lip);
       r.landing={x:lx, z:lz, y:topY-1.35, hx:0.85, hz:0.85}; } }
-  for(const s of BR.walls){ useZone(s.zone); wallBox(s.x0,s.z0,s.x1,s.z1,(s.by!=null?s.by:y0),lTy(s),false,!!s.half); endZone(s.zone); }   // full-height walls rise to the taller of the rooms they bound (HALF walls carry a much lower ty + a real capped top you see over); `by` lets a wall start above the floor — a stairwell's side lining spans two storeys
+  for(const s of BR.walls){ useZone(s.zone);
+    const _cp=(s.capLo===false||s.capHi===false)? {lo:s.capLo!==false, hi:s.capHi!==false} : null;   // a run that continues into a collinear neighbour carries no cap at that end
+    wallBox(s.x0,s.z0,s.x1,s.z1,(s.by!=null?s.by:y0),lTy(s),false,!!s.half,null,_cp); endZone(s.zone); }   // full-height walls rise to the taller of the rooms they bound (HALF walls carry a much lower ty + a real capped top you see over); `by` lets a wall start above the floor — a stairwell's side lining spans two storeys
   const _roomCeil=(x,z)=>{ const r=brxRoomAt(x,z); return r? lCeil(r) : y1; };
   for(const l of (BR.lintels||[])){ if(BR._dbg&&BR._dbg.noLintels) break; let x0,z0,x1,z1; if(l.vert){ x0=x1=l.fixed; z0=l.s0; z1=l.s1; } else { z0=z1=l.fixed; x0=l.s0; x1=l.s1; }
     // A ROUND ARCHWAY (Ben 07-28: "archways should be round, not blocky"). Two things were wrong with the old one. It was
@@ -11472,6 +11497,12 @@ function brBuildEnv(){ if(!BR.rooms||!BR.rooms.length)brxGenerate(); const grp=n
     // The header abuts the flanking masonry exactly, coplanar, with no end caps — which is right, and the hairline that used
     // to run up both sides of it was never a geometry fault at all: it was the wall UVs restarting at each piece. See uAt in
     // wallBox. Standing the header 2mm proud "to fix" it only added a second line, its own lit edge.
+    //   NOT THE HEADER EITHER. The header does abut the flanking stubs edge to edge, which is a genuine T-junction of the same
+    // class as the wall-run overlap fixed in brxEmitWall — but overlapping it into the masonry (by half a thickness, its
+    // surfaces pulled 1% in so the stub's face wins the depth test) moved the measured seam by nothing at all, and it clipped
+    // the top 2cm off an archway's crown on the way. Reverted. The artefact was the COLLINEAR RUN OVERLAP, see brxEmitWall.
+    // If a header line ever does show up on its own, that overlap is the shape of the fix — but it should not ship until
+    // something measures it, which is how this one join collected three contradictory "fixes" before now.
     useZone(l.zone); wallBox(x0,z0,x1,z1,hdY,lTop,true,false);                                          // header above each doorway/crawl — WITH soffit so the opening has a finished top (an archway's finished top is the intrados below; its soffit at the crown is enclosed and never seen)
     if(l.arch && !(BR._dbg&&BR._dbg.noArch)){ const span=l.s1-l.s0, cen=l.s0+ARC, N=18, W2=BR_WT/2, crown=BR_DOORH+ARC;
       const yAt=(s)=>{ const off=s-cen; return BR_DOORH+Math.sqrt(Math.max(0,ARC*ARC-off*off)); };
@@ -12486,6 +12517,38 @@ if(typeof window!=='undefined'){ window.__hcBRX={          // the chunk substrat
               out.sample.unshift({ over:+over.toFixed(3), x:+e[0].toFixed(2), z:+e[1].toFixed(2),
                                    look:+Math.atan2(-(-buz),-(bux)).toFixed(3), zone:a.zone|0 }); out.sample=out.sample.slice(0,6); } } } } }
     out.all.sort((p,q)=>q.over-p.over); out.all=out.all.slice(0,12);
+    return out; },
+  // QA: COLLINEAR WALL RUNS OVERLAPPING EACH OTHER. A wall LINE is split into one run per pair of rooms it separates, and
+  // every run grows by BR_WT/2 at each outer end to bury its cap. Where two runs meet in line — the rooms change but the
+  // wall carries straight on — BOTH grow toward each other, so the two boxes overlap by a full wall thickness and their long
+  // faces are coplanar across that band. One material, one merged geometry: a z-fight, whose two edges draw the pair of
+  // dashed lines standing outboard of every opening. This is pure geometry, so it needs no rebuild to measure.
+  wallOverlaps:()=>{ const W=BR.walls||[], out={walls:W.length, overlaps:0, worst:0, sample:[]};
+    for(let i=0;i<W.length;i++){ const a=W[i], ax=a.x1-a.x0, az=a.z1-a.z0, aL=Math.hypot(ax,az)||1, aux=ax/aL, auz=az/aL;
+      for(let j=i+1;j<W.length;j++){ const b=W[j], bx=b.x1-b.x0, bz=b.z1-b.z0, bL=Math.hypot(bx,bz)||1, bux=bx/bL, buz=bz/bL;
+        if(Math.abs(aux*bux+auz*buz) < 0.999) continue;                                   // collinear-parallel only
+        // b's ends projected onto a's own line: perpendicular offset says "same line", along-offset says "overlapping span"
+        const p0=(b.x0-a.x0)*(-auz)+(b.z0-a.z0)*aux, p1=(b.x1-a.x0)*(-auz)+(b.z1-a.z0)*aux;
+        if(Math.abs(p0)>0.02 || Math.abs(p1)>0.02) continue;                              // a different, parallel wall
+        const t0=Math.min((b.x0-a.x0)*aux+(b.z0-a.z0)*auz, (b.x1-a.x0)*aux+(b.z1-a.z0)*auz);
+        const t1=Math.max((b.x0-a.x0)*aux+(b.z0-a.z0)*auz, (b.x1-a.x0)*aux+(b.z1-a.z0)*auz);
+        const ov=Math.min(t1,aL)-Math.max(t0,0);
+        if(ov<=0.01) continue;
+        // …AND THEY MUST SHARE HEIGHT TO FIGHT. Two chunks on different storeys legitimately put a wall on the same XZ line
+        // at different heights (see brxEmitWall's sameStorey rule), and that is not an artefact. Only a Y overlap is.
+        // A wall's floor, when it does not carry an explicit `by`, is its own storey's floor — NOT BR_WY0. brxUnion rewrites
+        // ty to WORLD, so a chunk one storey up has ty 58 where the ground floor has 49, and assuming 41 for both invented a
+        // fat Y overlap between two walls that are really a storey apart. Derive the floor from the top: ty - one storey.
+        const _floor=w=>(w.by!=null? w.by : (w.ty!=null? w.ty-(BR_WY1-BR_WY0) : BR_WY0));
+        const ab=_floor(a), at2=(a.ty!=null?a.ty:BR_WY1), bb=_floor(b), bt=(b.ty!=null?b.ty:BR_WY1);
+        const yov=Math.min(at2,bt)-Math.max(ab,bb);
+        if(yov<=0.01) continue;
+        out.overlaps++;
+        const rec={ ov:+ov.toFixed(3), yov:+yov.toFixed(2), kind:(ov>BR_WT*1.5?'sheet':'growth'),
+                    a:[+a.x0.toFixed(2),+a.z0.toFixed(2),+a.x1.toFixed(2),+a.z1.toFixed(2),+ab.toFixed(1),+at2.toFixed(1)],
+                    b:[+b.x0.toFixed(2),+b.z0.toFixed(2),+b.x1.toFixed(2),+b.z1.toFixed(2),+bb.toFixed(1),+bt.toFixed(1)] };
+        out[rec.kind]=(out[rec.kind]||0)+1;
+        if(ov>out.worst){ out.worst=+ov.toFixed(3); out.sample.unshift(rec); out.sample=out.sample.slice(0,6); } } }
     return out; },
   // QA: per-loaded-chunk storey bookkeeping. r.ceil and w.ty are stored LOCAL at generation and rewritten to WORLD by
   // brxUnion, while brBuildEnv builds in LOCAL space inside a group that is itself offset by dy — so this is where a

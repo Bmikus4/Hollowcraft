@@ -35,8 +35,13 @@ async function magnify(page, box, k){
   }, {png,box,k});
 }
 const saveDataUrl=(url,file)=>fs.writeFileSync(file, Buffer.from(url.split(',')[1],'base64'));
-// the sharpest column-to-column jump, and where it is
-const worstJump=(cols)=>{ let best=0, at=0; for(let i=1;i<cols.length;i++){ const j=Math.abs(cols[i]-cols[i-1]); if(j>best){best=j;at=i;} }
+// THE SHARPEST HAIRLINE, which is NOT the sharpest column-to-column jump. A doorframe's return face is a shaded RAMP —
+// the door variant of this test was reporting a 0.03 "seam" that was really seven columns of smooth gradient down the
+// casing, and it survived suppressing shadows, caps, lintels and the arch because it was never any of them. It sent two
+// sessions chasing it. A seam is a ONE-COLUMN step; a ramp has a large first difference and almost no second difference.
+// So score the second difference — |2c[i] - c[i-1] - c[i+1]| — which a hairline maximises and a gradient cancels.
+const worstJump=(cols)=>{ let best=0, at=0;
+  for(let i=1;i<cols.length-1;i++){ const j=Math.abs(2*cols[i]-cols[i-1]-cols[i+1]); if(j>best){best=j;at=i;} }
   return { jump:+best.toFixed(4), at, of:cols.length }; };
 (async()=>{
   fs.mkdirSync(OUT,{recursive:true});
@@ -82,8 +87,16 @@ const worstJump=(cols)=>{ let best=0, at=0; for(let i=1;i<cols.length;i++){ cons
       // ABSOLUTE, with the ratio reported alongside. A ratio-only test is unstable here: an unlit wall is almost perfectly
       // flat (median 0.0001), so any real geometry edge is 30x that while being 0.3% of luminance and invisible. The dashed
       // line under a nearby point light measured 0.010-0.015, so the bar sits well under that.
-      T('above a '+kind+' doorway there is no visible seam', w.jump < 0.008,
+      // ONLY THE 'empty' VARIANT IS AN ASSERTION. Its crop is plain masonry above an open doorway, so any sharp column is a
+      // seam. The 'door' variant frames the opening itself — the leaf, the casing's shaded return, and the wall-to-dark
+      // silhouette, all antialiased — and its worst column is one of THOSE every time, whatever the masonry is doing. It
+      // reported ~0.03 while suppressing shadows, caps, lintels and the arch each left it untouched, because it was never
+      // measuring any of them; two sessions read that as "the seam is none of these" when it meant "this crop cannot see the
+      // seam". Reported, not asserted, so it stops sending anyone down that road.
+      if(kind==='empty') T('above an empty doorway there is no visible seam', w.jump < 0.008,
         {worstJump:w.jump, median:+median.toFixed(5), ratio:+(w.jump/median).toFixed(1), atColumn:w.at, of:w.of});
+      else console.log('   [door crop — reported only, it frames the opening and its casing, not clean masonry] worst '
+        +w.jump+' at col '+w.at);
       // BISECT. Rebuild the same view with one surface suppressed at a time; whichever removal takes the jump with it is the
       // surface drawing the line. Guessing was 0 for 2.
       const variants=[['shadows off', null, ()=>page.evaluate(`window.__hcBR.shadows(false)`), ()=>page.evaluate(`window.__hcBR.shadows(true)`)],

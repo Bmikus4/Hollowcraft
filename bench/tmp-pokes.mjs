@@ -16,7 +16,7 @@ function waitHttp(url,t=15000){ return new Promise((res,rej)=>{ const t0=Date.no
 const ARGS=['--enable-gpu','--ignore-gpu-blocklist','--use-angle=d3d11','--mute-audio'];
 function findBrowser(){ for(const p of ['C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe','C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe']) if(fs.existsSync(p)) return p; throw new Error('no browser'); }
 
-const AUDIT = `window.__hcBRX.wallPokes()`;
+const AUDIT = `({pokes:window.__hcBRX.wallPokes(), ov:window.__hcBRX.wallOverlaps()})`;
 
 (async()=>{
   const port=await freePort();
@@ -34,8 +34,8 @@ const AUDIT = `window.__hcBRX.wallPokes()`;
     for(const [dx,dz] of [[0,0],[240,0],[0,240],[-240,-240],[480,240]]){
       await page.evaluate(`window.__hcBR.tp(${dx},${dz})`); await sleep(2500);
       const r=await page.evaluate(AUDIT);
-      console.log('tp '+dx+','+dz+'  walls='+r.walls+'  pokes='+r.pokes+'  worst='+r.worst+'  '+JSON.stringify(r.byShape));
-      if(r.pokes) console.log('   '+JSON.stringify(r.all.slice(0,3)));
+      console.log('tp '+dx+','+dz+'  walls='+r.pokes.walls+'  pokes='+r.pokes.pokes+'  overlaps='+r.ov.overlaps+' (sheet='+(r.ov.sheet||0)+' growth='+(r.ov.growth||0)+')  worst='+r.ov.worst);
+      if(r.ov.sample.length) console.log('   '+JSON.stringify(r.ov.sample.slice(0,2)));
     }
     await browser.close();
   } finally { server.kill(); }
