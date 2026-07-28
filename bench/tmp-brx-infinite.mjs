@@ -28,7 +28,8 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
     await page.evaluate(`window.__hcBR.enter()`); await sleep(6000);
 
-    // ---- OFF: the fixed region must be exactly as before
+    // ---- OFF: both systems now default ON, so switch off explicitly before asserting the fixed region
+    await page.evaluate(`window.__hcBRX.levels(false)`); await page.evaluate(`window.__hcBRX.infinite(false)`); await sleep(2500);
     const off = await page.evaluate(`window.__hcBRX.stats()`);
     T('with infinity OFF the fixed region is intact', off.infinite===false && off.rooms>25 && off.walls>100, off);
 

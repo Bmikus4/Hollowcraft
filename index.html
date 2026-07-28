@@ -10026,9 +10026,16 @@ const BR = { inside:false, door:null, exit:null, exitMesh:null, keyMesh:null, re
   // and while it was undefined those pure functions silently fell back to seed 1 — so anything that asked about a chunk
   // boundary before the first maze was generated described a DIFFERENT world than the one that then got built. Caught by
   // bench/tmp-brx-edges.mjs ("returning to the original seed reproduces it exactly" failed) rather than by reading.
-  seed:99991 };
+  seed:99991,
+  // ON BY DEFAULT (Ben 07-27) so the halls are the infinite, stacked version you actually walk into. Both remain
+  // switchable at runtime — __hcBRX.infinite(false) / __hcBRX.levels(false) — and levels-off still reproduces the
+  // original single flat region exactly, so this is a default, not a one-way door.
+  infinite:true, levels:true };
 const BR_X0=100000, BR_FLOOR=40, BR_CELL=9, BR_CH=9;   // bigger cells = real rooms; BR_CH = uniform ceiling (voxel collision + PBR render match) (Ben 07-24)
 const BR_ENTRY={ x:100033, z:0 }, BR_KEY={ x:100600, z:0 };
+// Where the entry room's floor actually is. Every spawn/teleport/portal height must come through here: with stacked
+// floors the entry chunk may sit a storey or two up, and BR_FLOOR is then simply the wrong number.
+function brEntryFloorY(){ try{ const c=brxChunkOf(BR_ENTRY.x,BR_ENTRY.z); return BR.levels? brxChunkBaseY(c.gx,c.gz) : BR_FLOOR; }catch(e){ return BR_FLOOR; } }
 function brRegion(wx){ return wx>=BR_X0; }                                     // pure coordinate test — only ever runs for a chunk a player is standing in
 function brHash(a,b,s){ let h=(Math.imul(a|0,73856093)^Math.imul(b|0,19349663)^Math.imul(s|0,83492791))>>>0; h=Math.imul(h^(h>>>13),1274126177)>>>0; return (h>>>0)/4294967296; }
 function brRoomAt(wx,wz){ if(wx>=100026&&wx<=100040&&wz>=-6&&wz<=6)return {kind:'entry',x0:100026,x1:100040,z0:-6,z1:6,doorX:100040,ch:9};
@@ -10123,9 +10130,11 @@ function brEnter(){ if(BR.inside)return; const d=BR.door;
   try{ if(typeof wretch!=='undefined'){ player.grabbed=false; player.tied=false; player.bound=false; wretch.dragging=false; wretch.grabPhase=null; wretch.active=false; if(wretch.group)wretch.group.visible=false;   // DESPAWN the Wretch — it does not exist in the Backrooms, and can never be mid-grabbing you here
     if(typeof blackOverlay!=='undefined')blackOverlay.style.opacity=0; if(typeof _scareVig!=='undefined'&&_scareVig)_scareVig.style.opacity=0; } }catch(e){}
   brApplyAtmo(0);
-  player.pos.set(BR_ENTRY.x, BR_FLOOR+1.2, BR_ENTRY.z); player.vel.set(0,0,0);                                            // yaw/pitch UNTOUCHED → frame-perfect continuity
+  player.pos.set(BR_ENTRY.x, brEntryFloorY()+1.2, BR_ENTRY.z); player.vel.set(0,0,0);                                            // yaw/pitch UNTOUCHED → frame-perfect continuity
   if(typeof streamChunks==='function')for(let i=0;i<8;i++)streamChunks(160,160);                                          // force the flat floor/ceiling voxels (Y collision) NOW → no fall-through
-  BR.rooms=[]; brBuildEnvAll();                                                                                           // generate the angled room graph + render the smooth PBR environment
+  BR.rooms=[];
+  if(BR.infinite){ BR.gen=null; BR._cgx=null; brxStream(true); }                                                          // straight to the streamed neighbourhood — building the fixed region first only to replace it next frame wasted a build and flashed the wrong geometry
+  else brBuildEnvAll();                                                                                                   // generate the angled room graph + render the smooth PBR environment
   brStartAudio(); BR.paleFlees=0; BR.pale={state:'dormant',cd:45+Math.random()*45,t:0}; }   // The Pale wakes 45-90s in; the flee counter (2 retreats, then it commits) resets per visit
 function brExit(){ if(!BR.inside)return; const r=BR.returnPos||{x:0,y:BR_FLOOR,z:0,yaw:0};
   brStopAudio(); brResumeMusic(); brRestoreAtmo(); brClearEnv(); BR.rooms=[]; brClearExit(); brHidePale(); BR.inside=false;
@@ -11138,7 +11147,7 @@ function brRenderPortal(){ if(typeof renderer==='undefined'||!renderer||!BR.door
   if(!_brPortalRT){ _brPortalRT=new THREE.WebGLRenderTarget(rw,rh,{depthBuffer:true}); _brPortalCam=new THREE.PerspectiveCamera(); }
   else if(_brPortalRT.width!==rw||_brPortalRT.height!==rh)_brPortalRT.setSize(rw,rh);
   const d=BR.door, dy=d.y+1;                                                                                 // source portal (door) centre
-  const dstx=BR_ENTRY.x, dsty=BR_FLOOR+2, dstz=BR_ENTRY.z;                                                    // destination portal centre (inside the entry room)
+  const dstx=BR_ENTRY.x, dsty=brEntryFloorY()+2, dstz=BR_ENTRY.z;                                                    // destination portal centre (inside the entry room)
   // TRUE PARALLAX: virtual cam = the player's camera TRANSLATED by (dst - src). It moves with you → the door reveals the room by parallax.
   camera.getWorldPosition(_bv0); camera.getWorldQuaternion(_bq);
   _brPortalCam.position.set(_bv0.x+(dstx-d.x), _bv0.y+(dsty-dy), _bv0.z+(dstz-d.z)); _brPortalCam.quaternion.copy(_bq); _brPortalCam.updateMatrixWorld(true);
@@ -11581,7 +11590,10 @@ if(typeof window!=='undefined'){ window.__hcBRX={          // the chunk substrat
     if(BR.infinite) brxStream(true);                                              // settle any pending stream FIRST
     // BR.env can be null between a clear and a rebuild; a QA hook must not depend on that timing
     if(!BR.env){ BR.env=new THREE.Group(); scene.add(BR.env); }
-    BR.ramps=BR.ramps||[]; const g=brBuildStairs(BR.env, st, BR_WY0, BR_WY0+(rise||BR_CH));
+    // anchor at the player's real floor: with levels on the entry chunk may be a storey up, and a flight based on
+    // BR_WY0 would start below the slab you are standing on
+    const fy0=(()=>{ const v=brPaleFloorY(player.pos.x,player.pos.z); return v==null? BR_WY0 : v; })();
+    BR.ramps=BR.ramps||[]; const g=brBuildStairs(BR.env, st, fy0, fy0+(rise||BR_CH));
     if(!g) return null;
     player.pos.set(g.loX, BR_WY0+0.6, g.loZ); player.vel.set(0,0,0);
     player.yaw=Math.atan2(-(g.hiX-g.loX), -(g.hiZ-g.loZ)); player.pitch=0.12;
@@ -11591,7 +11603,7 @@ if(typeof window!=='undefined'){ window.__hcBRX={          // the chunk substrat
     .map(r=>r.acx+','+r.acy+','+r.cw+'x'+r.ch+','+r.zone+','+(r.low?'L':'')+(r.drop?'D':'')+(r.shaft?'S':'')+(r.tilt?'T':'')).sort().join('|'),   // QA: a chunk's layout fingerprint, for revisit-determinism
   KIND:{DOOR:BRX_DOOR,TUNNEL:BRX_TUNNEL,STAIR:BRX_STAIR} }; }
 if(typeof window!=='undefined'){ window.__hcBR={ door:()=>brSpawnDoorNearPlayer(), enter:()=>brEnter(), exit:()=>brExit(), key:()=>brGiveKey(),
-  tp:(dx=0,dz=0)=>{ if(!BR.inside)brEnter(); player.pos.set(BR_ENTRY.x+dx,BR_FLOOR+1.2,BR_ENTRY.z+dz); if(typeof streamChunks==='function')for(let i=0;i<6;i++)streamChunks(160,160); },
+  tp:(dx=0,dz=0)=>{ if(!BR.inside)brEnter(); player.pos.set(BR_ENTRY.x+dx,brEntryFloorY()+1.2,BR_ENTRY.z+dz); if(typeof streamChunks==='function')for(let i=0;i<6;i++)streamChunks(160,160); },
   gotoKey:()=>{ if(!BR.inside)brEnter(); player.pos.set(BR_KEY.x-14,BR_FLOOR+1.2,BR_KEY.z); if(typeof streamChunks==='function')for(let i=0;i<6;i++)streamChunks(160,160); },
   pale:(dist)=>{ if(!BR.inside)brEnter(); brSpawnPale(); const A=player.yaw, D=dist||6; BR.pale.x=player.pos.x-Math.sin(A)*D; BR.pale.z=player.pos.z-Math.cos(A)*D; return BR.pale&&BR.pale.state; },
   anim:(a)=>{ if(!BR.inside)brEnter(); if(!BR.pale||!BR.pale.mesh)brSpawnPale(); const p=BR.pale; const yaw=player.yaw, D=5.5;   // place it right in front, facing the camera
