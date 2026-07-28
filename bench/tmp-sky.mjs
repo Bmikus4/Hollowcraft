@@ -134,6 +134,36 @@ async function rowEdge(page){
     const [b1]=await bands(page,[[0.05,0.45]]);
     T('the VISUALS knobs reach the sky', Math.abs(b0-b1)>0.002, {starsAndCloudOn:b0, off:b1});
     await page.evaluate(`__hc.vis({stars:1,cloud:1})`); await sleep(400);
+    // ---- THE TREELINE (Ben 07-28: "a black seam at the bottom of the horizon pines, like a dark undertree forest") ----
+    // Turn INLAND, where the pine silhouette layer stands past the fog wall, and read the luminance profile across the rows
+    // the treeline occupies. A seam at the base means the darkest row sits in the LOWER part of that band, not the middle.
+    await page.evaluate(`__hc.time(0.3*${DAY_LEN})`); await sleep(900);
+    await page.evaluate(`(()=>{ const p=__hc.pos(), c=(typeof islandStats==='function')?islandStats():null;
+      const tx=c?c.x:p.x+400, tz=c?c.z:p.z; __hc.look(tx,p.y,tz); })()`).catch(async()=>{
+      await page.evaluate(`(()=>{ const p=__hc.pos(); __hc.look(p.x+400,p.y,p.z); })()`); });
+    await sleep(900);
+    await page.screenshot({path:path.join(OUT,'treeline.png')});
+    const prof = await page.evaluate(async ()=>{
+      const c=document.querySelector('canvas'); return null; }).catch(()=>null);
+    const rowsProf = await (async()=>{
+      const png=(await page.screenshot({type:'png'})).toString('base64');
+      return await page.evaluate(async (png)=>{
+        const img=new Image(); img.src='data:image/png;base64,'+png; await img.decode();
+        const cv=document.createElement('canvas'); cv.width=img.width; cv.height=img.height;
+        const g=cv.getContext('2d'); g.drawImage(img,0,0);
+        const y0=Math.round(img.height*0.42), y1=Math.round(img.height*0.56);
+        const d=g.getImageData(0,y0,img.width,y1-y0).data, W=img.width, out=[];
+        for(let r=0;r<(y1-y0);r++){ let s=0; for(let x=0;x<W;x++){ const i=(r*W+x)*4; s+=d[i]*0.2126+d[i+1]*0.7152+d[i+2]*0.0722; }
+          out.push(+(s/W/255).toFixed(4)); }
+        return out;
+      }, png);
+    })();
+    // Reported, not asserted. Locating the treeline's exact rows from a screenshot needs the band to be framed reliably, and
+    // whichever way the camera happens to be pointing decides that — so this prints the profile and leaves the shot at
+    // bench/results/treeline.png for Ben's eye. An assertion here that I cannot aim reliably would only pass by luck.
+    { const lo=Math.min(...rowsProf), hi=Math.max(...rowsProf);
+      console.log('treeline row profile (top→bottom of the band), range '+lo+'..'+hi+':', JSON.stringify(rowsProf)); }
+
     const fps=[]; for(let i=0;i<4;i++){ await sleep(700); fps.push((await page.evaluate(`__hc.st()`)).fps); }
     console.log('fps with the new sky:', JSON.stringify(fps));
     T('the new sky has not cost the framerate', Math.max(...fps)>=30, {fps});

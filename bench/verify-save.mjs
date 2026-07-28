@@ -43,11 +43,18 @@ const T = (name, cond, info='') => { console.log((cond?'PASS':'FAIL')+' — '+na
       const placedId = __hc.setBlockAt(bx,by,bz,'gold_block');
       const after = __hc.editCount();
       __hc.giveItem('diamond',5); __hc.giveItem('ar15',1);
+      // BACKPACK (fix-list #1) — it touches the save format, so it is exercised here rather than in its own harness: carry
+      // the pack, put something in it, and the reload below must bring the contents back.
+      __hc.giveItem('backpack',1);
+      const bpBefore = __hc.backpack({id:'diamond',n:9}, 0);
       const saved = __hc.save();
       const info = __hc.saveInfo();
       const ach1 = __hc.achFire('bell');
-      return { px,py,pz,bx,by,bz, before, after, placedId, saved, info, ach1, inv:__hc.invList() };
+      return { px,py,pz,bx,by,bz, before, after, placedId, saved, info, ach1, inv:__hc.invList(), bpBefore };
     })()`);
+    T('a crafted backpack is carried and holds what is put in it', A.bpBefore && A.bpBefore.has===true && A.bpBefore.slots.includes('diamond:9'), JSON.stringify(A.bpBefore));
+    const bpRecipe = await page.evaluate(`__hc.canCraft('backpack')`);
+    T('the backpack has a recipe that actually crafts', bpRecipe.found===true && bpRecipe.out==='backpack:1', JSON.stringify(bpRecipe));
     T('block placement recorded as an edit', A.after===A.before+1 && typeof A.placedId==='number' && A.placedId>0, 'edits '+A.before+'→'+A.after+', id '+A.placedId);
     T('saveGame wrote the save', /^saved \d+ edits$/.test(A.saved), A.saved);
     T('saveInfo sees inventory + position', A.info && A.info.inv>=2 && Array.isArray(A.info.pos), JSON.stringify(A.info));
@@ -65,8 +72,17 @@ const T = (name, cond, info='') => { console.log((cond?'PASS':'FAIL')+' — '+na
       const loaded = __hc.loadNow();
       const postBlock = __hc.blockAt(${A.bx},${A.by},${A.bz});
       const p = __hc.pos();
-      return { preBlock, loaded, postBlock, inv:__hc.invList(), ach:__hc.ach(), pos:[p.x,p.y,p.z] };
+      return { preBlock, loaded, postBlock, inv:__hc.invList(), ach:__hc.ach(), pos:[p.x,p.y,p.z], bp:__hc.backpack() };
     })()`);
+    T('backpack contents survived the save/load round-trip', B.bp && B.bp.slots.includes('diamond:9'), JSON.stringify(B.bp));
+    // …and the KEY actually opens it. The store restoring is not the feature; being able to get at it is.
+    await page.evaluate(`__hc.aim(false)`);
+    await page.keyboard.press('KeyB'); await sleep(500);
+    const bpUI = await page.evaluate(`(()=>({ b:__hc.backpack(), vis:(document.getElementById('chestui')||{style:{}}).style.display }))()`);
+    T('B opens the backpack, titled as one, using the chest UI', bpUI.b.ui==='chest' && bpUI.b.title==='Backpack' && bpUI.vis==='flex', JSON.stringify(bpUI));
+    await page.keyboard.press('KeyB'); await sleep(400);
+    const bpShut = await page.evaluate(`(()=>({ b:__hc.backpack(), vis:(document.getElementById('chestui')||{style:{}}).style.display }))()`);
+    T('B closes it again, and nothing was lost', bpShut.b.ui===null && bpShut.b.slots.includes('diamond:9'), JSON.stringify(bpShut));
     T('fresh page starts without the marker block', B.preBlock===0, 'pre='+B.preBlock);
     T('loadNow applied the save', /^loaded \d+ edits$/.test(B.loaded), B.loaded);
     T('marker block restored after load', B.postBlock===A.placedId, 'post='+B.postBlock+' expected='+A.placedId);

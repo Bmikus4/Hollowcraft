@@ -1773,19 +1773,30 @@ const pineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, sid
   '  float sink=(1.0-smoothstep(0.05,0.5,hs))*0.06; base-=sink; top-=sink; bottom-=sink;',        // the taper SINKS below the horizon line as it ends — the last trees slip under the water/ground edge, so the run never ends with a floating gap (Ben 07-20: whatever is down there cannot be seen)
   '  if(elev>top || elev<bottom) discard;',                                                      // jagged silhouette band; green skirt extends below the terrain join (terrain in front occludes it)
   '  float t=clamp(((elev-bottom)/max(top-bottom,1e-4))-0.03,0.0,1.0);',                         // 0 at the fog-bound base → 1 at the tips; the -0.03 lifts the fade-off boundary 3% higher up the silhouette (Ben 07-20)
+  '  float under=(1.0-smoothstep(0.0,0.11,t))*smoothstep(0.05,0.35,hs);',                        // THE UNDERTREE SEAM (Ben 07-28): the bottom of the silhouette is the forest FLOOR under the canopy, the darkest thing on the horizon. Gated on hs so the taper past the shore still drowns in haze instead of ending on a dark line. It tints the pine COLOUR only — an earlier version also suppressed the fog wash here so the seam could not be washed out, and that read as the fog disappearing from the skybox pines altogether (Ben 07-28). The haze stays; the seam lives under it.
   '  float col=nz(az*130.0);',                                                                    // per-tree column id → each tree its own brightness (depth between trees)
   '  float shade=0.58+col*0.30+nz(az*540.0)*0.12;',                                              // per-tree brightness + fine needle/bark grain
   '  vec3 pine=uPine*shade*(0.66+0.46*t);',                                                       // darker shaded base → brighter tips = depth up each tree
   '  pine+=uPine*0.55*smoothstep(0.72,1.0,t)*col;',                                              // sunlit catch-light on the upper crowns of some trees
+  '  pine*=mix(1.0,0.28,under);',                                                              // …and a BLACK SEAM along the base: the band of shadow under the trees, which is what makes a treeline read as a forest with depth rather than a cut-out ridge
   '  float fog=clamp(uFogAmt*(1.0-0.18*t),0.0,1.0);',                                            // fade the whole silhouette into the fog the terrain fades to (density-driven → matches weather/day)
-  '  fog=max(fog, 1.0-smoothstep(0.0,0.22,hs));',                                                // …and past the shore the taper drowns COMPLETELY in fog — but only at the very end, so the concave ease-out (the treeline landing tangent to the ground, curving gently up) stays VISIBLE before the haze takes it (Ben 07-20)
+  '  fog=max(fog, 1.0-smoothstep(0.0,0.22,hs));',                                              // …and past the shore the taper drowns COMPLETELY in fog — but only at the very end, so the concave ease-out (the treeline landing tangent to the ground, curving gently up) stays VISIBLE before the haze takes it (Ben 07-20)
   '  gl_FragColor=vec4(mix(pine,uFogCol,fog), smoothstep(0.2,0.45,m)*clamp(1.0-uWx*1.25,0.0,1.0)); }'].join('\n') });   // SOLID silhouette with a quick edge fade; WEATHER FOG fades the whole layer OUT (Ben 07-20: at night the color-wash was invisible — near-black washing to near-black — so the pines punched dark holes through the fog bank; in fog the shell owns the horizon)
 const pineLayer=new THREE.Mesh(_horizGeo, pineMat); pineLayer.frustumCulled=false; pineLayer.renderOrder=-5; scene.add(pineLayer);   // over the ocean seam
 let _pineLastX=1e9, _pineLastZ=1e9, _pineLastRD=0;
 function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.position.copy(camera.position); const day=globalU.uDay.value;
   { const fc=scene.fog.color;   // PERFECT MATCH BY CONSTRUCTION (Ben 07-20): the backdrop ring's deep colour = exactly what the REAL water fogs to at its far edge (same formula as waterMat's fog target) — the seam cannot mismatch in any weather/time
-    _uWater.value.setRGB(fc.r*0.5, fc.g*0.5+0.012, fc.b*0.5+0.028);
+    const _bx=fc.r*0.5, _by=fc.g*0.5+0.012, _bz=fc.b*0.5+0.028;   // waterMat's OWN fog target, before the deep-water knob scales it
+    _uWater.value.setRGB(_bx,_by,_bz);
     _uWater.value.lerp(_deepSea, Math.min(1, 0.42+0.5*day));   // the deep water below the horizon reads as a resonant DEEP BLUE — strongly by DAY (~0.92) but also clearly at NIGHT (~0.42) so the dark under-horizon band is a vivid deep blue at all hours (Ben 07-21); the seam still anchors on uHorizonBlend, only the depths darken to blue
+    // THE RING COMES DOWN TO THE WATER (Ben 07-28). The claim above was only half true: the ring used the same FORMULA as the
+    // water's fog target but not the same VALUE, because the water surface then scales that target by the deep-water knob
+    // (0.2) and the ring never did. So the two sides of the horizon were a factor of five apart — the residual step measured
+    // at the night horizon. Matched by VALUE while keeping the ring's deep-blue HUE: scale the ring's luminance to exactly
+    // what the surface fogs to. Only ever DOWN — if the ring is already darker than the water, leave it alone.
+    { const want=(_bx*0.2126+_by*0.7152+_bz*0.0722)*_uWaterDeep.value;
+      const have=_uWater.value.r*0.2126+_uWater.value.g*0.7152+_uWater.value.b*0.0722;
+      if(have>1e-5) _uWater.value.multiplyScalar(Math.min(1, want/have)); }
     { const cd=_horizCamDir; camera.getWorldDirection(cd); oceanMat.uniforms.uCamYaw.value=Math.atan2(cd.z,cd.x); }   // view azimuth for the horizon bow
     // THE ANCHOR IS THE SEA. Nothing else. This value's entire job is to be what the sky converges to where it meets the
     // water, so anything else in it is a stripe: it used to be the sea pulled 25% toward an UNDARKENED bright sky tone and
@@ -3066,7 +3077,12 @@ function updateSky(dt){
   _vfogAmt.value=Math.min(1,wf*1.4);                                                // held-item fog follows WEATHER FOG only (Ben 07-20): crisp viewmodel in clear air
   if(wf>0.01){ fc.lerp(_fogGrey.setRGB(0.34+0.2*day, 0.36+0.2*day, 0.40+0.2*day), Math.min(0.88,wf*0.95)); }
   if(scene.background&&scene.background.isColor)scene.background.copy(fc);   // guard: a skybox CubeTexture background isn't a Color — don't call .copy on it
-  scene.fog.density=lerp(1.10,0.85,day)/(CFG.RENDER_DIST*CK) * (1+wf*wf*18) * CFG.fogMul;   // CFG.fogMul = the Settings > VISUALS Fog dial (1.0 = shipped). HALVED (Ben 07-27, fix-list #7): was lerp(2.2,1.7) — the bank sat so close it greyed out anything past a few chunks. cullChunks still turns the fog wall into a draw-distance CUT.
+  // DAY 3x FARTHER, NIGHT CLOSER (Ben 07-28). Density is inverse to reach, so the day end is divided by three (0.85 -> 0.283)
+  // and the night end pushed up (1.10 -> 1.70, the bank about a third nearer). The day/night SPLIT is now wide: clear air to
+  // the render wall while the sun is up, and after dusk the black bank closes in around you. The treeline haze and the
+  // fog-wall chunk cull both derive from this value, so they follow on their own — and the night cull tightens from 12
+  // chunks to 8, which pays for itself. History: lerp(2.2,1.7) originally, halved to lerp(1.10,0.85) for fix-list #7.
+  scene.fog.density=lerp(1.70,0.283,day)/(CFG.RENDER_DIST*CK) * (1+wf*wf*18) * CFG.fogMul;   // CFG.fogMul = the Settings > VISUALS Fog dial (1.0 = shipped)
   waterMat.uniforms.uFogDensity.value=scene.fog.density;
   // hide the SKY behind the fog (and fade it back gradually as the bank clears)
   fogShell.position.copy(camera.position); fogShell.material.color.copy(fc);
@@ -3134,6 +3150,7 @@ defItem('flint',{name:'Flint',icon:{t:'shard',c:'#3b3b46'}});
 defItem('snail_shell',{name:'Snail Shell',icon:{t:'blob',c:'#b0a084'}});   // dropped by killed snails → knaps into flint in the crafting window
 defItem('string',{name:'String',icon:{t:'coil',c:'#d8d2c0'}});
 defItem('leather',{name:'Leather',icon:{t:'blob',c:'#8a5a34'}});
+defItem('backpack',{name:'Backpack',max:1,icon:{t:'basket',c:'#6b4526'}});   // fix-list #1: carry it and press B — 27 slots that travel with you (see openBackpack)
 defItem('leather_helmet',   {name:'Leather Cap',   max:1, icon:{t:'helm',c:'#7a4a24'}, armor:{slot:0,def:1,dur:80, col:0x7a4a24}});
 defItem('leather_chestplate',{name:'Leather Tunic',max:1, icon:{t:'chest',c:'#8a542a'}, armor:{slot:1,def:3,dur:110, col:0x7a4a24}});
 defItem('leather_leggings', {name:'Leather Pants', max:1, icon:{t:'legs',c:'#6f4322'}, armor:{slot:2,def:2,dur:100, col:0x7a4a24}});
@@ -3521,6 +3538,7 @@ shapeless('stick',4,['planks','planks']);
 shaped('table',1,['PP','PP'],{P:'planks'});
 shaped('torch',4,['C','S'],{C:'coal',S:'stick'});
 shaped('chest',1,['PPP','P P','PPP'],{P:'planks'});
+shaped('backpack',1,['L L','LSL','LLL'],{L:'leather',S:'string'});   // six hides and a drawstring — the same shape as the chest, softened
 shaped('barrel',1,['PSP','P P','PSP'],{P:'planks',S:'planks'});
 shaped('bookshelf',1,['PPP','SSS','PPP'],{P:'planks',S:'planks'});
 shaped('bed',1,['WWW','PPP'],{W:'wool',P:'planks'});
@@ -3673,7 +3691,7 @@ function saveGame(){
     player:{ x:player.pos.x, y:player.pos.y, z:player.pos.z, yaw:player.yaw, pitch:player.pitch,
       health:player.health, hunger:player.hunger, water:player.water, sat:player.sat,
       creative:player.creative, blessT:player.blessT||0, sick:player.sick||0 },
-    selSlot, inv, armor, edits, chests, localChests:[...localChests], furnaces, campfires,
+    selSlot, inv, armor, backpackStore, edits, chests, localChests:[...localChests], furnaces, campfires,
     drops: drops.filter(d=>d&&!d.dead).slice(0,150).map(d=>({id:d.id,n:d.n,x:+d.x.toFixed(2),y:+d.y.toFixed(2),z:+d.z.toFixed(2)})),
     horror:{ nightsSurvived:HORROR.nightsSurvived, tier:HORROR.tier, menace:HORROR.menace } };
   try{ localStorage.setItem(SAVE_KEY, JSON.stringify(s)); }
@@ -3700,6 +3718,10 @@ function applySave(s){
   player.creative=!!P.creative; window._allowCreative=!!P.creative;   // the save's mode wins on resume — survival worlds stay survival
   for(let i=0;i<INV_N;i++) inv[i]=(s.inv&&s.inv[i])||null;
   for(let i=0;i<4;i++) armor[i]=(s.armor&&s.armor[i])||null;
+  // BACKPACK CONTENTS. Rebuilt into a fresh 27-slot array rather than assigned, so a save written before the backpack
+  // existed (no field), or one with a short or over-long array, still loads into a well-formed store.
+  if(s.backpackStore){ backpackStore=new Array(27).fill(null); for(let i=0;i<27;i++) backpackStore[i]=s.backpackStore[i]||null; }
+  else backpackStore=null;
   selSlot=Math.min(8,Math.max(0,s.selSlot|0)); refreshHotbar();
   (s.drops||[]).forEach(d=>{ try{ spawnDrop(d.id,d.n,d.x,d.y,d.z); }catch(e){} });
   _resumeHold=true; return true; }
@@ -4064,10 +4086,11 @@ addEventListener('keydown',e=>{ if(e.code==='Space')e.preventDefault();
   if(e.code==='F4'){ e.preventDefault(); _tpsOn=!_tpsOn; _tpsPos.set(0,0,0); flashName(_tpsOn?'third person':'first person'); return; }   // rough tracking third-person (Ben 07-27)
   if(e.code==='F8'){ dbg.style.display=dbg.style.display==='none'?'block':'none'; updateDbg&&updateDbg(); return; }
   if(e.code==='KeyC' && (!openUI||openUI==='creative') && !player.grabbed){ if(!window._allowCreative){ flashName('creative is locked in survival'); return; } toggleCreative(); return; }   // creative all-items menu (open from play, close from the menu) — SURVIVAL locks it; NOTHING opens while it has you
-  if(openUI && (e.code==='Escape'||e.code==='KeyE')){ if(openUI==='creative')toggleCreative(); else closeUI(); return; }
+  if(openUI && (e.code==='Escape'||e.code==='KeyE'||e.code==='KeyB')){ if(openUI==='creative')toggleCreative(); else closeUI(); return; }   // B closes the backpack the same way it opened it
   if(!locked)return; keys[e.code]=true;
   if(e.code==='Space' && !e.repeat && (player.grabbed||player.tied||player.bound)) wretch._mash=(wretch._mash||0)+1;   // struggle: count only REAL taps (ignore OS key-repeat) so holding Space can't cheese it — grabs, ropes, AND heaven's chains
   if(e.code==='KeyE'){ if(!player.grabbed)openInventory(2); return; }   // no menus while it has you — mash Space, that's all there is
+  if(e.code==='KeyB'){ openBackpack(); return; }                        // fix-list #1: your own 27 slots, if you are carrying the pack
   if(e.code.startsWith('Digit')){ const n=+e.code.slice(5); if(n>=1&&n<=9){ selSlot=n-1; refreshHotbar(); const s=inv[selSlot]; flashName(s?ITEMS[s.id].name:'');} }
   if(e.code==='KeyF'){ if(!window._allowCreative){ flashName('flight is locked in survival'); return; } player.fly=!player.fly; player.vel.y=0; flashName(player.fly?'fly':'walk'); }   // SURVIVAL: no flight
   if(e.code==='KeyG'){ if(!window._allowCreative){ flashName('creative is locked in survival'); return; }   // G CYCLES gamemodes: survival → creative → cinematic → survival (Ben 07-21)
@@ -7590,9 +7613,24 @@ function openChest(x,y,z){ if(!uiBuilt)buildContainers(); curChestKey=x+','+y+',
   $('ctitle').textContent = B[getBlock(x,y,z)]&&B[getBlock(x,y,z)].name==='barrel'?'Barrel':'Chest'; openUI='chest'; chestuiEl.style.display='flex'; chestLidOpen(x,y,z); renderInvUI(); document.exitPointerLock&&document.exitPointerLock(); }
 function closeUI(){ for(let i=0;i<9;i++){ if(craftGrid[i]){ invAdd(craftGrid[i].id,craftGrid[i].n); craftGrid[i]=null; } }
   if(cursor){ invAdd(cursor.id,cursor.n); cursor=null; renderCursor(); }
-  invuiEl.style.display='none'; chestuiEl.style.display='none'; if(openUI==='chest') chestLidClose();
+  invuiEl.style.display='none'; chestuiEl.style.display='none'; if(openUI==='chest' && curChestKey) chestLidClose();   // curChestKey: the BACKPACK borrows this UI and has no block in the world, so there is no lid to shut
   if(openUI==='chest' && NET.on && curChestKey && curChest && !localChests.has(curChestKey)) netSend({t:'chest',k:curChestKey,c:curChest});   // co-op: share PLAYER-PLACED chests only — loot chests stay local (both players loot their own)
   openUI=null; curChest=null; curChestKey=null; refreshHotbar(); requestLock(); }
+// ---- THE BACKPACK (fix-list #1) ----
+// 27 slots you carry. It reuses the chest UI wholesale — the same grid, the same drag/stack/shift-click code, the same
+// renderInvUI path — because that is already the container UI and a second one would be a second set of bugs. The only
+// differences from a placed chest are that it has no world key (so no lid animation and no co-op broadcast: it is yours and
+// it travels with you) and that it lives in the save under its own field.
+let backpackStore=null;
+function hasBackpack(){ for(let i=0;i<INV_N;i++) if(inv[i]&&inv[i].id==='backpack') return true;
+  for(let i=0;i<4;i++) if(armor[i]&&armor[i].id==='backpack') return true; return false; }
+function openBackpack(){ if(player.grabbed||player.dead) return;
+  if(!hasBackpack()){ flashName('you have no backpack'); return; }
+  if(!uiBuilt) buildContainers();
+  if(!backpackStore) backpackStore=new Array(27).fill(null);
+  curChestKey=null; curChest=backpackStore;
+  $('ctitle').textContent='Backpack'; openUI='chest'; chestuiEl.style.display='flex';
+  renderInvUI(); document.exitPointerLock&&document.exitPointerLock(); }
 // CREATIVE INVENTORY — a scrollable grid of every item in the game (blocks, tools, food, spears, spawn eggs). Click → a full stack.
 let creativeEl=null;
 function buildCreativeUI(){ creativeEl=document.createElement('div'); creativeEl.id='creative';
@@ -14982,6 +15020,26 @@ window.__hc={
   // QA/bench: put the QA light AT a world point. qa() only sets its intensity — it is positioned by frame(), so any harness
   // shooting something that is not the Wretch was lighting the world origin and photographing a black room.
   // QA/bench + the VISUALS panel's own values, readable and settable: {skydark, waterdeep, cloud, stars, fogmul}
+  // QA/bench: the fog, as REACH rather than density. `coef` is the day/night coefficient before the view-distance divide, so a
+  // harness can check the day/night split without hardcoding the constant; `reach` is the distance at which FogExp2 hits ~99%.
+  fogInfo(){ const d=scene.fog.density, c=scene.fog.color;
+    return { density:d, coef:d*(CFG.RENDER_DIST*CK)/Math.max(1e-6,CFG.fogMul), reach: d>0? 2.146/d : Infinity,
+             day:+globalU.uDay.value.toFixed(3), fogMul:CFG.fogMul,
+             color:[+c.r.toFixed(3),+c.g.toFixed(3),+c.b.toFixed(3)], colorLum:c.r*0.2126+c.g*0.7152+c.b*0.0722 }; },
+  // QA/bench: is there a REACHABLE recipe for this item? Finds it, lays it into the real 3x3 grid, runs the real matcher and
+  // reports what comes out, then clears the grid. Granting an item with giveItem proves nothing about craftability.
+  canCraft(id){ const R=RECIPES.find(r=>r.out===id); if(!R) return {found:false};
+    const g=new Array(9).fill(null);
+    if(R.shaped){ for(let y=0;y<R.h;y++) for(let x=0;x<R.w;x++){ const ch=R.pat[y][x]; if(ch===' ')continue; g[y*3+x]={id:R.key[ch],n:1}; } }
+    else R.ing.forEach((it,i)=>{ g[i]={id:it,n:1}; });
+    for(let i=0;i<9;i++) craftGrid[i]=g[i];
+    let out=null; try{ out=craftMatch(craftGrid,3); }catch(e){ out={err:String(e&&e.message||e)}; }
+    for(let i=0;i<9;i++) craftGrid[i]=null;
+    return { found:true, shaped:!!R.shaped, pat:R.pat||R.ing, out:out?(out.id+':'+out.n):null }; },
+  // QA/bench: the backpack. `put` writes {id,n} into a slot so a save/load round-trip has something to prove.
+  backpack(put,slot){ if(put){ if(!backpackStore) backpackStore=new Array(27).fill(null); backpackStore[slot|0]={id:put.id,n:put.n|0}; }
+    return { has:hasBackpack(), made:!!backpackStore, ui:openUI, title:(document.getElementById('ctitle')||{}).textContent||'',
+             slots:(backpackStore||[]).map(s=>s?s.id+':'+s.n:null).filter(Boolean) }; },
   vis(o){ if(o){ if(o.skydark!=null)_uSkyDark.value=o.skydark; if(o.waterdeep!=null)_uWaterDeep.value=o.waterdeep;
       if(o.cloud!=null)_uCloud.value=o.cloud; if(o.stars!=null)_uStars.value=o.stars; if(o.fogmul!=null)CFG.fogMul=o.fogmul; }
     return { skydark:_uSkyDark.value, waterdeep:_uWaterDeep.value, cloud:_uCloud.value, stars:_uStars.value, fogmul:CFG.fogMul }; },
