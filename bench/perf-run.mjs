@@ -27,6 +27,9 @@ const QUICK  = has('quick');
 const RUNS   = +arg('runs', QUICK?2:5);          // reported runs (the warm-up run is extra and discarded)
 const WIDTH  = +arg('width', 1920), HEIGHT = +arg('height', 1080);
 const DURSCALE = QUICK ? 0.25 : 1;
+// The Backrooms maze seed is normally Math.random() per door, so two runs never measure the same geometry.
+// Pinning it is the only way an A/B comparison of the Backrooms means anything.
+const BRSEED = +arg('brseed', 20260728);
 const ONLY   = arg('scenes','') ? arg('scenes','').split(',') : null;
 
 // scene → what the world has to be in before it can run
@@ -74,7 +77,7 @@ function findBrowser(){
 
     // ---- B7 LOAD: cold page load → first interactive frame ----------------------------------------
     const tNav = Date.now();
-    await page.goto(base+'/'+FILE+'?perf=1&debug=1&t=210',{waitUntil:'load',timeout:120000});
+    await page.goto(base+'/'+FILE+'?perf=1&debug=1&t=210&brseed='+BRSEED,{waitUntil:'load',timeout:120000});
     const tLoadEvent = Date.now()-tNav;
     await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
     const tStarted = Date.now()-tNav;
@@ -133,7 +136,7 @@ function findBrowser(){
         summary: summarise(kept) };
     }
 
-    const out = { label:LABEL, file:FILE, stamp, viewport:[WIDTH,HEIGHT], runs:RUNS, quick:QUICK,
+    const out = { label:LABEL, file:FILE, stamp, viewport:[WIDTH,HEIGHT], runs:RUNS, quick:QUICK, brseed:BRSEED,
                   ref, B7, pageErrors, results };
     const jf = path.join(OUT, `perf-${LABEL}-${stamp}.json`);
     fs.writeFileSync(jf, JSON.stringify(out,null,2));
