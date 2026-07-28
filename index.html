@@ -11294,7 +11294,10 @@ function brxCollide(p){ const W=BR.walls; if(!W||!W.length)return; const RAD=0.4
 //   then paint it onto the Void Door quad → you SEE the Backrooms room through the door before you step in. ----
 let _brPortalRT=null, _brPortalCam=null, _brPortalMat=null;
 const _bv0=new THREE.Vector3(), _bv1=new THREE.Vector3(), _bv3=new THREE.Vector3(), _bq=new THREE.Quaternion(), _bcp=new THREE.Vector4(), _bq4=new THREE.Vector4(), _bPlane=new THREE.Plane(), _bSize=new THREE.Vector2();
+const BR_PORTAL_DIST=30;                                                    // past this the quad is a few pixels wide and a stale RT is indistinguishable
+function brPortalWanted(dist){ return dist < BR_PORTAL_DIST; }              // ONE definition, so the tick and the test cannot drift
 function brRenderPortal(){ if(typeof renderer==='undefined'||!renderer||!BR.door||typeof camera==='undefined')return;
+  BR._portalFrames=(BR._portalFrames|0)+1;                                   // QA: proves the gate below did not switch the portal off for good
   if(!BR.rooms||!BR.rooms.length){ brxGenerate(); brBuildEnvAll(); }
   renderer.getDrawingBufferSize(_bSize); const rw=Math.max(2,_bSize.x|0), rh=Math.max(2,_bSize.y|0);
   if(!_brPortalRT){ _brPortalRT=new THREE.WebGLRenderTarget(rw,rh,{depthBuffer:true}); _brPortalCam=new THREE.PerspectiveCamera(); }
@@ -11685,7 +11688,16 @@ function brUpdatePale(dt){ const p=BR.pale||(BR.pale={state:'dormant',cd:45+Math
 // ---- MAIN TICK ----
 function updateBackrooms(dt){
   if(BR.door&&!BR.inside){ BR.door.t+=dt; const d=BR.door;
-    brRenderPortal();   // see-through portal EVERY frame (60fps) → the parallax stays in sync with the camera (no stale-RT edge tearing)
+    // THE PORTAL IS A SECOND FULL SCENE RENDER. It draws the whole Backrooms environment (1681 meshes) into a
+    // drawing-buffer-sized render target, and it used to do that EVERY frame for as long as the door existed anywhere in the
+    // world — with no distance test and no facing test. That is Ben's "massive lag when spawning the backrooms portal": the
+    // cost landed the moment the door appeared, whether or not you were anywhere near it or even looking at it.
+    // Parallax only has to stay in sync while the door is actually on screen, so gate on that and nothing is lost.
+    // DISTANCE ONLY. A facing test looks tempting and buys a little more, but it needs the live view direction, and this
+    // file's player.yaw is not it (it reads back null through the debug hooks) — a gate built on it skipped the portal at
+    // seemingly random times. Distance needs nothing but the door position, is trivially verifiable, and already removes the
+    // cost for all the time the door is sitting somewhere else in the world.
+    if(brPortalWanted(Math.hypot(d.x-player.pos.x, d.z-player.pos.z))) brRenderPortal();
     if(Math.hypot(player.pos.x-d.x,player.pos.z-d.z)<1.1&&Math.abs(player.pos.y-d.y)<2.2)brEnter(); }
   if(!BR.inside)return;
   if(player.dead){ brForceLeaveOnDeath(); return; }                                                                      // any death inside → clean out of the dimension (permadeath: key lost, halls sealed)
@@ -11729,6 +11741,14 @@ if(typeof window!=='undefined'){ window.__hcBRX={          // the chunk substrat
   crossings:(gx,gz)=>{ const rec=brxChunkGen(gx,gz); return { tunnels:rec.tunnels.length, stairs:rec.stairs.length, lintels:rec.lintels.length }; },
   levels:(on)=>{ BR.levels=!!on; brEnvCacheClear();                        // dy and the stair flights differ per storey, so every cached group is stale
     if(BR.inside){ try{ brBuildEnvAll(); }catch(e){ return {err:e.message}; } } return { levels:!!BR.levels, ramps:(BR.ramps||[]).length }; },
+  // QA: is the see-through portal still rendering when it should be? Counts brRenderPortal calls, and can place the player
+  // near the door either facing it or with their back to it.
+  portalGate:(dist)=>brPortalWanted(dist),                                  // QA: the decision itself. The per-frame COST is not measurable headless — updateBackrooms only ticks under pointer lock.
+  portalProbe:(where)=>{ const d=BR.door; if(!d) return null;
+    if(where==='facing'){ player.pos.set(d.x-Math.sin(d.yaw)*7, d.y, d.z-Math.cos(d.yaw)*7); player.yaw=Math.atan2(-(d.x-player.pos.x),-(d.z-player.pos.z)); player.pitch=0; if(typeof camera!=='undefined'&&camera){ camera.position.copy(player.pos); camera.rotation.set(0,player.yaw,0); camera.updateMatrixWorld(true); } }
+    else if(where==='behind'){ player.pos.set(d.x-Math.sin(d.yaw)*7, d.y, d.z-Math.cos(d.yaw)*7); player.yaw=Math.atan2(-(d.x-player.pos.x),-(d.z-player.pos.z))+Math.PI; player.pitch=0; if(typeof camera!=='undefined'&&camera){ camera.position.copy(player.pos); camera.rotation.set(0,player.yaw,0); camera.updateMatrixWorld(true); } }
+    else if(where==='far'){ player.pos.set(d.x+90, d.y, d.z+90); }
+    return { frames:BR._portalFrames|0, inside:!!BR.inside, hasDoor:!!BR.door, x:+player.pos.x.toFixed(1), z:+player.pos.z.toFixed(1) }; },
   // QA: coincident duplicate wall segments across the whole loaded set. This is the direct test for Ben's "walls are
   // overlapping often" — two wall planes on the identical world line, which is what both chunks emitting a shared
   // boundary produced. Direction-normalised, so A->B and B->A count as the same segment.
