@@ -821,6 +821,73 @@ window.__hcPERF = {
   },
   // Force a full rebuild of the loaded Backrooms geometry — the only way to A/B a flag that only takes effect
   // at build time. Clears the per-chunk cache so nothing is re-parented from before the flag changed.
+  // -------------------------------------------------------------------
+  //  V3 · ORDER-INDEPENDENCE. A chunk must be a pure function of (gx, gz, seed): generated in any order, on any
+  //  thread, in isolation or in a crowd, it must come out identical. tmp-brx-edges.mjs already proves this for
+  //  the shared-edge oracle; this proves it for the whole chunk RECORD the oracle feeds.
+  //  Hash is order-sensitive within a chunk (field order is fixed) but independent of generation order.
+  // -------------------------------------------------------------------
+  chunkHash(gx,gz){
+    try{
+      const rec=brxChunkGen(gx,gz);
+      let h=0x811c9dc5;
+      const mix=(v)=>{ h^=v; h=Math.imul(h,0x01000193)>>>0; };
+      const num=(n)=>{ if(n==null){ mix(0x9e37); return; } const q=Math.round(n*4096); mix(q&0xffff); mix((q>>>16)&0xffff); };
+      for(const f of BRX_FIELDS){
+        const a=rec[f]||[]; mix(a.length&0xffff);
+        for(const o of a){
+          if(o==null){ mix(0xdead); continue; }
+          if(typeof o!=='object'){ num(+o); continue; }
+          // fixed key order, so the hash cannot depend on property insertion order
+          const keys=Object.keys(o).filter(k=>k[0]!=='_'&&k!=='mesh'&&k!=='grp'&&k!=='pivot'&&k!=='pivots'&&k!=='seg').sort();
+          for(const k of keys){ const v=o[k];
+            if(typeof v==='number') num(v);
+            else if(typeof v==='boolean') mix(v?1:2);
+            else if(typeof v==='string'){ for(let i=0;i<v.length;i++) mix(v.charCodeAt(i)); }
+          }
+        }
+      }
+      return h>>>0;
+    }catch(e){ return 'ERR:'+String(e&&e.message||e); }
+  },
+  // wipe the data cache so the next chunkHash really regenerates instead of reading back what it stored
+  dropChunkCache(){ try{ const n=BR.gen?BR.gen.size:0; if(BR.gen) BR.gen.clear(); return n; }catch(e){ return String(e); } },
+  // -------------------------------------------------------------------
+  //  V4 · SEAMS. Every voxel column is decided by brSlabColumn, which is a pure function of (wx, wz). A seam
+  //  would mean the column on one side of a chunk boundary disagrees with the same column asked for while the
+  //  OTHER chunk is the loaded one. Sample real boundary columns and compare the full block stack, not a
+  //  summary — a mismatch anywhere in the stack is a hole or a floating slab.
+  // -------------------------------------------------------------------
+  columnStack(wx,wz){
+    try{
+      if(!this._colBuf) this._colBuf=new Uint8Array(CA);
+      const bl=this._colBuf; bl.fill(0);
+      const htop=brSlabColumn(bl, 0, 0, wx, wz, false);
+      let h=0x811c9dc5, solid=0;
+      for(let y=0;y<WH;y++){ const b=bl[idx(0,y,0)]; if(b)solid++; h^=b; h=Math.imul(h,0x01000193)>>>0; }
+      return { htop, solid, hash:h>>>0 };
+    }catch(e){ return {err:String(e&&e.message||e)}; }
+  },
+  // The stronger seam test: compare the LIVE world voxels against a fresh evaluation of the oracle. Asking
+  // brSlabColumn twice only proves it is pure, which it is by construction. Asking whether the blocks actually
+  // sitting in the loaded chunks still match it is what catches a chunk generated before something changed —
+  // which is what a real seam looks like from the player's side.
+  columnVsWorld(wx,wz){
+    try{
+      if(!this._colBuf) this._colBuf=new Uint8Array(CA);
+      const bl=this._colBuf; bl.fill(0);
+      brSlabColumn(bl, 0, 0, wx, wz, false);
+      const c=getChunk(wx>>4, wz>>4);
+      if(!c || !c.generated) return { skipped:true };
+      const lx=wx&15, lz=wz&15;
+      let diff=0, firstY=-1;
+      for(let y=0;y<WH;y++){
+        const want=bl[idx(0,y,0)], got=c.blocks[idx(lx,y,lz)];
+        if(want!==got){ diff++; if(firstY<0) firstY=y; }
+      }
+      return { diff, firstY };
+    }catch(e){ return {err:String(e&&e.message||e)}; }
+  },
   // P5 gate: how often the portal actually re-renders, and whether motion still forces it every frame.
   portalRate(reset, standAt){ try{
       if(standAt && BR.door){ const d=BR.door; player.pos.set(d.x+standAt, d.y+1.7, d.z); player.vel.set(0,0,0);

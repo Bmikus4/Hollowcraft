@@ -40,10 +40,21 @@ V6 flag matrix verified: booting with `?perfoff=all` reproduces the baseline exa
   **only on p99**, and every one of those p99s is a hitch, not steady-state cost.
 - **C2 (no frame > 12 ms, zero > 16.6 ms).** **B5 and B1o now pass.** Everywhere else it still fails — this
   remains the honest headline: the pass has fixed *throughput*, not *hitching*. B4 still reaches 124.6 ms.
-- **C3 / C4 (no seams, no regression).** Not formally tested — V3/V4 are unwritten. The existing Backrooms
-  harnesses (`tmp-br-visible`, `tmp-v1-doors`, `tmp-br-portal`, `tmp-verify-backrooms`) all pass, and
-  `bench/perf-verify-p2.mjs` proves the door merge is geometrically exact, but that is not the same as a seam
-  test. **This is the biggest gap in the sign-off.**
+- **C3 (no cross-chunk seams, order-independent output). PASS.** `bench/perf-verify-v3v4.mjs`:
+  - a 5×5 BRX region hashes **identically across 20 different generation orders**, and identically again when
+    each chunk is generated alone in a cleared cache;
+  - evicting the whole data cache and regenerating reproduces every chunk exactly;
+  - 2 000 sampled boundary columns give the same voxel stack whichever chunk is resident, none step more than
+    one storey against their neighbour, and none are empty void;
+  - **1 420 resident boundary columns still match the oracle exactly** — the test that would actually catch a
+    visible seam, as opposed to merely re-proving that a pure function is pure.
+
+  The shared-edge oracle was already covered by `tmp-brx-edges.mjs` (agreement from both sides, stair
+  antisymmetry, determinism, connectivity, seed reproducibility) and still passes — 1 250 edges, all agreeing.
+- **C4 (no gameplay or visual regression).** Partly tested. Every existing Backrooms harness passes
+  (`tmp-br-visible`, `tmp-v1-doors`, `tmp-br-portal`, `tmp-verify-backrooms`), and `bench/perf-verify-p2.mjs`
+  proves the door merge is geometrically exact at three swing angles. **Not** covered: QA-helper output parity
+  (V5) and the 30-minute soak (V7).
 - **C5 (still one file, no new deps).** Held. No build step, no CDN, no new runtime dependency.
 - **C6 (numbers-backed).** Every claim here has a JSON artifact under `bench/results/`.
 
@@ -65,8 +76,9 @@ makes the shader enormous. A smaller pool shrinks the shader, the compile and th
    frame. A smaller pool shrinks the compile, the fragment cost and the program size together, and
    `brStableLightCount` keeps the count constant either way. Until this is settled, `brPrecompile` costs +16 s
    of load and `brPrefetch` measures as nothing, because both are swamped by the compiles.
-2. **V3/V4 — determinism and seam tests.** Unwritten, and the largest gap in the sign-off. The BRX edge oracle
-   is order-independent by construction, so this is a matter of asserting it, not building it.
+2. **V5 and V7 — QA-helper parity and the 30-minute soak.** V3/V4 now pass (`bench/perf-verify-v3v4.mjs`);
+   these two are what is left of the sign-off. V7 matters most: heap reaches 231 MB in B4 and nothing has
+   proved it flattens.
 3. **P6 — the overworld streaming slice.** `streamChunks` declares a 1.5–3.5 ms budget and overruns to
    16–25 ms because one unit of work is bigger than the slice. B3o: 235 frames over 12 ms, worst 25.1 ms. This
    is the last untouched C2 failure that is purely a scheduling bug.
