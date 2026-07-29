@@ -2315,7 +2315,16 @@ const skyMat = new THREE.ShaderMaterial({
       // giving them their own accumulator does the same thing without forcing the horizon anchor to happen before it.
       vec3 add = vec3(0.0);
       // ---- BASE GRADIENT: Rayleigh-ish by day, deep blue-black at night ----
-      vec3 zenD=vec3(0.10,0.32,0.71), horD=vec3(0.64,0.76,0.89);
+      // THE DAYTIME HORIZON IS DARK BLUE, NOT PALE HAZE (Ben 07-29, asked "dozens of times").
+      // horD was vec3(0.64,0.76,0.89) — a pale grey-blue Rayleigh haze. Measured on a coast frame at noon it rendered as
+      // rgb(93,114,135) directly above a rgb(43,73,111) waterline: the BRIGHTEST thing in the frame was the band sitting on
+      // the sea. Every previous attempt fixed the ANCHOR (the half-degree where sky meets water) and left this untouched, so
+      // the seam matched perfectly and the pale wash three degrees above it was still there — which is the thing he can see.
+      // So the sky's own horizon is now a DEEP BLUE, DARKER than the zenith. That inverts the real Rayleigh gradient on
+      // purpose: it is the painterly value reversal the sea already uses (it darkens as it recedes), applied to the air above
+      // it, and it is the only way the lowest sky reads as dark at noon. Warmth near the sun still comes back through the
+      // forward-scatter and golden-hour terms below, which are added AFTER this and are unbounded — so a sunset is unaffected.
+      vec3 zenD=vec3(0.10,0.32,0.71), horD=vec3(0.085,0.175,0.355);
       vec3 zenN=vec3(0.005,0.011,0.030), horN=vec3(0.018,0.032,0.066);
       vec3 zen=mix(zenN,zenD,uDay), hor=mix(horN,horD,uDay);
       vec3 col=mix(hor,zen,pow(up,0.55));
@@ -2412,7 +2421,13 @@ const skyMat = new THREE.ShaderMaterial({
       // saturated blue, which is the neon strip. Layer-by-layer bisection put it here — hiding the ocean ring or the pines
       // left it untouched, hiding the sky dome removed it. So the lowest ~3 degrees ease all the way into the sea colour,
       // which is fixed and dark, so there is nothing left to glow at any hour.
-      col=mix(col, uHorizonBlend, 1.0-smoothstep(0.0,0.055,bow));
+      // …and the convergence runs WIDE as well as deep (Ben 07-29). At 0.055 rad the anchor owned about 30 px of a 720 px
+      // frame — the seam was seamless and the pale band began immediately above it. The band is now ~0.20 rad (11°) and
+      // SQUARED, so it is the full anchor colour at the waterline, still ~55% of it two degrees up, and gone by eleven — a
+      // deep navy shelf lying along the sea instead of a hairline join. The +0.02 floor term keeps the last half-degree
+      // pinned at 100% anchor no matter what the wide curve is doing, so the seam itself can never reopen.
+      float hzb = 1.0 - smoothstep(0.0, 0.20, bow);
+      col=mix(col, uHorizonBlend, min(1.0, hzb*hzb*0.98 + (1.0-smoothstep(0.0,0.012,bow))*0.02));
       col += add;
       gl_FragColor = vec4(col,1.0);
     }`
@@ -2492,7 +2507,12 @@ const oceanMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, si
 const oceanLayer=new THREE.Mesh(_horizGeo, oceanMat); oceanLayer.frustumCulled=false; oceanLayer.renderOrder=-6; scene.add(oceanLayer);
 // THE FIXED HORIZON SEA COLOUR (Ben 07-28) — waterMat's own grazing-angle sky reflection at its NIGHT end. Used at every
 // hour on purpose: the horizon band must not brighten with the sun, and the water it meets is this colour, so they match 24/7.
-const _seaHorizon=new THREE.Color(0.03,0.05,0.09);
+// DARKER AGAIN, AND BLUER (Ben 07-29). 0.03,0.05,0.09 came out of the renderer as rgb(43,73,111) — AgX tone mapping has a
+// strong toe that lifts darks, and the grade's uSat 1.3 then saturates what it lifted, so a value chosen as "dark" in linear
+// space arrives on screen as a mid navy. Measured, not guessed: the shipped anchor was ~2.4x brighter on screen than its
+// linear value implies. Taking it to 0.009,0.017,0.045 lands it where 0.03,0.05,0.09 was ever supposed to look, and shifts
+// the ratio further toward blue so the darkness reads as deep ocean rather than as grey.
+const _seaHorizon=new THREE.Color(0.009,0.017,0.045);
 const _deepSea=new THREE.Color(0.008,0.055,0.27), _horizCamDir=new THREE.Vector3();   // the DEEP BLUE below the horizon — a DARKER, deeper deep-ocean navy (Ben 07-21): low R/G, still blue-dominant but lower value so the under-horizon band reads as deep ocean at ALL hours
 // PINE TREELINE — a distant forest silhouette on the horizon, shown ONLY toward azimuths where REAL land continues
 // past the fog wall. A per-azimuth mask samples the actual terrain heightfield (surfaceH, pure noise — no chunks needed)
@@ -2502,9 +2522,11 @@ const _pineMask=new THREE.DataTexture(_pineMaskData,_PN,1,THREE.RGBAFormat); _pi
 const _uPine={value:new THREE.Color(0.078,0.157,0.071)};   // = the DARKEST textured pixel in the leaf tile, rgb(20,40,18)
 const _uPineFog=new THREE.Color(0.1,0.13,0.2), _stormBlue=new THREE.Color(0.09,0.12,0.19), _fogShellCol=new THREE.Color(0xbfc4cc);
 const pineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, side:THREE.BackSide, fog:false,
-  uniforms:{ uMask:{value:_pineMask}, uPine:_uPine, uFogCol:{value:_uPineFog}, uFogAmt:{value:0}, uWx:{value:0}, uCamY:{value:CFG.SEA+2}, uVisD:{value:CFG.RENDER_DIST*CK} },   // uFogCol = scene fog pulled toward DARK STORMY BLUE (Ben 07-20), set per-frame in updateHorizon with uFogAmt/uCamY/uVisD; uWx = weather fog
+  uniforms:{ uMask:{value:_pineMask}, uPine:_uPine, uFogCol:{value:_uPineFog}, uFogAmt:{value:0}, uWx:{value:0}, uCamY:{value:CFG.SEA+2}, uVisD:{value:CFG.RENDER_DIST*CK},
+    uEntAz:{value:0}, uEntW:{value:0.115}, uEntOn:{value:1} },   // the entranceway: bearing set per-frame in updateHorizon, half-width ~6.6 degrees (a mouth you could walk into, not a valley)   // uFogCol = scene fog pulled toward DARK STORMY BLUE (Ben 07-20), set per-frame in updateHorizon with uFogAmt/uCamY/uVisD; uWx = weather fog
   vertexShader:_horizVert, fragmentShader:[
   'precision highp float; varying vec3 vPos; uniform sampler2D uMask; uniform vec3 uPine, uFogCol; uniform float uFogAmt, uWx, uCamY, uVisD;',
+  'uniform float uEntAz, uEntW, uEntOn;',   // THE DARK FOREST ENTRANCEWAY — world azimuth of the opening, its half-width in radians, and 0/1 for whether it is on this frame
   'float hash(float n){ return fract(sin(n)*43758.5453); }',
   'float nz(float x){ float i=floor(x),f=fract(x); return mix(hash(i),hash(i+1.0),f*f*(3.0-2.0*f)); }',
   'float treeline(float az){ return nz(az*46.0)*0.55+nz(az*88.0)*0.30+nz(az*150.0)*0.15; }',     // canopy-height noise 0..1 — lower frequencies = broad rounded crowns, not needle teeth (Ben 07-20)
@@ -2515,7 +2537,21 @@ const pineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, sid
   '  float hT=msk.g*'+WH.toFixed(1)+'-uCamY;',                                                   // forest terrain top at/past the fog wall, relative to the eye (per-azimuth, sampled alongside the mask)
   '  float spike=pow(abs(sin(az*170.0)),2.0)*4.0;',                                              // gentle wide crowns standing proud — the old ^6 needles read as spikes (Ben 07-20)
   '  float crown=pow(abs(sin(az*95.0)),5.0)*6.0 + pow(abs(sin(az*235.0)),9.0)*3.2;',             // individual pointed conifer tips riding the broad treeline → more detail, SAME height envelope (Ben 07-27)
-  '  float hs=msk.b; float hTree=(24.0+treeline(az)*18.0+spike+crown)*hs; if(hTree<1.2) discard;',// canopy BLOCKS above that terrain, scaled by the per-azimuth B channel: 1 over real forest (clears the real 18..31-block pines at the edge), tapering to 0 down the phantom coastline → the treeline DESCENDS into the horizon instead of ending as a wall
+  '  float hs=msk.b; float hTree=(24.0+treeline(az)*18.0+spike+crown)*hs;',                      // canopy BLOCKS above that terrain, scaled by the per-azimuth B channel: 1 over real forest (clears the real 18..31-block pines at the edge), tapering to 0 down the phantom coastline → the treeline DESCENDS into the horizon instead of ending as a wall
+  // ---- THE DARK FOREST ENTRANCEWAY ---- a mouth in the treeline at one fixed bearing: the trees part, the canopy drops to a
+  // low lintel, and what is behind them is black. Cut from the SAME treeline math as everything else (it scales hTree and
+  // tints the pine colour) rather than pasted on as a separate object, so it tracks the horizon, the taper and the haze.
+  '  float dA=az-uEntAz; dA=atan(sin(dA),cos(dA));',                                             // shortest signed angle to the opening — atan(sin,cos) so it wraps correctly across the +-PI seam instead of tearing there
+  '  float e=clamp(1.0-abs(dA)/max(uEntW,1e-4),0.0,1.0);',                                       // 1 at the centre of the mouth → 0 at its jambs
+  '  float ment=uEntOn*smoothstep(0.10,0.58,e)*smoothstep(0.35,0.80,hs);',                       // FLAT-TOPPED core with defined jambs → an opening with sides, not a soft dent. Gated on hs so it can only appear where the treeline stands at full canopy, never on the phantom coast taper where it would read as a hole in the horizon.
+  // A DARK OPENING, NOT A NOTCH OF SKY. The first version cut hTree to 0.30 over the mouth, and that read wrong for a reason
+  // worth writing down: cutting the canopy away exposes whatever is BEHIND the pine layer, which is the sky and the ocean
+  // ring — both brighter than the trees. So the "dark entranceway" came out as the lightest patch on the treeline, which is
+  // the exact inversion of the thing. The silhouette now only DIPS (a lintel of branches across the top, the trees visibly
+  // parting) and the darkness carries the read: the band stays filled, and what fills it is nearly black.
+  '  hTree*=mix(1.0,0.78,ment);',
+  '  float jamb=smoothstep(0.02,0.22,e)*(1.0-smoothstep(0.22,0.48,e))*uEntOn*smoothstep(0.35,0.80,hs);',   // a narrow ring at the mouth's SIDES — the trunks flanking the opening, which catch light and frame the void. An opening reads as an opening because of its jambs.
+  '  if(hTree<1.2) discard;',
   '  float tip=hT+hTree;',
   '  float base=hT/sqrt(dist*dist+hT*hT), top=tip/sqrt(dist*dist+tip*tip), bottom=base-0.22*max(hs,0.35);',   // WORLD-anchored elevations; generous under-skirt
   '  float sink=(1.0-smoothstep(0.05,0.5,hs))*0.06; base-=sink; top-=sink; bottom-=sink;',        // the taper SINKS below the horizon line as it ends — the last trees slip under the water/ground edge, so the run never ends with a floating gap (Ben 07-20: whatever is down there cannot be seen)
@@ -2527,10 +2563,28 @@ const pineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, sid
   '  vec3 pine=uPine*shade*(0.66+0.46*t);',                                                       // darker shaded base → brighter tips = depth up each tree
   '  pine+=uPine*0.55*smoothstep(0.72,1.0,t)*col;',                                              // sunlit catch-light on the upper crowns of some trees
   '  pine*=mix(1.0,0.28,under);',                                                              // …and a BLACK SEAM along the base: the band of shadow under the trees, which is what makes a treeline read as a forest with depth rather than a cut-out ridge
+  '  float mdark=ment*(1.0-0.42*smoothstep(0.58,1.0,t));',                                       // darkest at the FLOOR of the opening, easing off toward the lintel — the gradient is what makes it read as depth receding into the wood rather than as a flat black rectangle
+  '  pine*=mix(1.0,0.045,mdark);',                                                               // INSIDE THE MOUTH: near-black. This is the point of the feature — an opening in a treeline is the darkest thing on the horizon, because you are looking down an unlit corridor of trunks.
+  '  pine*=1.0+0.40*jamb;',                                                                      // …and the flanking trunks lift, so the void has edges
   '  float fog=clamp(uFogAmt*(1.0-0.18*t),0.0,1.0);',                                            // fade the whole silhouette into the fog the terrain fades to (density-driven → matches weather/day)
+  '  fog*=mix(1.0,0.12,mdark);',                                                                // …and the haze is held OFF the mouth, or by day the white fog wash would fill the opening and it would read as a bright notch — the exact inversion of the thing. Local to the entranceway only: the tree fog itself is untouched (Ben 07-28 said the horizon pines were explicitly NOT the tree-fog complaint).
   '  fog=max(fog, 1.0-smoothstep(0.0,0.22,hs));',                                              // …and past the shore the taper drowns COMPLETELY in fog — but only at the very end, so the concave ease-out (the treeline landing tangent to the ground, curving gently up) stays VISIBLE before the haze takes it (Ben 07-20)
   '  gl_FragColor=vec4(mix(pine,uFogCol,fog), smoothstep(0.2,0.45,m)*clamp(1.0-uWx*1.25,0.0,1.0)); }'].join('\n') });   // SOLID silhouette with a quick edge fade; WEATHER FOG fades the whole layer OUT (Ben 07-20: at night the color-wash was invisible — near-black washing to near-black — so the pines punched dark holes through the fog bank; in fog the shell owns the horizon)
 const pineLayer=new THREE.Mesh(_horizGeo, pineMat); pineLayer.frustumCulled=false; pineLayer.renderOrder=-5; scene.add(pineLayer);   // over the ocean seam
+// WHERE THE ENTRANCEWAY IS. It has to be a PLACE, not a screen-space effect: a bearing that stays put as you walk, so the
+// opening is always the same gap in the same wood. So it resolves once to a world POINT far past the island in the most
+// densely forested direction, and the shader is handed the live azimuth from the camera to that point every frame.
+// Chosen from the actual heightfield rather than a hard-coded compass bearing — a literal angle lands on open sea for half
+// of all islands, and the mask would then discard the pines there and the feature would silently not exist.
+let _ENT_PT=null;
+function entrancePoint(){ if(_ENT_PT) return _ENT_PT;
+  const IC=islandStats(); let bestA=0, bestS=-1;
+  for(let a=0;a<64;a++){ const th=a/64*6.2831853, dx=Math.cos(th), dz=Math.sin(th); let s=0;
+    for(let r=IC.R*0.45; r<=IC.R*1.05; r+=IC.R*0.06){ const h=surfaceH(Math.round(IC.x+dx*r), Math.round(IC.z+dz*r));
+      if(h>CFG.SEA+4 && h<=CFG.SEA+44) s++; }                                    // the tree-capable band — the same test the pine mask uses, so a bearing that scores here is a bearing that will actually draw pines
+    if(s>bestS){ bestS=s; bestA=th; } }
+  _ENT_PT={ x:IC.x+Math.cos(bestA)*IC.R*6.0, z:IC.z+Math.sin(bestA)*IC.R*6.0, a:bestA, score:bestS };   // 6 island-radii out: far enough that walking the island barely swings the bearing, so the mouth holds still on the horizon
+  return _ENT_PT; }
 let _pineLastX=1e9, _pineLastZ=1e9, _pineLastRD=0;
 function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.position.copy(camera.position); const day=globalU.uDay.value;
   { // ---- THE HORIZON COLOUR: THE NIGHT SEA, AT EVERY HOUR ----
@@ -2568,6 +2622,8 @@ function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.p
       _uPineFog.copy(scene.fog.color).lerp(_stormBlue, 0.55*(1-day)).multiplyScalar(0.10+0.90*day);
       const _wf2=(typeof weather!=='undefined'?(weather.fog||0):0); if(_wf2>0.01) _uPineFog.lerp(scene.fog.color, Math.min(1,_wf2*0.95)); pineMat.uniforms.uWx.value=_wf2; }   // WEATHER FOG overrides the hour's tint AND fades the layer's alpha out (see pineMat fragment). Toward the LIVE fog colour, not the pale constant _fogShellCol: that constant is a daylight grey (0xbfc4cc), so in night rain the treeline was washed pale while everything around it was black
     pineMat.uniforms.uCamY.value=camera.position.y; pineMat.uniforms.uVisD.value=CFG.RENDER_DIST*CK;   // per-frame (jumps/climbs shift the eye between mask recomputes; RD slider moves the wall)
+    { const EP=entrancePoint();   // the mouth's live bearing — atan2(z,x) to match the shader's atan(vPos.z,vPos.x) exactly
+      pineMat.uniforms.uEntAz.value=Math.atan2(EP.z-camera.position.z, EP.x-camera.position.x); }
     // the pine-visibility mask depends only on player position + render distance, so recompute the 128 rays +
     // re-upload the DataTexture only when the player has actually moved (or RD changed). <2 blocks of parallax
     // is sub-pixel at the horizon → gating this is exact, not approximate. Cost: 128×8 surfaceH calls, occasional.
@@ -11171,19 +11227,43 @@ function brSlabColumn(bl,lx,lz,wx,wz,clear){
     if(y===0)b=BID.bedrock; else if(y<FLOOR)b=(shaft?0:BID.br_concrete); else if(y===FLOOR)b=(shaft?0:BID.br_carpet); else if(y===topY)b=(openTop?0:BID.br_ceiling);
     if(b)bl[idx(lx,y,lz)]=b; }
   return topY; }
-function brGenColumn(c,lx,lz,wx,wz){ c.htop[lx+lz*CK]=brSlabColumn(c.blocks,lx,lz,wx,wz,false); }
+function brGenColumn(c,lx,lz,wx,wz){ c.htop[lx+lz*CK]=brSlabColumn(c.blocks,lx,lz,wx,wz,false); c._brSeed=(BR.seed||0)>>>0; }   // STAMP the seed this chunk's slab was laid under — see brReslabStale
 // RE-LAY the slab for the voxel chunks already in memory. Block data is written ONCE, when a chunk generates — so anything
 // that changes what brGenColumn would produce (the storey flags, a room losing its drop, a stairwell footprint appearing)
 // leaves the columns already on disk carved under the old rule, and nothing ever revisits them. brBuildEnv's tail did this
 // for drop rooms and vertical rooms only, by hand. This is the general version: it is the same rule, re-run.
-function brReslab(radius){ if(!BR.inside) return 0; let n=0;
+function brReslab(radius,staleOnly){ if(!BR.inside) return 0; let n=0;
+  const seed=(BR.seed||0)>>>0;
   const c0=Math.floor(player.pos.x)>>4, d0=Math.floor(player.pos.z)>>4, RR=radius||8;
   for(let cx=c0-RR;cx<=c0+RR;cx++) for(let cz=d0-RR;cz<=d0+RR;cz++){
     const c=getChunk(cx,cz); if(!c||!c.generated) continue;
+    if(staleOnly && ((c._brSeed||0)>>>0)===seed) continue;   // already laid under THIS maze's storey grid — nothing to repair, and this early-out is what makes the per-frame sweep free
     for(let lx=0;lx<CK;lx++) for(let lz=0;lz<CK;lz++)
       c.htop[lx+lz*CK]=brSlabColumn(c.blocks,lx,lz,cx*CK+lx,cz*CK+lz,true);
-    markRemesh(cx,cz); n++; }
+    c._brSeed=seed; markRemesh(cx,cz); n++; }
   return n; }
+// ---- THE STALE-LID BUG (Ben 07-29: "the portal spawned me on top of the backrooms, and there are invisible blocks
+// filling the backrooms itself"). ONE cause, both symptoms, and it is a lifetime problem, not a generation problem.
+//
+// brSpawnDoor re-randomises BR.seed on every door — that is the design, a fresh maze each time. But brxChunkLevel is a hash
+// of BR.seed, so a new seed also re-assigns which STOREY every chunk sits on. The smooth BRX environment is rebuilt from
+// scratch and follows the new assignment; the VOXEL layer does not. Block data is written once, when a chunk first
+// generates, and brSlabColumn's write loop is purely additive (`if(b) bl[...]=b`) with clearing gated behind a `clear` flag
+// that the real path (brGenColumn) passes as false. So a chunk that generated during visit 1 keeps visit 1's floor, lid and
+// concrete at visit 1's heights forever.
+//
+// Measured, second visit through a fresh door, chunk (0,0) promoted from storey 0 to storey 1: the entry column's solid
+// blocks were [30..40, 49] — a floor at 40 and a lid at 49, both from the previous maze — while the new geometry expects a
+// floor at 49 and a ceiling at 58. brEntryFloorY() correctly answers 49, so the player is placed at 50.2, standing on the
+// OLD CEILING. That is "on top of the backrooms". Everything from 30 to 40 is the old slab with no geometry drawn over it:
+// "invisible blocks filling the backrooms". slabAudit agreed (4 columns with no ceiling); reslab cleared all of it.
+//
+// It reproduces identically under ?perfoff=all, so it is not the FPS pass. And it did NOT reproduce with ?brseed pinned —
+// pinning makes the boot-time prewarm and the door agree, which is exactly why a benchmark never caught it.
+//
+// The repair already existed (brReslab, clear=true) and was reachable only from QA hooks. Rather than call it blindly, each
+// chunk now carries the seed its slab was laid under, so a sweep can re-lay only the chunks that actually disagree.
+function brReslabStale(radius){ return brReslab(radius, true); }
 
 // ---- ATMOSPHERE: reuse the engine's own fog/light, just swap the presets per zone (crisp, cheap) ----
 const _BR_FOG={0:[0.69,0.62,0.36],1:[0.10,0.10,0.12],2:[0.93,0.93,0.89],3:[0.03,0.03,0.04],4:[0.55,0.40,0.22]};
@@ -11247,6 +11327,12 @@ function brEnter(){ if(BR.inside)return; const d=BR.door;
   BR.rooms=[];
   if(BR.infinite){ BR.gen=null; BR._cgx=null; brxStream(true); }                                                          // straight to the streamed neighbourhood — building the fixed region first only to replace it next frame wasted a build and flashed the wrong geometry
   else brBuildEnvAll();                                                                                                   // generate the angled room graph + render the smooth PBR environment
+  // RE-LAY ANY SLAB LEFT OVER FROM A PREVIOUS MAZE, THEN place the player (see brReslabStale). This has to run AFTER the
+  // environment is built, because brSlabColumn consults BR.rooms through brOpenTopAt — reslabbing first would punch the
+  // ceiling holes for the OLD room set. And the spawn Y has to be re-derived AFTERWARDS: the whole symptom was standing on
+  // a stale lid, so a Y computed before the lid was removed is a Y measured against the bug.
+  brReslabStale(10);
+  player.pos.set(BR_ENTRY.x, brEntryFloorY()+1.2, BR_ENTRY.z); player.vel.set(0,0,0);
   brStartAudio(); BR.paleFlees=0; BR.pale={state:'dormant',cd:45+Math.random()*45,t:0}; }   // The Pale wakes 45-90s in; the flee counter (2 retreats, then it commits) resets per visit
 function brExit(){ if(!BR.inside)return; const r=BR.returnPos||{x:0,y:BR_FLOOR,z:0,yaw:0};
   brStopAudio(); brResumeMusic(); brRestoreAtmo(); brEnvCacheClear(); brClearEnv(); BR.rooms=[]; brClearExit(); brHidePale(); brPoolLightsOff(); BR.inside=false;
@@ -13358,7 +13444,10 @@ function updateBackrooms(dt){
   T.begin(TID.collision); brxCollide(player); T.end(TID.collision);                                                      // segment collision — keep the player inside the rooms (runs AFTER physics(dt))
   brxUpdateLights(player.pos.x, player.pos.z);                                                                           // fluorescent pool follows the player
   brUpdateHum(dt);                                                                                                       // the buzz tracks the LIT tubes near you — blacked-out wings go silent
-  if(BR.infinite){ try{ T.begin(TID.brStream); brxStream(false); brxPrefetch(); T.end(TID.brStream); }catch(e){ T.end(TID.brStream); BR.infinite=false; if(typeof flashName==='function')flashName('the halls refuse to extend'); } }   // one chunk-crossing check per frame; a failure falls back to the fixed region rather than wedging the loop
+  if(BR.infinite){ try{ T.begin(TID.brStream); brxStream(false); brxPrefetch(); brReslabStale(6); T.end(TID.brStream); }catch(e){ T.end(TID.brStream); BR.infinite=false; if(typeof flashName==='function')flashName('the halls refuse to extend'); } }   // one chunk-crossing check per frame; a failure falls back to the fixed region rather than wedging the loop
+  // …and one stale-slab sweep per frame. Entry alone is not enough: walking far enough re-reaches chunks that generated
+  // during an EARLIER visit and were never in the entry radius, and those carry the old maze's lids. The seed stamp makes
+  // the clean case a bounded integer compare over ~169 chunks with no column work, so the steady state costs nothing.
   if(player.pos.y < BR_FLOOR-26 && !player.dead) brKill('the drop');                                                     // fell down a shaft — the dark at the bottom is the bottom
   brUpdateDoors(dt); brUpdateKey(dt); brUpdateExit(dt); brUpdatePale(dt); }
 
@@ -16093,11 +16182,11 @@ window.__hc={
   achReset(){ try{ for(const k in achGot)delete achGot[k]; localStorage.removeItem(ACH_KEY); return 'reset'; }catch(e){ return e.message; } },
   achFire(id){ try{ achUnlock(id); return Object.keys(achGot); }catch(e){ return e.message; } },
   loadNow(){ try{ const s=readSave(); if(!s)return 'no save'; applySave(s); return 'loaded '+Object.keys(s.edits).length+' edits'; }catch(e){ return e.message; } },
-  editCount(){ try{ return Object.keys(edits).length; }catch(e){ return e.message; } },
+  // (an earlier `editCount` was declared here and was dead: a later duplicate key in this same object literal shadowed it)
   blockAt(x,y,z){ try{ return getBlock(x,y,z); }catch(e){ return e.message; } },
   setBlockAt(x,y,z,id){ try{ setBlockWorld(x,y,z,typeof id==='string'?BID[id]:id,true); return getBlock(x,y,z); }catch(e){ return e.message; } },
   giveItem(id,n){ try{ invAdd(id,n||1); refreshHotbar(); return invCount(id); }catch(e){ return e.message; } },
-  hold(id){ try{ if(invCount(id)<1)invAdd(id,1); let si=-1; for(let i=0;i<9;i++){ if(inv[i]&&inv[i].id===id){ si=i; break; } } if(si<0){ inv[0]={id,n:1}; si=0; } selSlot=si; refreshHotbar(); return {held:id,slot:si}; }catch(e){ return e.message; } },
+  // (an earlier `hold` was declared here and was dead for the same reason — the later `hold` below is the live one)
   leaves(){ try{ return {count:_leafIM.count, max:LEAF_MAX, init:_leafInit, matColor:+_leafMat.color.r.toFixed(2), y0:+_leafPos[1].toFixed(1), eyeY:+camera.position.y.toFixed(1)}; }catch(e){ return e.message; } },
   viewDbg(){ try{ const vm=view.mesh; return { id:view.id, locked:!!locked, vis:!!view.group.visible, hasMesh:!!vm, meshVis:vm?!!vm.visible:null, children:view.group.children.length, rot:[+view.group.rotation.x.toFixed(3),+view.group.rotation.y.toFixed(3),+view.group.rotation.z.toFixed(3)], pos:[+view.group.position.x.toFixed(3),+view.group.position.y.toFixed(3),+view.group.position.z.toFixed(3)] }; }catch(e){ return e.message; } },
   invList(){ try{ return inv.filter(Boolean).map(s=>s.id+':'+s.n); }catch(e){ return e.message; } },
@@ -16116,7 +16205,21 @@ window.__hc={
   vitals(h,w,c){ try{ if(h!=null)player.hunger=h; if(w!=null)player.water=w; if(c!=null)player.creative=!!c; return {hunger:player.hunger, water:player.water, health:player.health, creative:!!player.creative, sick:+(player.sick||0).toFixed(1), bless:+(player.blessT||0).toFixed(1), vign:_sickEl?_sickEl.style.opacity:null, dens:+(scene.fog.density*1000).toFixed(2), locked, introA:(typeof intro!=='undefined'?intro.active:null)}; }catch(e){ return {err:e.message}; } },   // QA: set/read hunger+thirst (+creative toggle) — horror-amplifier checks
   chest(x,z){ try{ const bx=Math.floor(x), bz=Math.floor(z), by=surfaceH(bx,bz)+1; setBlockWorld(bx,by,bz,BID.chest,true); openChest(bx,by,bz); return {bx,by,bz}; }catch(e){ return {err:e.message}; } },   // QA: place + OPEN a chest at (x,z) — lid-animation visual checks
   chestClose(){ try{ closeUI(); return true; }catch(e){ return {err:e.message}; } },
-  island(){ try{ const IC=islandStats(); return {cx:+IC.x.toFixed(1), cz:+IC.z.toFixed(1), R:+IC.R.toFixed(1), px:+player.pos.x.toFixed(1), pz:+player.pos.z.toFixed(1)}; }catch(e){ return {err:e.message}; } },   // QA: island centroid/radius driving the forever-coast treeline wrap
+  island(){ try{ const IC=islandStats(); return {cx:+IC.x.toFixed(1), cz:+IC.z.toFixed(1), R:+IC.R.toFixed(1), px:+player.pos.x.toFixed(1), pz:+player.pos.z.toFixed(1),
+    sea:CFG.SEA, treeBand:[CFG.SEA+4, CFG.SEA+44] }; }catch(e){ return {err:e.message}; } },   // QA: island centroid/radius driving the forever-coast treeline wrap, plus SEA and the tree-capable height band — a vantage-finding harness needs heights RELATIVE to sea level, and picking them absolute is how one ended up underwater
+  // QA/bench: the terrain height at (x,z) straight from the noise — NO chunk required. blockAt only sees loaded chunks, so a
+  // harness hunting for a camera vantage anywhere but the spawn ring reads air everywhere and concludes the island is empty.
+  // Batched form (surfH([[x,z],...])) so scanning a few thousand samples is one round trip instead of a few thousand.
+  surfH(x,z){ try{ if(Array.isArray(x)) return x.map(p=>surfaceH(Math.round(p[0]),Math.round(p[1])));
+    return surfaceH(Math.round(x),Math.round(z)); }catch(e){ return {err:e.message}; } },
+  // QA: the dark forest entranceway — where it resolved to, its live bearing, and the player YAW that centres it in frame.
+  // yaw is handed back solved (az = -PI/2 - yaw for this projection) so a harness never has to re-derive the mapping and
+  // photograph the arc 180 degrees away, which is exactly what the first pine harness did.
+  entrance(){ try{ const EP=entrancePoint(), az=pineMat.uniforms.uEntAz.value;
+    return { x:+EP.x.toFixed(1), z:+EP.z.toFixed(1), bearing:+EP.a.toFixed(4), forestScore:EP.score,
+             az:+az.toFixed(4), yawToFace:+(-Math.PI/2-az).toFixed(4), halfWidthDeg:+(pineMat.uniforms.uEntW.value*57.2958).toFixed(2),
+             on:pineMat.uniforms.uEntOn.value }; }catch(e){ return {err:e.message}; } },
+  entranceOn(v){ try{ pineMat.uniforms.uEntOn.value=v?1:0; return pineMat.uniforms.uEntOn.value; }catch(e){ return {err:e.message}; } },   // QA: A/B the mouth against the same frame with it off
   gun(id){ try{ invAdd(id,1); invAdd('rifle_ammo',64); for(let i=0;i<9;i++){ if(inv[i]&&inv[i].id===id){ selSlot=i; break; } } refreshHotbar(); return 'armed '+id; }catch(e){ return e.message; } },   // QA: give + select a gun with reserve ammo
   aim(on){ try{ locked=true; rmbHeld=!!on; return rmbHeld; }catch(e){ return e.message; } },   // QA: hold/release the aim intent (forces the locked flag for headless runs)
   shoot(){ try{ locked=true; return !!fireGun(); }catch(e){ return e.message; } },             // QA: pull the trigger once
@@ -16149,7 +16252,16 @@ window.__hc={
   mind(){ try{ return { plan:reason.plan.map(s=>({i:s.intent,p:s.phase||null})), step:reason.step, journal:reason.journal.length, seq:(typeof CTXD!=='undefined')?CTXD.seq:null, thought:reason.liveThought||null, orch:reason.orchTrigger, divertT:+((reason.divertT||0)).toFixed(1), nav:{active:nav.active,beh:nav.behavior,label:nav.label,divert:nav.divert}, lastMutual:+((WILL.lastMutual||0)).toFixed(1), willLog:WILL.log.slice(-6) }; }catch(e){ return {err:e.message}; } },
   stim(k,extra){ try{ reasonEvent(k,extra||{x:Math.round(player.pos.x),z:Math.round(player.pos.z)}); return 'fired '+k; }catch(e){ return e.message; } },
   nudge(){ try{ WILL.lastMutual=-1e9; WILL.lastOrch=-1e9; return 'cold'; }catch(e){ return e.message; } },
-  look(){ if(!wretch.active)return 'inactive'; const dx=wretch.pos.x-player.pos.x, dy=(wretch.pos.y+2.4)-(player.pos.y+EYE), dz=wretch.pos.z-player.pos.z, L=Math.hypot(dx,dy,dz)||1; player.yaw=Math.atan2(-dx,-dz); player.pitch=clamp(Math.asin(dy/L),-1.2,1.2); return {yaw:+player.yaw.toFixed(2),pitch:+player.pitch.toFixed(2),dist:+Math.hypot(dx,dz).toFixed(1)}; },
+  // QA/bench: aim the camera. Same duplicate-key trap as tp — `look` was declared twice, so look() with no args (aim at the
+  // Wretch) was being shadowed by look(x,y,z) (aim at a world point) and quietly returned NaNs instead of finding the mob.
+  //   look()        → aim at the Wretch
+  //   look(x,y,z)   → aim at a world point
+  look(x,y,z){
+    if(x==null){ if(!wretch.active)return 'inactive'; const dx=wretch.pos.x-player.pos.x, dy=(wretch.pos.y+2.4)-(player.pos.y+EYE), dz=wretch.pos.z-player.pos.z, L=Math.hypot(dx,dy,dz)||1;
+      player.yaw=Math.atan2(-dx,-dz); player.pitch=clamp(Math.asin(dy/L),-1.2,1.2); return {yaw:+player.yaw.toFixed(2),pitch:+player.pitch.toFixed(2),dist:+Math.hypot(dx,dz).toFixed(1)}; }
+    const dx=x-camera.position.x, dy=y-camera.position.y, dz=z-camera.position.z;
+    player.yaw=Math.atan2(-dx,-dz); player.pitch=Math.atan2(dy, Math.hypot(dx,dz)||1e-6);
+    return {yaw:+player.yaw.toFixed(3), pitch:+player.pitch.toFixed(3), eye:[+camera.position.x.toFixed(2),+camera.position.y.toFixed(2),+camera.position.z.toFixed(2)]}; },
   put(dx,dz){ if(!wretch.active)this.summon(); wretch.pos.set(player.pos.x+(dx||0), player.pos.y, player.pos.z+(dz||0)); return {x:+wretch.pos.x.toFixed(1),z:+wretch.pos.z.toFixed(1)}; },
   blood(n){ const fx=-Math.sin(player.yaw), fz=-Math.cos(player.yaw), rx=-fz, rz=fx; for(let i=0;i<(n||3);i++){ const f=2+i*1.1, s=(Math.random()-0.5)*3; spawnBloodSplat(player.pos.x+fx*f+rx*s, player.pos.z+fz*f+rz*s, 1.2+Math.random()*0.8); } return 'splat'; },   // QA: paint gore in front of the player
   gore(){ if(typeof spawnCarcass==='function')spawnCarcass(player.pos.x+1, player.pos.y, player.pos.z+2.5); return 'carcass'; },   // QA: full carcass (ribcage + painted pool)
@@ -16395,11 +16507,20 @@ window.__hc={
   yank(){ if(!wretch.active) this.summon(); if(wretch.group){ wretch.pos.set(player.pos.x+1.4, player.pos.y, player.pos.z); wretch.state='HUNT'; wretch.committed=true; } return wretch.state; },
   set(p){ Object.assign(wretch, p||{}); return wretch.state; },
   cam(o){ o=o||{}; if(o.pitch!=null)player.pitch=o.pitch; if(o.yaw!=null)player.yaw=o.yaw; return {yaw:player.yaw,pitch:player.pitch}; },
-  look(x,y,z){ const dx=x-camera.position.x, dy=y-camera.position.y, dz=z-camera.position.z;   // QA/bench: aim the camera AT a world point (yaw convention lives in lookDir) — every visual harness needs this
-    player.yaw=Math.atan2(-dx,-dz); player.pitch=Math.atan2(dy, Math.hypot(dx,dz)||1e-6);
-    return {yaw:+player.yaw.toFixed(3), pitch:+player.pitch.toFixed(3), eye:[+camera.position.x.toFixed(2),+camera.position.y.toFixed(2),+camera.position.z.toFixed(2)]}; },
+  // (the world-point `look` that used to live here is folded into the single dispatching look above — see the note there)
   time(t){ if(t!=null) worldTime=((+t)%CFG.DAY_LEN+CFG.DAY_LEN)%CFG.DAY_LEN; return {worldTime:+worldTime.toFixed(1), frac:+(worldTime/CFG.DAY_LEN).toFixed(3), day:+globalU.uDay.value.toFixed(3)}; },   // QA/bench: jump the clock (frac 0.25=noon-ish, 0.75=midnight)
-  tp(x,z){ player.pos.x=x; player.pos.z=z; player.pos.y=Math.max(groundYAt(x,z),CFG.SEA)+2; player.vel.set(0,0,0); return {x:+player.pos.x.toFixed(1),y:+player.pos.y.toFixed(1),z:+player.pos.z.toFixed(1)}; },   // QA/bench: teleport, ground-snapped
+  // QA/bench: teleport. TWO ARITIES ON ONE KEY, and it has to stay that way — this object had `tp` declared TWICE, and in a
+  // JS object literal the LATER declaration silently replaces the earlier one. The later one was tp(x,y,z,yaw,pitch), so
+  // every `__hc.tp(x,z)` call in bench/ — about thirty of them, including the shipped horizon and pine harnesses — was
+  // actually running pos.set(x, z, undefined): teleporting to y=z with z undefined. That is why those harnesses kept
+  // photographing open sea and the inside of hills, and it was silent because pos.set never complains.
+  //   tp(x, z)                  → ground-snapped, the form bench/ uses most
+  //   tp(x, y, z [,yaw,pitch])  → exact, the form the verification shots use
+  tp(x,y,z,yaw,pitch){
+    if(z==null){ const gx=x, gz=y; player.pos.x=gx; player.pos.z=gz; player.pos.y=Math.max(groundYAt(gx,gz),CFG.SEA)+2; player.vel.set(0,0,0);
+      return {x:+player.pos.x.toFixed(1),y:+player.pos.y.toFixed(1),z:+player.pos.z.toFixed(1),mode:'ground'}; }
+    player.pos.set(x,y,z); if(yaw!=null)player.yaw=yaw; if(pitch!=null)player.pitch=pitch; player.vel.set(0,0,0);
+    return {x:+player.pos.x.toFixed(2),y:+player.pos.y.toFixed(2),z:+player.pos.z.toFixed(2),mode:'exact'}; },
   tpAt(x,y,z){ player.pos.set(x,y,z); player.vel.set(0,0,0); return {x:+player.pos.x.toFixed(1),y:+player.pos.y.toFixed(1),z:+player.pos.z.toFixed(1)}; },   // QA/bench: exact teleport, NO ground snap (groundYAt lands you on canopy tops)
   rd(n){ if(n!=null) CFG.RENDER_DIST=Math.max(3,Math.min(CFG.RD_MAX,n|0)); return CFG.RENDER_DIST; },   // QA/bench: get/set render distance
   probe(){ const P=player.pos; return { worldSize:world.size, sea:CFG.SEA, WH, feet:getBlock(Math.floor(P.x),Math.floor(P.y),Math.floor(P.z)), gyHere:groundYAt(P.x,P.z), gy26:groundYAt(P.x+26,P.z), gyN:groundYAt(P.x,P.z-26), chunkHere:!!getChunk(Math.floor(P.x)>>4,Math.floor(P.z)>>4), chunk26:!!getChunk((Math.floor(P.x)+26)>>4,Math.floor(P.z)>>4) }; },
@@ -16492,6 +16613,17 @@ window.__hc={
   studio(on){ window.__qaStudio=!!on; if(on){ chunkRoot.visible=false; if(typeof avatarGroup!=='undefined')avatarGroup.visible=false; if(typeof view!=='undefined'&&view.group&&view.group.parent)camera.remove(view.group); if(typeof skyDome!=='undefined')skyDome.visible=false; scene.background=new THREE.Color(o_studioBG(on)); scene.fog.density=0.00008; this.qa(typeof on==='number'?on:150); } else { chunkRoot.visible=true; if(typeof view!=='undefined'&&view.group&&!view.group.parent)camera.add(view.group); if(typeof skyDome!=='undefined')skyDome.visible=true; scene.background=_skyBG; } return !!on; },
   spin(deg){ if(wretch.group) wretch.yaw=(deg||0)*Math.PI/180; return wretch.yaw; },
   freeze(on,moving){ window.__qaFreeze=!!on; window.__qaMoving=moving!==false; return {frozen:window.__qaFreeze,moving:window.__qaMoving}; },
+  // QA/bench: make the frame REPRODUCIBLE, so two screenshots can be diffed and the difference means something. Without
+  // this an A/B of any visual feature is unreadable: a mouth-on vs mouth-off pair came back with 46% of pixels changed and
+  // identical mean colour, all of it film grain (re-randomised every frame) and depth-reprojection smear. Neither the grain
+  // uniform nor motionPass is reachable from the QA surface, which is why no harness could turn them off.
+  stillFrame(on){ const q=(on!==false);
+    try{ if(typeof gradePass!=='undefined'&&gradePass) gradePass.uniforms.uGrain.value = q?0:0.06; }catch(e){}
+    try{ if(typeof motionPass!=='undefined'&&motionPass) motionPass.uniforms.uEnabled.value = q?0:1; }catch(e){}
+    try{ if(typeof weather!=='undefined'){ if(q){ this._wx={fog:weather.fog,rain:weather.rain}; weather.fog=0; weather.rain=0; } else if(this._wx){ weather.fog=this._wx.fog; weather.rain=this._wx.rain; } } }catch(e){}
+    return { grain:(typeof gradePass!=='undefined'&&gradePass)?gradePass.uniforms.uGrain.value:null,
+             motion:(typeof motionPass!=='undefined'&&motionPass)?motionPass.uniforms.uEnabled.value:null,
+             wxFog:(typeof weather!=='undefined')?weather.fog:null }; },
   qaCorpse(){ const px=player.pos.x, pz=player.pos.z-6, gy=groundYAt(px,pz);
     if(typeof spawnCarcass==='function') spawnCarcass(px-1.6, gy, pz);
     if(typeof buildAnimalMesh==='function'){ const m=buildAnimalMesh('deer',true); m.position.set(px+1.6, gy, pz); if(typeof animals!=='undefined')animals.push({type:'deer',mesh:m,x:px+1.6,y:gy,z:pz,yaw:1.6,hp:8,timer:99,flee:0,dead:false,corrupt:true}); }
@@ -16524,7 +16656,7 @@ window.__hc={
     for(let k=-1;k<=1;k++) setBlockWorld(mx,my+k,mz,BID.stone,true);
     const broken=bossBeamCarve(ox,oy,oz, tx,gy+0.3,tz);
     return { broken, pillarAfter:[getBlock(mx,my-1,mz),getBlock(mx,my,mz),getBlock(mx,my+1,mz)] }; },
-  tp(x,y,z,yaw,pitch){ player.pos.set(x,y,z); if(yaw!=null)player.yaw=yaw; if(pitch!=null)player.pitch=pitch; return {x:+player.pos.x.toFixed(2),y:+player.pos.y.toFixed(2),z:+player.pos.z.toFixed(2)}; },   // QA: teleport for verification shots
+  // (the second `tp` that used to live here is folded into the single dispatching tp above — see the note there)
   daddyFeet(off){ off=(off==null?0.95:off); const YUP=new THREE.Vector3(0,1,0), n=new THREE.Vector3(1,0,0);   // QA: daddy-long-legs foot reach vs a wall at x=0 (room=+x). footMinX≈0/slightly<0=planted, dorsalX≈+1=back to room
     const g=buildArachnid('daddy'); scene.add(g); g.position.set(off,0,0); g.quaternion.setFromUnitVectors(YUP,n); g.updateMatrixWorld(true);
     let minx=1e9,maxx=-1e9; for(const L of g.userData.legs){ const t=L.tibG.localToWorld(new THREE.Vector3(0,2.0,0)); minx=Math.min(minx,t.x); maxx=Math.max(maxx,t.x); }
