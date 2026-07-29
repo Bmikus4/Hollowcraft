@@ -21,8 +21,8 @@ vsync off, `?brseed=20260728`.
 | **B1o** overworld static | 1.63 → 1.76 | 568 | 167 | 3.48 | 11.8 | **PASS** | **PASS** |
 | B5o / B2o / B3o overworld | 1.9–2.2 → 2.0–2.4 | ~420–490 | unchanged | — | — | mixed | mixed |
 
-Load: **8.42 s → 8.53 s** first interactive. Unchanged, which was a requirement — `brPrecompile` would have
-made it 26.9 s and is therefore off.
+Load: **8.42 s → 5.88 s** first interactive (P9, three cold loads each, non-overlapping). `brPrecompile` would
+have made it 26.9 s and is therefore off.
 
 Note B1's p99 spread is ±5.58 and B4's ±9.49: those two scenes cannot resolve anything finer than their own
 noise, and this machine's failing cooling fan is the likely source late in a long suite (PERF_REPORT assumption
@@ -168,8 +168,10 @@ verified: B1 goes back to 13.7 ms and 4 772 draws, which is the baseline.
 | `brGenCacheMax` | **512** | 0 | LRU bound on the chunk data cache | nothing at this scale (peaks at 156) | none — insurance only |
 | `streamBudgetMs` | **8** | 0 | one shared deadline for overworld streaming, with admission control | frames > 12 ms −60 (B2o) / −114 (B3o) | low — the first unit of a frame always runs, so streaming cannot starve |
 | `streamAdmitSafety` | 1.0 | — | multiplier on the cost estimate | — | >1 starves streaming sooner |
+| `preloadSliceMs` | **30** | 5 | ms of each loading-screen frame spent baking item icons | first interactive 6 775 → 5 884 ms | low — the sigil is a separate 2D canvas and still animates at ~30 fps |
 | `streamBudgetMs` | **8** | 0 | one shared deadline for overworld streaming, with admission control | frames >12 ms −60 (B2o) / −114 (B3o) | low — the first unit of a frame always runs, so streaming cannot starve |
 | `streamAdmitSafety` | 1.0 | — | multiplier on the cost estimate | — | >1 starves streaming sooner |
+| `preloadSliceMs` | **30** | 5 | ms of each loading-screen frame spent baking item icons | first interactive 6 775 → 5 884 ms | low — the sigil is a separate 2D canvas and still animates at ~30 fps |
 | `brPrecompile` | **false** | false | compile the Backrooms shaders on the loading screen | works, costs +16 s of load | rejected on cost |
 | `brPrefetch` | **false** | false | build the chunk ring ahead of the player | nothing while compiles dominate | re-measure after the light-pool decision |
 | `brPrefetchRing` / `brPrefetchCooldown` | 1 / 20 | — | tuning for the above | — | inert while `brPrefetch` is off |

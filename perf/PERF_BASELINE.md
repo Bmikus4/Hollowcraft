@@ -38,8 +38,14 @@ change what the numbers mean:
 
 **B7 LOAD** — cold navigation to first interactive frame **8 419 ms**; to steady state (3 consecutive seconds
 with no frame over 16.6 ms) **17 498 ms**. `load` event fires at 147 ms and the menu is up at 1 556 ms, so
-**6.9 s of the 8.4 s is the preload gate**: baking every item icon through a synchronous GPU readback, meshing
-the spawn chunk, and pre-warming the shadows-off shader variants.
+**6.9 s of the 8.4 s is the preload gate**, which bakes every item icon, meshes the spawn chunk, and pre-warms
+the shadows-off shader variants.
+
+> **CORRECTION, 2026-07-29.** I originally wrote that the 6.9 s *was* the icon baking, "through a synchronous
+> GPU readback". I had not measured it — I inferred it from a code comment. `__hcPERF.iconCost()` says the whole
+> icon bake is **944 ms across 94 items**, of which the synchronous readback is **107 ms (11 %)** and rendering
+> is 702 ms (74 %). So the icon bake is about an eighth of the gate, and the part everyone blames is a ninth of
+> that. See CHANGELOG P9. What the remaining ~3.5 s of the gate is spent on is still unmeasured.
 
 Gate summary against the contract:
 

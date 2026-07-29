@@ -459,6 +459,47 @@ Kept because it is correct and removes real garbage, but it is not credited with
 
 ---
 
+## P9 — the loading screen, and a number I had wrong by 7×
+
+**Flag.** `PERF.preloadSliceMs` — default **30**, baseline **5**.
+
+**What I claimed, and what is actually true.** PERF_BASELINE said *"6.9 s of the 8.4 s cold load is the preload
+gate: baking every item icon through a synchronous GPU readback"*. I never measured that; I inferred it from a
+code comment. `__hcPERF.iconCost()` measures it properly:
+
+| | ms | share |
+|---|---|---|
+| render each item to a 100×100 target | **702** | 74 % |
+| GPU readback (`readRenderTargetPixels`) | 107 | 11 % |
+| build the item model | 84 | 9 % |
+| PNG encode (`toDataURL`) | 52 | 6 % |
+| **total, 94 icons** | **944** | — |
+
+**The whole icon bake is 944 ms, not 6.9 s**, and the synchronous readback that the code comment and my own
+write-up both blamed is **11 %** of it. Rendering is the cost. Both claims are corrected in PERF_BASELINE.
+
+**The change.** The gate did 5 ms of icon work per frame and paid a full game render for each of those frames —
+about 190 frames to deliver 944 ms of work. Nothing is looking at the 3D view behind the loading screen (the
+sigil is a separate 2D canvas on its own rAF), so the slice can be far wider. At 30 ms the sigil still animates
+at roughly 30 fps.
+
+**Measured**, three cold loads each, non-overlapping:
+
+| | runs (ms) | median |
+|---|---|---|
+| baseline, 5 ms slice | 6 775 / 6 471 / 6 989 | **6 775** |
+| shipped, 30 ms slice | 5 861 / 6 075 / 5 884 | **5 884** |
+
+**−891 ms, −13 %**, and every run of the fast side beats every run of the slow side.
+
+**What is still unexplained.** `started` fires at ~1.6 s and interactive at ~5.9 s, so the gate is ~4.3 s and
+only ~0.95 s of that is icons. The rest is waiting for the spawn chunk to mesh plus the shadows-off shader
+prewarm. Not chased — recorded so the next person does not repeat my mistake of assuming which part is heavy.
+
+**Revert.** `PERF.preloadSliceMs = 5`.
+
+---
+
 ## Critique pass — what re-reading the diff caught
 
 **One real bug, found by measurement, fixed.** `_brMergeRigid` copied `frustumCulled = false` from

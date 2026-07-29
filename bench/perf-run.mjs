@@ -97,6 +97,7 @@ function findBrowser(){
     const B7 = { loadEventMs:tLoadEvent, startedMs:tStarted, firstInteractiveMs:tInteractive, steadyStateMs:tSteady };
     console.log('B7 LOAD:', JSON.stringify(B7));
 
+    try{ console.log('ICON BAKE:', JSON.stringify(await page.evaluate(`window.__hcPERF.iconCost()`))); }catch(e){}
     const ref = await page.evaluate(`window.__hcPERF.ref()`);
     console.log('REF:', JSON.stringify(ref));
     if(!ref.gpuTimers) console.log('!! EXT_disjoint_timer_query_webgl2 unavailable — GPU column will be zero');

@@ -448,6 +448,15 @@ const PERF = {
   //   identically (V3). 512 is generous: the loaded set is 9 and the prefetch ring at most 25.
   brGenCacheMax: 512,
   //
+  // P9 · preloadSliceMs  (baseline: 5)
+  //   How much of each loading-screen frame goes into baking item icons. Measured: the whole icon bake is
+  //   944 ms of work across 94 items — 702 ms of it rendering, only 107 ms of GPU readback, so the sync
+  //   readback the old comment blamed is not the cost. At a 5 ms slice the gate needed ~190 frames and spent
+  //   most of its wall clock rendering the full game once per frame to deliver 5 ms of icons. Nobody is looking
+  //   at the 3D view behind the loading screen — the sigil is a separate 2D canvas — so the slice can be far
+  //   wider. The sigil still animates at ~30 fps at this setting.
+  preloadSliceMs: 30,
+  //
   // P6 · streamBudgetMs  (baseline: 0 = the old separate gen and mesh budgets)
   //   One shared deadline for all overworld streaming in a frame, plus admission control: a unit is not
   //   STARTED unless its expected cost still fits. Measured beforehand: generation averages 3.2-4.9 ms against
@@ -461,7 +470,7 @@ const PERF = {
   portalMoveEps: 0.008,        // metres of camera travel that force a fresh portal frame
   portalTurnEps: 0.0015,       // quaternion delta that does the same
 };
-PERF.baseline = { brShadowLights: 2, brMergeRigid: false, brStableLightCount: false, portalHz: 0, brGenCacheMax: 0, streamBudgetMs: 0 };   // brPrecompile and brPrefetch already ship at their baseline   // brPrecompile already ships at its baseline   // V6 flag matrix: restore any of these and the game is the old game
+PERF.baseline = { brShadowLights: 2, brMergeRigid: false, brStableLightCount: false, portalHz: 0, brGenCacheMax: 0, streamBudgetMs: 0, preloadSliceMs: 5 };   // brPrecompile and brPrefetch already ship at their baseline   // brPrecompile already ships at its baseline   // V6 flag matrix: restore any of these and the game is the old game
 // ?perfoff=a,b,c  restores those flags to their baseline value AT BOOT — the only way to A/B a change whose
 // whole effect is on the first encounter (shader compilation), where flipping a flag mid-session is too late.
 // ?perfoff=all restores every one of them, which is the V6 "all flags off = baseline behaviour" check.
@@ -797,6 +806,9 @@ window.__hcPERF = {
   // V6/V5 helper: put every optimisation back to its baseline value at runtime, or back to shipped defaults.
   // Which programs exist, by three's own cache key. Diffing this over a soak says exactly WHAT is being
   // recompiled, instead of leaving "programs grow" as a number to guess at.
+  iconCost(){ return { count:_icoT.n, modelMs:+_icoT.model.toFixed(0), renderMs:+_icoT.render.toFixed(0),
+    readbackMs:+_icoT.readback.toFixed(0), encodeMs:+_icoT.encode.toFixed(0),
+    totalMs:+(_icoT.model+_icoT.render+_icoT.readback+_icoT.encode).toFixed(0) }; },
   programKeys(){ try{ return (renderer.info.programs||[]).map(p=>String(p.cacheKey||'').slice(0,220)); }catch(e){ return [String(e)]; } },
   // Which lights three will actually count this frame, and who owns them. The program cache key embeds the
   // light COUNT, so anything that toggles a light's visible flag recompiles every material in the scene.
@@ -5958,7 +5970,7 @@ function loop(){ try{
     if(c&&c.meshed){
       if(!_preIcons){ try{ _preIcons=Object.keys(ITEMS); }catch(e){ _preIcons=[]; } _preI=0; }
       const t0p=performance.now();
-      while(_preI<_preIcons.length && performance.now()-t0p<5){ try{ slotIconURL(_preIcons[_preI]); }catch(e){} _preI++; }   // icon3DURL does a synchronous GPU readback per modelled item — a 2-15ms hitch on first pickup and a 100ms+ freeze on first creative-menu open if left to happen live
+      while(_preI<_preIcons.length && performance.now()-t0p<PERF.preloadSliceMs){ try{ slotIconURL(_preIcons[_preI]); }catch(e){} _preI++; }   // icon3DURL does a synchronous GPU readback per modelled item — a 2-15ms hitch on first pickup and a 100ms+ freeze on first creative-menu open if left to happen live
       const pct=_preIcons.length? _preI/_preIcons.length : 1;
       { const lb=document.querySelector('#load .lb'); if(lb) lb.textContent = pct<1 ? '…binding the sigils… '+Math.round(pct*100)+'%' : '…the circle is drawn…'; }
       if(_preI>=_preIcons.length){
@@ -8679,20 +8691,29 @@ function itemModel(id){ const it=ITEMS[id];
   return extrudeIcon(id); }   // tools, food, materials → extruded pixel model
 // render an item's 3D model once → cached transparent PNG for the DOM icons
 const _icon3D={}; let _iconRT,_iconScene,_iconCam,_iconCanvas,_iconCtx,_iconPix;
+// P9 instrumentation: the preload gate spends 6.9 s of an 8.5 s cold load baking these, and the three parts
+// (build the model, read the pixels back off the GPU, encode a PNG) have very different fixes. Measure first.
+const _icoT={ n:0, model:0, render:0, readback:0, encode:0 };
 function icon3DURL(id){ if(_icon3D[id])return _icon3D[id];
   if(!_iconRT){ _iconRT=new THREE.WebGLRenderTarget(100,100); _iconScene=new THREE.Scene();
     _iconCam=new THREE.OrthographicCamera(-0.62,0.62,0.62,-0.62,0.01,20); _iconCam.position.set(0.85,0.7,1.3); _iconCam.lookAt(0,0,0);
     _iconScene.add(new THREE.AmbientLight(0xffffff,0.85)); const dl=new THREE.DirectionalLight(0xffffff,0.9); dl.position.set(1.2,2,1.4); _iconScene.add(dl);
     _iconCanvas=document.createElement('canvas'); _iconCanvas.width=_iconCanvas.height=100; _iconCtx=_iconCanvas.getContext('2d'); _iconPix=new Uint8Array(40000); }
+  const _t0=performance.now();
   const m=itemModel(id); const box=new THREE.Box3().setFromObject(m), sz=box.getSize(new THREE.Vector3()), ctr=box.getCenter(new THREE.Vector3());
   const sc=0.95/(Math.max(sz.x,sz.y,sz.z)||1); m.scale.multiplyScalar(sc); m.position.copy(ctr).multiplyScalar(-sc); _iconScene.add(m);
+  const _t1=performance.now(); _icoT.model+=_t1-_t0;
   const pRT=renderer.getRenderTarget(), pc=renderer.getClearColor(new THREE.Color()), pa=renderer.getClearAlpha();
-  renderer.setRenderTarget(_iconRT); renderer.setClearColor(0x000000,0); renderer.clear(); renderer.render(_iconScene,_iconCam); renderer.readRenderTargetPixels(_iconRT,0,0,100,100,_iconPix);
+  renderer.setRenderTarget(_iconRT); renderer.setClearColor(0x000000,0); renderer.clear(); renderer.render(_iconScene,_iconCam); const _t2=performance.now(); _icoT.render+=_t2-_t1; renderer.readRenderTargetPixels(_iconRT,0,0,100,100,_iconPix);
+  const _t3=performance.now(); _icoT.readback+=_t3-_t2;
   renderer.setRenderTarget(pRT); renderer.setClearColor(pc,pa);
   const img=_iconCtx.createImageData(100,100), d=img.data;
   for(let y=0;y<100;y++){ const sy=99-y; for(let x=0;x<100;x++){ const s=(sy*100+x)*4,o=(y*100+x)*4; d[o]=_iconPix[s];d[o+1]=_iconPix[s+1];d[o+2]=_iconPix[s+2];d[o+3]=_iconPix[s+3]; } }
   _iconCtx.putImageData(img,0,0); _iconScene.remove(m); _disposeView(m);
-  _icon3D[id]=_iconCanvas.toDataURL(); return _icon3D[id]; }
+  const _t4=performance.now();
+  _icon3D[id]=_iconCanvas.toDataURL();
+  _icoT.encode+=performance.now()-_t4; _icoT.n++;
+  return _icon3D[id]; }
 function slotIconURL(id){ const it=ITEMS[id]; const modelBlock = it&&it.block!=null && B[it.block] && B[it.block].cat==='model';   // fence/bars/chair/gate/door/pot/etc. → render their real 3D model, not a flat grass tile
   return (it&&(it.gun||it.tool||it.ghost||it.nvg||it.atlas||it.block===BID.torch||it.block===BID.torch_unlit||it.block===BID.lantern||it.block===BID.candle||modelBlock||id==='handcuffs'))?icon3DURL(id):iconURL(id); }   // 3D icon for modelled items (Ghost, NVG, Atlas, …), else 2D
 const _dropGeo=new THREE.BoxGeometry(0.26,0.26,0.26);
