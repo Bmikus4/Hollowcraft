@@ -437,8 +437,15 @@ const PERF = {
   brPrefetch: false,
   brPrefetchRing: 1,          // how far beyond BRX_KEEP to keep warm. 1 = the next ring you can walk into.
   brPrefetchCooldown: 20,     // frames to wait after building one, so a burst cannot stack into a stutter
+  //
+  // P5 · portalHz  (baseline: 0 = every frame)
+  //   Cap how often the see-through portal re-renders the whole scene a second time. Movement still forces an
+  //   immediate re-render, so the parallax never lags behind a camera you are actually moving.
+  portalHz: 120,
+  portalMoveEps: 0.008,        // metres of camera travel that force a fresh portal frame
+  portalTurnEps: 0.0015,       // quaternion delta that does the same
 };
-PERF.baseline = { brShadowLights: 2, brMergeRigid: false, brStableLightCount: false };   // brPrecompile and brPrefetch already ship at their baseline   // brPrecompile already ships at its baseline   // V6 flag matrix: restore any of these and the game is the old game
+PERF.baseline = { brShadowLights: 2, brMergeRigid: false, brStableLightCount: false, portalHz: 0 };   // brPrecompile and brPrefetch already ship at their baseline   // brPrecompile already ships at its baseline   // V6 flag matrix: restore any of these and the game is the old game
 // ?perfoff=a,b,c  restores those flags to their baseline value AT BOOT — the only way to A/B a change whose
 // whole effect is on the first encounter (shader compilation), where flipping a flag mid-session is too late.
 // ?perfoff=all restores every one of them, which is the V6 "all flags off = baseline behaviour" check.
@@ -814,6 +821,16 @@ window.__hcPERF = {
   },
   // Force a full rebuild of the loaded Backrooms geometry — the only way to A/B a flag that only takes effect
   // at build time. Clears the per-chunk cache so nothing is re-parented from before the flag changed.
+  // P5 gate: how often the portal actually re-renders, and whether motion still forces it every frame.
+  portalRate(reset, standAt){ try{
+      if(standAt && BR.door){ const d=BR.door; player.pos.set(d.x+standAt, d.y+1.7, d.z); player.vel.set(0,0,0);
+        player.yaw=Math.atan2(-(d.x-player.pos.x), -(d.z-player.pos.z)); }
+      if(reset){ BR._portalFrames=0; BR._prT0=performance.now(); return true; }
+      const dt=(performance.now()-(BR._prT0||performance.now()))/1000;
+      return { renders:BR._portalFrames|0, seconds:+dt.toFixed(2), hz:Math.round((BR._portalFrames|0)/Math.max(0.001,dt)),
+               fps:Math.round(fpsAvg), portalHz:PERF.portalHz };
+    }catch(e){ return {err:String(e&&e.message||e)}; } },
+  spin(on){ try{ if(on){ if(!this._sp) this._sp=setInterval(()=>{ player.yaw+=0.05; }, 4); } else { clearInterval(this._sp); this._sp=null; } return !!this._sp; }catch(e){ return String(e); } },
   prefetch(){ return { on:!!PERF.brPrefetch, ring:PERF.brPrefetchRing, built:BR._pfBuilt|0, lastMs:BR._pfMs||0,
     cached:BR.envCache?BR.envCache.size:0, loaded:BR.loaded?BR.loaded.length:0, err:BR._pfErr||null }; },
   precompile(){ return _brPcState ? { done:_brPcState.done, ms:_brPcState.ms, slices:_brPcState.i,
@@ -12621,6 +12638,25 @@ let _brPortalRT=null, _brPortalCam=null, _brPortalMat=null;
 const _bv0=new THREE.Vector3(), _bv1=new THREE.Vector3(), _bv3=new THREE.Vector3(), _bq=new THREE.Quaternion(), _bcp=new THREE.Vector4(), _bq4=new THREE.Vector4(), _bPlane=new THREE.Plane(), _bSize=new THREE.Vector2();
 const BR_PORTAL_DIST=30;                                                    // past this the quad is a few pixels wide and a stale RT is indistinguishable
 function brPortalWanted(dist){ return dist < BR_PORTAL_DIST; }              // ONE definition, so the tick and the test cannot drift
+// P5 · THE PORTAL DOES NOT NEED A FRESH FRAME AT 250 FPS. It is a second full scene render; at baseline that
+// was 11.48 ms of CPU a frame, and P1/P2 have it down to 2.9, but that is still 41% of a 7.14 ms budget spent
+// on one prop. updateVoid already throttles its raymarch RT to ~30 Hz for the same reason.
+// The catch is that the quad samples the RT in SCREEN space, so a stale RT under a moving camera smears. Hence
+// two triggers, not one: a cadence, and an immediate re-render whenever the view has actually moved enough for
+// the staleness to show. Standing still costs the cadence; whipping the camera around costs every frame, which
+// is exactly when you would see it.
+let _brPortalT=0; const _brPortalPrev={x:0,y:0,z:0,qx:0,qy:0,qz:0,qw:1};
+function brPortalDue(){
+  if(!PERF.portalHz) return true;                                            // 0 = off, render every frame (baseline)
+  const now=performance.now();
+  if(now-_brPortalT >= 1000/PERF.portalHz){ _brPortalT=now; _brPortalSnap(); return true; }
+  const p=camera.position, q=camera.quaternion, P=_brPortalPrev;
+  const dp=Math.abs(p.x-P.x)+Math.abs(p.y-P.y)+Math.abs(p.z-P.z);
+  const dq=Math.abs(q.x-P.qx)+Math.abs(q.y-P.qy)+Math.abs(q.z-P.qz)+Math.abs(q.w-P.qw);
+  if(dp>PERF.portalMoveEps || dq>PERF.portalTurnEps){ _brPortalT=now; _brPortalSnap(); return true; }
+  return false; }
+function _brPortalSnap(){ const p=camera.position, q=camera.quaternion, P=_brPortalPrev;
+  P.x=p.x; P.y=p.y; P.z=p.z; P.qx=q.x; P.qy=q.y; P.qz=q.z; P.qw=q.w; }
 function brRenderPortal(){ if(typeof renderer==='undefined'||!renderer||!BR.door||typeof camera==='undefined')return;
   BR._portalFrames=(BR._portalFrames|0)+1;                                   // QA: proves the gate below did not switch the portal off for good
   if(!BR.rooms||!BR.rooms.length){ brxGenerate(); brBuildEnvAll(); }
@@ -13038,7 +13074,7 @@ function updateBackrooms(dt){
     // file's player.yaw is not it (it reads back null through the debug hooks) — a gate built on it skipped the portal at
     // seemingly random times. Distance needs nothing but the door position, is trivially verifiable, and already removes the
     // cost for all the time the door is sitting somewhere else in the world.
-    if(brPortalWanted(Math.hypot(d.x-player.pos.x, d.z-player.pos.z))){ T.begin(TID.brPortal); brRenderPortal(); T.end(TID.brPortal); }
+    if(brPortalWanted(Math.hypot(d.x-player.pos.x, d.z-player.pos.z)) && brPortalDue()){ T.begin(TID.brPortal); brRenderPortal(); T.end(TID.brPortal); }
     if(Math.hypot(player.pos.x-d.x,player.pos.z-d.z)<1.1&&Math.abs(player.pos.y-d.y)<2.2)brEnter(); }
   if(!BR.inside)return;
   if(player.dead){ brForceLeaveOnDeath(); return; }                                                                      // any death inside → clean out of the dimension (permadeath: key lost, halls sealed)

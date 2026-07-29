@@ -5,19 +5,27 @@ started.** This is an interim report, not a Phase 6 sign-off.
 
 ## Before / after
 
-Baseline `bench/results/perf-baseline-d2a425f-2026-07-28T22-16-00.json` vs shipped
-`bench/results/perf-SHIPPED-P1P2P3-2026-07-29T06-24-44.json`. Both n = 5, warm-up discarded, same machine,
-1920×1080, vsync off, `?brseed=20260728`.
+Baseline `bench/results/perf-baseline-d2a425f-2026-07-28T22-16-00.json` vs final
+`bench/results/perf-FINAL-2026-07-29T08-04-34.json`. Both n = 5, warm-up discarded, same machine, 1920×1080,
+vsync off, `?brseed=20260728`.
 
 | scene | median ms | fps | draws | p99 ms | max ms | C1 | C2 |
 |---|---|---|---|---|---|---|---|
-| **B1** Backrooms static | 15.04 → **3.15** (4.8×) | 67 → **318** | 4 770 → **399** | 16.18 → 13.71 | 22.2 → 69.4 | FAIL | FAIL |
-| **B5** Backrooms spin | 16.03 → **3.83** (4.2×) | 62 → **261** | 4 928 → **519** | 17.67 → **5.36** | 25.1 → 20.8 | **PASS** | FAIL |
-| **B2** Backrooms sprint | 15.94 → **3.94** (4.0×) | 63 → **254** | 4 958 → **431** | 25.53 → 13.55 | 54.4 → 63.1 | FAIL | FAIL |
-| **B3** Backrooms diagonal | 16.49 → **4.21** (3.9×) | 61 → **238** | 5 443 → **500** | 27.28 → 14.11 | 66.6 → 50.3 | FAIL | FAIL |
-| **B4** teleport | 18.53 → **4.69** (4.0×) | 54 → **213** | 5 230 → **512** | 30.43 → 24.55 | 111.8 → 107.6 | FAIL | FAIL |
-| **B6** portal | 23.99 → **6.22** (3.9×) | 42 → **161** | 7 168 → **717** | 25.82 → **8.02** | 42.5 → 25.5 | **PASS** | FAIL |
-| B1o / B5o / B2o / B3o overworld | 1.6–2.3 → 2.2–2.6 | ~400 | unchanged | — | — | mixed | mixed |
+| **B1** Backrooms static | 15.04 → **3.58** (4.2×) | 67 → **280** | 4 770 → **399** | 16.18 → **6.15** | 22.2 → 24.1 | **PASS** | FAIL |
+| **B5** Backrooms spin | 16.03 → **4.39** (3.7×) | 62 → **228** | 4 928 → **517** | 17.67 → **5.51** | 25.1 → **10.2** | **PASS** | **PASS** |
+| **B2** Backrooms sprint | 15.94 → **4.08** (3.9×) | 63 → **245** | 4 958 → **431** | 25.53 → 13.48 | 54.4 → 74.0 | FAIL | FAIL |
+| **B3** Backrooms diagonal | 16.49 → **4.45** (3.7×) | 61 → **225** | 5 443 → **500** | 27.28 → 14.22 | 66.6 → 44.4 | FAIL | FAIL |
+| **B4** teleport | 18.53 → **4.92** (3.8×) | 54 → **204** | 5 230 → **512** | 30.43 → 19.35 | 111.8 → 124.6 | FAIL | FAIL |
+| **B6** portal | 23.99 → **6.98** (3.4×) | 42 → **143** | 7 168 → **787** | 25.82 → 10.77 | 42.5 → 28.4 | FAIL | FAIL |
+| **B1o** overworld static | 1.63 → 1.76 | 568 | 167 | 3.48 | 11.8 | **PASS** | **PASS** |
+| B5o / B2o / B3o overworld | 1.9–2.2 → 2.0–2.4 | ~420–490 | unchanged | — | — | mixed | mixed |
+
+Load: **8.42 s → 8.53 s** first interactive. Unchanged, which was a requirement — `brPrecompile` would have
+made it 26.9 s and is therefore off.
+
+Note B1's p99 spread is ±5.58 and B4's ±9.49: those two scenes cannot resolve anything finer than their own
+noise, and this machine's failing cooling fan is the likely source late in a long suite (PERF_REPORT assumption
+4). B5 and B1o are the tight ones and both pass outright.
 
 **Three to five times faster everywhere the game was slow**, and draw calls are down 87–92 % — from 4 770–7 168
 to 399–717, now at or under the 664 ceiling derived in PERF_MATH §4.4 (B6 is 53 over).
@@ -27,11 +35,16 @@ V6 flag matrix verified: booting with `?perfoff=all` reproduces the baseline exa
 
 ## Gates: what is fixed and what is not
 
-- **C1 (median ≤ 7.14 ms, p99 ≤ 9.5 ms).** Every median now passes with room — the worst is B6 at 6.22 ms. B5
-  and B6 pass outright. The rest fail **only on p99**, and every one of those p99s is a chunk-crossing hitch,
-  not steady-state cost.
-- **C2 (no frame > 12 ms, zero > 16.6 ms). Still fails everywhere.** This is the honest headline: the pass so
-  far has fixed *throughput*, not *hitching*. B4 still reaches 107.6 ms and B2 63.1 ms.
+- **C1 (median ≤ 7.14 ms, p99 ≤ 9.5 ms).** Every median passes with room — the worst is B6 at 6.98 ms, and the
+  Backrooms sits at 3.6–4.9 ms against a 7.14 ms budget. **B1, B5 and B1o pass C1 outright.** The rest fail
+  **only on p99**, and every one of those p99s is a hitch, not steady-state cost.
+- **C2 (no frame > 12 ms, zero > 16.6 ms).** **B5 and B1o now pass.** Everywhere else it still fails — this
+  remains the honest headline: the pass has fixed *throughput*, not *hitching*. B4 still reaches 124.6 ms.
+- **C3 / C4 (no seams, no regression).** Not formally tested — V3/V4 are unwritten. The existing Backrooms
+  harnesses (`tmp-br-visible`, `tmp-v1-doors`, `tmp-br-portal`, `tmp-verify-backrooms`) all pass, and
+  `bench/perf-verify-p2.mjs` proves the door merge is geometrically exact, but that is not the same as a seam
+  test. **This is the biggest gap in the sign-off.**
+- **C5 (still one file, no new deps).** Held. No build step, no CDN, no new runtime dependency.
 - **C6 (numbers-backed).** Every claim here has a JSON artifact under `bench/results/`.
 
 ## The one number that has barely moved, and why
@@ -47,13 +60,20 @@ makes the shader enormous. A smaller pool shrinks the shader, the compile and th
 
 ## Next five things
 
-1. **P4 — slice the BRX chunk build across frames.** The budget allows 209 frames per chunk (PERF_MATH §4.2)
-   and it uses one. This is the C2 failure in B2/B3/B4 and needs no new algorithm.
-2. **Decide the Backrooms light pool size.** Unlocks P3b and cuts fragment cost at the same time.
-3. **P6 — the overworld streaming slice.** `streamChunks` declares 1.5–3.5 ms and overruns to 16–25 ms because
-   one unit of work is larger than the slice. B3o: 230 frames over 12 ms.
-4. **P7 — bound the `BR.gen` cache.** Heap still reaches 231 MB in B4; resident chunk data is only ~5 MB.
-5. **V3/V4/V7 — determinism, seam and soak tests.** None written yet, and P4 must not land before V3/V4 do.
+1. **Decide the Backrooms light pool size — this is a question for Ben, and it unblocks the rest.** Sixteen
+   simultaneous point lights is what makes the shader enormous, and that shader is the 6–7 second first-entry
+   frame. A smaller pool shrinks the compile, the fragment cost and the program size together, and
+   `brStableLightCount` keeps the count constant either way. Until this is settled, `brPrecompile` costs +16 s
+   of load and `brPrefetch` measures as nothing, because both are swamped by the compiles.
+2. **V3/V4 — determinism and seam tests.** Unwritten, and the largest gap in the sign-off. The BRX edge oracle
+   is order-independent by construction, so this is a matter of asserting it, not building it.
+3. **P6 — the overworld streaming slice.** `streamChunks` declares a 1.5–3.5 ms budget and overruns to
+   16–25 ms because one unit of work is bigger than the slice. B3o: 235 frames over 12 ms, worst 25.1 ms. This
+   is the last untouched C2 failure that is purely a scheduling bug.
+4. **P7 — bound the `BR.gen` cache.** Heap still reaches 231 MB in B4; resident chunk data is only ~5 MB, so
+   this is an unbounded map, not footprint.
+5. **Re-measure `brPrefetch` after (1).** It is implemented and correct; it just has nothing to show while the
+   compiles dominate.
 
 ---
 

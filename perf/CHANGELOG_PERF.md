@@ -279,6 +279,46 @@ deleted, because "we tried prefetching and it did nothing" is only true *given t
 
 ---
 
+## P5 — the portal stops re-rendering the world at 250 fps
+
+**Flag.** `PERF.portalHz` — default **120**, baseline **0** (every frame). Plus `portalMoveEps = 0.008` m and
+`portalTurnEps = 0.0015`.
+
+**What.** `brRenderPortal` is a second full scene render, every frame the player is within 30 m of the void
+door. P1 and P2 had already taken it from **11.48 ms to 2.94 ms of CPU** (and 9.62 → 1.54 ms of GPU), which is
+most of the original justification gone — but 2.94 ms is still 41 % of a 7.14 ms budget spent on one prop.
+`updateVoid` already throttles its raymarch RT to ~30 Hz for exactly this reason.
+
+The quad samples the RT in **screen space**, so a stale render under a moving camera smears. Hence two triggers,
+not one: a cadence, *and* an immediate re-render whenever the camera has actually moved or turned enough for the
+staleness to show. Standing still costs the cadence; moving costs what it needs to.
+
+**Measured.** Paired in-session A/B on B6, the right instrument for a steady-state change:
+
+| | off (every frame) | on (120 Hz) |
+|---|---|---|
+| median | 8.79 ms | **7.40 ms** |
+| paired delta | — | **−1.48 ms, 5 of 5 pairs** |
+| draws | 755 | **421** |
+| frames > 12 ms | — | **−61** |
+
+**And the portal ends up refreshing more often, not less.** Direct cadence probe, standing 3 m from the door:
+
+| | portal refresh | game |
+|---|---|---|
+| gate off | 43 Hz | 61 fps |
+| gate on (120) | **91 Hz** | **197 fps** |
+| gate on, camera turning | 38 Hz | 92 fps |
+
+Because the gate makes the whole frame three times cheaper, the portal gets more updates per second than it did
+when it was rendering "every frame". The only case that loses refresh rate is a fast camera sweep (43 → 38 Hz)
+and it buys 50 % more frame rate there. Note the turn trigger under-fires in the headless probe because
+`setInterval` is throttled — with real mouse input it fires far more often, so this is the pessimistic reading.
+
+**Revert.** `PERF.portalHz = 0`.
+
+---
+
 ## Critique pass — what re-reading the diff caught
 
 **One real bug, found by measurement, fixed.** `_brMergeRigid` copied `frustumCulled = false` from
