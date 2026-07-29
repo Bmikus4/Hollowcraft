@@ -454,6 +454,18 @@ const PERF = {
   //   of updateBrain at 0.02 ms or less.
   brainScanSlice: 400,
   //
+  // P8b · genColumnSlice  (baseline: 0 = all 256 columns in one frame)
+  //   Columns of terrain generated per frame. generateChunk's own bisect: genColumn is the bulk of it, worst
+  //   single chunk 11.85 ms against a 12 ms frame ceiling. A chunk is only marked generated once every column
+  //   is laid, and nothing downstream can see a half-built one.
+  //   MEASURED NEGATIVE — ships OFF. At 64 columns per frame the worst genColumn slice was still 11.71 ms
+  //   (against 11.85 unsliced) and B3o's frames over 12 ms went 136 -> 186. Cutting the batch by four changed
+  //   the worst case by one percent, which means the tail is not 256 columns adding up — it is ONE expensive
+  //   column, and no column-granularity slicing can divide that. Making this frame budget requires genColumn
+  //   itself to get cheaper, or to run off-thread. The resumable machinery is kept behind the flag because it
+  //   is the right scaffolding for the off-thread version.
+  genColumnSlice: 0,
+  //
   // P9 · preloadSliceMs  (baseline: 5)
   //   How much of each loading-screen frame goes into baking item icons. Measured: the whole icon bake is
   //   944 ms of work across 94 items — 702 ms of it rendering, only 107 ms of GPU readback, so the sync
@@ -476,7 +488,7 @@ const PERF = {
   portalMoveEps: 0.008,        // metres of camera travel that force a fresh portal frame
   portalTurnEps: 0.0015,       // quaternion delta that does the same
 };
-PERF.baseline = { brShadowLights: 2, brMergeRigid: false, brStableLightCount: false, portalHz: 0, brGenCacheMax: 0, streamBudgetMs: 0, preloadSliceMs: 5, brainScanSlice: 0 };   // brPrecompile and brPrefetch already ship at their baseline   // brPrecompile already ships at its baseline   // V6 flag matrix: restore any of these and the game is the old game
+PERF.baseline = { brShadowLights: 2, brMergeRigid: false, brStableLightCount: false, portalHz: 0, brGenCacheMax: 0, streamBudgetMs: 0, preloadSliceMs: 5, brainScanSlice: 0, genColumnSlice: 0 };   // brPrecompile and brPrefetch already ship at their baseline   // brPrecompile already ships at its baseline   // V6 flag matrix: restore any of these and the game is the old game
 // ?perfoff=a,b,c  restores those flags to their baseline value AT BOOT — the only way to A/B a change whose
 // whole effect is on the first encounter (shader compilation), where flipping a flag mid-session is too late.
 // ?perfoff=all restores every one of them, which is the V6 "all flags off = baseline behaviour" check.
@@ -815,6 +827,8 @@ window.__hcPERF = {
   // V6/V5 helper: put every optimisation back to its baseline value at runtime, or back to shipped defaults.
   // Which programs exist, by three's own cache key. Diffing this over a soak says exactly WHAT is being
   // recompiled, instead of leaving "programs grow" as a number to guess at.
+  genSplit(reset){ const o={}; for(let i=0;i<_GCN.length;i++) o[_GCN[i]]={ totalMs:+_gcT[i].toFixed(1), maxMs:+_gcMax[i].toFixed(2) };
+    if(reset){ for(let i=0;i<_gcT.length;i++){ _gcT[i]=0; _gcMax[i]=0; } } return o; },
   brainSplit(reset){ const o={}; for(let i=0;i<_BBN.length;i++) o[_BBN[i]]={ totalMs:+_bbT[i].toFixed(1), maxMs:+_bbMax[i].toFixed(2) };
     if(reset){ for(let i=0;i<_bbT.length;i++){ _bbT[i]=0; _bbMax[i]=0; } } return o; },
   iconCost(){ return { count:_icoT.n, modelMs:+_icoT.model.toFixed(0), renderMs:+_icoT.render.toFixed(0),
@@ -1727,11 +1741,34 @@ function oreVeins(c){ const r=tileRng((c.cx*374761393 ^ c.cz*668265263 ^ 0x9e377
   for(let k=0;k<ironN;k++){ const lx=(r()*CK)|0, lz=(r()*CK)|0, top=topAt(lx,lz); if(top<10)continue; const hi=Math.min(top-4,48); if(hi<=6)continue; const y=5+((r()*(hi-5))|0); if(c.blocks[idx(lx,y,lz)]===BID.stone) placeVein(c,lx,y,lz,BID.iron_ore,sampleWeighted(r,IRON_W),r); }
   const diaN=(r()<0.55)?1:(r()<0.85?0:2);                                // SCARCE — usually 0–1, occasionally 2
   for(let k=0;k<diaN;k++){ const lx=(r()*CK)|0, lz=(r()*CK)|0, y=2+((r()*13)|0); if(c.blocks[idx(lx,y,lz)]===BID.stone) placeVein(c,lx,y,lz,BID.diamond_ore,sampleWeighted(r,DIAMOND_W),r); } }
+// P8b bisect: generateChunk averages 3.2-4.9 ms with a tail to 24 ms, against a frame budget of 12. Before
+// declaring that a refactor, find out which stage it actually is. Zero cost with the profiler off.
+const _gcT=[0,0,0,0,0,0,0], _gcMax=[0,0,0,0,0,0,0];
+const _GCN=['genColumn','oreVeins','decorate','beachLog','enrichTerrain','applyEdits','flags+neighbours'];
+let _gcLast=0;
+function _gc(i){ if(!PERF.on) return; const t=performance.now();
+  if(i>0){ const d=t-_gcLast; _gcT[i-1]+=d; if(d>_gcMax[i-1])_gcMax[i-1]=d; }
+  _gcLast=t; }
+// P8b · GENERATION IS RESUMABLE AT COLUMN GRANULARITY. Bisected: of a 3.4 s generation budget across a
+// diagonal sprint, genColumn is 2.46 s (worst single chunk 11.85 ms) and decorate 0.92 s (worst 7.81 ms);
+// everything else together is under 20 ms. There is no cheap trick here — it is 256 columns of domain-warped
+// fBm — but the loop is a plain nested for, so it can simply stop and come back. A chunk stays
+// `generated=false` until every column is laid, and streamChunks already refuses to mesh a chunk whose
+// neighbours are not generated, so a half-built chunk is invisible to everything downstream by construction.
 function generateChunk(c){
-  for (let lz=0;lz<CK;lz++) for (let lx=0;lx<CK;lx++) genColumn(c,lx,lz);
+  _gc(0);
+  const step = PERF.genColumnSlice>0 ? PERF.genColumnSlice : CK*CK;
+  let i = c._genI|0;
+  const end = Math.min(CK*CK, i+step);
+  for(; i<end; i++) genColumn(c, i&15, i>>4);
+  if(i < CK*CK){ c._genI=i; _gc(1); _gc(2); _gc(3); _gc(4); _gc(5); _gc(6); return; }   // resume next frame
+  c._genI=0;
   c.generated=true;                        // mark before decorate (uses getBlock)
-  if(!brRegion(c.cx*CK)){ oreVeins(c); decorate(c); beachLog(c); enrichTerrain(c); }   // THE BACKROOMS region is a hand-built voxel maze → skip ALL terrain decoration/ores/trees (Ben 07-24)
+  _gc(1);
+  if(!brRegion(c.cx*CK)){ oreVeins(c); _gc(2); decorate(c); _gc(3); beachLog(c); _gc(4); enrichTerrain(c); } else { _gc(2); _gc(3); _gc(4); }   // THE BACKROOMS region is a hand-built voxel maze → skip ALL terrain decoration/ores/trees (Ben 07-24)
+  _gc(5);
   applyEdits(c);
+  _gc(6);
   // DERIVE render flags from actual content (single source of truth) so no placement path can leave them stale →
   // fixes worldgen model/cross blocks (sulfur nodes, flowers/foliage) being invisible until the chunk is re-meshed by an edit.
   { let a=c.hasCross,b=c.hasModel,w=c.hasWater; const bl=c.blocks;

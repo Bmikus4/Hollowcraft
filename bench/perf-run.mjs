@@ -132,6 +132,7 @@ function findBrowser(){
         const res = await page.evaluate(`window.__hcPERF.result()`);
         try{ if(res) res.streamUnits = await page.evaluate(`window.__hcPERF.streamUnits(true)`); }catch(e){}
         try{ if(res) res.brainSplit = await page.evaluate(`window.__hcPERF.brainSplit(true)`); }catch(e){}
+        try{ if(res) res.genSplit = await page.evaluate(`window.__hcPERF.genSplit(true)`); }catch(e){}
         if(!res){ console.log('  NO RESULT', step.id); break; }
         // A run that measured the WRONG WORLD is worse than no run — it reports plausible numbers for a scene
         // that never happened. The Pale used to kill the player mid-suite and every Backrooms scene after it

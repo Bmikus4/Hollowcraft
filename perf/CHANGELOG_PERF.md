@@ -531,6 +531,35 @@ stays (a stale list costs at most one three-second cycle of noticing a newly pla
 
 ---
 
+## P8b — slicing terrain generation: MEASURED NEGATIVE, ships off
+
+**Flag.** `PERF.genColumnSlice` — default **0** (whole chunk in one frame).
+
+I had written that the remaining overworld C2 failure needed `generateChunk` "split or moved off-thread", and
+called it a large refactor. My previous two "large refactor" assumptions both turned out to be one-line fixes
+once measured, so this one got bisected too:
+
+| stage of `generateChunk` | total ms over a diagonal sprint | worst single call |
+|---|---|---|
+| **genColumn** (256 columns) | 2 457 | **11.85 ms** |
+| **decorate** | 925 | **7.81 ms** |
+| oreVeins / beachLog / enrichTerrain / applyEdits / flags | < 20 combined | ≤ 0.1 ms |
+
+The column loop is a plain nested `for`, so making it resumable is easy: a cursor on the chunk, `generated`
+stays false until every column is laid, and `streamChunks` already refuses to mesh a chunk whose neighbours are
+not generated — so a half-built chunk is invisible downstream by construction.
+
+**It does not work.** At 64 columns per frame the worst `genColumn` call was **11.71 ms**, against 11.85 ms
+unsliced, and B3o's frames over 12 ms went **136 → 186**. Cutting the batch by four changed the worst case by
+one percent.
+
+**That is a useful negative**, because it rules out the obvious fix and names the real one: the tail is not 256
+columns adding up, it is **one expensive column**, and no column-granularity slicing can divide a single call.
+Making this fit a 12 ms frame needs `genColumn` itself to get cheaper, or to run off-thread. The resumable
+machinery stays behind the flag because it is exactly the scaffolding an off-thread version would need.
+
+---
+
 ## Critique pass — what re-reading the diff caught
 
 **One real bug, found by measurement, fixed.** `_brMergeRigid` copied `frustumCulled = false` from

@@ -89,10 +89,12 @@ makes the shader enormous. A smaller pool shrinks the shader, the compile and th
 2. **Make every point light come from a fixed-size pool.** This is the concrete form of (1). The soak proves
    programs grow forever because the light count moves; `__hcPERF.programKeys()` and `lightCensus()` are there
    to verify a fix. Nothing else in the game leaks — heap, draws and geometries are all flat.
-3. **Split `generateChunk`, or move it off-thread.** P6 stopped generation and meshing compounding, but a
-   single generation unit still averages 3.2–4.9 ms with a tail to 24 ms against a 12 ms ceiling. No scheduling
-   can fix a unit larger than the budget — this is the remaining overworld C2 failure and it needs the unit
-   made smaller.
+3. **Make `genColumn` itself cheaper, or run it off-thread.** Bisected: of `generateChunk`, `genColumn` is
+   2 457 ms of a diagonal sprint (worst single call 11.85 ms) and `decorate` 925 ms (worst 7.81 ms); everything
+   else is under 20 ms combined. Column-granularity slicing was implemented and **measured negative** — at 64
+   columns per frame the worst call was 11.71 ms, because the tail is one expensive column rather than 256
+   adding up. The resumable machinery is in place behind `PERF.genColumnSlice` and is the right scaffolding for
+   a worker.
 4. **Nothing — the heap question is closed.** V7 with forced GC shows it flat. The 165–327 MB in the suite was
    uncollected garbage, not a leak. Both my earlier guesses about it were wrong and are retracted in PERF_MATH.
 5. **Re-measure `brPrefetch` after (1).** It is implemented and correct; it just has nothing to show while the
@@ -168,10 +170,12 @@ verified: B1 goes back to 13.7 ms and 4 772 draws, which is the baseline.
 | `streamAdmitSafety` | 1.0 | — | multiplier on the cost estimate | — | >1 starves streaming sooner |
 | `preloadSliceMs` | **30** | 5 | ms of each loading-screen frame spent baking item icons | first interactive 6 775 → 5 884 ms | low — the sigil is a separate 2D canvas and still animates at ~30 fps |
 | `brainScanSlice` | **400** | 0 | block edits `detectBase` examines per frame | worst frame 8.10 → 0.13 ms | low — a stale key list costs at most one 3 s cycle |
+| `genColumnSlice` | **0** (off) | 0 | resumable terrain generation, columns per frame | **negative** — 11.71 vs 11.85 ms; the tail is one column, not 256 | n/a, off |
 | `streamBudgetMs` | **8** | 0 | one shared deadline for overworld streaming, with admission control | frames >12 ms −60 (B2o) / −114 (B3o) | low — the first unit of a frame always runs, so streaming cannot starve |
 | `streamAdmitSafety` | 1.0 | — | multiplier on the cost estimate | — | >1 starves streaming sooner |
 | `preloadSliceMs` | **30** | 5 | ms of each loading-screen frame spent baking item icons | first interactive 6 775 → 5 884 ms | low — the sigil is a separate 2D canvas and still animates at ~30 fps |
 | `brainScanSlice` | **400** | 0 | block edits `detectBase` examines per frame | worst frame 8.10 → 0.13 ms | low — a stale key list costs at most one 3 s cycle |
+| `genColumnSlice` | **0** (off) | 0 | resumable terrain generation, columns per frame | **negative** — 11.71 vs 11.85 ms; the tail is one column, not 256 | n/a, off |
 | `brPrecompile` | **false** | false | compile the Backrooms shaders on the loading screen | works, costs +16 s of load | rejected on cost |
 | `brPrefetch` | **false** | false | build the chunk ring ahead of the player | nothing while compiles dominate | re-measure after the light-pool decision |
 | `brPrefetchRing` / `brPrefetchCooldown` | 1 / 20 | — | tuning for the above | — | inert while `brPrefetch` is off |
