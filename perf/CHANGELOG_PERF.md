@@ -397,6 +397,59 @@ still happened. Frame time alone cannot tell the difference between "faster" and
 
 ---
 
+## V5 — QA helper parity: PASS
+
+`bench/perf-verify-v5.mjs` calls 21 read-only console helpers twice in the same page, once with every
+optimisation restored to its baseline value and once shipped, and diffs the results. Volatile fields (frame
+rate, clocks, live positions, per-frame counters) are compared for presence and type; everything else must
+match exactly.
+
+**Exactly one difference, and it is the intended one:** `__hcBRX.envStats.visible` 1 220 → 561 — the mesh merge
+doing its job. No helper is missing, none throws, nothing else moved. The user's ground truth is intact.
+
+---
+
+## V7 — soak: heap is clean, programs are not
+
+`bench/perf-soak.mjs` loops a moving scene and linear-fits heap, draws, programs, geometries and textures
+against elapsed time. Chrome runs with `--expose-gc` and `gc()` is called before every heap sample, so what is
+measured is **retained** memory rather than garbage that has not been collected yet — without that, every run
+looks like a leak.
+
+| | slope / min | over 3 min | verdict |
+|---|---|---|---|
+| heap | +0.77 MB | 76.6 → 78.2 MB | **flat** |
+| draw calls | −2.8 | 407 → 407 | **flat** |
+| geometries | −2.7 | 385 → 385 | **flat** |
+| **programs** | **+7.0** | **84 → 119** | **GROWS** |
+| textures | +0.97 | 67 → 69 | grows, tracks the above |
+
+**This settles the heap question, and it settles it against my earlier guess.** With GC forced, the heap is
+flat. The 165–327 MB figures in the benchmark suite were uncollected garbage, not a leak and not `BR.gen`.
+
+**The programs finding is a real, previously invisible defect.** Programs grow ~7 per minute *for as long as
+you keep walking* — not just on first entry. `__hcPERF.programKeys()` was added to diff three's own cache keys
+and it names the cause exactly: the differing field is the **point-light count**, measured at **43, 44 and 46**.
+`brStableLightCount` pinned the Backrooms pool of 16, but the total still moves as streaming chunks bring their
+own lights in, and three recompiles **every material in the scene** at each new count.
+
+This is the same root cause as the parked light-pool question, now with a precise mechanism and two diagnostics
+(`programKeys()`, `lightCensus()`). Fixing it means every light coming from a fixed-size pool, which changes how
+many fluorescents can be lit at once — Ben's call. The soak reports it as a **named known failure** rather than
+having its threshold widened until it passes.
+
+### One fix attempted on the way, and honestly labelled
+
+I suspected leaked materials: `brBuildEnv` created the troffer housing, diffuser and dead-tube materials **per
+chunk**, plus a `panelMat.clone()` per flickering fixture, and chunk eviction disposes geometry but never
+materials. That is a genuine leak and it is now fixed — `brTrofferMats()` caches them like `brDoorMats` does,
+and the per-fixture clone is gone because a flicker toggles `mesh.visible`, not its material.
+
+**It was not the cause of the program growth.** Re-measured after the fix: 84 → 119, slope 6.46/min, unchanged.
+Kept because it is correct and removes real garbage, but it is not credited with anything it did not do.
+
+---
+
 ## Critique pass — what re-reading the diff caught
 
 **One real bug, found by measurement, fixed.** `_brMergeRigid` copied `frustumCulled = false` from

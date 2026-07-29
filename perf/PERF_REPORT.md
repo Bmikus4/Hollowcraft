@@ -55,10 +55,16 @@ V6 flag matrix verified: booting with `?perfoff=all` reproduces the baseline exa
 
   The shared-edge oracle was already covered by `tmp-brx-edges.mjs` (agreement from both sides, stair
   antisymmetry, determinism, connectivity, seed reproducibility) and still passes — 1 250 edges, all agreeing.
-- **C4 (no gameplay or visual regression).** Partly tested. Every existing Backrooms harness passes
-  (`tmp-br-visible`, `tmp-v1-doors`, `tmp-br-portal`, `tmp-verify-backrooms`), and `bench/perf-verify-p2.mjs`
-  proves the door merge is geometrically exact at three swing angles. **Not** covered: QA-helper output parity
-  (V5) and the 30-minute soak (V7).
+- **C4 (no gameplay or visual regression). PASS.** Every existing Backrooms harness passes (`tmp-br-visible`,
+  `tmp-v1-doors`, `tmp-br-portal`, `tmp-verify-backrooms`, `tmp-brx-edges`), `bench/perf-verify-p2.mjs` proves
+  the door merge is geometrically exact at three swing angles, and **V5** (`bench/perf-verify-v5.mjs`) diffs 21
+  read-only QA helpers between baseline and shipped: **one difference, `envStats.visible` 1 220 → 561, which is
+  the merge doing its job.** Nothing else moved.
+- **V7 soak — heap PASS, programs FAIL.** With GC forced, heap / draws / geometries are flat over a soak. But
+  **shader programs grow ~7 per minute for as long as you keep walking** (84 → 119 in three minutes). Cause,
+  from three's own cache keys: the total point-light count still moves (43 / 44 / 46) as streaming chunks bring
+  their own lights, and three recompiles every material at each new count. Same root cause as the light-pool
+  question below.
 - **C5 (still one file, no new deps).** Held. No build step, no CDN, no new runtime dependency.
 - **C6 (numbers-backed).** Every claim here has a JSON artifact under `bench/results/`.
 
@@ -80,16 +86,15 @@ makes the shader enormous. A smaller pool shrinks the shader, the compile and th
    frame. A smaller pool shrinks the compile, the fragment cost and the program size together, and
    `brStableLightCount` keeps the count constant either way. Until this is settled, `brPrecompile` costs +16 s
    of load and `brPrefetch` measures as nothing, because both are swamped by the compiles.
-2. **V5 and V7 — QA-helper parity and the 30-minute soak.** V3/V4 now pass (`bench/perf-verify-v3v4.mjs`);
-   these two are what is left of the sign-off. V7 matters most: heap reaches 231 MB in B4 and nothing has
-   proved it flattens.
+2. **Make every point light come from a fixed-size pool.** This is the concrete form of (1). The soak proves
+   programs grow forever because the light count moves; `__hcPERF.programKeys()` and `lightCensus()` are there
+   to verify a fix. Nothing else in the game leaks — heap, draws and geometries are all flat.
 3. **Split `generateChunk`, or move it off-thread.** P6 stopped generation and meshing compounding, but a
    single generation unit still averages 3.2–4.9 ms with a tail to 24 ms against a 12 ms ceiling. No scheduling
    can fix a unit larger than the budget — this is the remaining overworld C2 failure and it needs the unit
    made smaller.
-4. **Find where the heap actually goes.** B4 reaches 165–327 MB. I guessed `BR.gen` and was wrong — it peaks at
-   156 entries, about 6 MB — so the LRU bound shipped in P7 is insurance, not the fix. This needs a DevTools
-   heap snapshot, not more arithmetic.
+4. **Nothing — the heap question is closed.** V7 with forced GC shows it flat. The 165–327 MB in the suite was
+   uncollected garbage, not a leak. Both my earlier guesses about it were wrong and are retracted in PERF_MATH.
 5. **Re-measure `brPrefetch` after (1).** It is implemented and correct; it just has nothing to show while the
    compiles dominate.
 

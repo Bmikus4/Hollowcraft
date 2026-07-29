@@ -794,6 +794,27 @@ window.__hcPERF = {
   ref(){ return PERF.refConfig(); },
   flags(){ const o={}; for(const k in PERF) if(typeof PERF[k]==='boolean'||typeof PERF[k]==='number') o[k]=PERF[k]; return o; },
   set(k,v){ PERF[k]=v; return PERF[k]; },
+  // V6/V5 helper: put every optimisation back to its baseline value at runtime, or back to shipped defaults.
+  // Which programs exist, by three's own cache key. Diffing this over a soak says exactly WHAT is being
+  // recompiled, instead of leaving "programs grow" as a number to guess at.
+  programKeys(){ try{ return (renderer.info.programs||[]).map(p=>String(p.cacheKey||'').slice(0,220)); }catch(e){ return [String(e)]; } },
+  // Which lights three will actually count this frame, and who owns them. The program cache key embeds the
+  // light COUNT, so anything that toggles a light's visible flag recompiles every material in the scene.
+  lightCensus(){ try{
+      const by={}; let visPoint=0, totPoint=0;
+      scene.traverse(o=>{ if(!o.isLight) return;
+        const t=o.type; by[t]=by[t]||{total:0,visible:0}; by[t].total++; if(o.visible) by[t].visible++;
+        if(o.isPointLight){ totPoint++; if(o.visible) visPoint++; } });
+      const owners={};
+      const tag=(name,arr)=>{ if(!arr) return; let v=0; for(const L of arr) if(L&&L.visible) v++; owners[name]=v+'/'+arr.length; };
+      tag('BR.lightPool', typeof BR!=='undefined'?BR.lightPool:null);
+      tag('glowPool', typeof glowPool!=='undefined'?glowPool:null);
+      tag('pointPool', typeof pointPool!=='undefined'?pointPool:null);
+      return { byType:by, visiblePointLights:visPoint, totalPointLights:totPoint, owners };
+    }catch(e){ return {err:String(e&&e.message||e)}; } },
+  baselineFlags(){ return Object.assign({}, PERF.baseline); },
+  restoreBaseline(){ for(const k in PERF.baseline) PERF[k]=PERF.baseline[k];
+    try{ brApplyShadowLights(); }catch(e){} return this.flags(); },
   arm(){ PERF.on=true; PERF.jank.start(); locked=true; return true; },     // headless runs never acquire pointer lock; physics is gated on it
   start(name,opts){ locked=true; return PERF.bench.start(name,opts); },
   active(){ return PERF.bench.active; },
@@ -12345,8 +12366,7 @@ function brBuildEnv(){ if(!BR.rooms||!BR.rooms.length)brxGenerate(); const grp=n
   // ---- MODELED recessed fluorescent troffers: a grey housing box hanging just below the ceiling + a bright emissive panel inset ----
   const pw=2.0, pd=0.86, ph=0.18, ipw=1.72, ipd=0.62;
   let yt=y1, yb=y1-ph, ey=yb+0.008;                                                                      // reassigned per fixture — a troffer hangs from ITS room's ceiling, not a global one
-  const frameMat=new THREE.MeshStandardMaterial({color:0xe6e2d6, roughness:0.55, metalness:0.15, side:THREE.DoubleSide});   // white-metal housing
-  const panelMat=new THREE.MeshBasicMaterial({color:0xfff3da, fog:false, toneMapped:true, side:THREE.DoubleSide});          // glowing diffuser
+  const _tm=brTrofferMats(), frameMat=_tm.frame, panelMat=_tm.panel;   // SHARED, not per chunk — see brTrofferMats
   const hP=[],hI=[]; let hv=0; const gP=[],gI=[]; let gv=0; BR.flickers=[];
   const housing=(cx,cz)=>{ const x0=cx-pw/2,x1=cx+pw/2,z0=cz-pd/2,z1=cz+pd/2;                                              // 4 sides + bottom (top flush with ceiling)
     const q=(a,b,c,d)=>{ hP.push(a[0],a[1],a[2],b[0],b[1],b[2],c[0],c[1],c[2],d[0],d[1],d[2]); hI.push(hv,hv+1,hv+2,hv,hv+2,hv+3); hv+=4; };
@@ -12354,12 +12374,12 @@ function brBuildEnv(){ if(!BR.rooms||!BR.rooms.length)brxGenerate(); const grp=n
     q([x0,yb,z1],[x0,yb,z0],[x0,yt,z0],[x0,yt,z1]); q([x1,yb,z0],[x1,yb,z1],[x1,yt,z1],[x1,yt,z0]);
     q([x0,yb,z0],[x1,yb,z0],[x1,yb,z1],[x0,yb,z1]); };
   const panelQuad=(arr,ii,base,cx,cz)=>{ arr.push(cx-ipw/2,ey,cz-ipd/2, cx+ipw/2,ey,cz-ipd/2, cx+ipw/2,ey,cz+ipd/2, cx-ipw/2,ey,cz+ipd/2); ii.push(base,base+2,base+1, base,base+3,base+2); };
-  const deadPanel=new THREE.MeshStandardMaterial({color:0x6d6a60, roughness:0.8, metalness:0.05, side:THREE.DoubleSide});   // burnt-out tube: a dull grey diffuser, no glow
+  const deadPanel=_tm.dead;
   for(const f of (BR.fixtures||[])){
     { const rc=_roomCeil(f.x,f.z); yt=rc; yb=rc-ph; ey=yb+0.008; f.y=yb-0.9+dyB; }                                        // the housing is LOCAL (the group carries the storey); f.y is read by brxUpdateLights in WORLD space, so it carries the storey itself
     housing(f.x,f.z);                                                                                                     // housing is always solid (static, merged)
     if(f.dead){ const m=new THREE.Mesh(new THREE.PlaneGeometry(ipw,ipd), deadPanel); m.rotation.x=-Math.PI/2; m.position.set(f.x,ey,f.z); m.frustumCulled=false; grp.add(m); }
-    else if(f.flick){ const m=new THREE.Mesh(new THREE.PlaneGeometry(ipw,ipd), panelMat.clone()); m.rotation.x=-Math.PI/2; m.position.set(f.x,ey,f.z); m.frustumCulled=false; grp.add(m); f.mesh=m; BR.flickers.push({m,f}); }
+    else if(f.flick){ const m=new THREE.Mesh(new THREE.PlaneGeometry(ipw,ipd), panelMat); /* NOT a clone: a flicker toggles mesh.visible, never its material */ m.rotation.x=-Math.PI/2; m.position.set(f.x,ey,f.z); m.frustumCulled=false; grp.add(m); f.mesh=m; BR.flickers.push({m,f}); }
     else { panelQuad(gP,gI,gv,f.x,f.z); gv+=4; } }
   if(hP.length){ const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.Float32BufferAttribute(hP,3)); g.setIndex(hI); g.computeVertexNormals(); const m=new THREE.Mesh(g,frameMat); m.frustumCulled=false; grp.add(m); }
   if(gP.length){ const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.Float32BufferAttribute(gP,3)); g.setIndex(gI); const m=new THREE.Mesh(g,panelMat); m.frustumCulled=false; grp.add(m); }
@@ -12369,6 +12389,19 @@ function brBuildEnv(){ if(!BR.rooms||!BR.rooms.length)brxGenerate(); const grp=n
 const BR_SHADOW_LIGHTS=2;
 // The pooled troffer lights are GLOBAL, not per chunk. brBuildEnv used to create them, which was fine when it ran once —
 // per chunk it would have made 16 lights nine times over.
+// THE TROFFER MATERIALS ARE SHARED, and they were not. brBuildEnv ran once per chunk and made a fresh housing
+// material, a fresh diffuser and a fresh dead-tube material every time — and chunk eviction disposes geometry
+// but never materials, so every chunk that streamed out leaked three of them, plus one cloned diffuser per
+// flickering fixture. Each leaked material pins a shader program. The V7 soak measured the result: programs
+// climbing about 7 per minute for as long as you keep walking, and textures with them, on a heap that was
+// otherwise flat. Cached here like brDoorMats and the rest, and the per-fixture clone is gone because a
+// flicker toggles mesh.visible, not material.
+let _brTrofferMat=null;
+function brTrofferMats(){ if(_brTrofferMat) return _brTrofferMat;
+  return _brTrofferMat = {
+    frame: new THREE.MeshStandardMaterial({color:0xe6e2d6, roughness:0.55, metalness:0.15, side:THREE.DoubleSide}),
+    panel: new THREE.MeshBasicMaterial({color:0xfff3da, fog:false, toneMapped:true, side:THREE.DoubleSide}),
+    dead:  new THREE.MeshStandardMaterial({color:0x6d6a60, roughness:0.8, metalness:0.05, side:THREE.DoubleSide}) }; }
 function brEnsureLightPool(){ if(BR.lightPool && BR.lightPool.length) return;
   BR.lightPool=[]; for(let i=0;i<16;i++){ const L=new THREE.PointLight(0xffedcf, 0, 56, 2.0); L.visible=false; scene.add(L); BR.lightPool.push(L); }
   // REAL CAST SHADOWS from the two nearest troffers (Ben 07-27). Point-light shadows are 6 faces each, so the count is
