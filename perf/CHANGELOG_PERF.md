@@ -549,14 +549,32 @@ The column loop is a plain nested `for`, so making it resumable is easy: a curso
 stays false until every column is laid, and `streamChunks` already refuses to mesh a chunk whose neighbours are
 not generated — so a half-built chunk is invisible downstream by construction.
 
-**It does not work.** At 64 columns per frame the worst `genColumn` call was **11.71 ms**, against 11.85 ms
-unsliced, and B3o's frames over 12 ms went **136 → 186**. Cutting the batch by four changed the worst case by
-one percent.
+**It does not clearly work.** Paired in-session A/B, four pairs per scene:
 
-**That is a useful negative**, because it rules out the obvious fix and names the real one: the tail is not 256
-columns adding up, it is **one expensive column**, and no column-granularity slicing can divide a single call.
-Making this fit a 12 ms frame needs `genColumn` itself to get cheaper, or to run off-thread. The resumable
-machinery stays behind the flag because it is exactly the scaffolding an off-thread version would need.
+| | B2o | B3o |
+|---|---|---|
+| paired median delta | +0.05 ms | +0.28 ms |
+| p99 | −1.30 ms | −0.85 ms |
+| max | **−2.82 ms** | **−3.02 ms** |
+| frames > 12 ms | **−30.5** | **+24.5** |
+| sign test (median) | 1/4 | 1/4 |
+
+The worst frame improves by about 3 ms in both scenes and p99 improves slightly, but medians are
+neutral-to-worse and the frames-over-12 ms count moves in **opposite directions** in the two scenes. That does
+not beat the noise, so it ships off.
+
+**I first wrote this up as "the tail is one expensive column, and no column-granularity slicing can divide a
+single call."** That was wrong, and worth recording as wrong: it came from comparing two single maxima taken
+from different runs (11.85 ms unsliced on one scene, 11.71 ms sliced on another) as though they were a
+controlled pair, which is precisely the mistake this whole pass is meant to avoid. The A/B above is the actual
+evidence, and what it says is *inconclusive*, not *impossible*. A 64-column slice can legitimately cost 10+ ms
+on a deep chunk — 64 columns × ~80 voxels × a 4-octave 3D noise per voxel — so a narrower slice may well help;
+it simply has not been shown to.
+
+**What is actually known:** `genColumn` is 2.4 s of a diagonal sprint and `decorate` 0.9 s, the totals do not
+move with slicing (as expected — same work), and the per-frame distribution barely does. Getting this inside a
+12 ms frame most likely needs `genColumn` to be cheaper or off-thread, but that is a hypothesis now, not a
+measured conclusion. The resumable machinery stays behind the flag as scaffolding for the worker version.
 
 ---
 
