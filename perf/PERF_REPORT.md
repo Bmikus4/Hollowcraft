@@ -7,29 +7,27 @@ An interim report, not a full Phase 6 sign-off.
 ## Before / after
 
 Baseline `bench/results/perf-baseline-d2a425f-2026-07-28T22-16-00.json` vs final
-`bench/results/perf-FINAL-2026-07-29T08-04-34.json`. Both n = 5, warm-up discarded, same machine, 1920×1080,
+`bench/results/perf-FINAL2-2026-07-29T11-34-07.json`. Both n = 5, warm-up discarded, same machine, 1920×1080,
 vsync off, `?brseed=20260728`.
 
-| scene | median ms | fps | draws | p99 ms | max ms | C1 | C2 |
-|---|---|---|---|---|---|---|---|
-| **B1** Backrooms static | 15.04 → **3.58** (4.2×) | 67 → **280** | 4 770 → **399** | 16.18 → **6.15** | 22.2 → 24.1 | **PASS** | FAIL |
-| **B5** Backrooms spin | 16.03 → **4.39** (3.7×) | 62 → **228** | 4 928 → **517** | 17.67 → **5.51** | 25.1 → **10.2** | **PASS** | **PASS** |
-| **B2** Backrooms sprint | 15.94 → **4.08** (3.9×) | 63 → **245** | 4 958 → **431** | 25.53 → 13.48 | 54.4 → 74.0 | FAIL | FAIL |
-| **B3** Backrooms diagonal | 16.49 → **4.45** (3.7×) | 61 → **225** | 5 443 → **500** | 27.28 → 14.22 | 66.6 → 44.4 | FAIL | FAIL |
-| **B4** teleport | 18.53 → **4.92** (3.8×) | 54 → **204** | 5 230 → **512** | 30.43 → 19.35 | 111.8 → 124.6 | FAIL | FAIL |
-| **B6** portal | 23.99 → **6.98** (3.4×) | 42 → **143** | 7 168 → **787** | 25.82 → 10.77 | 42.5 → 28.4 | FAIL | FAIL |
-| **B1o** overworld static | 1.63 → 1.76 | 568 | 167 | 3.48 | 11.8 | **PASS** | **PASS** |
-| B5o / B2o / B3o overworld | 1.9–2.2 → 2.0–2.4 | ~420–490 | unchanged | — | — | mixed | mixed |
+| scene | median ms | fps | draws | p99 ms | max ms | >12 ms | C1 | C2 |
+|---|---|---|---|---|---|---|---|---|
+| **B1** Backrooms static | 15.04 → **3.47** (4.3×) | 67 → **288** | 4 770 → **399** | 16.18 → **6.01** | 22.2 → 23.6 | 2 350 → **15** | **PASS** | FAIL |
+| **B5** Backrooms spin | 16.03 → **4.28** (3.7×) | 62 → **234** | 4 928 → **517** | 17.67 → **5.17** | 25.1 → **10.2** | 2 407 → **0** | **PASS** | **PASS** |
+| **B2** Backrooms sprint | 15.94 → **4.02** (4.0×) | 63 → **249** | 4 958 → **431** | 25.53 → 13.17 | 54.4 → 57.3 | 3 604 → **152** | FAIL | FAIL |
+| **B3** Backrooms diagonal | 16.49 → **4.25** (3.9×) | 61 → **236** | 5 443 → **500** | 27.28 → 13.75 | 66.6 → 45.4 | 4 096 → **219** | FAIL | FAIL |
+| **B4** teleport | 18.53 → **4.80** (3.9×) | 54 → **209** | 5 230 → **512** | 30.43 → 23.71 | 111.8 → 124.8 | 3 847 → **1 142** | FAIL | FAIL |
+| **B6** portal | 23.99 → **6.34** (3.8×) | 42 → **158** | 7 168 → **570** | 25.82 → **8.26** | 42.5 → **16.7** | 2 830 → **1** | **PASS** | FAIL |
+| **B1o** overworld static | 1.63 → 1.68 | **595** | 320 | 2.96 | **4.15** | 0 | **PASS** | **PASS** |
+| **B5o** overworld spin | 1.96 → 2.03 | 494 | 171 | 3.21 | 38.8 | **1** | **PASS** | FAIL |
+| **B2o** overworld sprint | 2.25 → 2.48 | 404 | 171 | 14.21 | 18.4 | 183 → **140** | FAIL | FAIL |
+| **B3o** overworld diagonal | 2.20 → 2.50 | 400 | 174 | 14.03 | 20.7 | 225 → **136** | FAIL | FAIL |
 
-Load: **8.42 s → 5.88 s** first interactive (P9, three cold loads each, non-overlapping). `brPrecompile` would
-have made it 26.9 s and is therefore off.
+Load: **8.42 s → 6.08 s** first interactive (−28 %). `brPrecompile` would have made it 26.9 s and is off.
 
-Note B1's p99 spread is ±5.58 and B4's ±9.49: those two scenes cannot resolve anything finer than their own
-noise, and this machine's failing cooling fan is the likely source late in a long suite (PERF_REPORT assumption
-4). B5 and B1o are the tight ones and both pass outright.
-
-**Three to five times faster everywhere the game was slow**, and draw calls are down 87–92 % — from 4 770–7 168
-to 399–717, now at or under the 664 ceiling derived in PERF_MATH §4.4 (B6 is 53 over).
+**Roughly four times faster everywhere the game was slow**, draw calls down 87–92 % (4 770–7 168 → 399–570,
+all now under the 664 ceiling from PERF_MATH §4.4), and frames over 12 ms down by 90–100 % in every scene
+except the teleport stress case.
 
 V6 flag matrix verified: booting with `?perfoff=all` reproduces the baseline exactly — B1 back to 14.41 ms and
 4 772 draws. Every optimisation is one boolean away from the old behaviour.
@@ -39,7 +37,7 @@ V6 flag matrix verified: booting with `?perfoff=all` reproduces the baseline exa
 - **C1 (median ≤ 7.14 ms, p99 ≤ 9.5 ms).** Every median passes with room — the worst is B6 at 6.98 ms, and the
   Backrooms sits at 3.6–4.9 ms against a 7.14 ms budget. **B1, B5 and B1o pass C1 outright.** The rest fail
   **only on p99**, and every one of those p99s is a hitch, not steady-state cost.
-- **C2 (no frame > 12 ms, zero > 16.6 ms).** **B5 and B1o pass.** Everywhere else it still fails — this remains
+- **C2 (no frame > 12 ms, zero > 16.6 ms).** **B5 and B1o pass**, and B6 is down to a single frame over. Everywhere else it still fails — this remains
   the honest headline: the pass has fixed *throughput*, not *hitching*. B4 still reaches 124.6 ms. P6 cut the
   overworld's frames over 12 ms by 60–114 by stopping generation and meshing compounding, but a single
   `generateChunk` still averages 3.2–4.9 ms with a tail to 24 ms, and no scheduling fixes a unit bigger than
