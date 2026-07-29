@@ -16,6 +16,7 @@ const sleep = ms => new Promise(r=>setTimeout(r,ms));
 const argv=process.argv.slice(2); const arg=(k,d)=>{const i=argv.indexOf('--'+k);return i>=0?argv[i+1]:d;};
 const SCENES = arg('scenes','B1,B2,B3,B4').split(',');
 const BRSEED = +arg('brseed',20260728);
+const FLAGS  = arg('flags','brStableLightCount,brPrecompile');   // restored to baseline on the A side
 
 function freePort(){ return new Promise((res,rej)=>{ const s=createServer(); s.listen(0,'127.0.0.1',()=>{ const p=s.address().port; s.close(()=>res(p)); }); s.on('error',rej); }); }
 function waitHttp(url,t=20000){ return new Promise((res,rej)=>{ const t0=Date.now();
@@ -70,7 +71,7 @@ async function session(browser, base, label, urlExtra){
     const out=[];
     // Separate BROWSER launches, each with its own throwaway profile, so Chrome's persistent shader cache
     // cannot carry programs from the first side into the second.
-    for(const [label, extra] of [['baseline (flags off)','&perfoff=brStableLightCount,brPrecompile'], ['P3 on','']]){
+    for(const [label, extra] of [['baseline ('+FLAGS+' off)','&perfoff='+FLAGS], ['on','']]){
       browser=await chromium.launch({executablePath:findBrowser(),headless:true,
         args:['--enable-gpu','--ignore-gpu-blocklist','--use-angle=d3d11','--mute-audio',
               '--disable-gpu-vsync','--disable-frame-rate-limit','--disable-gpu-program-cache','--disable-gpu-shader-disk-cache']});

@@ -245,6 +245,40 @@ defect left in the game.
 
 ---
 
+## P4 — prefetch the ring ahead — MEASURED NEGATIVE, ships OFF
+
+**Flag.** `PERF.brPrefetch` — default **false**. `PERF.brPrefetchRing = 1`, `PERF.brPrefetchCooldown = 20`.
+
+**What.** Crossing a BRX boundary built up to three brand-new chunks in the frame you stepped over it —
+`brxGenerate` + `brBuildEnv` + `brMergeStatic`, measured at 18–47 ms per chunk and 85–99 ms on a teleport. The
+budget was never the constraint: at 10.08 m/s across 64 m chunks there are **209 frames of headroom per chunk**
+(PERF_MATH §4.2) and the game used one. And a BRX chunk is a pure function of `(gx, gz, seed)`, so it can be
+built at any time in any order. `brxPrefetch()` builds the ring one step beyond the loaded set, one chunk per
+frame, only on frames with headroom (`fpsAvg ≥ 90`), nearest-first and biased along the player's velocity
+(PERF_MATH §5.3.3). `brBuildEnvAll`'s eviction was widened to match, or it would have disposed each prefetched
+group on the very crossing it was built for.
+
+**Measured, and it does not work — on this codebase, today:**
+
+| | B2 | B3 | B4 |
+|---|---|---|---|
+| paired A/B, median delta | −0.04 ms | −0.02 ms | +0.09 ms |
+| sign test | 2/4 | 2/4 | 1/4 |
+
+5 of 12 pairs faster, against a run-to-run spread of about ±0.9 ms. A **cold two-session** run (the paired
+harness cannot see this change either — `BR.envCache` persists, so the off side inherits whatever the on side
+prefetched) agrees: worst frame **7 417 → 7 265 ms**, medians slightly worse, frames over 12 ms slightly worse.
+
+**Why.** The 18–47 ms chunk build is real, and removing it is worth something — but it is not what these
+benchmarks are made of. The **6–7 second shader-compile frames swamp it entirely**, and every metric that
+matters is dominated by them. Until the compile problem is gone there is nothing here for prefetch to show.
+
+Kept behind the flag, off, with the code intact: this is the right shape of fix and it should be re-measured
+the moment the light-pool decision lands and the compiles stop. Recorded as a negative result rather than
+deleted, because "we tried prefetching and it did nothing" is only true *given the compiles*.
+
+---
+
 ## Critique pass — what re-reading the diff caught
 
 **One real bug, found by measurement, fixed.** `_brMergeRigid` copied `frustumCulled = false` from

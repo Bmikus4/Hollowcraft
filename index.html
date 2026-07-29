@@ -424,8 +424,21 @@ const PERF = {
   //   and that is a visual decision, so it goes to Ben rather than being taken here. Left switchable so the
   //   trade can be re-taken in one flag once the pool size is settled.
   brPrecompile: false,
+  //
+  // P4 · brPrefetch  (baseline: false)
+  //   Build the ring one step beyond the loaded set, one chunk per spare frame, so crossing a boundary finds
+  //   the geometry already cached instead of making three chunks from scratch in the frame you step over.
+  //   Legal only because a BRX chunk is a pure function of (gx, gz, seed) and can be built at any time.
+  //   MEASURED NEGATIVE — ships OFF. Paired A/B: -0.04 / -0.02 / +0.09 ms on B2/B3/B4, 5 of 12 pairs faster,
+  //   against a spread of about +/-0.9. Cold two-session run: worst frame 7 417 -> 7 265 ms, medians slightly
+  //   worse. The 18-47 ms chunk build it removes is real, but it is not what these benchmarks are made of —
+  //   the 6-7 second shader compiles are, and they swamp it. Worth re-measuring the moment the light-pool
+  //   decision lands and those compiles stop; the code and the flag are kept for exactly that.
+  brPrefetch: false,
+  brPrefetchRing: 1,          // how far beyond BRX_KEEP to keep warm. 1 = the next ring you can walk into.
+  brPrefetchCooldown: 20,     // frames to wait after building one, so a burst cannot stack into a stutter
 };
-PERF.baseline = { brShadowLights: 2, brMergeRigid: false, brStableLightCount: false };   // brPrecompile already ships at its baseline   // V6 flag matrix: restore any of these and the game is the old game
+PERF.baseline = { brShadowLights: 2, brMergeRigid: false, brStableLightCount: false };   // brPrecompile and brPrefetch already ship at their baseline   // brPrecompile already ships at its baseline   // V6 flag matrix: restore any of these and the game is the old game
 // ?perfoff=a,b,c  restores those flags to their baseline value AT BOOT — the only way to A/B a change whose
 // whole effect is on the first encounter (shader compilation), where flipping a flag mid-session is too late.
 // ?perfoff=all restores every one of them, which is the V6 "all flags off = baseline behaviour" check.
@@ -801,6 +814,8 @@ window.__hcPERF = {
   },
   // Force a full rebuild of the loaded Backrooms geometry — the only way to A/B a flag that only takes effect
   // at build time. Clears the per-chunk cache so nothing is re-parented from before the flag changed.
+  prefetch(){ return { on:!!PERF.brPrefetch, ring:PERF.brPrefetchRing, built:BR._pfBuilt|0, lastMs:BR._pfMs||0,
+    cached:BR.envCache?BR.envCache.size:0, loaded:BR.loaded?BR.loaded.length:0, err:BR._pfErr||null }; },
   precompile(){ return _brPcState ? { done:_brPcState.done, ms:_brPcState.ms, slices:_brPcState.i,
     groups:_brPcState.attached?_brPcState.attached.length:0, drew:!!_brPcState.drew,
     timedOut:!!_brPcState.timedOut, programs:_brPcState.programs, err:_brPcState.err||null } : null; },
@@ -11580,6 +11595,47 @@ function brxStream(force){ if(!BR.infinite || !BR.inside) return false;
   const keep=[]; for(let dx=-BRX_KEEP; dx<=BRX_KEEP; dx++) for(let dz=-BRX_KEEP; dz<=BRX_KEEP; dz++) keep.push(brxChunkGen(c.gx+dx, c.gz+dz));
   BR.loaded=keep; brxUnion(); T.begin(TID.brBuild); brBuildEnvAll(); T.end(TID.brBuild);
   return true; }
+// ---------------------------------------------------------------------
+//  P4 · PREFETCH THE RING AHEAD (Ben 07-29)
+//  Crossing a BRX boundary pulled up to three brand-new chunks into existence in the frame you stepped over it:
+//  brxGenerate, brBuildEnv and brMergeStatic for each, measured at 18-47 ms per chunk and 85-99 ms on a
+//  teleport. That is the hitch Ben feels "entering new chunks".
+//
+//  The budget was never the problem. At 10.08 m/s across 64 m chunks there are 209 frames of headroom per
+//  chunk (PERF_MATH 4.2) and the game was using one. And because a BRX chunk is a pure function of
+//  (gx, gz, seed) — the whole point of the substrate — it can be built at ANY time, in any order, before it is
+//  ever needed. So build the ring one step wider than the one you can see, ONE chunk per frame, only on frames
+//  that have room to spare. By the time you cross, brBuildEnvAll finds the group already in the cache and the
+//  crossing is a re-parent.
+// ---------------------------------------------------------------------
+let _brPfCool=0;
+function brxPrefetch(){
+  if(!PERF.brPrefetch || !BR.infinite || !BR.inside || !BR.envCache) return 0;
+  if(BR._prewarmQ && BR._prewarmQ.length) return 0;                  // the load-time drip still owns the budget
+  if(_brPfCool>0){ _brPfCool--; return 0; }
+  // Only spend a frame on this when the last one was comfortable. A prefetch that fires during a hitch just
+  // makes the hitch longer, and there is no hurry — 209 frames per chunk.
+  if(fpsAvg < 90) return 0;
+  const c=brxChunkOf(player.pos.x, player.pos.z), R=BRX_KEEP+PERF.brPrefetchRing;
+  // nearest-first, and biased along the way the player is actually going (PERF_MATH 5.3.3): the chunk ahead of
+  // motion is the one about to be needed, so it is worth more than the one behind.
+  const vx=player.vel.x, vz=player.vel.z, sp=Math.hypot(vx,vz);
+  let best=null, bestScore=1e9;
+  for(let dx=-R; dx<=R; dx++) for(let dz=-R; dz<=R; dz++){
+    if(!dx && !dz) continue;
+    const gx=c.gx+dx, gz=c.gz+dz, k=gx+'_'+gz;
+    if(BR.envCache.has(k)) continue;
+    let score=Math.abs(dx)+Math.abs(dz);
+    if(sp>0.3){ const d=Math.hypot(dx,dz)||1; score -= 1.5*((dx/d)*(vx/sp) + (dz/d)*(vz/sp)); }   // ahead of motion wins
+    if(score<bestScore){ bestScore=score; best=[gx,gz]; }
+  }
+  if(!best) return 0;
+  const t0=performance.now();
+  try{ brxBuildChunkGroup(brxChunkGen(best[0], best[1])); }
+  catch(e){ if(!BR._pfErr) BR._pfErr=String(e&&e.message||e); }
+  BR._pfBuilt=(BR._pfBuilt|0)+1; BR._pfMs=+(performance.now()-t0).toFixed(1);
+  _brPfCool = PERF.brPrefetchCooldown;                                // let the frame budget recover before the next one
+  return 1; }
 let _brDoorMat=null;
 function brDoorMats(){ if(_brDoorMat)return _brDoorMat; const TL=new THREE.TextureLoader(), base='./assets/backrooms/';
   const tx=(p,srgb)=>{ const t=TL.load(base+p); t.wrapS=t.wrapT=THREE.RepeatWrapping; t.anisotropy=8; if(srgb)t.colorSpace=THREE.SRGBColorSpace; return t; };
@@ -12444,7 +12500,15 @@ function brBuildEnvAll(){
       for(const fl of ent.flickers) allFlick.push(fl);
       parent.add(g); } }
   for(const f of BRX_FIELDS) BR[f]=stash[f]; BR._bc=null; BR._bdy=0;
-  for(const [ck,e] of BR.envCache){ if(live.has(ck)) continue;              // evict chunks that streamed out, and only now dispose them
+  // EVICT, but not the ring we deliberately built ahead. This used to drop everything outside the loaded nine,
+  // which would have disposed every prefetched group on the very crossing it was built for — the prefetch would
+  // have paid full price and delivered nothing. Keep anything inside the prefetch radius; hysteresis is free
+  // here because a chunk is a pure function of its coordinates and can always be rebuilt.
+  const _pc = brxChunkOf(player.pos.x, player.pos.z);
+  const _keepR = BRX_KEEP + (PERF.brPrefetch ? PERF.brPrefetchRing : 0);
+  for(const [ck,e] of BR.envCache){ if(live.has(ck)) continue;
+    const p=ck.split('_'), gx=+p[0], gz=+p[1];
+    if(Math.max(Math.abs(gx-_pc.gx), Math.abs(gz-_pc.gz)) <= _keepR) continue;   // warm ring — leave it alone
     if(e.g){ if(e.g.parent) e.g.parent.remove(e.g); e.g.traverse(o=>{ if(o.geometry) o.geometry.dispose(); }); }
     BR.envCache.delete(ck); }
   BR.ramps=allRamps; BR.flickers=allFlick;                    // both are per-frame consumers and must span the whole loaded set
@@ -12984,7 +13048,7 @@ function updateBackrooms(dt){
   T.begin(TID.collision); brxCollide(player); T.end(TID.collision);                                                      // segment collision — keep the player inside the rooms (runs AFTER physics(dt))
   brxUpdateLights(player.pos.x, player.pos.z);                                                                           // fluorescent pool follows the player
   brUpdateHum(dt);                                                                                                       // the buzz tracks the LIT tubes near you — blacked-out wings go silent
-  if(BR.infinite){ try{ T.begin(TID.brStream); brxStream(false); T.end(TID.brStream); }catch(e){ T.end(TID.brStream); BR.infinite=false; if(typeof flashName==='function')flashName('the halls refuse to extend'); } }   // one chunk-crossing check per frame; a failure falls back to the fixed region rather than wedging the loop
+  if(BR.infinite){ try{ T.begin(TID.brStream); brxStream(false); brxPrefetch(); T.end(TID.brStream); }catch(e){ T.end(TID.brStream); BR.infinite=false; if(typeof flashName==='function')flashName('the halls refuse to extend'); } }   // one chunk-crossing check per frame; a failure falls back to the fixed region rather than wedging the loop
   if(player.pos.y < BR_FLOOR-26 && !player.dead) brKill('the drop');                                                     // fell down a shaft — the dark at the bottom is the bottom
   brUpdateDoors(dt); brUpdateKey(dt); brUpdateExit(dt); brUpdatePale(dt); }
 
