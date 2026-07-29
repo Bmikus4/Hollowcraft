@@ -2566,6 +2566,73 @@ const pineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, sid
   '  fog=max(fog, 1.0-smoothstep(0.0,0.22,hs));',                                              // …and past the shore the taper drowns COMPLETELY in fog — but only at the very end, so the concave ease-out (the treeline landing tangent to the ground, curving gently up) stays VISIBLE before the haze takes it (Ben 07-20)
   '  gl_FragColor=vec4(mix(pine,uFogCol,fog), smoothstep(0.2,0.45,m)*clamp(1.0-uWx*1.25,0.0,1.0)); }'].join('\n') });   // SOLID silhouette with a quick edge fade; WEATHER FOG fades the whole layer OUT (Ben 07-20: at night the color-wash was invisible — near-black washing to near-black — so the pines punched dark holes through the fog bank; in fog the shell owns the horizon)
 const pineLayer=new THREE.Mesh(_horizGeo, pineMat); pineLayer.frustumCulled=false; pineLayer.renderOrder=-5; scene.add(pineLayer);   // over the ocean seam
+// =====================================================================
+//  THE DARK WOODY BAND UNDER THE TREELINE (Ben 07-29: "horizon pines do NOT have a dark edge underneath them, just copy
+//  them, turn them into a dark/woody band with the same behavior")
+// =====================================================================
+// pineMat already has an "undertree seam": it darkens the lowest 11% of the silhouette to 28% brightness. It does not
+// read. Two reasons, and they compound. It is a MULTIPLY on a colour that is already nearly black at the bottom of its
+// own tip-gradient (pine = uPine*shade*(0.66+0.46*t), so t=0 is 66% before the seam touches it), and then the fog wash
+// is applied AFTER it — at full strength by day — so whatever darkness survives is immediately washed back toward the
+// haze. Darkening it further inside the same layer just fights the same two terms.
+//
+// So this is a SECOND LAYER, exactly as asked: the same cylinder, the same mask, the same per-azimuth ground height and
+// hs taper, the same sink, the same fog and weather behaviour, the same entranceway. The only difference is what it
+// draws — a solid dark woody band from the under-skirt up through the first few blocks of trunk, in its own colour,
+// with its own reduced fog exposure so the haze cannot erase it.
+//
+// IN FRONT OF THE PINES, AND BOUND INSIDE THEM (Ben's follow-up). renderOrder -4.9 puts it over the treeline rather
+// than behind it, so it is a band ON the wood and not a shape glimpsed through it. And it is CLIPPED to the pine
+// silhouette: this shader recomputes the pines' own canopy height from the identical treeline/spike/crown noise and
+// clamps the band's top to it, discarding wherever the pines themselves would discard. So the band can never poke
+// above the crowns or spill past the ends of the treeline — its extent is a strict subset of the pines' extent.
+const _uPineBand=new THREE.Color(0.050,0.040,0.030);   // dark woody brown — trunks and the shadowed forest floor, not foliage
+const pineUnderMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, side:THREE.BackSide, fog:false,
+  uniforms:{ uMask:{value:_pineMask}, uBand:{value:_uPineBand}, uFogCol:{value:_uPineFog}, uFogAmt:{value:0}, uWx:{value:0},
+    uCamY:{value:CFG.SEA+2}, uVisD:{value:CFG.RENDER_DIST*CK}, uBandH:{value:9.0},
+    uEntAz:{value:0}, uEntW:{value:0.115}, uEntOn:{value:1} },
+  vertexShader:_horizVert, fragmentShader:[
+  'precision highp float; varying vec3 vPos; uniform sampler2D uMask; uniform vec3 uBand, uFogCol; uniform float uFogAmt, uWx, uCamY, uVisD, uBandH;',
+  'uniform float uEntAz, uEntW, uEntOn;',
+  'float hash(float n){ return fract(sin(n)*43758.5453); }',
+  'float nz(float x){ float i=floor(x),f=fract(x); return mix(hash(i),hash(i+1.0),f*f*(3.0-2.0*f)); }',
+  'float treeline(float az){ return nz(az*46.0)*0.55+nz(az*88.0)*0.30+nz(az*150.0)*0.15; }',     // IDENTICAL to pineMat — the clip depends on reproducing the canopy exactly, so this noise must match term for term
+  'void main(){ vec3 d=normalize(vPos); float elev=d.y; float az=atan(vPos.z,vPos.x);',
+  '  vec4 msk=texture2D(uMask, vec2((az+3.14159265)/6.2831853, 0.5));',
+  '  float m=msk.r; if(m<0.2) discard;',                                                         // identical gate to the pines, so the band exists exactly where the treeline does
+  '  float dist=uVisD;',
+  '  float hT=msk.g*'+WH.toFixed(1)+'-uCamY;',                                                   // the same forest floor the pines stand on
+  '  float hs=msk.b;',
+  // --- reproduce the PINES' canopy so the band can be clipped to it ---
+  '  float dA0=az-uEntAz; dA0=atan(sin(dA0),cos(dA0));',
+  '  float e0=clamp(1.0-abs(dA0)/max(uEntW,1e-4),0.0,1.0);',
+  '  float ment=uEntOn*smoothstep(0.10,0.58,e0)*smoothstep(0.35,0.80,hs);',
+  '  float spike=pow(abs(sin(az*170.0)),2.0)*4.0;',
+  '  float crown=pow(abs(sin(az*95.0)),5.0)*6.0 + pow(abs(sin(az*235.0)),9.0)*3.2;',
+  '  float hTree=(24.0+treeline(az)*18.0+spike+crown)*hs; hTree*=mix(1.0,0.78,ment);',            // including the entranceway dip, so the band follows the mouth's lintel down
+  '  if(hTree<1.2) discard;',                                                                    // wherever the pines vanish, so does the band
+  '  float tip=hT+hTree;',
+  '  float bandTop=min(hT+uBandH*hs, tip);',                                                     // BOUND INSIDE: the band can never be taller than the canopy standing on the same column
+  '  float base=hT/sqrt(dist*dist+hT*hT), topE=bandTop/sqrt(dist*dist+bandTop*bandTop);',
+  '  float pineTop=tip/sqrt(dist*dist+tip*tip);',
+  '  float bottom=base-0.22*max(hs,0.35);',                                                      // the same generous under-skirt the pines use
+  '  float sink=(1.0-smoothstep(0.05,0.5,hs))*0.06; base-=sink; topE-=sink; bottom-=sink; pineTop-=sink;',   // the same sink, so the band slips under the waterline where the treeline does
+  '  topE=min(topE,pineTop);',                                                                   // clipped in ELEVATION as well as in blocks — belt and braces, since the two conversions are non-linear
+  '  if(elev>topE || elev<bottom) discard;',
+  '  float t=clamp((elev-bottom)/max(topE-bottom,1e-4),0.0,1.0);',                               // 0 at the skirt, 1 at the top of the band
+  '  float col=nz(az*130.0);',                                                                   // the SAME per-tree column id as the pines, so trunks line up with the crowns above them
+  '  vec3 band=uBand*(0.55+0.55*col)*(1.0-0.35*t);',                                             // darkest at the floor, easing up toward where the canopy takes over; per-column variation gives it depth instead of a flat stripe
+  '  band*=mix(1.0,0.05,ment);',                                                                 // the entranceway runs through this layer too, or the mouth would have a lit floor across it
+  '  float fog=clamp(uFogAmt*0.45*(1.0-0.25*t),0.0,0.72);',                                      // HALF the pines\' fog exposure and capped at 0.72: this band is the one thing on the horizon that must stay dark, and full-strength daylight haze is precisely what erased the seam it replaces
+  '  fog=max(fog, 1.0-smoothstep(0.0,0.22,hs));',                                                // …but past the shore it still drowns completely, like everything else on this horizon
+  '  gl_FragColor=vec4(mix(band,uFogCol,fog), smoothstep(0.2,0.45,m)*clamp(1.0-uWx*1.25,0.0,1.0)); }'].join('\n') });
+// renderOrder -4.9 = IN FRONT of the pines (-5), not behind: a band ON the wood, not a shape seen through it.
+// PARENTED TO pineLayer, not added to the scene. pineLayer.visible is toggled from twelve places — the Backrooms
+// atmosphere, its restore, the boss's stage-2 whiteout and its restore, the void, and three QA hooks — and a sibling
+// layer would have had to be added to every one of them, with the next new toggle silently leaving a dark band hanging
+// in the Backrooms. As a child it inherits visibility and the per-frame camera position for free, and renderOrder is
+// independent of the hierarchy so it still draws in front.
+const pineUnderLayer=new THREE.Mesh(_horizGeo, pineUnderMat); pineUnderLayer.frustumCulled=false; pineUnderLayer.renderOrder=-4.9; pineLayer.add(pineUnderLayer);
 // WHERE THE ENTRANCEWAY IS. It has to be a PLACE, not a screen-space effect: a bearing that stays put as you walk, so the
 // opening is always the same gap in the same wood. So it resolves once to a world POINT far past the island in the most
 // densely forested direction, and the shader is handed the live azimuth from the camera to that point every frame.
@@ -2619,6 +2686,14 @@ function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.p
     pineMat.uniforms.uCamY.value=camera.position.y; pineMat.uniforms.uVisD.value=CFG.RENDER_DIST*CK;   // per-frame (jumps/climbs shift the eye between mask recomputes; RD slider moves the wall)
     { const EP=entrancePoint();   // the mouth's live bearing — atan2(z,x) to match the shader's atan(vPos.z,vPos.x) exactly
       pineMat.uniforms.uEntAz.value=Math.atan2(EP.z-camera.position.z, EP.x-camera.position.x); }
+    // THE DARK WOODY BAND rides on exactly the same per-frame state as the pines — same fog amount, same weather, same
+    // eye height, same wall distance, same entranceway bearing. Copied deliberately rather than shared: the moment these
+    // two drift the band stops being clipped to the treeline and starts poking out of it.
+    { const pu=pineUnderMat.uniforms, pm=pineMat.uniforms;
+      pu.uFogAmt.value=pm.uFogAmt.value; pu.uWx.value=pm.uWx.value;
+      pu.uCamY.value=pm.uCamY.value; pu.uVisD.value=pm.uVisD.value;
+      pu.uEntAz.value=pm.uEntAz.value; pu.uEntW.value=pm.uEntW.value; pu.uEntOn.value=pm.uEntOn.value;
+      const dimB=0.10+0.90*day; _uPineBand.setRGB(0.050*dimB, 0.040*dimB, 0.030*dimB); }   // goes near-black at night with the canopy above it
     // the pine-visibility mask depends only on player position + render distance, so recompute the 128 rays +
     // re-upload the DataTexture only when the player has actually moved (or RD changed). <2 blocks of parallax
     // is sub-pixel at the horizon → gating this is exact, not approximate. Cost: 128×8 surfaceH calls, occasional.
@@ -2652,7 +2727,7 @@ const waterMat = new THREE.ShaderMaterial({
     uTime:globalU.uTime, uSunDir:globalU.uSunDir, uMoonDir:globalU.uMoonDir,
     uDay:globalU.uDay, uCamPos:globalU.uCamPos, uFogColor:{value:scene.fog.color},
     uFogDensity:{value:scene.fog.density}, uDeep:_uWaterDeep, uRing:_uWater,
-    uCurveR:{value:20.0}, uCurveK:{value:0.0022}   // THE WORLD CURVE — flat to 20 blocks, then k*(d-20)^2. k is small on purpose: at 40 blocks that is 0.9 down, at 96 it is 12.6, so the tip-over is gentle where you can see detail and only steepens where it reads as the sea falling away. "Subtle."
+    uWx:{value:0}, uCurveR:{value:20.0}, uCurveK:{value:0.0022}   // THE WORLD CURVE — flat to 20 blocks, then k*(d-20)^2. k is small on purpose: at 40 blocks that is 0.9 down, at 96 it is 12.6, so the tip-over is gentle where you can see detail and only steepens where it reads as the sea falling away. "Subtle."
   }),
   vertexShader:`
     attribute float aTop; attribute float aDepth; varying float vTop; varying float vDepth; varying vec3 vW; varying vec3 vN; varying float vFog; varying float vCrest;
@@ -2689,7 +2764,7 @@ const waterMat = new THREE.ShaderMaterial({
   fragmentShader:`
     precision highp float;
     varying float vTop; varying float vDepth; varying vec3 vW; varying vec3 vN; varying float vFog; varying float vCrest;
-    uniform vec3 uSunDir,uMoonDir,uCamPos; uniform float uDay,uTime; uniform vec3 uFogColor; uniform float uFogDensity, uDeep; uniform vec3 uRing;
+    uniform vec3 uSunDir,uMoonDir,uCamPos; uniform float uDay,uTime; uniform vec3 uFogColor; uniform float uFogDensity, uDeep, uWx; uniform vec3 uRing;
     float h2(vec2 p){ return fract(sin(dot(p,vec2(12.9,78.2)))*43758.5); }
     float vn2(vec2 x){ vec2 i=floor(x),f=fract(x); f=f*f*(3.0-2.0*f); return mix(mix(h2(i),h2(i+vec2(1,0)),f.x),mix(h2(i+vec2(0,1)),h2(i+vec2(1,1)),f.x),f.y); }
     void main(){
@@ -2724,7 +2799,14 @@ const waterMat = new THREE.ShaderMaterial({
       float alpha = clamp(0.72 + 0.26*absorb + 0.08*F, 0.0, 0.99);    // NOT glass: even shallow water is mostly opaque so you never see through it to infinity; deep = solid
       if(vTop<0.5) alpha = max(alpha, 0.95);                          // side faces stay solid-looking
       float fd=uFogDensity*vFog; float ff=clamp(1.0-exp(-fd*fd),0.0,1.0);
-      col=mix(col, uRing, ff);    // ONE DEFINITION for the far edge: the ring colour computed in updateHorizon, handed in as a uniform. It used to recompute (uFogColor*0.5+tint)*uDeep here while the backdrop ring built its own value in JS, and the two drifted — same formula, different results, a visible band at the sea line. Now the surface fogs to exactly what stands beyond it, whatever that is, so the sea line cannot mismatch and the colour can be tuned in one place — the far EDGES of the water 5x DARKER (Ben 07-27), meeting the dark backdrop ring without a bright seam. uDeep 0.2 = shipped; Settings > VISUALS drives it.
+      // WATER IS AFFECTED BY FOG (Ben 07-29). uFogColor was passed into this shader and never used: the surface fogged
+      // to uRing at every hour and in every weather, so in rain or a fog bank the sea stayed blue while the terrain,
+      // the treeline and the sky all went grey — the water was the one surface the weather could not touch. The far
+      // edge still lands on the ring in clear air (that is what keeps the sea line matched), and rolls toward the live
+      // scene fog colour as the weather closes in. ff itself already rises with the weather, because uFogDensity is the
+      // live scene density — only the TARGET was wrong.
+      vec3 fogTo = mix(uRing, uFogColor, clamp(uWx*0.95, 0.0, 1.0));
+      col=mix(col, fogTo, ff);    // ONE DEFINITION for the far edge: the ring colour computed in updateHorizon, handed in as a uniform. It used to recompute (uFogColor*0.5+tint)*uDeep here while the backdrop ring built its own value in JS, and the two drifted — same formula, different results, a visible band at the sea line. Now the surface fogs to exactly what stands beyond it, whatever that is, so the sea line cannot mismatch and the colour can be tuned in one place — the far EDGES of the water 5x DARKER (Ben 07-27), meeting the dark backdrop ring without a bright seam. uDeep 0.2 = shipped; Settings > VISUALS drives it.
       gl_FragColor=vec4(col,alpha);
     }`
 });
@@ -4005,6 +4087,7 @@ function updateSky(dt){
   // chunks to 8, which pays for itself. History: lerp(2.2,1.7) originally, halved to lerp(1.10,0.85) for fix-list #7.
   scene.fog.density=lerp(1.70,0.283,day)/(CFG.RENDER_DIST*CK) * (1+wf*wf*18) * CFG.fogMul;   // CFG.fogMul = the Settings > VISUALS Fog dial (1.0 = shipped)
   waterMat.uniforms.uFogDensity.value=scene.fog.density;
+  if(waterMat.uniforms.uWx) waterMat.uniforms.uWx.value=(typeof weather!=='undefined'?(weather.fog||0):0);   // weather fog reaches the water now — see the fogTo blend in its fragment
   // hide the SKY behind the fog (and fade it back gradually as the bank clears)
   fogShell.position.copy(camera.position); fogShell.material.color.copy(fc);
   const fo=Math.min(0.985, wf*1.25); fogShell.material.opacity=fo; fogShell.visible=fo>0.01;
@@ -14713,21 +14796,27 @@ function groundStructure(cx,cz,gy,R,pathR){
   // So a trunk block is now only removed if no SURVIVING pine also owns that column at that height. Leaves are still taken
   // unconditionally: canopies interpenetrate everywhere and a slightly thinner neighbour is invisible, whereas a severed
   // trunk is the artefact. Four candidate roots per block, ~30 trunk blocks per tree — the cost is nothing.
-  const _survivingTrunkOwner=(bx,by,bz)=>{
-    for(const o of [[0,0],[-1,0],[0,-1],[-1,-1]]){ const rx=bx+o[0], rz=bz+o[1];
-      if(Math.max(Math.abs(rx-cx),Math.abs(rz-cz))<=T) continue;          // rooted on the pad → doomed too, not a reason to keep the block
-      if(!pineAt(rx,rz)) continue;
-      const sh=_pineShape(rx,rz);
-      if((o[0]||o[1]) && !sh.thick) continue;                             // only a THICK pine reaches a neighbouring column
-      const rh=surfaceH(rx,rz), gy=Math.min(rh, surfaceH(bx,bz));
-      if(by>gy && by<=rh+sh.th) return true;                              // that tree's own trunk really does occupy this block
-    }
-    return false; };
+  // Ben 07-29, after the trunk-only version shipped: "trees are still completely broken, when they are placed around
+  // structures a ton of their leaves are broken/destroyed/stems cut off". The first fix protected shared TRUNK columns
+  // and I judged shared LEAVES harmless because canopies interpenetrate. That was wrong — a doomed tree's canopy
+  // overlaps its neighbours' canopies over hundreds of blocks, so deleting every leaf it emits eats holes out of every
+  // surviving tree around the pad. The per-block owner lookup that worked for trunks cannot scale to leaves either: a
+  // trunk has 4 candidate roots, a leaf has every root within PINE_MAXR, which is 441 of them per block.
+  //
+  // So it is done as SET SUBTRACTION instead, which is both cheaper and exactly right. Build the claim set of every
+  // block belonging to a tree that SURVIVES, then erase the doomed trees and skip anything in that set. A block is
+  // removed only if no surviving tree also claims it — trunk, leaf or core, one rule for all three.
+  const _pk=(bx,by,bz)=>{ const lx=bx-cx+128, lz=bz-cz+128; return ((lx*512)+lz)*512+by; };   // local packing; roots sit within T+PINE_MAXR+2 of centre and reach at most PINE_MAXR, so offsets stay well inside 0..255
+  const keep=new Set(), T2=T+PINE_MAXR+2;
+  for(let dx=-T2;dx<=T2;dx++)for(let dz=-T2;dz<=T2;dz++){
+    if(Math.max(Math.abs(dx),Math.abs(dz))<=T) continue;                  // rooted on the pad → doomed, so not a keeper
+    const wx=cx+dx, wz=cz+dz; if(!pineAt(wx,wz)) continue;
+    pineEmit(wx,wz,(bx,by,bz)=>{ keep.add(_pk(bx,by,bz)); }); }
   for(let dx=-T;dx<=T;dx++)for(let dz=-T;dz<=T;dz++){ const wx=cx+dx, wz=cz+dz;
     if(!pineAt(wx,wz))continue;
-    pineEmit(wx,wz,(bx,by,bz,id,trunk)=>{ const b=getBlock(bx,by,bz);
+    pineEmit(wx,wz,(bx,by,bz)=>{ const b=getBlock(bx,by,bz);
       if(b!==BID.log && b!==BID.leaves && b!==BID.leaves_core) return;
-      if(b===BID.log && _survivingTrunkOwner(bx,by,bz)) return;           // shared column with a tree that is staying — leave it standing
+      if(keep.has(_pk(bx,by,bz))) return;                                 // a tree that is staying also owns this block
       setBlockWorld(bx,by,bz,AIR,true); }); }
   for(let dx=-T;dx<=T;dx++)for(let dz=-T;dz<=T;dz++){ const wx=cx+dx, wz=cz+dz, cheb=Math.max(Math.abs(dx),Math.abs(dz));
     const nH=surfaceH(wx,wz), f=cheb<=P?0:(cheb-P)/SK, e=f*f*(3-2*f);
