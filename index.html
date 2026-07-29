@@ -448,11 +448,20 @@ const PERF = {
   //   identically (V3). 512 is generous: the loaded set is 9 and the prefetch ring at most 25.
   brGenCacheMax: 512,
   //
+  // P6 · streamBudgetMs  (baseline: 0 = the old separate gen and mesh budgets)
+  //   One shared deadline for all overworld streaming in a frame, plus admission control: a unit is not
+  //   STARTED unless its expected cost still fits. Measured beforehand: generation averages 3.2-4.9 ms against
+  //   a declared 2.5 ms slice with a tail to 24 ms, meshing 3.9-4.2 ms, and the two stacked — the worst frames
+  //   read "gen 18.0 + mesh 6.4". This stops them compounding; it cannot fix a single unit bigger than the
+  //   whole budget, which needs generateChunk split or moved off-thread.
+  streamBudgetMs: 8,
+  streamAdmitSafety: 1.0,     // multiplier on the cost estimate; >1 is more cautious, starves streaming sooner
+  //
   portalHz: 120,
   portalMoveEps: 0.008,        // metres of camera travel that force a fresh portal frame
   portalTurnEps: 0.0015,       // quaternion delta that does the same
 };
-PERF.baseline = { brShadowLights: 2, brMergeRigid: false, brStableLightCount: false, portalHz: 0, brGenCacheMax: 0 };   // brPrecompile and brPrefetch already ship at their baseline   // brPrecompile already ships at its baseline   // V6 flag matrix: restore any of these and the game is the old game
+PERF.baseline = { brShadowLights: 2, brMergeRigid: false, brStableLightCount: false, portalHz: 0, brGenCacheMax: 0, streamBudgetMs: 0 };   // brPrecompile and brPrefetch already ship at their baseline   // brPrecompile already ships at its baseline   // V6 flag matrix: restore any of these and the game is the old game
 // ?perfoff=a,b,c  restores those flags to their baseline value AT BOOT — the only way to A/B a change whose
 // whole effect is on the first encounter (shader compilation), where flipping a flag mid-session is too late.
 // ?perfoff=all restores every one of them, which is the V6 "all flags off = baseline behaviour" check.
@@ -905,6 +914,12 @@ window.__hcPERF = {
                fps:Math.round(fpsAvg), portalHz:PERF.portalHz };
     }catch(e){ return {err:String(e&&e.message||e)}; } },
   spin(on){ try{ if(on){ if(!this._sp) this._sp=setInterval(()=>{ player.yaw+=0.05; }, 4); } else { clearInterval(this._sp); this._sp=null; } return !!this._sp; }catch(e){ return String(e); } },
+  streamUnits(reset){ const o={ gen:_suStat.gen, genAvgMs:+(_suStat.genMs/Math.max(1,_suStat.gen)).toFixed(2),
+      genMaxMs:+_suStat.genMax.toFixed(2), mesh:_suStat.mesh,
+      meshAvgMs:+(_suStat.meshMs/Math.max(1,_suStat.mesh)).toFixed(2), meshMaxMs:+_suStat.meshMax.toFixed(2),
+      worstFrameMs:+_suStat.worstFrame.toFixed(2), worstFrameSplit:_suStat.worstKind };
+    if(reset){ _suStat.gen=_suStat.genMs=_suStat.genMax=_suStat.mesh=_suStat.meshMs=_suStat.meshMax=_suStat.worstFrame=0; _suStat.worstKind=''; }
+    return o; },
   prefetch(){ return { on:!!PERF.brPrefetch, ring:PERF.brPrefetchRing, built:BR._pfBuilt|0, lastMs:BR._pfMs||0,
     cached:BR.envCache?BR.envCache.size:0, loaded:BR.loaded?BR.loaded.length:0, err:BR._pfErr||null }; },
   precompile(){ return _brPcState ? { done:_brPcState.done, ms:_brPcState.ms, slices:_brPcState.i,
@@ -3483,27 +3498,73 @@ const RING=[];
 (function(){ const R=CFG.RD_MAX+1; for(let dz=-R;dz<=R;dz++)for(let dx=-R;dx<=R;dx++) RING.push([dx,dz]); RING.sort((a,b)=>(a[0]*a[0]+a[1]*a[1])-(b[0]*b[0]+b[1]*b[1])); })();   // sized to the MAX RD so raising the slider actually streams more chunks
 function neighbors8(c){ for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++){ if(!dx&&!dz)continue; const n=getChunk(c.cx+dx,c.cz+dz); if(!n||!n.generated) return false; } return true; }
 let _streamMeshed=false;   // did we build a chunk mesh this frame? (loop uses it to avoid stacking the shadow re-bake on the same frame)
+// ---------------------------------------------------------------------
+//  P6 · STREAMING SLICE ACCOUNTING. streamChunks declares a 2.5 ms generation slice and a 1.5-3.5 ms meshing
+//  slice, and B3o still produced 22-25 ms frames inside that scope. Both slices are checked AFTER a unit of
+//  work finishes, so a single unit larger than its whole budget cannot be stopped — and gen and mesh have
+//  SEPARATE budgets, so one frame can overrun both. Before changing the scheduling, measure which it is:
+//  how many units ran, and how big the largest one was.
+// ---------------------------------------------------------------------
+const _suStat={ gen:0, genMs:0, genMax:0, mesh:0, meshMs:0, meshMax:0, worstFrame:0, worstKind:'' };
+let _suFrameGen=0, _suFrameMesh=0;
+function _streamUnitReset(){ _suFrameGen=0; _suFrameMesh=0; }
+function _streamUnit(kind, ms){
+  _suNote(kind, ms);
+  if(kind===0){ _suStat.gen++; _suStat.genMs+=ms; if(ms>_suStat.genMax)_suStat.genMax=ms; _suFrameGen+=ms; }
+  else { _suStat.mesh++; _suStat.meshMs+=ms; if(ms>_suStat.meshMax)_suStat.meshMax=ms; _suFrameMesh+=ms; }
+  const tot=_suFrameGen+_suFrameMesh;
+  if(tot>_suStat.worstFrame){ _suStat.worstFrame=tot;
+    _suStat.worstKind='gen '+_suFrameGen.toFixed(1)+' + mesh '+_suFrameMesh.toFixed(1); }
+}
+function _timedMesh(c){ const t=performance.now(); const r=buildChunkStaged(c); _streamUnit(1, performance.now()-t); return r; }
+// ---------------------------------------------------------------------
+//  P6 · ONE SHARED STREAMING BUDGET, WITH ADMISSION CONTROL.
+//  Two faults, both measured. (1) Generation and meshing had SEPARATE budgets, so a frame could overrun both
+//  and the worst frames came out as "gen 18.0 + mesh 6.4". (2) Every budget was checked AFTER a unit finished,
+//  which cannot stop a unit that is bigger than the whole budget — and the average generation unit is 3.2-4.9 ms
+//  against a declared 2.5 ms slice, with a tail to 24 ms.
+//  So: one deadline for all streaming work in the frame, and refuse to START a unit unless the time it is
+//  expected to take still fits. The estimate is an EMA per unit kind, seeded high so the first frames are
+//  cautious rather than optimistic.
+//  This does NOT fix a single unit that is inherently bigger than the budget — nothing but splitting
+//  generateChunk can — but it stops the two halves compounding, which is what took 24 ms frames to 30.
+// ---------------------------------------------------------------------
+const _suEst=[6,5];                       // ms, [gen, mesh] — EMA of recent unit cost
+function _suNote(kind, ms){ _suEst[kind] += (ms-_suEst[kind])*0.15; }
+function _suAdmit(kind, t0){
+  if(!PERF.streamBudgetMs) return true;                       // 0 = the old two-budget behaviour
+  // THE FIRST UNIT OF A FRAME ALWAYS RUNS. Without this the gate latches shut and the world stops loading:
+  // a few 19 ms chunks drag the estimate above the budget, the gate then refuses everything, and since only a
+  // unit that actually RAN can update the estimate, it can never come back down. Measured while it was wrong —
+  // 10 chunks resident instead of 241, gen 0, mesh 0 — and the frame times looked wonderful because the game
+  // had simply stopped working. Guaranteeing one unit bounds the frame at one unit's cost, which was the point:
+  // stop gen and mesh COMPOUNDING, not stop them happening.
+  if(_suFrameGen + _suFrameMesh === 0) return true;
+  return (performance.now()-t0) + _suEst[kind]*PERF.streamAdmitSafety <= PERF.streamBudgetMs;
+}
 function streamChunks(genBudget, meshBudget){
+  _streamUnitReset();
+  const _streamT0=performance.now();   // ONE deadline for every unit of streaming work in this frame
   _streamMeshed=false;
   const pcx=Math.floor(player.pos.x)>>4, pcz=Math.floor(player.pos.z)>>4;
   const genT0=performance.now();
   const genR=CFG.RENDER_DIST+1;   // gen only what meshing can ever need (mesh needs neighbors8 → RD+1). unloadFar deletes at RD+2, so gen<unload = real hysteresis. Without this clamp the loop endlessly regenerated rings RD+3..13 that unloadFar kept deleting — a permanent ~2.5ms+/frame streaming storm (THE dominant baseline frame cost), forever, even standing still.
-  for(let i=0;i<RING.length && genBudget>0;i++){ const o=RING[i]; if(o[0]>genR||o[0]<-genR||o[1]>genR||o[1]<-genR) continue; const kk=key(pcx+o[0],pcz+o[1]); let c=world.get(kk); if(!c){ c=makeChunk(pcx+o[0],pcz+o[1]); world.set(kk,c); } if(!c.generated){ generateChunk(c); genBudget--; if(performance.now()-genT0>2.5)break; } }   // time-slice gen too (was uncapped): a slow terrain-gen can't stack into a hitch when you cross into new territory
+  for(let i=0;i<RING.length && genBudget>0;i++){ const o=RING[i]; if(o[0]>genR||o[0]<-genR||o[1]>genR||o[1]<-genR) continue; const kk=key(pcx+o[0],pcz+o[1]); let c=world.get(kk); if(!c){ c=makeChunk(pcx+o[0],pcz+o[1]); world.set(kk,c); } if(!c.generated){ if(!_suAdmit(0,_streamT0)) break; const _gu=performance.now(); generateChunk(c); _streamUnit(0,performance.now()-_gu); genBudget--; if(performance.now()-genT0>2.5)break; } }   // time-slice gen too (was uncapped): a slow terrain-gen can't stack into a hitch when you cross into new territory
   // meshing is time-sliced AND count-capped: a single heavy forest chunk can cost several ms, so a cluster
   // of them entering the ring at once used to stack into one big frame spike (the "walking into the woods"
   // stutter). Keep the slice well under a 60fps frame (16.6ms) so meshing + render + shadow never blow a frame.
   const meshT0=performance.now(), meshMS=fpsAvg<38?1.5:fpsAvg<52?2.5:3.5;   // smaller per-frame mesh budget → the CHUNK-STREAM HITCH (a 5ms mesh build spiking one frame as you walk) is cut; slightly more pop-in, far smoother motion
   // RESUME-FIRST: an in-flight staged build must complete its stage B before any new stage A may run (shared snapshot scratch)
   if(_stagedC){ const cc=_stagedC;
-    if(world.get(key(cc.cx,cc.cz))===cc && cc.generated){ if(buildChunkStaged(cc)){ if(!cc.dirty) remeshSet.delete(key(cc.cx,cc.cz)); _streamMeshed=true; meshBudget--; } if(performance.now()-meshT0>meshMS) return; }   // !dirty: stage B re-flags a chunk edited mid-build — never drop that request
+    if(world.get(key(cc.cx,cc.cz))===cc && cc.generated){ if(_timedMesh(cc)){ if(!cc.dirty) remeshSet.delete(key(cc.cx,cc.cz)); _streamMeshed=true; meshBudget--; } if(performance.now()-meshT0>meshMS) return; }   // !dirty: stage B re-flags a chunk edited mid-build — never drop that request
     else _abandonStaged(); }   // its chunk unloaded mid-build → drop the partial
   for(let i=0;i<RING.length && meshBudget>0;i++){ const o=RING[i]; if(Math.abs(o[0])>CFG.RENDER_DIST||Math.abs(o[1])>CFG.RENDER_DIST) continue; const c=getChunk(pcx+o[0],pcz+o[1]);
-    if(c && c.dirty && neighbors8(c)){ _streamMeshed=true;
-      if(!buildChunkStaged(c)){ if(performance.now()-meshT0>meshMS) return; if(!buildChunkStaged(c)) return; }   // stage A ran; finish B in-slice or resume next frame
+    if(c && c.dirty && neighbors8(c)){ if(!_suAdmit(1,_streamT0)) return; _streamMeshed=true;
+      if(!_timedMesh(c)){ if(performance.now()-meshT0>meshMS) return; if(!_timedMesh(c)) return; }   // stage A ran; finish B in-slice or resume next frame
       if(!c.dirty) remeshSet.delete(key(c.cx,c.cz)); meshBudget--; if(performance.now()-meshT0>meshMS) return; } }
   // explicit edit-driven remeshes — same time slice (a big edit/explosion can't hitch the frame either)
-  if(remeshSet.size){ for(const kk of Array.from(remeshSet)){ if(performance.now()-meshT0>meshMS)break; const c=world.get(kk); if(c&&c.dirty&&neighbors8(c)){ _streamMeshed=true;
-      if(!buildChunkStaged(c)){ if(performance.now()-meshT0>meshMS) break; if(!buildChunkStaged(c)) break; }   // as above: bounded units, resume next frame if the slice is spent
+  if(remeshSet.size){ for(const kk of Array.from(remeshSet)){ if(performance.now()-meshT0>meshMS||!_suAdmit(1,_streamT0))break; const c=world.get(kk); if(c&&c.dirty&&neighbors8(c)){ _streamMeshed=true;
+      if(!_timedMesh(c)){ if(performance.now()-meshT0>meshMS) break; if(!_timedMesh(c)) break; }   // as above: bounded units, resume next frame if the slice is spent
       if(!c.dirty) remeshSet.delete(kk); } else remeshSet.delete(kk); } }
   // light-only refloods (torch place/break neighbors) — far cheaper than a remesh; same slice, drained after
   if(relightSet.size){ for(const kk of relightSet){ if(performance.now()-meshT0>meshMS)break; relightSet.delete(kk); const c=world.get(kk); if(c&&c.meshed&&!c.dirty) relightChunk(c); } }

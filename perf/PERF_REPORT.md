@@ -1,8 +1,8 @@
 # PERF_REPORT — Hollowcraft performance pass
 
-Status: **Phases −1, 0, 1, 2 complete. P1, P2, P3, P5 shipped and measured; P3b and P4 implemented and shipped
-off as measured negatives. C3 and V6 verified; V5 and V7 outstanding.** This is an interim report, not a full
-Phase 6 sign-off.
+Status: **Phases −1, 0, 1, 2 complete. P1, P2, P3, P5, P6, P7 shipped and measured; P3b and P4 implemented and
+shipped off as measured negatives. C1 (medians), C3, C5, C6 and V6 verified; C2, V5 and V7 outstanding.**
+An interim report, not a full Phase 6 sign-off.
 
 ## Before / after
 
@@ -39,8 +39,11 @@ V6 flag matrix verified: booting with `?perfoff=all` reproduces the baseline exa
 - **C1 (median ≤ 7.14 ms, p99 ≤ 9.5 ms).** Every median passes with room — the worst is B6 at 6.98 ms, and the
   Backrooms sits at 3.6–4.9 ms against a 7.14 ms budget. **B1, B5 and B1o pass C1 outright.** The rest fail
   **only on p99**, and every one of those p99s is a hitch, not steady-state cost.
-- **C2 (no frame > 12 ms, zero > 16.6 ms).** **B5 and B1o now pass.** Everywhere else it still fails — this
-  remains the honest headline: the pass has fixed *throughput*, not *hitching*. B4 still reaches 124.6 ms.
+- **C2 (no frame > 12 ms, zero > 16.6 ms).** **B5 and B1o pass.** Everywhere else it still fails — this remains
+  the honest headline: the pass has fixed *throughput*, not *hitching*. B4 still reaches 124.6 ms. P6 cut the
+  overworld's frames over 12 ms by 60–114 by stopping generation and meshing compounding, but a single
+  `generateChunk` still averages 3.2–4.9 ms with a tail to 24 ms, and no scheduling fixes a unit bigger than
+  the budget.
 - **C3 (no cross-chunk seams, order-independent output). PASS.** `bench/perf-verify-v3v4.mjs`:
   - a 5×5 BRX region hashes **identically across 20 different generation orders**, and identically again when
     each chunk is generated alone in a cleared cache;
@@ -80,9 +83,10 @@ makes the shader enormous. A smaller pool shrinks the shader, the compile and th
 2. **V5 and V7 — QA-helper parity and the 30-minute soak.** V3/V4 now pass (`bench/perf-verify-v3v4.mjs`);
    these two are what is left of the sign-off. V7 matters most: heap reaches 231 MB in B4 and nothing has
    proved it flattens.
-3. **P6 — the overworld streaming slice.** `streamChunks` declares a 1.5–3.5 ms budget and overruns to
-   16–25 ms because one unit of work is bigger than the slice. B3o: 235 frames over 12 ms, worst 25.1 ms. This
-   is the last untouched C2 failure that is purely a scheduling bug.
+3. **Split `generateChunk`, or move it off-thread.** P6 stopped generation and meshing compounding, but a
+   single generation unit still averages 3.2–4.9 ms with a tail to 24 ms against a 12 ms ceiling. No scheduling
+   can fix a unit larger than the budget — this is the remaining overworld C2 failure and it needs the unit
+   made smaller.
 4. **Find where the heap actually goes.** B4 reaches 165–327 MB. I guessed `BR.gen` and was wrong — it peaks at
    156 entries, about 6 MB — so the LRU bound shipped in P7 is insurance, not the fix. This needs a DevTools
    heap snapshot, not more arithmetic.
@@ -155,6 +159,10 @@ verified: B1 goes back to 13.7 ms and 4 772 draws, which is the baseline.
 | `brStableLightCount` | **true** | false | park unused pool lights at zero intensity instead of hiding them, so the shader's light count stops moving | compile events 14 → 4 | none — pixel-identical |
 | `portalHz` | **120** | 0 | cap how often the portal re-renders the scene; motion forces it anyway | −1.48 ms, 5/5 pairs; portal refresh 43 → 91 Hz | low — refreshes more often than before, except on a fast sweep |
 | `brGenCacheMax` | **512** | 0 | LRU bound on the chunk data cache | nothing at this scale (peaks at 156) | none — insurance only |
+| `streamBudgetMs` | **8** | 0 | one shared deadline for overworld streaming, with admission control | frames > 12 ms −60 (B2o) / −114 (B3o) | low — the first unit of a frame always runs, so streaming cannot starve |
+| `streamAdmitSafety` | 1.0 | — | multiplier on the cost estimate | — | >1 starves streaming sooner |
+| `streamBudgetMs` | **8** | 0 | one shared deadline for overworld streaming, with admission control | frames >12 ms −60 (B2o) / −114 (B3o) | low — the first unit of a frame always runs, so streaming cannot starve |
+| `streamAdmitSafety` | 1.0 | — | multiplier on the cost estimate | — | >1 starves streaming sooner |
 | `brPrecompile` | **false** | false | compile the Backrooms shaders on the loading screen | works, costs +16 s of load | rejected on cost |
 | `brPrefetch` | **false** | false | build the chunk ring ahead of the player | nothing while compiles dominate | re-measure after the light-pool decision |
 | `brPrefetchRing` / `brPrefetchCooldown` | 1 / 20 | — | tuning for the above | — | inert while `brPrefetch` is off |

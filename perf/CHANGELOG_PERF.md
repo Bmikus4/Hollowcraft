@@ -345,6 +345,58 @@ session that visits far more than 156 chunks. It is **not** the heap fix, and it
 
 ---
 
+## P6 — one shared streaming budget, and a false win that nearly shipped
+
+**Flag.** `PERF.streamBudgetMs` — default **8**, baseline **0** (the old separate budgets).
+`PERF.streamAdmitSafety = 1.0`.
+
+**What the measurement said first.** Rather than guess, `__hcPERF.streamUnits()` was added to count units of
+streaming work and their cost. Over B2o/B3o:
+
+| | average | max | declared slice |
+|---|---|---|---|
+| `generateChunk` | 3.2–4.9 ms | **14–24 ms** | 2.5 ms |
+| `buildChunkStaged` | 3.9–4.2 ms | 11–14 ms | 1.5–3.5 ms |
+
+Two distinct faults. A single unit routinely exceeds its **entire** budget, and the budget is only checked
+*after* the unit finishes, so nothing can stop it. And generation and meshing had **separate** budgets, so one
+frame could overrun both — the worst frames read `gen 18.0 + mesh 6.4`.
+
+**The change.** One deadline for all streaming work in the frame, and a unit is not *started* unless its
+expected cost (an EMA per unit kind) still fits. This cannot fix a unit that is inherently bigger than the
+budget — only splitting `generateChunk` or moving it off-thread can — but it stops the two halves compounding.
+
+**Measured**, paired A/B, after the fix below:
+
+| | B2o | B3o |
+|---|---|---|
+| median | +0.06 ms (noise) | +0.02 ms (noise) |
+| p99 | −0.71 ms | **−3.61 ms** |
+| max | +0.79 ms | **−6.89 ms** |
+| frames > 12 ms | **−60.5** | **−114** |
+
+No median change is the correct outcome: the same total work happens, it is just no longer stacked. And the
+worst-frame split now reads `gen 16.3 + mesh 0.0` where it used to read `gen 16.7 + mesh 6.3`.
+
+### The false win
+
+The first version had **no guarantee of forward progress**, and its A/B looked spectacular: B2o p99 −12.1 ms,
+max −11.2 ms, 185 fewer frames over 12 ms, 4/4 pairs.
+
+It had stopped streaming altogether. A fill check — `chunks` resident and units executed — showed **10 chunks
+instead of 241, `gen: 0`, `mesh: 0`**. A few 19 ms chunks dragged the cost estimate above the 8 ms budget; the
+gate then refused everything; and because only a unit that actually *runs* can update the estimate, it could
+never come back down. A latch. The frame times were beautiful because the game had stopped doing anything.
+
+Fixed by always admitting the **first** unit of a frame: forward progress is guaranteed, the frame is bounded
+at one unit's cost, and that was the actual goal. Verified after the fix: **242 chunks resident either way,
+1 125 generations and 1 884 meshes either way** — identical throughput, no stacking.
+
+The lesson is in the harness now: a performance number is not a result until you have checked that the work
+still happened. Frame time alone cannot tell the difference between "faster" and "stopped".
+
+---
+
 ## Critique pass — what re-reading the diff caught
 
 **One real bug, found by measurement, fixed.** `_brMergeRigid` copied `frustumCulled = false` from
