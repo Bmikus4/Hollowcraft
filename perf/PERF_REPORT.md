@@ -1,7 +1,8 @@
 # PERF_REPORT — Hollowcraft performance pass
 
-Status: **Phases −1, 0, 1, 2 complete. P1, P2, P3 shipped and measured. P4, P5 and the V-series sign-off not
-started.** This is an interim report, not a Phase 6 sign-off.
+Status: **Phases −1, 0, 1, 2 complete. P1, P2, P3, P5 shipped and measured; P3b and P4 implemented and shipped
+off as measured negatives. C3 and V6 verified; V5 and V7 outstanding.** This is an interim report, not a full
+Phase 6 sign-off.
 
 ## Before / after
 
@@ -82,8 +83,9 @@ makes the shader enormous. A smaller pool shrinks the shader, the compile and th
 3. **P6 — the overworld streaming slice.** `streamChunks` declares a 1.5–3.5 ms budget and overruns to
    16–25 ms because one unit of work is bigger than the slice. B3o: 235 frames over 12 ms, worst 25.1 ms. This
    is the last untouched C2 failure that is purely a scheduling bug.
-4. **P7 — bound the `BR.gen` cache.** Heap still reaches 231 MB in B4; resident chunk data is only ~5 MB, so
-   this is an unbounded map, not footprint.
+4. **Find where the heap actually goes.** B4 reaches 165–327 MB. I guessed `BR.gen` and was wrong — it peaks at
+   156 entries, about 6 MB — so the LRU bound shipped in P7 is insurance, not the fix. This needs a DevTools
+   heap snapshot, not more arithmetic.
 5. **Re-measure `brPrefetch` after (1).** It is implemented and correct; it just has nothing to show while the
    compiles dominate.
 
@@ -141,7 +143,34 @@ Everything below was **read off the machine**, not assumed — `window.__hcPERF.
 | `PERF.loaf` | `true` | `long-animation-frame` + `longtask` observers | none |
 | `PERF.matrix.mode` | `'off'` | bottleneck-isolation experiment (Phase 1) | debug only |
 
-Optimisation flags are added here one per change, from Phase 4 onward.
+### Optimisation flags
+
+Every one restores the pre-pass behaviour at its **baseline** value, and `?perfoff=all` restores the lot —
+verified: B1 goes back to 13.7 ms and 4 772 draws, which is the baseline.
+
+| flag | ships | baseline | what it does | measured | risk |
+|---|---|---|---|---|---|
+| `brShadowLights` | **0** | 2 | how many troffers cast a real cube shadow. A point-light shadow is 6 scene renders | 20.23 → 4.73 ms | **visual** — no contact shadows under the two nearest tubes. Ben approved 07-28 |
+| `brMergeRigid` | **true** | false | merge the meshes hanging off a door pivot, in the pivot's own frame | −0.9…−1.6 ms, 15/16 pairs | geometry proven identical (`perf-verify-p2.mjs`) |
+| `brStableLightCount` | **true** | false | park unused pool lights at zero intensity instead of hiding them, so the shader's light count stops moving | compile events 14 → 4 | none — pixel-identical |
+| `portalHz` | **120** | 0 | cap how often the portal re-renders the scene; motion forces it anyway | −1.48 ms, 5/5 pairs; portal refresh 43 → 91 Hz | low — refreshes more often than before, except on a fast sweep |
+| `brGenCacheMax` | **512** | 0 | LRU bound on the chunk data cache | nothing at this scale (peaks at 156) | none — insurance only |
+| `brPrecompile` | **false** | false | compile the Backrooms shaders on the loading screen | works, costs +16 s of load | rejected on cost |
+| `brPrefetch` | **false** | false | build the chunk ring ahead of the player | nothing while compiles dominate | re-measure after the light-pool decision |
+| `brPrefetchRing` / `brPrefetchCooldown` | 1 / 20 | — | tuning for the above | — | inert while `brPrefetch` is off |
+| `portalMoveEps` / `portalTurnEps` | 0.008 / 0.0015 | — | how much camera motion forces a fresh portal frame | — | lower = more faithful, more cost |
+
+### Verification harnesses added
+
+| harness | what it proves |
+|---|---|
+| `bench/perf-run.mjs` | the B1–B7 suite; every number in this report |
+| `bench/perf-ab.mjs` | paired in-session A/B — the right instrument for steady-state changes |
+| `bench/perf-compile.mjs` | two cold sessions — the only instrument that can see first-encounter effects |
+| `bench/perf-matrix.mjs` | GPU Gems 2 bottleneck isolation |
+| `bench/perf-drawprobe.mjs` | scene census; reconstructs the draw-call count |
+| `bench/perf-verify-p2.mjs` | door geometry identical at three swing angles, and still swinging |
+| `bench/perf-verify-v3v4.mjs` | C3: order-independence and cross-chunk seams |
 
 ## URL parameters added by the pass
 

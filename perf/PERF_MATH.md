@@ -236,9 +236,16 @@ stride = pos(12) + normal(12) + uv(8) = 32 bytes
 mesh_bytes ≈ 16 000 × 32                          = 512 KB per chunk
 data_bytes (rooms/walls/doors/… 16 arrays)        ≈ 40 KB per chunk   (GUESS — not instrumented)
 ```
-With `BRX_KEEP = 1`, resident = 9 × 552 KB ≈ **5 MB**. That is negligible; the 272 MB is **not** resident chunk
-data, it is `BR.gen` (the data cache, unbounded — B4 grows it to hundreds of entries) plus `BR.envCache`
-churn plus garbage awaiting collection. **The memory problem is an unbounded cache, not chunk size.**
+With `BRX_KEEP = 1`, resident = 9 × 552 KB ≈ **5 MB**. That is negligible, so the 272 MB is not resident chunk
+data.
+
+> **CORRECTION, 2026-07-29.** I attributed the rest to `BR.gen`, the unbounded chunk-data cache, and wrote that
+> "the memory problem is an unbounded cache, not chunk size". **That was a guess and it is wrong.** Measured:
+> `BR.gen` peaks at **156 entries** across the whole B4 teleport scene — about **6 MB**, not 231. A 512-entry
+> LRU bound was added (`PERF.brGenCacheMax`, P7) and it never fires at benchmark scale, so it cannot be and is
+> not the fix. **The real source of the 165–327 MB heap is unidentified**, and finding it needs a heap
+> snapshot, not arithmetic. Recorded rather than quietly amended, because it is exactly the sort of plausible
+> story this pass is supposed to refuse to tell.
 
 Ceiling: 350 MB JS heap, 250 MB GPU. At 552 KB/chunk the heap ceiling permits `r` far beyond anything useful,
 so **r is not memory-limited** — it is limited by draw calls (§4.4). `BR.gen` needs an LRU bound; sized at

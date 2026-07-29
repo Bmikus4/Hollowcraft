@@ -319,6 +319,32 @@ and it buys 50 % more frame rate there. Note the turn trigger under-fires in the
 
 ---
 
+## P7 — bound the chunk data cache, and a hypothesis that turned out to be wrong
+
+**Flag.** `PERF.brGenCacheMax` — default **512**, baseline **0** (unbounded).
+
+**What.** `BR.gen` caches generated chunk records and never evicted anything. It is now an insertion-order LRU:
+a cache hit is re-inserted so it moves to the young end, and inserts past the cap drop the oldest. Safe at any
+size because a BRX chunk regenerates identically — which V3 now proves rather than assumes.
+
+**The reason I did it was wrong.** PERF_MATH §4.6 attributed B4's 231 MB heap to this cache growing without
+limit. Measured: `BR.gen` peaks at **156 entries** across the entire B4 teleport scene — roughly **6 MB**. The
+512 cap therefore **never fires** at benchmark scale, and the paired A/B says exactly what it should say for a
+change that does nothing: median +0.07 ms, 1 of 4 pairs, heap 141 → 157 MB (noise, and heap is session-
+cumulative so an interleaved A/B cannot read it anyway).
+
+I also briefly had a 231 → 165 MB heap reading that looked like a win. It was not: it came from a two-scene
+subset run where B4 sits in a different suite position, the same confound already recorded for B6. Same-position
+comparison shows nothing.
+
+**Kept anyway, honestly labelled:** the bound is correct, costs nothing, and is real insurance for a long
+session that visits far more than 156 chunks. It is **not** the heap fix, and it is not counted as one.
+**The actual source of the 165–327 MB heap is unidentified** and wants a heap snapshot, not more arithmetic.
+
+**Revert.** `PERF.brGenCacheMax = 0`.
+
+---
+
 ## Critique pass — what re-reading the diff caught
 
 **One real bug, found by measurement, fixed.** `_brMergeRigid` copied `frustumCulled = false` from

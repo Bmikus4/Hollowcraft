@@ -441,11 +441,18 @@ const PERF = {
   // P5 · portalHz  (baseline: 0 = every frame)
   //   Cap how often the see-through portal re-renders the whole scene a second time. Movement still forces an
   //   immediate re-render, so the parallax never lags behind a camera you are actually moving.
+  //
+  // P7 · brGenCacheMax  (baseline: 0 = unbounded)
+  //   LRU bound on BR.gen, the Backrooms chunk DATA cache. It grew without limit — B4's ten teleports drove the
+  //   heap to 231 MB against ~5 MB of resident chunk data. Safe at any size because a chunk regenerates
+  //   identically (V3). 512 is generous: the loaded set is 9 and the prefetch ring at most 25.
+  brGenCacheMax: 512,
+  //
   portalHz: 120,
   portalMoveEps: 0.008,        // metres of camera travel that force a fresh portal frame
   portalTurnEps: 0.0015,       // quaternion delta that does the same
 };
-PERF.baseline = { brShadowLights: 2, brMergeRigid: false, brStableLightCount: false, portalHz: 0 };   // brPrecompile and brPrefetch already ship at their baseline   // brPrecompile already ships at its baseline   // V6 flag matrix: restore any of these and the game is the old game
+PERF.baseline = { brShadowLights: 2, brMergeRigid: false, brStableLightCount: false, portalHz: 0, brGenCacheMax: 0 };   // brPrecompile and brPrefetch already ship at their baseline   // brPrecompile already ships at its baseline   // V6 flag matrix: restore any of these and the game is the old game
 // ?perfoff=a,b,c  restores those flags to their baseline value AT BOOT — the only way to A/B a change whose
 // whole effect is on the first encounter (shader compilation), where flipping a flag mid-session is too late.
 // ?perfoff=all restores every one of them, which is the V6 "all flags off = baseline behaviour" check.
@@ -11642,7 +11649,8 @@ function brxRoomAt(x,z){ const R=BR.rooms||[]; for(let i=0;i<R.length;i++){ cons
 const BRX_KEEP=1;                                                       // Chebyshev radius of chunks kept loaded (1 = 3x3)
 const BRX_FIELDS=['rooms','walls','doors','lintels','pillars','fixtures','crawls','tables','frames','windows','solids','props','boxes','bulbs','tunnels','stairs'];   // NOTE: not 'ramps' — ramps are built by brBuildEnv, not generated, so unioning chunk records would wipe the flights
 function brxChunkGen(gx,gz){ if(!BR.gen) BR.gen=new Map();
-  const k=gx+'_'+gz; const hit=BR.gen.get(k); if(hit) return hit;
+  const k=gx+'_'+gz; const hit=BR.gen.get(k);
+  if(hit){ if(PERF.brGenCacheMax>0){ BR.gen.delete(k); BR.gen.set(k,hit); } return hit; }   // touch = move to the young end, so the LRU below never evicts a chunk you are standing in
   const o=brxChunkOrigin(gx,gz), ent=brxChunkOf(BR_ENTRY.x,BR_ENTRY.z);
   const stash={}; for(const f of BRX_FIELDS) stash[f]=BR[f];             // swap the live arrays aside…
   const keyRoomStash=BR.keyRoom;
@@ -11651,7 +11659,19 @@ function brxChunkGen(gx,gz){ if(!BR.gen) BR.gen=new Map();
   const rec={gx,gz}; for(const f of BRX_FIELDS) rec[f]=BR[f];            // …capture what it produced…
   if(!(gx===ent.gx && gz===ent.gz)) BR.keyRoom=keyRoomStash;             // only the entry chunk is allowed to define the key
   for(const f of BRX_FIELDS) BR[f]=stash[f];                             // …and put the live arrays back
-  BR.gen.set(k,rec); return rec; }
+  BR.gen.set(k,rec);
+  // P7 · BOUND THE DATA CACHE. BR.gen grew forever — B4 teleports to ten far-apart neighbourhoods and the heap
+  // reached 231 MB, against roughly 5 MB of chunk data actually resident. Nothing here is precious: a BRX chunk
+  // is a pure function of (gx, gz, seed) and regenerates identically (proved by bench/perf-verify-v3v4.mjs), so
+  // eviction is always safe and never visible. Plain insertion-order LRU — Map iterates oldest-first, and a
+  // re-hit is re-inserted below so the set you are standing in cannot be evicted out from under you.
+  if(PERF.brGenCacheMax > 0 && BR.gen.size > PERF.brGenCacheMax){
+    const over = BR.gen.size - PERF.brGenCacheMax;
+    let n = 0;
+    for(const oldKey of BR.gen.keys()){ if(n++ >= over) break; if(oldKey !== k) BR.gen.delete(oldKey); }
+    BR._genEvicted = (BR._genEvicted|0) + over;
+  }
+  return rec; }
 // Rebuild the flat arrays as the union of the loaded set. Room ids are renumbered because the nav graph indexes by id and
 // every chunk numbers its own rooms from zero — without this, chunk 2's room 0 would silently shadow chunk 1's.
 function brxUnion(){ const keep=BR.loaded||[];
