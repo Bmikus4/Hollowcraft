@@ -388,9 +388,18 @@ const PERF = {
   overlay:  Q.get('perf')==='1',        // the on-screen readout
   gpuTimers:true,                       // EXT_disjoint_timer_query_webgl2, feature-detected
   loaf:     true,                       // PerformanceObserver('long-animation-frame')
-  // ---- optimisation flags (Phase 4/5 fills these in; every one defaults to BASELINE behaviour) ----
-  // (none yet — Phase 0 must not change a single line of game logic)
+  // ---- optimisation flags ------------------------------------------------------------------------
+  // Convention: the DEFAULT is the shipping (optimised) value. Setting a flag back to its `baseline:`
+  // value below restores the pre-pass behaviour exactly, so any regression can be bisected to one flag.
+  //
+  // P1 · brShadowLights  (baseline: 2)
+  //   How many Backrooms troffers cast a real shadow. A PointLight shadow is SIX cube-face renders, so with
+  //   1213 environment meshes marked as casters and frustumCulled off, two of them multiplied the frame by 13.
+  //   Measured: 20.23 ms -> 4.73 ms in the halls, 24.61 -> 8.05 at the portal. Ben's call, 07-28: cut them.
+  //   The pooled fluorescent falloff and the dying-tube flicker are untouched — only the cast shadow goes.
+  brShadowLights: 0,
 };
+PERF.baseline = { brShadowLights: 2 };   // V6 flag matrix: restore any of these and the game is the old game
 // ---------------------------------------------------------------------
 //  T — zero-alloc scoped CPU timers. Integer enum, preallocated Float64Array, never a string key, never an object.
 // ---------------------------------------------------------------------
@@ -758,7 +767,8 @@ window.__hcPERF = {
              brLoaded:(typeof BR!=='undefined'&&BR.loaded)?BR.loaded.length:0 };
   },
   // counterfactual, measured not guessed
-  brPointShadows(on){ try{ for(const L of (BR.lightPool||[])) L.castShadow=!!on; return true; }catch(e){ return String(e); } },
+  brPointShadows(on){ try{ PERF.brShadowLights = on ? BR_SHADOW_LIGHTS : 0; return brApplyShadowLights(); }catch(e){ return String(e); } },
+  shadowLights(n){ try{ if(n!=null) PERF.brShadowLights=n|0; return brApplyShadowLights(); }catch(e){ return String(e); } },
   // -------------------------------------------------------------------
   //  BOTTLENECK MATRIX (GPU Gems 2 ch.28): starve one pipeline stage at a time and read the delta.
   //  If starving a stage does not change the frame time, that stage is not the bottleneck. Every mode is
@@ -12031,9 +12041,19 @@ function brEnsureLightPool(){ if(BR.lightPool && BR.lightPool.length) return;
   BR.lightPool=[]; for(let i=0;i<16;i++){ const L=new THREE.PointLight(0xffedcf, 0, 56, 2.0); L.visible=false; scene.add(L); BR.lightPool.push(L); }
   // REAL CAST SHADOWS from the two nearest troffers (Ben 07-27). Point-light shadows are 6 faces each, so the count is
   // deliberately tiny and the far plane is clamped to the local room — everything past that is carried by the pooled falloff.
-  if(CFG.quality!=='Low'){ const SS=CFG.quality==='Ultra'?1024:512;
-    for(let i=0;i<BR_SHADOW_LIGHTS;i++){ const L=BR.lightPool[i]; L.castShadow=true; L.shadow.mapSize.set(SS,SS);
-      L.shadow.bias=-0.006; L.shadow.normalBias=0.06; L.shadow.camera.near=0.3; L.shadow.camera.far=26; } }
+  brApplyShadowLights();
+}
+// ONE place decides how many troffers cast. Called at pool creation and whenever PERF.brShadowLights changes,
+// so the flag is genuinely live and the V6 matrix can flip it without a reload.
+function brApplyShadowLights(){
+  if(!BR.lightPool) return 0;
+  const want = (CFG.quality==='Low') ? 0 : Math.min(BR_SHADOW_LIGHTS, PERF.brShadowLights|0);
+  const SS = CFG.quality==='Ultra'?1024:512;
+  for(let i=0;i<BR.lightPool.length;i++){ const L=BR.lightPool[i];
+    if(i<want){ L.castShadow=true; L.shadow.mapSize.set(SS,SS);
+      L.shadow.bias=-0.006; L.shadow.normalBias=0.06; L.shadow.camera.near=0.3; L.shadow.camera.far=26; }
+    else L.castShadow=false; }
+  return want;
 }
 // ---- THE INSTALLER (Ben 07-27) ----
 // One group PER CHUNK, each offset in Y by its storey. That offset is what makes stacked floors nearly free for
