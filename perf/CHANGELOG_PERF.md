@@ -500,6 +500,37 @@ prewarm. Not chased — recorded so the next person does not repeat my mistake o
 
 ---
 
+## P8 — the 8 ms frame in the overworld was one line
+
+**Flags.** `PERF.brainScanSlice` — default **400**, baseline **0** (whole sweep in one frame).
+
+**Found by bisection, not by guessing.** The overworld's recurring 8–18 ms frames all sat inside the `entities`
+scope. Splitting that scope into `brain` / `wretch` / `animals` / `props` put the whole spike in `brain`
+(8.0–8.4 ms, everything else ≤ 0.2 ms). Splitting `updateBrain` again by stage named it outright:
+
+| stage | max ms |
+|---|---|
+| **detectBase** | **8.10** |
+| pushScent | 0.02 |
+| seedPlaces / trackPlayer / awareness / pickMode | ≤ 0.01 |
+
+`detectBase` runs every three seconds and sweeps **every block edit in the world**, `String.split(',')` per
+edit, to work out where the player has built a nest.
+
+**Two attempts, and the first was aimed at the wrong half.** Slicing the sweep across frames took the worst
+frame 8.10 → 6.05 ms; narrowing the slice from 1500 keys to 400 then moved it only to **5.74**. A 3.75× narrower
+slice buying 5 % says the per-key loop is not the cost — **`Object.keys(edits)` is**, and it is paid once per
+sweep whatever the slice. So the key list is now cached and rebuilt only when something has actually placed or
+broken a block since the last sweep (`_editsDirty`, set at all four sites that add an edit).
+
+**Measured:** `detectBase` worst frame **8.10 ms → 0.13 ms**, a **62×** reduction; total across a 20 s scene
+39.2 → 21.6 ms. **B1o and B5o now pass C1 and C2 outright**, worst frames 7.1 and 8.4 ms.
+
+**Revert.** `PERF.brainScanSlice = 0` restores the single-frame sweep; the key cache is behaviour-neutral and
+stays (a stale list costs at most one three-second cycle of noticing a newly placed block).
+
+---
+
 ## Critique pass — what re-reading the diff caught
 
 **One real bug, found by measurement, fixed.** `_brMergeRigid` copied `frustumCulled = false` from

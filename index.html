@@ -448,6 +448,12 @@ const PERF = {
   //   identically (V3). 512 is generous: the loaded set is 9 and the prefetch ring at most 25.
   brGenCacheMax: 512,
   //
+  // P8 · brainScanSlice  (baseline: 0 = the whole sweep in one frame)
+  //   How many block edits detectBase examines per frame. It runs every three seconds over every edit in the
+  //   world and measured 8.1 ms in a single frame — the entire overworld entity spike, with every other stage
+  //   of updateBrain at 0.02 ms or less.
+  brainScanSlice: 400,
+  //
   // P9 · preloadSliceMs  (baseline: 5)
   //   How much of each loading-screen frame goes into baking item icons. Measured: the whole icon bake is
   //   944 ms of work across 94 items — 702 ms of it rendering, only 107 ms of GPU readback, so the sync
@@ -470,7 +476,7 @@ const PERF = {
   portalMoveEps: 0.008,        // metres of camera travel that force a fresh portal frame
   portalTurnEps: 0.0015,       // quaternion delta that does the same
 };
-PERF.baseline = { brShadowLights: 2, brMergeRigid: false, brStableLightCount: false, portalHz: 0, brGenCacheMax: 0, streamBudgetMs: 0, preloadSliceMs: 5 };   // brPrecompile and brPrefetch already ship at their baseline   // brPrecompile already ships at its baseline   // V6 flag matrix: restore any of these and the game is the old game
+PERF.baseline = { brShadowLights: 2, brMergeRigid: false, brStableLightCount: false, portalHz: 0, brGenCacheMax: 0, streamBudgetMs: 0, preloadSliceMs: 5, brainScanSlice: 0 };   // brPrecompile and brPrefetch already ship at their baseline   // brPrecompile already ships at its baseline   // V6 flag matrix: restore any of these and the game is the old game
 // ?perfoff=a,b,c  restores those flags to their baseline value AT BOOT — the only way to A/B a change whose
 // whole effect is on the first encounter (shader compilation), where flipping a flag mid-session is too late.
 // ?perfoff=all restores every one of them, which is the V6 "all flags off = baseline behaviour" check.
@@ -482,9 +488,11 @@ PERF.baseline = { brShadowLights: 2, brMergeRigid: false, brStableLightCount: fa
 //  T — zero-alloc scoped CPU timers. Integer enum, preallocated Float64Array, never a string key, never an object.
 // ---------------------------------------------------------------------
 const TID = { input:0, sim:1, collision:2, entities:3, stream:4, meshApply:5, uniforms:6, cull:7, draw:8, hud:9,
-              audio:10, br:11, brPortal:12, brStream:13, brBuild:14, post:15, sky:16, shadow:17, misc:18 };
+              audio:10, br:11, brPortal:12, brStream:13, brBuild:14, post:15, sky:16, shadow:17, misc:18,
+              brain:19, wretch:20, animals:21, props:22 };
 const TN = ['input','sim','collision','entities','stream','meshApply','uniforms','cull','draw','hud',
-            'audio','br','brPortal','brStream','brBuild','post','sky','shadow','misc'];
+            'audio','br','brPortal','brStream','brBuild','post','sky','shadow','misc',
+            'brain','wretch','animals','props'];
 const NSYS = TN.length;
 const PROF_RING = 4096;
 const T = (function(){
@@ -509,7 +517,8 @@ const T = (function(){
       const base = w*NSYS;
       // NESTED scopes must not be counted twice: brPortal/brStream/collision live inside br, brBuild inside brStream.
       let acc=0; for(let i=0;i<NSYS;i++)
-        if(i!==TID.misc && i!==TID.brPortal && i!==TID.brStream && i!==TID.brBuild && i!==TID.collision) acc+=cur[i];
+        if(i!==TID.misc && i!==TID.brPortal && i!==TID.brStream && i!==TID.brBuild && i!==TID.collision
+           && i!==TID.brain && i!==TID.wretch && i!==TID.animals && i!==TID.props) acc+=cur[i];
       cur[TID.misc] = cpuMs>acc ? cpuMs-acc : 0;
       for(let i=0;i<NSYS;i++){ ring[base+i] = cur[i]; cur[i] = 0; depth[i] = 0; }
       frames[w] = frameMs; progs[w] = nProg|0;
@@ -806,6 +815,8 @@ window.__hcPERF = {
   // V6/V5 helper: put every optimisation back to its baseline value at runtime, or back to shipped defaults.
   // Which programs exist, by three's own cache key. Diffing this over a soak says exactly WHAT is being
   // recompiled, instead of leaving "programs grow" as a number to guess at.
+  brainSplit(reset){ const o={}; for(let i=0;i<_BBN.length;i++) o[_BBN[i]]={ totalMs:+_bbT[i].toFixed(1), maxMs:+_bbMax[i].toFixed(2) };
+    if(reset){ for(let i=0;i<_bbT.length;i++){ _bbT[i]=0; _bbMax[i]=0; } } return o; },
   iconCost(){ return { count:_icoT.n, modelMs:+_icoT.model.toFixed(0), renderMs:+_icoT.render.toFixed(0),
     readbackMs:+_icoT.readback.toFixed(0), encodeMs:+_icoT.encode.toFixed(0),
     totalMs:+(_icoT.model+_icoT.render+_icoT.readback+_icoT.encode).toFixed(0) }; },
@@ -2907,7 +2918,7 @@ function setBlockWorld(wx,wy,wz,b,record){
     _bulk.touched.set(key(c.cx,c.cz), c);
     if(lx===0){ const n=getChunk(c.cx-1,c.cz); if(n&&n.generated)_bulk.touched.set(key(n.cx,n.cz),n); } else if(lx===15){ const n=getChunk(c.cx+1,c.cz); if(n&&n.generated)_bulk.touched.set(key(n.cx,n.cz),n); }   // edge writes: neighbor's border faces must re-cull
     if(lz===0){ const n=getChunk(c.cx,c.cz-1); if(n&&n.generated)_bulk.touched.set(key(n.cx,n.cz),n); } else if(lz===15){ const n=getChunk(c.cx,c.cz+1); if(n&&n.generated)_bulk.touched.set(key(n.cx,n.cz),n); }
-    if(record){ edits[wx+','+wy+','+wz]=b; editIndexPut(wx,wy,wz,b); }
+    if(record){ edits[wx+','+wy+','+wz]=b; _editsDirty=true; editIndexPut(wx,wy,wz,b); }
     return;
   }
   const _old=c.blocks[idx(lx,wy,lz)];
@@ -2924,7 +2935,7 @@ function setBlockWorld(wx,wy,wz,b,record){
   if (lx===0) markRemesh(c.cx-1,c.cz); if (lx===15) markRemesh(c.cx+1,c.cz);
   if (lz===0) markRemesh(c.cx,c.cz-1); if (lz===15) markRemesh(c.cx,c.cz+1);
   if((lx===0||lx===15)&&(lz===0||lz===15)) markRemesh(c.cx+(lx===0?-1:1), c.cz+(lz===0?-1:1));
-  if (record){ edits[wx+','+wy+','+wz]=b; editIndexPut(wx,wy,wz,b); if(typeof _editShadowT!=='undefined') _editShadowT=0; }   // player/synced edit → refresh shadows so lighting responds
+  if (record){ edits[wx+','+wy+','+wz]=b; _editsDirty=true; editIndexPut(wx,wy,wz,b); if(typeof _editShadowT!=='undefined') _editShadowT=0; }   // player/synced edit → refresh shadows so lighting responds
 }
 
 // =====================================================================
@@ -4467,6 +4478,7 @@ function wipeSave(){ try{ localStorage.removeItem(SAVE_KEY); }catch(e){} }
 function applySave(s){
   if(s.seed!==CFG.SEED) flashName('this save used a different seed — the land may not match it');
   beginBulk();   // world delta — mirrors the co-op sync apply: generated chunks patch now, the rest bake in applyEdits as they stream in
+  _editsDirty=true;
   try{ for(const k in s.edits){ const b=s.edits[k]; edits[k]=b; const p=k.split(','), wx=+p[0],wy=+p[1],wz=+p[2];
     editIndexPut(wx,wy,wz,b); const c=getChunk(wx>>4,wz>>4); if(c&&c.generated) setBlockWorld(wx,wy,wz,b,false); } }
   finally{ endBulk(); }
@@ -5659,6 +5671,7 @@ function netMsg(m){
     if(!keys.length) netSend({t:'sync',to:m.id,edits:{},last:true,tm:worldTime});
     if(drops.length) netSend({t:'drops',to:m.id,d:drops.slice(0,120).map(o=>({did:o.did,i:o.id,n:o.n,x:+o.x.toFixed(2),y:+o.y.toFixed(2),z:+o.z.toFixed(2),d:0}))}); } }   // …and the items already on the ground (late-join drop snapshot)
   else if(m.t==='sync'){ if(m.to!==NET.id||!m.edits)return; NET.applying=true; beginBulk();                                                        // apply a received world-snapshot PAGE (bulk: flat writes + one coalesced remesh wave)
+    _editsDirty=true;
     try{ for(const k in m.edits){ edits[k]=m.edits[k]; const p=k.split(','), wx=+p[0],wy=+p[1],wz=+p[2]; editIndexPut(wx,wy,wz,m.edits[k]); const c=getChunk(wx>>4,wz>>4); if(c&&c.generated) setBlockWorld(wx,wy,wz,m.edits[k],false); } }finally{ endBulk(); }   // generated chunks update now; the rest apply via applyEdits as they stream in (indexed per chunk)
     NET.applying=false; if(m.last){ if(m.tm!=null)worldTime=m.tm; flashName('world synced'); } }
   else if(m.t==='time'){ if(!NET.host){ if(m.tm!=null)worldTime=m.tm; if(typeof weather!=='undefined'){ if(m.rt!=null)weather.rainTgt=m.rt; if(m.ft!=null)weather.fogTgt=m.ft; } } }   // host clock (1Hz) + weather targets → guests lerp toward them
@@ -5879,7 +5892,7 @@ function loop(){ try{
     if(rmbHeld && performance.now()>=nextAct){ doPlace(); nextAct=performance.now()+240; } }   // right-hold = repeat place
   T.end(TID.sim);
   T.begin(TID.entities);
-  if(started && !player.dead && !intro.active && !(typeof BR!=='undefined'&&BR.inside)){ if(!NET.on||NET.host)updateBrain(dt); updateWretch(dt); if(typeof heartbeatProximity==='function')heartbeatProximity(dt); if(NET.on&&!NET.host)netAnimalsTick(); else updateAnimals(dt); if(typeof updateHerobrine==='function'){ if(NET.on && herobrine.haunting && herobrine.owner!=null && herobrine.owner!==NET.id) hbMirrorTick(dt); else updateHerobrine(dt); } }   // co-op: director + animals run on the host; the HAUNT runs on its interactor, others mirror. THE BACKROOMS suspends ALL overworld-entity sim — the Wretch can never follow you in or grab you there (Ben 07-27)
+  if(started && !player.dead && !intro.active && !(typeof BR!=='undefined'&&BR.inside)){ T.begin(TID.brain); if(!NET.on||NET.host)updateBrain(dt); T.end(TID.brain); T.begin(TID.wretch); updateWretch(dt); T.end(TID.wretch); if(typeof heartbeatProximity==='function')heartbeatProximity(dt); T.begin(TID.animals); if(NET.on&&!NET.host)netAnimalsTick(); else updateAnimals(dt); T.end(TID.animals); if(typeof updateHerobrine==='function'){ if(NET.on && herobrine.haunting && herobrine.owner!=null && herobrine.owner!==NET.id) hbMirrorTick(dt); else updateHerobrine(dt); } }   // co-op: director + animals run on the host; the HAUNT runs on its interactor, others mirror. THE BACKROOMS suspends ALL overworld-entity sim — the Wretch can never follow you in or grab you there (Ben 07-27)
   if(started && !player.dead && !intro.active) updateGhost(dt);            // hover vehicle — must run BEFORE the camera so a rider's slaved position is current this frame
   if(started) updateNVG(dt);                                               // night-vision overlay (green phosphor + heavy grain) while the goggles are worn+on
   T.end(TID.entities);
@@ -5888,10 +5901,10 @@ function loop(){ try{
   else { if(!intro.active) applyLook(dt); if(intro.active) updateIntro(dt); else updateCamera(dt); }
   T.end(TID.input);
   applyWaterFog();
-  T.begin(TID.entities);
+  T.begin(TID.entities); T.begin(TID.props);
   updateDrops(dt); updateSpears(dt); updateStuckSpears(dt); updateParticles(dt); updateShells(dt); updateView(dt); if(typeof updateWings==='function')updateWings(dt); updateWatchers(dt); checkNotes(dt); updateSkyBirds(dt); updateLeaves(dt); if(typeof updateDungeonBugs==='function')updateDungeonBugs(dt);  // floating items, thrown/stuck spears, particles, ejected shell casings, held viewmodel, angel wings, watching-eyes, notes, sky birds, dungeon arachnids
   netUpdate(dt);                                                             // co-op: send my transform, interpolate peers, host broadcasts the Wretch/time
-  T.end(TID.entities);
+  T.end(TID.props); T.end(TID.entities);
   T.begin(TID.audio); updateAudio(dt); T.end(TID.audio);
   T.begin(TID.stream);
   const t0=performance.now();
@@ -6510,9 +6523,31 @@ function logLocation(label,x,y,z,note){ const rx=Math.round(x),ry=Math.round(y||
   if(e){ if(Math.hypot(e.x-rx,e.z-rz)>4){ e.x=rx; e.y=ry; e.z=rz; } return false; }             // already logged — update if it drifted, never duplicate
   IMPORTANT_LOG.push({label,x:rx,y:ry,z:rz,note:note||'',t:(typeof clock!=='undefined'?clock.elapsedTime:0)});
   if(typeof flashName==='function')flashName('Location logged — '+label+' ('+rx+', '+rz+')'); return true; }
-function detectBase(dt){ _baseAcc+=dt; if(_baseAcc<3)return; _baseAcc=0;
-  let sx=0,sz=0,n=0; const doors=[];
-  for(const k in edits){ const b=edits[k]; if(_SB.indexOf(b)>=0){ const p=k.split(','); sx+=+p[0]; sz+=+p[2]; n++; } else if(b===BID.gate||b===BID.trapdoor){ const p=k.split(','); doors.push({x:+p[0],y:+p[1],z:+p[2]}); } }
+// P8 · THE 8 MS FRAME IN THE OVERWORLD WAS THIS. Every three seconds detectBase swept EVERY block edit in the
+// world, splitting each key string as it went — measured at 8.1 ms in one frame, with every other stage of
+// updateBrain at 0.02 ms or less. It is a three-second-cadence aggregate ("where has the player built a nest"),
+// so finishing it a few frames later is invisible; landing it all in one frame is not. The sweep now runs over
+// a snapshot of the keys, a slice per frame, and commits only when it reaches the end. A snapshot is if
+// anything more correct than the old live iteration, which could see `edits` mutate underneath it.
+let _bsKeys=null, _bsI=0, _bsSx=0, _bsSz=0, _bsN=0, _bsDoors=null;
+// Object.keys(edits) IS the cost, not the loop over it — narrowing the per-frame slice from 1500 keys to 400
+// moved the worst frame only 6.05 -> 5.74 ms, which says the fixed part dominates. So the key list is cached
+// and only rebuilt when something has actually placed or broken a block since the last sweep. In ordinary play
+// that is most sweeps skipped entirely.
+let _bsCache=null, _editsDirty=true;
+function detectBase(dt){
+  if(!_bsKeys){ _baseAcc+=dt; if(_baseAcc<3)return; _baseAcc=0;
+    if(_editsDirty || !_bsCache){ _bsCache=Object.keys(edits); _editsDirty=false; }
+    _bsKeys=_bsCache; _bsI=0; _bsSx=0; _bsSz=0; _bsN=0; _bsDoors=[]; }
+  const step = PERF.brainScanSlice>0 ? PERF.brainScanSlice : _bsKeys.length;
+  const end = Math.min(_bsKeys.length, _bsI+step);
+  for(; _bsI<end; _bsI++){ const k=_bsKeys[_bsI], b=edits[k];
+    if(b===undefined) continue;                                   // edited away since the snapshot
+    if(_SB.indexOf(b)>=0){ const p=k.split(','); _bsSx+=+p[0]; _bsSz+=+p[2]; _bsN++; }
+    else if(b===BID.gate||b===BID.trapdoor){ const p=k.split(','); _bsDoors.push({x:+p[0],y:+p[1],z:+p[2]}); } }
+  if(_bsI < _bsKeys.length) return;                               // more to do next frame
+  const sx=_bsSx, sz=_bsSz, n=_bsN, doors=_bsDoors;
+  _bsKeys=null; _bsDoors=null;
   if(n>=6){ mind.base={x:sx/n,z:sz/n,n}; mind.doors=doors; place('home','home',sx/n,sz/n,{radius:9,note:n+' placed'}); logLocation('Home',sx/n,0,sz/n,'your base');
     if(typeof WILL!=='undefined'&&typeof reasonEvent==='function'){ const pb=WILL._sv.baseN||0;              // NEW STRUCTURE / the nest has GROWN → the mind takes note (first detection, then every +8 placed blocks)
       if(pb===0||n>=pb+8){ WILL._sv.baseN=n; reasonEvent('found_structure',{x:Math.round(sx/n),z:Math.round(sz/n),blocks:n}); } } }   // enough furniture placed together = the player's home → mark it
@@ -15581,6 +15616,12 @@ function findWater(cx,cz){ const bx=Math.floor(cx), bz=Math.floor(cz); let best=
   for(let dx=-R;dx<=R;dx+=2)for(let dz=-R;dz<=R;dz+=2){ const d=dx*dx+dz*dz; if(d>=bd||d>R*R)continue; if(surfaceH(bx+dx,bz+dz)<CFG.SEA){ best={x:bx+dx+0.5,z:bz+dz+0.5}; bd=d; } }
   if(best)return best;
   const ex=cx-ISLE_X, ez=cz-ISLE_Z, L=Math.hypot(ex,ez)||1; return { x:ISLE_X+ex/L*(ISLE_R+6), z:ISLE_Z+ez/L*(ISLE_R+6) }; }   // no water nearby → head for the sea
+const _bbT=[0,0,0,0,0,0,0], _bbMax=[0,0,0,0,0,0,0];
+const _BBN=['seedPlaces','pushScent','detectBase','trackPlayer','awareness','pickMode'];
+let _bbLast=0;
+function _bb(i){ if(!PERF.on) return; const t=performance.now();
+  if(i>0){ const d=t-_bbLast; _bbT[i-1]+=d; if(d>_bbMax[i-1])_bbMax[i-1]=d; }
+  _bbLast=t; }
 function updateBrain(dt){
   // horror bookkeeping (the removed Director used to run this): pacing timers, night survival, tier escalation
   HORROR.sinceScare+=dt; HORROR.menace=Math.max(0,HORROR.menace-dt*0.03);
@@ -15648,8 +15689,10 @@ function updateBrain(dt){
       if(!isNight){ if(typeof orchestrate==='function'){ WILL.lastOrch=clock.elapsedTime; orchestrate('daily'); } }                       // DAWN — the one scheduled council of the day
       else { if(typeof logStim==='function')logStim('dusk'); if(reason.plan.length){ reason.step=_firstPhaseStep(); applyPlanStep(); } } } }   // DUSK — no council; step into the standing plan's night arc
   // brain v2 — perception + world model + live awareness (always accrue, even while dormant)
-  seedPlaces(); pushScent(dt); detectBase(dt); trackPlayer(dt); awareness(dt);
-  pickMode(dt);
+  // P8 bisect: updateBrain spikes to 8.4 ms periodically and is near-zero otherwise. Time each stage so the
+  // culprit is named rather than guessed at. Zero cost with the profiler off.
+  _bb(0); seedPlaces(); _bb(1); pushScent(dt); _bb(2); detectBase(dt); _bb(3); trackPlayer(dt); _bb(4); awareness(dt); _bb(5);
+  pickMode(dt); _bb(6);
   shotClock+=dt; if(shotClock>55+Math.random()*20){ shotClock=0; brain.wantShot=true; stratTier.flag=true; }
   _orKeyAcc+=dt; if(_orKeyAcc>1){ _orKeyAcc=0; _orKeyCache=lsGet('hollowcraft_or_key'); }   // was 1-3 synchronous localStorage reads EVERY frame; refresh at 1Hz
   if(_orKeyCache){ updateReasoning(dt); }                                                    // two-model mind: Gemini interprets → Opus plans → plan drives actions

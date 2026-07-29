@@ -169,9 +169,11 @@ verified: B1 goes back to 13.7 ms and 4 772 draws, which is the baseline.
 | `streamBudgetMs` | **8** | 0 | one shared deadline for overworld streaming, with admission control | frames > 12 ms −60 (B2o) / −114 (B3o) | low — the first unit of a frame always runs, so streaming cannot starve |
 | `streamAdmitSafety` | 1.0 | — | multiplier on the cost estimate | — | >1 starves streaming sooner |
 | `preloadSliceMs` | **30** | 5 | ms of each loading-screen frame spent baking item icons | first interactive 6 775 → 5 884 ms | low — the sigil is a separate 2D canvas and still animates at ~30 fps |
+| `brainScanSlice` | **400** | 0 | block edits `detectBase` examines per frame | worst frame 8.10 → 0.13 ms | low — a stale key list costs at most one 3 s cycle |
 | `streamBudgetMs` | **8** | 0 | one shared deadline for overworld streaming, with admission control | frames >12 ms −60 (B2o) / −114 (B3o) | low — the first unit of a frame always runs, so streaming cannot starve |
 | `streamAdmitSafety` | 1.0 | — | multiplier on the cost estimate | — | >1 starves streaming sooner |
 | `preloadSliceMs` | **30** | 5 | ms of each loading-screen frame spent baking item icons | first interactive 6 775 → 5 884 ms | low — the sigil is a separate 2D canvas and still animates at ~30 fps |
+| `brainScanSlice` | **400** | 0 | block edits `detectBase` examines per frame | worst frame 8.10 → 0.13 ms | low — a stale key list costs at most one 3 s cycle |
 | `brPrecompile` | **false** | false | compile the Backrooms shaders on the loading screen | works, costs +16 s of load | rejected on cost |
 | `brPrefetch` | **false** | false | build the chunk ring ahead of the player | nothing while compiles dominate | re-measure after the light-pool decision |
 | `brPrefetchRing` / `brPrefetchCooldown` | 1 / 20 | — | tuning for the above | — | inert while `brPrefetch` is off |
