@@ -42,8 +42,10 @@ const CENSUS = `window.__hcPERF.census()`;
     console.log('\nBACKROOMS census:', JSON.stringify(c,null,1));
     const info = await page.evaluate(`window.__benchInfoSnap`);
     console.log('BACKROOMS info  :', JSON.stringify(info));
-    const passes = 1 + c.shadowFaces + (c.sunShadow?1:0);
-    console.log('\nRECONSTRUCTION: visible drawables '+c.visible+' x passes '+passes+' = '+(c.visible*passes)+'   measured draws '+(info&&info.calls));
+    console.log('\nRECONSTRUCTION: drawables '+c.drawables+' x (1 main + '+c.shadowFaces+' shadow faces) = '
+                + c.predictedDraws + '   measured draws ' + (info && info.calls));
+
+    console.log('\nBR.env BREAKDOWN:', JSON.stringify(await page.evaluate(`window.__hcPERF.brEnvBreakdown()`),null,1));
 
     // and the counterfactual, measured not guessed: what does the frame cost with the point-light shadows off?
     const before = await page.evaluate(`window.__hcPERF.reset(), null`);

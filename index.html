@@ -398,8 +398,41 @@ const PERF = {
   //   Measured: 20.23 ms -> 4.73 ms in the halls, 24.61 -> 8.05 at the portal. Ben's call, 07-28: cut them.
   //   The pooled fluorescent falloff and the dying-tube flicker are untouched — only the cast shadow goes.
   brShadowLights: 0,
+  //
+  // P2 · brMergeRigid  (baseline: false)
+  //   Merge the meshes hanging off a door pivot into one per material, in the pivot's own frame. They are rigid
+  //   relative to it, so the door still swings as one piece. Measured before: 1061 of BR.env's 1214 meshes were
+  //   protected door furniture that brMergeStatic could not touch, against 154 that merged.
+  brMergeRigid: true,
+  //
+  // P3 · brStableLightCount  (baseline: false)
+  //   Hold the Backrooms point-light count constant by parking unused pool lights at zero intensity instead of
+  //   making them invisible. three.js keys the shader program on the light count, so a moving count is a
+  //   compile storm. Visually identical; the lights that matter are unchanged.
+  brStableLightCount: true,
+  //
+  // P3b · brPrecompile  (baseline: false — and it SHIPS OFF, see below)
+  //   Compile the Backrooms shaders on the loading screen instead of on the frame the player walks into a hall.
+  //   It works, and the price is far too high: first-interactive goes from 9.7 s to 26.9 s. Measured directly
+  //   (__hcPERF.precompile()), the pass spends 15.8 s, and it is not our compile loop doing it — dressing the
+  //   scene as the halls is enough for the NEXT ordinary render to compile every Backrooms material, so the
+  //   explicit slicing never even ran. That 15.8 s is simply what a sixteen-point-light MeshStandard shader
+  //   costs to build through ANGLE on this GPU, and it is the same cost the player otherwise pays in ~6 s
+  //   chunks on first entry. compileAsync does not avoid it: three does the GLSL-to-HLSL translation
+  //   synchronously and parallelises only the link.
+  //   THE REAL FIX IS A SMALLER LIGHT POOL — sixteen simultaneous point lights is what makes the shader huge —
+  //   and that is a visual decision, so it goes to Ben rather than being taken here. Left switchable so the
+  //   trade can be re-taken in one flag once the pool size is settled.
+  brPrecompile: false,
 };
-PERF.baseline = { brShadowLights: 2 };   // V6 flag matrix: restore any of these and the game is the old game
+PERF.baseline = { brShadowLights: 2, brMergeRigid: false, brStableLightCount: false };   // brPrecompile already ships at its baseline   // V6 flag matrix: restore any of these and the game is the old game
+// ?perfoff=a,b,c  restores those flags to their baseline value AT BOOT — the only way to A/B a change whose
+// whole effect is on the first encounter (shader compilation), where flipping a flag mid-session is too late.
+// ?perfoff=all restores every one of them, which is the V6 "all flags off = baseline behaviour" check.
+(function(){ const off=Q.get('perfoff'); if(!off) return;
+  const want = off==='all' ? Object.keys(PERF.baseline) : off.split(',');
+  for(const k of want) if(k in PERF.baseline) PERF[k]=PERF.baseline[k];
+})();
 // ---------------------------------------------------------------------
 //  T — zero-alloc scoped CPU timers. Integer enum, preallocated Float64Array, never a string key, never an object.
 // ---------------------------------------------------------------------
@@ -765,6 +798,78 @@ window.__hcPERF = {
              predictedDraws: drawables*(1+shadowFaces), measuredDraws: snap?snap.calls:null,
              brEnvCache:(typeof BR!=='undefined'&&BR.envCache)?BR.envCache.size:0,
              brLoaded:(typeof BR!=='undefined'&&BR.loaded)?BR.loaded.length:0 };
+  },
+  // Force a full rebuild of the loaded Backrooms geometry — the only way to A/B a flag that only takes effect
+  // at build time. Clears the per-chunk cache so nothing is re-parented from before the flag changed.
+  precompile(){ return _brPcState ? { done:_brPcState.done, ms:_brPcState.ms, slices:_brPcState.i,
+    groups:_brPcState.attached?_brPcState.attached.length:0, drew:!!_brPcState.drew,
+    timedOut:!!_brPcState.timedOut, programs:_brPcState.programs, err:_brPcState.err||null } : null; },
+  rebuildEnv(){ try{ brEnvCacheClear(); brxStream(true); return { chunks:BR.loaded?BR.loaded.length:0, cache:BR.envCache?BR.envCache.size:0 }; }
+    catch(e){ return {err:String(e&&e.message||e)}; } },
+  // P2 GATE: force every door to a given swing angle and return each pivot's WORLD-space bounding box.
+  // Merging a leaf's children is correct only if the box is identical at every angle and still moves when opened.
+  doorProbe(a){
+    if(!BR.doors) return {err:'no doors'};
+    for(const d of BR.doors){ d.a=a; d.target=a;
+      for(const L of (d.pivots||[])) L.pivot.rotation.y = d.base + L.hs*d.swing*d.a; }
+    if(BR.env) BR.env.updateMatrixWorld(true);
+    // The AABB must come from the TRANSFORMED VERTICES, not from each mesh's own bounding box. The AABB of a
+    // rotated AABB is bigger than the AABB of the rotated points, and by a different amount depending on how
+    // the geometry is split into meshes — so a box-of-boxes comparison reports a fat difference between a merged
+    // leaf and an unmerged one even when every vertex lands in exactly the same place. Ask the vertices.
+    const boxes=[]; const v=new THREE.Vector3(); let meshes=0, tris=0;
+    for(const d of BR.doors) for(const L of (d.pivots||[])){
+      let x0=Infinity,y0=Infinity,z0=Infinity,x1=-Infinity,y1=-Infinity,z1=-Infinity, any=false;
+      // Order-independent, indexing-independent checksum over TRIANGLE CENTROIDS. _brMergeInto de-indexes, so
+      // vertex counts and vertex-weighted centroids legitimately change when a leaf merges — but the set of
+      // triangles does not, and neither does where each one sits. Sums over that set survive both.
+      let n3=0, tx=0, ty=0, tz=0, tq=0;
+      const a=new THREE.Vector3(), b=new THREE.Vector3(), c=new THREE.Vector3();
+      L.pivot.traverse(o=>{ if(!o.isMesh) return; meshes++;
+        const g=o.geometry, ix=g.index, pa=g.getAttribute('position'); if(!pa) return;
+        const count = ix? ix.count : pa.count;
+        tris += count/3;
+        for(let i=0;i<count;i+=3){
+          const i0=ix?ix.getX(i):i, i1=ix?ix.getX(i+1):i+1, i2=ix?ix.getX(i+2):i+2;
+          a.fromBufferAttribute(pa,i0).applyMatrix4(o.matrixWorld);
+          b.fromBufferAttribute(pa,i1).applyMatrix4(o.matrixWorld);
+          c.fromBufferAttribute(pa,i2).applyMatrix4(o.matrixWorld);
+          const cx=(a.x+b.x+c.x)/3, cy=(a.y+b.y+c.y)/3, cz=(a.z+b.z+c.z)/3;
+          tx+=cx; ty+=cy; tz+=cz; tq+=cx*cx+cy*cy+cz*cz; n3++;
+          for(const p of [a,b,c]){
+            if(p.x<x0)x0=p.x; if(p.y<y0)y0=p.y; if(p.z<z0)z0=p.z;
+            if(p.x>x1)x1=p.x; if(p.y>y1)y1=p.y; if(p.z>z1)z1=p.z; }
+          any=true; } });
+      boxes.push(any? { b:[x0,y0,z0,x1,y1,z1].map(n=>+n.toFixed(4)),
+                        t:n3, s:[tx,ty,tz,tq].map(n=>+n.toFixed(3)) } : null);
+    }
+    return { boxes, meshes, tris:Math.round(tris) };
+  },
+  // WHAT ARE THE REMAINING DRAW CALLS? brMergeStatic collapses a chunk's static children to one mesh per
+  // material, but it deliberately leaves anything that moves alone, and it merges WITHIN a chunk group only.
+  // This splits the survivors so the next change targets the real remainder instead of the imagined one.
+  brEnvBreakdown(){
+    if(!BR.env) return {err:'no BR.env'};
+    const perChunk=[], matUse=new Map();
+    for(const c of BR.env.children){
+      let merged=0, protectedMeshes=0, instanced=0, tris=0;
+      const seen=new Set();
+      c.traverse(o=>{ if(!(o.isMesh||o.isInstancedMesh)) return;
+        if(o.isInstancedMesh) instanced++;
+        else if(o.parent===c) merged++; else protectedMeshes++;
+        const g=o.geometry; if(g){ const ix=g.index, pa=g.getAttribute&&g.getAttribute('position');
+          tris += (ix?ix.count/3:(pa?pa.count/3:0)) * (o.isInstancedMesh?o.count:1); }
+        if(o.material&&!Array.isArray(o.material)){ seen.add(o.material.uuid);
+          matUse.set(o.material.uuid,(matUse.get(o.material.uuid)||0)+1); } });
+      perChunk.push({ merged, protectedMeshes, instanced, materials:seen.size, tris:Math.round(tris) });
+    }
+    // a material used in exactly one chunk is a per-chunk material: it can never batch across chunks
+    let sharedMats=0, perChunkMats=0;
+    for(const [,n] of matUse){ if(n>1) sharedMats++; else perChunkMats++; }
+    const sum = k => perChunk.reduce((a,c)=>a+c[k],0);
+    return { chunks:perChunk.length, totalMerged:sum('merged'), totalProtected:sum('protectedMeshes'),
+             totalInstanced:sum('instanced'), totalTris:sum('tris'),
+             distinctMaterials:matUse.size, sharedMats, perChunkMats, perChunk:perChunk.slice(0,3) };
   },
   // counterfactual, measured not guessed
   brPointShadows(on){ try{ PERF.brShadowLights = on ? BR_SHADOW_LIGHTS : 0; return brApplyShadowLights(); }catch(e){ return String(e); } },
@@ -5670,7 +5775,13 @@ function loop(){ try{
       { const lb=document.querySelector('#load .lb'); if(lb) lb.textContent = pct<1 ? '…binding the sigils… '+Math.round(pct*100)+'%' : '…the circle is drawn…'; }
       if(_preI>=_preIcons.length){
         try{ sunLight.castShadow=false; renderer.render(scene,camera); sunLight.castShadow=true; }catch(e){}   // PRE-WARM the shadows-OFF shader variants (night kills the shadow pass) so the first dusk is a cached-program switch, not a compile storm
-        initialReady=true; document.getElementById('load').style.display='none'; _sigilStop(); } } }
+        // P3 · The Backrooms shaders are compiled HERE, on the loading screen, or they are compiled the first
+        // time you walk into a hall — as a multi-second frame. One slice per frame so the sigil keeps turning.
+        if(PERF.brPrecompile && !brPrecompileDone()){
+          const lb2=document.querySelector('#load .lb'); const p2=brPrecompileStep();
+          if(lb2) lb2.textContent='…learning the shape of the halls… '+Math.round(p2*100)+'%';
+        } else {
+        initialReady=true; document.getElementById('load').style.display='none'; _sigilStop(); } } } }
   fpsAvg+=((dt>0?1/dt:60)-fpsAvg)*0.05;
   _retargetFps(dt);
   // ADAPTIVE QUALITY — setpoints derived from the DISPLAY-AWARE target (defend min(70, refresh), see _retargetFps)
@@ -10857,11 +10968,11 @@ function brEnter(){ if(BR.inside)return; const d=BR.door;
   else brBuildEnvAll();                                                                                                   // generate the angled room graph + render the smooth PBR environment
   brStartAudio(); BR.paleFlees=0; BR.pale={state:'dormant',cd:45+Math.random()*45,t:0}; }   // The Pale wakes 45-90s in; the flee counter (2 retreats, then it commits) resets per visit
 function brExit(){ if(!BR.inside)return; const r=BR.returnPos||{x:0,y:BR_FLOOR,z:0,yaw:0};
-  brStopAudio(); brResumeMusic(); brRestoreAtmo(); brEnvCacheClear(); brClearEnv(); BR.rooms=[]; brClearExit(); brHidePale(); BR.inside=false;
+  brStopAudio(); brResumeMusic(); brRestoreAtmo(); brEnvCacheClear(); brClearEnv(); BR.rooms=[]; brClearExit(); brHidePale(); brPoolLightsOff(); BR.inside=false;
   player.pos.set(r.x, (typeof groundYAt==='function')?groundYAt(r.x,r.z)+1.1:r.y+1.1, r.z); player.vel.set(0,0,0);
   if(typeof streamChunks==='function')for(let i=0;i<6;i++)streamChunks(160,160);
   if(typeof flashName==='function')flashName(BR.hasKey?'you step back into the world — the Key to Olympus is yours':'you step back into the world'); }
-function brForceLeaveOnDeath(){ brStopAudio(); brResumeMusic(); brRestoreAtmo(); brEnvCacheClear(); brClearEnv(); BR.rooms=[]; brClearExit(); brHidePale(); BR.inside=false; BR.hasKey=false; BR.sealed=true; }
+function brForceLeaveOnDeath(){ brStopAudio(); brResumeMusic(); brRestoreAtmo(); brEnvCacheClear(); brClearEnv(); BR.rooms=[]; brClearExit(); brHidePale(); brPoolLightsOff(); BR.inside=false; BR.hasKey=false; BR.sealed=true; }
 
 // ---- MINIMAP → dead static (one 64px noise texture, scrolled; no per-frame noise gen) ----
 let _brNoise=null;
@@ -12045,6 +12156,97 @@ function brEnsureLightPool(){ if(BR.lightPool && BR.lightPool.length) return;
 }
 // ONE place decides how many troffers cast. Called at pool creation and whenever PERF.brShadowLights changes,
 // so the flag is genuinely live and the V6 matrix can flip it without a reload.
+// Park the whole pool properly on the way out. brStableLightCount keeps unused lights VISIBLE at zero intensity
+// so the count cannot move inside the halls — but the overworld must not then carry sixteen dead point lights
+// in every one of its shaders, so leaving the dimension turns them off for real.
+function brPoolLightsOff(){ if(!BR.lightPool) return; for(const L of BR.lightPool){ L.intensity=0; L.visible=false; } }
+// =====================================================================
+//  P3 · PRECOMPILE THE BACKROOMS (Ben 07-29)
+//  Measured on a cold page: walking the halls compiled 150 new shader programs, in frames of 5 958 / 6 250 /
+//  3 747 ms. That is not a hitch, it is a hang, and the player hits it the first time they step through the door.
+//
+//  The rule from three.js PR #19752 is that precompiling only helps if the render state at compile time equals
+//  the render state at draw time — lights, shadow counts, fog and env are all in the program cache key. So this
+//  does not compile materials in isolation: it dresses the scene EXACTLY as the Backrooms will be dressed
+//  (atmosphere, the full light pool at its real count, every prewarmed chunk group attached), compiles, and then
+//  puts everything back. brStableLightCount is what makes that state a single target instead of seventeen.
+//
+//  compileAsync alone is not enough on ANGLE/D3D: the driver defers its real specialisation until the program
+//  is used. So each pass ends by DRAWING one pixel with that state into a 1x1 target, which is what actually
+//  forces the compile to finish. Split across frames so the loading screen keeps animating.
+// =====================================================================
+let _brPcState=null, _brPcRT=null;
+function brPrecompileDone(){ return !!(_brPcState && _brPcState.done); }
+function brPrecompileStep(){
+  if(!_brPcState){
+    _brPcState = { i:0, done:false, stash:null, attached:[], compiled:0, t0:performance.now() };
+    try{
+      // dress the scene as the halls, and remember everything we touched
+      const S=_brPcState;
+      S.stash = { bg:scene.background, fogC:scene.fog.color.clone(), fogD:scene.fog.density,
+                  sun:sunLight.intensity, sunCast:sunLight.castShadow, hemi:hemi.intensity,
+                  amb:(typeof ambient!=='undefined')?ambient.intensity:null,
+                  chunks:chunkRoot.visible, sky:(typeof skyDome!=='undefined')?skyDome.visible:null,
+                  envParent:BR.env?BR.env.parent:null, camPos:camera.position.clone(), camQ:camera.quaternion.clone() };
+      brEnsureLightPool(); brApplyShadowLights();
+      const fc=_BR_FOG[0]; _brBg.setRGB(fc[0],fc[1],fc[2]);
+      scene.background=_brBg; scene.fog.color.setRGB(fc[0],fc[1],fc[2]); scene.fog.density=_BR_FD[0];
+      sunLight.intensity=0; hemi.intensity=0.12; if(typeof ambient!=='undefined') ambient.intensity=0.06;
+      chunkRoot.visible=false; if(typeof skyDome!=='undefined') skyDome.visible=false;
+      // the light pool exactly as brxUpdateLights would leave it standing in a lit room
+      for(let i=0;i<BR.lightPool.length;i++){ const L=BR.lightPool[i];
+        L.visible = PERF.brStableLightCount ? true : (i<4);
+        L.intensity = i<4 ? 12.0 : 0;
+        L.position.set(BR_ENTRY.x + (i%4)*3, BR_WY1-0.9, BR_ENTRY.z + ((i/4)|0)*3); }
+      // every chunk group the prewarm built, attached where the renderer can see it
+      if(BR.envCache) for(const e of BR.envCache.values()) if(e && e.g && !e.g.parent){ scene.add(e.g); S.attached.push(e.g); }
+      camera.position.set(BR_ENTRY.x, BR_WY1-1.0, BR_ENTRY.z); camera.quaternion.identity(); camera.updateMatrixWorld(true);
+      if(!_brPcRT) _brPcRT = new THREE.WebGLRenderTarget(1,1,{depthBuffer:true});
+    }catch(e){ _brPcState.err=String(e&&e.message||e); _brPcState.done=true; }
+    return 0;
+  }
+  const S=_brPcState;
+  if(S.done) return 1;
+  // compileAsync, NOT compile. The synchronous version measured 17 SECONDS added to the loading screen —
+  // first-interactive went 9.4 s to 26.8 s, which is a worse bug than the one it fixes. compileAsync hands the
+  // work to the driver (KHR_parallel_shader_compile where available) and resolves when it is done, so the
+  // sigil keeps turning and the main thread stays free. A hard cap means it can never hold the screen hostage:
+  // if the driver is still going after PC_CAP_MS we dismiss anyway and let the rest finish in the background.
+  // ONE CHUNK GROUP PER FRAME, not the whole scene. renderer.compile(scene, camera) walks EVERYTHING — the
+  // island, the Wretch, the boss, every item model — and compiles all of it against the Backrooms' sixteen-point-
+  // light configuration. That measured 17 seconds added to the loading screen (first-interactive 9.4 s -> 26.8 s),
+  // which is a worse bug than the one it fixes. compileAsync did not help: three does the GLSL-to-HLSL
+  // translation synchronously and only the link is parallel. Compiling per group against the real scene's lights
+  // (the third argument) gets the same programs for a fraction of the work, and slices naturally.
+  const PC_CAP_MS = 6000;
+  try{
+    if(performance.now()-S.t0 > PC_CAP_MS){ S.timedOut=true; }        // never hold the screen hostage
+    else if(S.i < S.attached.length){
+      const g=S.attached[S.i++];
+      if(renderer.compile) renderer.compile(g, camera, scene);
+      return 0.1 + 0.8*(S.i/Math.max(1,S.attached.length));
+    }
+    else if(!S.drew){ S.drew=true;                                    // one pixel, so the driver finishes any
+      const pv=renderer.getRenderTarget();                            // specialisation it deferred past the link
+      renderer.setRenderTarget(_brPcRT); renderer.render(scene, camera); renderer.setRenderTarget(pv);
+      return 0.97; }
+  }catch(e){ S.err=String(e&&e.message||e); }
+  // restore everything, exactly
+  try{
+    const st=S.stash;
+    for(const g of S.attached) scene.remove(g);
+    if(st){ scene.background=st.bg; scene.fog.color.copy(st.fogC); scene.fog.density=st.fogD;
+      sunLight.intensity=st.sun; sunLight.castShadow=st.sunCast; hemi.intensity=st.hemi;
+      if(typeof ambient!=='undefined' && st.amb!=null) ambient.intensity=st.amb;
+      chunkRoot.visible=st.chunks; if(typeof skyDome!=='undefined' && st.sky!=null) skyDome.visible=st.sky;
+      camera.position.copy(st.camPos); camera.quaternion.copy(st.camQ); camera.updateMatrixWorld(true); }
+    brPoolLightsOff();
+  }catch(e){ S.err=(S.err||'')+' restore:'+String(e&&e.message||e); }
+  try{ S.programs=(renderer.info.programs||[]).length; }catch(e){}
+  S.ms=+(performance.now()-S.t0).toFixed(1);
+  S.done=true;
+  return 1;
+}
 function brApplyShadowLights(){
   if(!BR.lightPool) return 0;
   const want = (CFG.quality==='Low') ? 0 : Math.min(BR_SHADOW_LIGHTS, PERF.brShadowLights|0);
@@ -12093,6 +12295,43 @@ function _brMergeInto(list){                                                  //
   o.setAttribute('normal',new THREE.BufferAttribute(N,3));
   o.setAttribute('uv',new THREE.BufferAttribute(U,2));
   return o; }
+// Merge every mesh under a RIGID root into one mesh per material, in the root's own local frame. The root keeps
+// its transform, so it goes on animating exactly as before — only its children collapse. Used for door leaves,
+// where the whole assembly turns together on one hinge.
+function _brMergeRigid(root){
+  const buckets=new Map(), doomed=[];
+  const collect=(o)=>{ for(const c of o.children.slice()){
+    if(c.isMesh && c.geometry && c.material && !Array.isArray(c.material)){
+      let e=buckets.get(c.material); if(!e){ e={ mat:c.material, geos:[], cast:false, recv:false }; buckets.set(c.material,e); }
+      const g=c.geometry.clone();
+      // The root is the frame of reference, so a child's own position/rotation/scale is baked in relative to it.
+      c.updateMatrix(); g.applyMatrix4(_brRigidRel(root, c));
+      e.geos.push(g); e.cast=e.cast||!!c.castShadow; e.recv=e.recv||!!c.receiveShadow;
+      doomed.push(c); continue; }
+    collect(c); } };
+  collect(root);
+  if(buckets.size<2 && doomed.length<2) { for(const e of buckets.values()) for(const g of e.geos) g.dispose(); return 0; }
+  for(const c of doomed){ if(c.parent) c.parent.remove(c); if(c.geometry) c.geometry.dispose(); }
+  let made=0;
+  for(const e of buckets.values()){
+    const m=new THREE.Mesh(_brMergeInto(e.geos), e.mat);
+    m.castShadow=e.cast; m.receiveShadow=e.recv;
+    // KEEP FRUSTUM CULLING ON. brMergeStatic disables it because a chunk-wide merge spans the whole chunk and
+    // is almost always on screen, so the test is wasted work. A door leaf is about a metre across and usually
+    // behind a wall — the paired A/B measured draws going UP (B3 515 -> 632) when this was copied across,
+    // because eight small meshes that each got culled became one that never did.
+    m.frustumCulled=true;
+    root.add(m); made++;
+    for(const g of e.geos) g.dispose(); }
+  return made; }
+// child-relative-to-root matrix, walking up the parent chain — the subtree is not in the scene graph's world
+// transform yet when a chunk is built off-screen, so matrixWorld cannot be trusted here.
+const _brRigidM=new THREE.Matrix4(), _brRigidAcc=new THREE.Matrix4();
+function _brRigidRel(root, child){
+  _brRigidAcc.identity();
+  let o=child;
+  while(o && o!==root){ o.updateMatrix(); _brRigidM.copy(o.matrix).multiply(_brRigidAcc); _brRigidAcc.copy(_brRigidM); o=o.parent; }
+  return _brRigidAcc; }
 function brMergeStatic(grp){
   // TWO DISTINCT SETS, and conflating them broke everything that moves. `roots` are subtrees that must be left completely
   // alone; `onPath` are their ancestors, which must be walked THROUGH to reach static siblings but never merged themselves.
@@ -12105,6 +12344,11 @@ function brMergeStatic(grp){
     for(const L of (d.pivots||[])) if(L && L.pivot) protect(L.pivot); }                 // swings
   for(const b of (BR.bulbs||[])) if(b.grp) protect(b.grp);                              // hangs, and its glass swaps material when lit
   for(const f of (BR.flickers||[])) if(f.m) protect(f.m);                               // visibility blinks per frame
+  // P2 · RIGID SUBTREE MERGE. Protecting a door pivot was right — it swings — but it also protected the eight
+  // meshes hanging off it: slab, two stiles, three rails, lever, rose. Measured: 1061 of BR.env's 1214 meshes
+  // were protected leaf furniture, against 154 that actually merged. Everything under a pivot is rigid RELATIVE
+  // TO THAT PIVOT, so it can be merged in the pivot's own local frame and still swing as one piece.
+  if(PERF.brMergeRigid) for(const d of (BR.doors||[])) for(const L of (d.pivots||[])) if(L && L.pivot) _brMergeRigid(L.pivot);
   grp.updateMatrixWorld(true);
   const inv=new THREE.Matrix4().copy(grp.matrixWorld).invert(), rel=new THREE.Matrix4();
   const buckets=new Map(), doomed=[];
@@ -12238,7 +12482,14 @@ function brxUpdateLights(px,pz){ if(!BR.lightPool||!BR.fixtures)return; const F=
     if(f.flick && L._on!==undefined && L._on!==on && i<4 && typeof playSample==='function'){                      // REAL tube sound (Ben 07-27): the recorded-quality strike/dropout from sounds/gen-fluor.js, spatialized at the fixture — was a bare square-wave blip
       const d=Math.sqrt(near[i].d); if(d<26) playSample(on?'fluor':'fluorout', {x:f.x,y:y,z:f.z}, (on?0.55:0.42)*Math.max(0.15,1-d/26)); }
     L._on=on;
-    if(on){ litNear++; if(near[i].d<nearest)nearest=near[i].d; } } else L.visible=false; }
+    if(on){ litNear++; if(near[i].d<nearest)nearest=near[i].d; } }
+    // P3 · A LIGHT THAT GOES INVISIBLE CHANGES THE SHADER. three.js bakes the light COUNT into every program's
+    // cache key, so toggling pool lights on and off as the player walks made numPointLights swing between 0 and
+    // 16 and forced every material to compile a fresh program at every count it had not seen yet. Measured:
+    // 59 programs at load, 464 by the end of the suite, with isolated 607 ms / 354 ms / 107 ms frames landing
+    // exactly on an increment. Keeping the light VISIBLE at zero intensity is pixel-for-pixel identical — three
+    // still uploads it, the shader still loops it, it just contributes nothing — and the count stops moving.
+    else { L.intensity=0; L.visible = !!PERF.brStableLightCount; } }
   BR._litNear=litNear; BR._litD=Math.sqrt(nearest);      // drives the fluorescent HUM (see brUpdateHum) — dark wings fall silent
   if(BR.flickers)for(const fl of BR.flickers) fl.m.visible = brFlick(fl.f.ph||0,t)>0; }   // the diffuser panel blinks with its own light
 function brxCollide(p){ const W=BR.walls; if(!W||!W.length)return; const RAD=0.42+BR_WT/2, X=p.pos.x, Z=p.pos.z; let px=X, pz=Z;   // radius accounts for wall thickness
@@ -12329,6 +12580,11 @@ function brRenderPortal(){ if(typeof renderer==='undefined'||!renderer||!BR.door
   sunLight.intensity=0; hemi.intensity=0.12; if(typeof ambient!=='undefined')ambient.intensity=0.06; chunkRoot.visible=false; if(typeof skyDome!=='undefined')skyDome.visible=false;   // moody — let the fluorescents carry it, no wash
   const pv=renderer.getRenderTarget(); if(PERF.on) PERF.gpu.mark(1); try{ renderer.setRenderTarget(_brPortalRT); renderer.render(scene,_brPortalCam); }catch(e){} renderer.setRenderTarget(pv); if(PERF.on) PERF.gpu.mark(0);
   scene.background=sBg; scene.fog.color.copy(sFC); scene.fog.density=sFD; sunLight.intensity=sSun; hemi.intensity=sHemi; if(typeof ambient!=='undefined'&&sAmb!=null)ambient.intensity=sAmb; chunkRoot.visible=sChunks; if(typeof skyDome!=='undefined'&&sSky!=null)skyDome.visible=sSky;
+  // DO NOT turn the pool off here. It looks wrong that an overworld pass leaves the Backrooms lights in the
+  // scene, and I changed it — measured, and B6 went from 6.22 ms to 10.46 ms with 862 frames over 12 ms. The
+  // portal re-renders every frame you are near the door, so switching the pool off after each pass makes the
+  // light count oscillate 0<->N once per frame, which is precisely the recompile churn brStableLightCount
+  // exists to stop. A stable configuration matters more than a tidy one.
   // paint the RT onto the door quad by SCREEN-SPACE uv → the window lines up exactly with the hole in the world (real parallax)
   if(!_brPortalMat){ _brPortalMat=new THREE.ShaderMaterial({ uniforms:{uTex:{value:_brPortalRT.texture},uRes:{value:new THREE.Vector2(rw,rh)}}, side:THREE.DoubleSide, toneMapped:false, fog:false,
     vertexShader:'void main(){ gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',

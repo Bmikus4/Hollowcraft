@@ -84,3 +84,192 @@ claimed either way.
 
 **Residual risk.** The troffers still exist as lights; only the shadow map is gone. If a later change makes the
 halls read as flat, the fix is baked per-vertex AO (RESEARCH_NOTES §3), not turning these back on.
+
+**What P1 did not fix.** Recorded in PERF_PLAN.md — B4 still has 1 606 frames over 12 ms and an 87.6 ms worst
+frame, every moving scene still fails C2, draws are still over the ceiling in B3/B4/B5, programs still reach
+431, and the heap still grows to 316 MB. The hitches were never a shadow problem.
+
+---
+
+## P2 — merge the rigid furniture hanging off each door pivot
+
+**Flag.** `PERF.brMergeRigid` — default **true**, baseline **false**.
+
+**What.** `brMergeStatic` protects each door pivot from merging, correctly: it swings. But protecting a subtree
+protects everything under it, and a door leaf is eight separate meshes — slab, two stiles, three rails, brass
+lever, rose. Measured with `__hcPERF.brEnvBreakdown()`: **1 061 of BR.env's 1 214 meshes were protected door
+furniture**, against 154 that actually merged. The merge was working; it just could not reach 87 % of the
+geometry.
+
+Everything under a pivot is rigid *relative to that pivot*, so `_brMergeRigid(pivot)` merges it into one mesh
+per material **in the pivot's own local frame**. The pivot keeps its transform and goes on swinging; only its
+children collapse.
+
+**Why not the material-sharing change I had planned.** The census said 30 of 64 materials were per-chunk, which
+looked like the problem. It was not: `brMergeStatic` merges within a chunk group anyway, so cross-chunk material
+sharing would not have removed a single draw call on its own. Measuring the breakdown before writing the change
+redirected it. Recorded because the original plan entry was wrong.
+
+**Implementation note.** `_brRigidRel` walks the parent chain and composes local matrices rather than using
+`matrixWorld`. A chunk group is built off-screen and unparented — its world matrix is not yet meaningful — so
+`matrixWorld` would have baked in a stale or identity transform.
+
+**Measured delta.** Geometry: protected meshes **1 055 → 395** (3.0×), BR.env total **1 214 → 503**, triangles
+**identical** (39 078 both ways).
+
+Frame time, from `bench/perf-ab.mjs` — a **paired in-session A/B** written for this change because the
+cross-session P1→P2 suite comparison put every median inside the run-to-run spread. It alternates flag-off and
+flag-on inside one page, so each pair shares a thermal state, heap, shader cache and loaded world, and reports
+the median of the per-pair deltas:
+
+| scene | off | on | paired median delta | sign test | draws |
+|---|---|---|---|---|---|
+| B1 static | 4.68 ms | **3.61** | **−1.03 ms** | 3/4 | 667 → 477 |
+| B3 diagonal | 5.73 ms | **4.26** | **−1.48 ms** | 4/4 | 516 → 403 |
+| B4 teleport | 5.23 ms | **3.76** | **−1.61 ms** | 4/4 | 698 → 451 |
+| B6 portal | 5.08 ms | **4.16** | **−0.94 ms** | 4/4 | 652 → 504 |
+
+15 of 16 pairs faster, −0.9 to −1.6 ms, draws down 25–35 %. That beats the noise floor by a wide margin, which
+the cross-session comparison could not establish.
+
+### A bug the paired A/B caught in my own change
+
+The first version copied `frustumCulled = false` from `brMergeStatic` onto the merged leaf. That is right for a
+chunk-wide merge, which spans the whole chunk and is nearly always on screen, and wrong for a door leaf, which
+is about a metre across and usually behind a wall. **Draw calls went up** — B3 515 → 632 — because eight small
+meshes that each got frustum-culled became one that never did. With culling left on, the same scene goes
+516 → 403. The measurement is the only reason this was caught; the mesh count fell either way.
+
+### What the tail numbers do and do not show
+
+The A/B harness's p99/max/>12 ms columns are **not usable for a build-time flag**: it calls `rebuildEnv()`
+before every run, and tearing down and rebuilding nine chunks ten times over produces 70–120 ms frames on
+**both** sides. Those frames have ~4 ms of CPU in the scoped timers, so the time is not in our JS at all.
+
+The realistic single-entry suite says the tail is fine:
+
+| | P1 | P2 |
+|---|---|---|
+| B1 max / frames > 12 ms | 8.05 ms / 0 | 12.22 ms / 1 |
+| B4 frames > 16.6 ms | 238 | **29** |
+| B4 heap | 316 MB | **226 MB** |
+
+And LoAF agrees: B1 reports **0 long tasks and 0 blocking** in the suite, while B4's remaining 109.8 ms frames
+are attributed to `onAnimationFrame` with 109.5 ms of script and **0 forced style/layout** — that is the
+synchronous chunk build, which is P4's job, not this change's.
+
+I initially attributed B1's A/B tail to shader compiles. That was wrong: program growth was 0 on both sides.
+The cause is the harness, and the harness now says so in its own output.
+
+**Correctness.** `bench/perf-verify-p2.mjs` builds the same 9 chunks twice in one page, flag off then on, and
+compares every one of the 166 door pivots at three swing angles:
+
+| check | result |
+|---|---|
+| triangle count preserved | 14 984 = 14 984 |
+| mesh count fell | 992 → 332 (2.99×) |
+| vertex-exact world AABB, closed / half-open / fully open | **delta 0.00000 m** at all three |
+| triangle-centroid checksum | agrees to 1e-13 (float noise) |
+| doors still swing | 166 of 166 pivots move |
+
+Two earlier versions of this test failed and **both were wrong, not the code**: comparing the AABB-of-per-mesh-
+AABBs inflates under rotation by an amount that depends on how geometry is split into meshes, and comparing
+vertex-weighted centroids breaks because `_brMergeInto` de-indexes (24-vertex `BoxGeometry` becomes 36). The
+surviving test compares vertex-exact bounds and an order- and indexing-independent triangle-centroid checksum.
+
+Also re-ran the pre-existing harnesses: `tmp-br-visible.mjs` (all pass, including its own "no door hinge was
+swallowed by the static merge" and "a door actually swings" checks), `tmp-v1-doors.mjs` (0 errors),
+`tmp-verify-backrooms.mjs` (no crashes across seeds).
+
+**Revert.** `PERF.brMergeRigid = false`, then rebuild the environment (`__hcPERF.rebuildEnv()`) — it is a
+build-time change, so a live flip needs the chunks rebuilt.
+
+---
+
+## P3 — stop the shader-program count from moving
+
+**Flag.** `PERF.brStableLightCount` — default **true**, baseline **false**.
+
+**What.** `brxUpdateLights` sets `L.visible = false` on pool lights it is not using. three.js bakes the **light
+count** into every program's cache key, so as the player walked and the number of nearby fluorescents changed,
+`numPointLights` swung between 0 and 16 and **every material recompiled at every count it had not seen before**.
+That is where 464 programs came from, and the isolated 607 ms / 354 ms / 107 ms frames in the baseline landed
+exactly on an increment. Unused lights are now kept **visible at zero intensity** — three still uploads them and
+the shader still loops them, they contribute nothing, and the count stops moving. Leaving the dimension parks
+the whole pool properly (`brPoolLightsOff`) so the overworld does not carry sixteen dead lights in its shaders.
+
+**Measured delta.** `bench/perf-compile.mjs` — two **cold page loads** with Chrome's program cache disabled,
+walking the same path. A paired in-session A/B is the wrong instrument here and said so: it reported **zero
+compiles on both sides**, because the warm-up pairs had already paid them.
+
+| | baseline | brStableLightCount |
+|---|---|---|
+| compile events during play | 14 | **4** |
+| new programs during play | +150 | **+56** |
+| B2 frames > 33 ms | 7 | **2** |
+
+Steady-state cost of holding 16 lights is neutral: paired A/B gives B1 −0.05 ms (2/4), B3 −0.19 ms (4/4),
+B4 +0.20 ms (1/4). Worth it for a 63 % cut in runtime compilation.
+
+**Revert.** `PERF.brStableLightCount = false`.
+
+### P3b — precompiling at load: implemented, measured, and shipped OFF
+
+**Flag.** `PERF.brPrecompile` — default **false**.
+
+`brPrecompileStep()` dresses the scene exactly as the halls are dressed (atmosphere, the full light pool at its
+real count, every prewarmed chunk group attached), compiles, draws one pixel into a 1×1 target to force the
+driver to finish deferred specialisation, and restores everything. This is the shape the brief and three.js PR
+#19752 prescribe, and it does move the compiles to the loading screen.
+
+**It is not worth it, measured:** first-interactive **9.7 s → 26.9 s**. `__hcPERF.precompile()` reports the pass
+spending **15 787 ms** — and, revealingly, `slices: 0`: my explicit per-group compile loop never ran, because
+merely dressing the scene was enough for the *next ordinary render* to compile every Backrooms material. So that
+15.8 s is not my loop being slow; it is what a **sixteen-point-light `MeshStandardMaterial` costs to build
+through ANGLE on this GPU**, and it is the same total the player otherwise pays in ~6 s chunks on first entry.
+
+Two things I tried that did not help, recorded so they are not tried again:
+- **`compileAsync` instead of `compile`** — no change (28.1 s). three does the GLSL→HLSL translation
+  synchronously and parallelises only the link, so the expensive half still blocks.
+- **Compiling one chunk group per frame against the real scene's lights** — no change (27.0 s), for the reason
+  above: the ordinary render beat the slicer to it.
+
+**The actual lever is the light pool size.** Sixteen simultaneous point lights is what makes the shader enormous:
+smaller pool → smaller shader → faster compile *and* cheaper fragment work *and* the count still constant. That
+changes how many fluorescents light the halls at once, which is a visual decision, so it goes to Ben rather than
+being taken here. The flag stays so the trade can be re-taken in one line once the pool size is settled.
+
+**What P3 did not fix.** The multi-second first-crossing frames are still there — B2 max 7 147 ms with the flag
+on versus 6 877 ms off. Fewer compiles, but the ones that remain are the big ones. This is the largest single
+defect left in the game.
+
+---
+
+## Critique pass — what re-reading the diff caught
+
+**One real bug, found by measurement, fixed.** `_brMergeRigid` copied `frustumCulled = false` from
+`brMergeStatic`. Right for a chunk-wide merge, wrong for a door leaf: eight small meshes that each got culled
+became one that never did, and **draw calls went up** (B3 515 → 632). With culling left on it is 516 → 403.
+The mesh count fell either way, so only the paired A/B caught it.
+
+**One plausible-looking fix that was wrong, caught by measuring it.** `brRenderPortal` runs in the overworld and
+calls `brxUpdateLights`, which since `brStableLightCount` leaves all sixteen pool lights *visible*. Handing every
+overworld material a point-light count it never had looks like an obvious regression, so I added
+`brPoolLightsOff()` after the portal pass. **B6 went 6.22 → 10.46 ms with 862 frames over 12 ms.** The portal
+re-renders every frame you are near the door, so switching the pool off after each pass makes the count
+oscillate 0↔N *once per frame* — the exact churn the flag exists to stop. Reverted (8.43 ms on the same
+like-for-like short run), and the reason is now a comment at the site so it is not "fixed" again.
+
+**Checked and found sound:** `brPoolLightsOff` is called before its declaration but function declarations hoist;
+`_brRigidRel` returns a shared scratch matrix that is consumed before the next call; `_brMergeRigid`'s
+early-return leaves originals intact and disposes its clones; the `brxUpdateLights` brace restructure parses and
+every door harness passes.
+
+**Known and accepted:** `_brPcRT` (a 1×1 render target) is never disposed — it is only allocated when
+`brPrecompile` is on, which is off by default. Left as is.
+
+**Measurement caveat worth stating:** running B6 alone gives a different answer from running it inside the full
+suite (8.43 vs 6.22 ms) because chunk residency and the portal's visible geometry differ — 134 385 triangles
+versus 86 470. Only compare scenes measured in the same suite position. The before/after table in
+PERF_REPORT.md does that; the short critique runs above do not, and are used only for the A-vs-B revert
+decision, where both sides share the position.
