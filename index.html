@@ -1625,6 +1625,37 @@ function registerNoTree(x,z,r){ for(const n of _NOTREE_DYN) if(n.x===x && n.z===
 let _noTreeDynOff=0;
 function _pineAtPreZone(x,z){ _noTreeDynOff++; try{ return pineAt(x,z); } finally { _noTreeDynOff--; } }
 function _pineEmitPreZone(x,z,emit){ _noTreeDynOff++; try{ return pineEmit(x,z,emit); } finally { _noTreeDynOff--; } }
+// Does any claimed site overlap this chunk at all? Cheap reject so a chunk nowhere near a structure costs one loop over a
+// handful of zones and nothing else. Radius is padded by PINE_MAXR because a tree ROOTED outside a zone can still have
+// put blocks inside it, and those are the ones the build-time erase reached for and missed.
+function _claimedZonesTouching(cx,cz){ if(!_NOTREE_DYN.length) return null; let out=null;
+  const x0=cx*CK, z0=cz*CK, x1=x0+CK-1, z1=z0+CK-1;
+  for(let i=0;i<_NOTREE_DYN.length;i++){ const n=_NOTREE_DYN[i], r=n.r+PINE_MAXR+2;
+    if(n.x+r < x0 || n.x-r > x1 || n.z+r < z0 || n.z-r > z1) continue;
+    (out||(out=[])).push(n); }
+  return out; }
+// THE RULE: a chunk that generates inside a claimed structure site carries no tree blocks belonging to a tree the site
+// owns. Replayed through pineEmit — the generator itself — so it removes exactly the blocks that tree would have, and
+// nothing else. Blocks claimed by a pine rooted OUTSIDE every zone are kept, so the forest edge around a building keeps
+// its overhang instead of being scalped.
+function treeSweepClaimed(c){
+  const Z=_claimedZonesTouching(c.cx,c.cz); if(!Z) return 0;
+  const inZone=(x,z)=>{ for(let i=0;i<Z.length;i++){ const n=Z[i], dx=x-n.x, dz=z-n.z; if(dx*dx+dz*dz<=n.r*n.r) return true; } return false; };
+  const x0=c.cx*CK, z0=c.cz*CK, doomed=[], keepers=[];
+  for(let dx=-PINE_MAXR-1; dx<CK+PINE_MAXR+1; dx++) for(let dz=-PINE_MAXR-1; dz<CK+PINE_MAXR+1; dz++){
+    const wx=x0+dx, wz=z0+dz;
+    if(!_pineAtPreZone(wx,wz)) continue;
+    (inZone(wx,wz)?doomed:keepers).push([wx,wz]); }
+  if(!doomed.length) return 0;
+  const keep=new Set(), pk=(x,y,z)=>((x-x0+64)*512+(z-z0+64))*512+y;
+  for(const r of keepers) _pineEmitPreZone(r[0],r[1],(bx,by,bz)=>{ if(bx>>4===c.cx && bz>>4===c.cz) keep.add(pk(bx,by,bz)); });
+  let n=0;
+  for(const r of doomed) _pineEmitPreZone(r[0],r[1],(bx,by,bz)=>{
+    if((bx>>4)!==c.cx || (bz>>4)!==c.cz) return;                       // this chunk only — its neighbours sweep themselves when they generate
+    if(keep.has(pk(bx,by,bz))) return;
+    const i=idx(bx&15,by,bz&15), b=c.blocks[i];
+    if(b===BID.log||b===BID.leaves||b===BID.leaves_core){ c.blocks[i]=AIR; n++; } });
+  return n; }
 function noTreeHit(wx,wz,reach){ const Z=noTreeZones();
   for(let i=0;i<Z.length;i++){ const n=Z[i], dx=wx-n.x, dz=wz-n.z, r=n.r+reach; if(dx*dx+dz*dz<=r*r) return true; }
   if(!_noTreeDynOff) for(let i=0;i<_NOTREE_DYN.length;i++){ const n=_NOTREE_DYN[i], dx=wx-n.x, dz=wz-n.z, r=n.r+reach; if(dx*dx+dz*dz<=r*r) return true; }
@@ -1803,6 +1834,17 @@ function generateChunk(c){
   // terrain enrichment and any replayed player edits all together. A chunk therefore cannot come into existence with a
   // buried or floating shrub in it, whatever order those passes ran in.
   decoSeatChunk(c);
+  // ---- AND THE SAME SHAPE OF RULE FOR TREES INSIDE A CLAIMED SITE ----
+  // registerNoTree stops the generator planting in a structure's footprint, but only for chunks generated AFTER the site
+  // was claimed. groundStructure's erase handles the ones that already existed — except setBlockWorld returns silently
+  // for an ungenerated chunk, so a tree straddling the load boundary lost the half that was present and kept the half
+  // that was not. That reachability gap is what left 8 floating trunk runs after the previous pass, sitting on bare grass.
+  //
+  // Making it a rule applied AT GENERATION closes it, because generation is exactly the moment the missing half arrives.
+  // A chunk coming into existence inside a claimed zone sweeps its own columns and removes the tree blocks the erase
+  // could not reach. Same shape as the decoration invariant: a state the engine refuses to hold, checked where the state
+  // is created, rather than a one-shot repair that has to guess what is loaded.
+  treeSweepClaimed(c);
   c.dirty=true;
   // ROOT FIX for dark/black chunk seams (Ben 07-21): any ALREADY-MESHED orthogonal neighbour baked its border
   // skylight while this chunk was still absent (assuming open sky). Now that this chunk's real terrain exists,
@@ -14938,14 +14980,20 @@ function groundStructure(cx,cz,gy,R,pathR){
   // Dooming trees rooted OUTSIDE the pad was tried and is strictly worse: it took the orphan count from 8 to 107,
   // because decorate() replants anything whose root the gates still allow, and the erase cannot reach a trunk sitting
   // in an unloaded chunk. Only what the site itself owns may be removed.
-  registerNoTree(cx, cz, T);
+  // MEASURED, NOT ASSUMED: the doom boundary stays at T. Widening it was tried TWICE — once to "any tree whose blocks
+  // enter the cut volume" (orphan runs 8 -> 107) and once to T+2 to cover a thick pine's footprint reach (8 -> 18).
+  // Both made it worse, which is the useful result: the residual orphans are not caused by the boundary being too tight,
+  // they are caused by the ERASE being incomplete for trees near the edge of whatever box it is given, so enlarging the
+  // box enlarges the damage. Diagnosis recorded on the residual below.
+  const TZ = T;
+  registerNoTree(cx, cz, TZ);
   const _pk=(bx,by,bz)=>{ const lx=bx-cx+128, lz=bz-cz+128; return ((lx*512)+lz)*512+by; };   // local packing; roots sit within T+PINE_MAXR+2 of centre and reach at most PINE_MAXR, so offsets stay well inside 0..255
   const keep=new Set(), T2=T+PINE_MAXR+2;
   for(let dx=-T2;dx<=T2;dx++)for(let dz=-T2;dz<=T2;dz++){
-    if(Math.max(Math.abs(dx),Math.abs(dz))<=T) continue;                  // rooted on the pad → doomed, so not a keeper
+    if(Math.max(Math.abs(dx),Math.abs(dz))<=TZ) continue;                 // rooted on the pad (or within a thick footprint of it) → doomed, so not a keeper
     const wx=cx+dx, wz=cz+dz; if(!_pineAtPreZone(wx,wz)) continue;
     _pineEmitPreZone(wx,wz,(bx,by,bz)=>{ keep.add(_pk(bx,by,bz)); }); }
-  for(let dx=-T;dx<=T;dx++)for(let dz=-T;dz<=T;dz++){ const wx=cx+dx, wz=cz+dz;
+  for(let dx=-TZ;dx<=TZ;dx++)for(let dz=-TZ;dz<=TZ;dz++){ const wx=cx+dx, wz=cz+dz;
     if(!_pineAtPreZone(wx,wz))continue;
     _pineEmitPreZone(wx,wz,(bx,by,bz)=>{ const b=getBlock(bx,by,bz);
       if(b!==BID.log && b!==BID.leaves && b!==BID.leaves_core) return;
