@@ -1602,8 +1602,32 @@ function _pineShape(wx,wz){ const rng=tileRng((wx*92821^wz*68917)>>>0);
   const thick = rng()<0.15?1:0;                        // mostly single-trunk pines (was 35% chunky) → thinner on average
   const base = Math.floor(th*0.45);
   return { rng, th, thick, base, reach: Math.max(0, Math.round(0.6 + (th+2-base)*0.44)) + thick }; }
+// DYNAMIC NO-TREE ZONES — registered by groundStructure when a dynamically-sited builder actually picks its spot.
+//
+// This is the root of "trees broken around structures", and it is architectural, not cosmetic. The static list above
+// covers only the fixed builder sites; its own comment says the dynamic ones (village, church, cathedral, golgotha,
+// peaks, dungeon) "can't be known here, so groundStructure erases whole trees for those instead". Erase-after-the-fact
+// cannot hold, for two reasons that no amount of care in the erase can fix:
+//   · decorate() REPLANTS. It plants wherever pineEmit's gates allow, and those gates never knew about the village. So
+//     every time one of those chunks is regenerated the trees come back, into a finished building.
+//   · the erase can only reach LOADED chunks. setBlockWorld returns early for an ungenerated chunk, so a tree straddling
+//     the load boundary loses the half that is present and keeps the half that is not.
+// Together they mean the pad is fighting the generator every time the world streams, which is exactly what a severed
+// trunk looks like. Registering the site instead makes pineEmit refuse to plant there in the first place — for every
+// chunk, forever, including regenerations — so there is no tree to sever and nothing to erase twice.
+const _NOTREE_DYN=[];
+function registerNoTree(x,z,r){ for(const n of _NOTREE_DYN) if(n.x===x && n.z===z){ if(r>n.r) n.r=r; return n; }
+  const n={x,z,r}; _NOTREE_DYN.push(n); return n; }
+// Registering a zone makes pineEmit refuse to emit inside it — which is the point, but it also means the pad can no
+// longer REPLAY the trees that were planted there before registration, and replaying them is how they get erased. So the
+// dynamic zones can be suspended for the duration of that replay. Without this the site claims itself and then leaves
+// every pre-existing tree standing inside the finished building, which is worse than the bug being fixed.
+let _noTreeDynOff=0;
+function _pineAtPreZone(x,z){ _noTreeDynOff++; try{ return pineAt(x,z); } finally { _noTreeDynOff--; } }
+function _pineEmitPreZone(x,z,emit){ _noTreeDynOff++; try{ return pineEmit(x,z,emit); } finally { _noTreeDynOff--; } }
 function noTreeHit(wx,wz,reach){ const Z=noTreeZones();
   for(let i=0;i<Z.length;i++){ const n=Z[i], dx=wx-n.x, dz=wz-n.z, r=n.r+reach; if(dx*dx+dz*dz<=r*r) return true; }
+  if(!_noTreeDynOff) for(let i=0;i<_NOTREE_DYN.length;i++){ const n=_NOTREE_DYN[i], dx=wx-n.x, dz=wz-n.z, r=n.r+reach; if(dx*dx+dz*dz<=r*r) return true; }
   return false; }
 // emit(x,y,z,blockId,isTrunk) — called once per block of the tree rooted at (wx,wz). Returns false if no tree is allowed.
 function pineEmit(wx,wz,emit){
@@ -1774,6 +1798,11 @@ function generateChunk(c){
   { let a=c.hasCross,b=c.hasModel,w=c.hasWater; const bl=c.blocks;
     for(let i=0;i<bl.length && !(a&&b&&w);i++){ const v=bl[i]; if(v===AIR)continue; if(v===WATER){w=true;continue;} const cat=blockCat[v]; if(cat==='cross')a=true; else if(cat==='model')b=true; }
     c.hasCross=a; c.hasModel=b; c.hasWater=w; }
+  // CHOKEPOINT 3 of 3 for the decoration invariant (see _decoSeatColumn). Runs AFTER hasCross has been derived from the
+  // real contents and AFTER applyEdits, so it sees the finished chunk — worldgen decoration, ore veins, beach logs,
+  // terrain enrichment and any replayed player edits all together. A chunk therefore cannot come into existence with a
+  // buried or floating shrub in it, whatever order those passes ran in.
+  decoSeatChunk(c);
   c.dirty=true;
   // ROOT FIX for dark/black chunk seams (Ben 07-21): any ALREADY-MESHED orthogonal neighbour baked its border
   // skylight while this chunk was still absent (assuming open sky). Now that this chunk's real terrain exists,
@@ -3120,9 +3149,60 @@ function relightChunk(c){
 // records the edit; endBulk then does ONE finish pass per touched chunk (full htop recompute, emitter
 // invalidation, remesh) + relights the surrounding ring. Reads during the build see live writes.
 let _bulk=null;
+// =====================================================================
+//  THE DECORATION INVARIANT — a GLOBAL rule, not a per-site repair (Ben 07-29)
+// =====================================================================
+// "I want to remove shrubs' ability from generating that way from the game itself, it should be a global rule."
+//
+// A cross block (bush, fern, grass, flower, mushroom, berry, sapling) may exist in exactly one situation: standing in
+// AIR with a solid, non-cross block directly beneath it. Buried and floating decoration are not bugs in the callers —
+// they are states the engine should be unable to represent, and every fix that patched a caller was a bandaid, because
+// the next caller reintroduces it. groundStructure was patched for exactly this and it did not hold.
+//
+// WHY THIS IS ENFORCEABLE GLOBALLY. Every block write in the game reaches one of three chokepoints and there is no
+// fourth: setBlockWorld's bulk path (structures, trails, tree falls, cathedral, village — anything wrapped in
+// beginBulk/endBulk), setBlockWorld's single-write path (player edits, one-off placements), and chunk generation
+// (genColumn/decorate/placeSet writing the block array directly). Enforce at those three and no code path anywhere,
+// present or future, can leave a shrub in the ground.
+//
+// WHY IT IS FREE. endBulk already walks every column of every touched chunk top-down to rebuild htop, and chunk
+// generation already walks the whole block array to derive hasCross. This rides on those same scans.
+//
+// IT DELETES, IT DOES NOT RELOCATE. Relocating a buried shrub up onto the new surface was the first design, and it is
+// wrong: a player who places a block on top of a flower expects the flower gone, not teleported onto their roof. One
+// predictable rule beats two context-dependent ones, and "gone" is the state Ben is asking for.
+// ?nodecoseat=1 DISABLES the invariant. It exists so bench/assert-shrub-seat.mjs can prove it is capable of failing on
+// this very build rather than on a hypothetical one: with the flag the assertion must report buried shrubs, without it
+// zero. A check that has only ever been run against working code is not evidence.
+const _NO_DECO_SEAT = Q.get('nodecoseat')!=null;
+function _decoSeatColumn(c, lx, lz){
+  if(_NO_DECO_SEAT) return -1;
+  const bl=c.blocks; let host=-1;
+  for(let y=WH-1;y>=1;y--){ const b=bl[idx(lx,y,lz)]; if(b===AIR) continue;
+    if(blockCat[b]==='cross'){
+      // SEATED iff there is solid ground directly beneath AND open air directly above. Both halves are required and the
+      // first draft of this rule only had the first — so a bush at surface level with dirt packed on top of it passed as
+      // "seated", which is EXACTLY the buried case it was written to remove. The negative control caught that: with the
+      // rule enabled the deliberately-sunk bush was still there. Checking only "is something solid under me" cannot
+      // distinguish standing on the ground from being inside it.
+      const u=bl[idx(lx,y-1,lz)], a=bl[idx(lx,y+1,lz)];
+      const onGround = (u && isSolid[u] && blockCat[u]!=='cross');
+      const inOpenAir = !(a && isSolid[a]);                       // leaves/glass are not isSolid, so a shrub under canopy is fine; packed dirt or stone above is not
+      if(!(onGround && inOpenAir)) bl[idx(lx,y,lz)]=AIR;
+      continue; }
+    if(isSolid[b] && host<0) host=y; }
+  return host; }
+// Enforce over a whole chunk. Gated on hasCross so a chunk with no decoration costs one boolean.
+function decoSeatChunk(c){ if(!c||!c.hasCross) return 0; let n=0;
+  for(let lz=0;lz<CK;lz++)for(let lx=0;lx<CK;lx++) n+=(_decoSeatColumn(c,lx,lz)>=0?0:0);
+  return n; }
 function beginBulk(){ if(!_bulk) _bulk={touched:new Map()}; }
 function endBulk(){ const t=_bulk; _bulk=null; if(!t||!t.touched.size) return;
   for(const c of t.touched.values()){
+    // CHOKEPOINT 1 of 3 for the decoration invariant (see _decoSeatColumn). This is where every bulk build lands —
+    // structure pads, trail carving, tree falls, the village, the cathedral — so it is where a shrub gets buried, and
+    // therefore where it gets removed. Runs BEFORE the htop rebuild because it changes the column's contents.
+    if(c.hasCross) for(let lz=0;lz<CK;lz++)for(let lx=0;lx<CK;lx++) _decoSeatColumn(c,lx,lz);
     for(let lz=0;lz<CK;lz++)for(let lx=0;lx<CK;lx++){ let top=-1; for(let y=WH-1;y>=0;y--){ if(occludesSky[c.blocks[idx(lx,y,lz)]]){ top=y; break; } } c.htop[lx+lz*CK]=top; }   // occludesSky (not isOpaque): canopy must not fold into htop — matches worldgen (Ben 07-23)
     c._emit=null; markRemesh(c.cx,c.cz);
     for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++){ if(!dx&&!dz)continue; const nc=getChunk(c.cx+dx,c.cz+dz);
@@ -3153,6 +3233,10 @@ function setBlockWorld(wx,wy,wz,b,record){
   const ci=lx+lz*CK;
   if (occludesSky[b] && wy>c.htop[ci]) c.htop[ci]=wy;                                        // occludesSky (not isOpaque): torches/glass/leaves AND canopy leaves_core must NOT darken the column (Ben 07-23 — matches worldgen; leaves_core was the "dark faces in the woods" root cause)
   else if (!occludesSky[b] && wy===c.htop[ci]){ let t=-1; for(let y=wy-1;y>=0;y--){const bb=c.blocks[idx(lx,y,lz)]; if(occludesSky[bb]){t=y;break;}} c.htop[ci]=t; }
+  // CHOKEPOINT 2 of 3 for the decoration invariant (see _decoSeatColumn). Single writes only — a player placing a block
+  // on a flower, or breaking the block under one. One column, so it costs a single top-down walk. Skipped when the write
+  // IS a cross block, because that is a legitimate placement and the invariant would only re-check what was just set.
+  if(c.hasCross && blockCat[b]!=='cross') _decoSeatColumn(c,lx,lz);
   markRemesh(c.cx,c.cz);
   if (lx===0) markRemesh(c.cx-1,c.cz); if (lx===15) markRemesh(c.cx+1,c.cz);
   if (lz===0) markRemesh(c.cx,c.cz-1); if (lz===15) markRemesh(c.cx,c.cz+1);
@@ -14771,7 +14855,6 @@ function buildSpawnChest(){ if(_spawnChestDone)return; const sx=spawnX, sz=spawn
 // _treeFlood is gone (Ben 07-27): a bounded flood can never match a pine's real extent — radius 6 / 700 blocks against a
 // canopy radius of 9 and thousands of blocks, so it truncated trees and left floating canopy over buildings. groundStructure
 // now replays pineEmit, the generator itself, to erase a tree exactly.
-const _NO_DECO_CLEAR = Q.get('nodecoclear')!=null;   // measurement only: leaves buried/floating shrubs in, to A/B the pad's decoration pass
 function groundStructure(cx,cz,gy,R,pathR){
   const SK=4, P=R+1, T=P+SK;
   // FIRST: remove every tree that reaches onto this pad — DETERMINISTICALLY, via the same generator that planted it
@@ -14806,15 +14889,35 @@ function groundStructure(cx,cz,gy,R,pathR){
   // So it is done as SET SUBTRACTION instead, which is both cheaper and exactly right. Build the claim set of every
   // block belonging to a tree that SURVIVES, then erase the doomed trees and skip anything in that set. A block is
   // removed only if no surviving tree also claims it — trunk, leaf or core, one rule for all three.
+  // AND THE RULE IS: A TREE THE PAD TOUCHES IS REMOVED WHOLE (Ben 07-29 — "an all encompassing game-level pass", after
+  // set-subtraction alone still left 8 floating trunk runs sitting on bare GRASS rather than on more log).
+  //
+  // Set subtraction fixed the erase, but the erase was never the only thing that cuts a tree. The ramp pass below removes
+  // every isSolid block above the pad level in a CONTIGUOUS y range that stops at max(nH,tH)+20 — and a pine is up to 33
+  // blocks tall on top of its terrain. So a tree standing on the pad, or overhanging it, had its middle taken by the ramp
+  // and its crown left hanging above the ceiling of the cut. That is a second, independent way to sever a tree, and
+  // protecting shared blocks does nothing about it.
+  //
+  // So doom is defined by CONTACT, not by where the trunk happens to be rooted: any pine with a single block inside the
+  // volume the ramp is about to clear is doomed, and doomed trees go entirely. Nothing is left to sever, because nothing
+  // partial survives. _padTop reproduces the ramp's own per-column height so "inside the volume" means exactly what the
+  // ramp will actually cut, not an approximation of it.
+  // STEP 1 — CLAIM THE SITE, so the generator will never plant here again (see registerNoTree). This has to happen
+  // BEFORE the erase: pineAt/pineEmit consult noTreeHit, so once the zone is registered the doomed trees stop being
+  // things pineEmit will regenerate and become purely historical — blocks already in memory, to be cleaned once.
+  // Dooming trees rooted OUTSIDE the pad was tried and is strictly worse: it took the orphan count from 8 to 107,
+  // because decorate() replants anything whose root the gates still allow, and the erase cannot reach a trunk sitting
+  // in an unloaded chunk. Only what the site itself owns may be removed.
+  registerNoTree(cx, cz, T);
   const _pk=(bx,by,bz)=>{ const lx=bx-cx+128, lz=bz-cz+128; return ((lx*512)+lz)*512+by; };   // local packing; roots sit within T+PINE_MAXR+2 of centre and reach at most PINE_MAXR, so offsets stay well inside 0..255
   const keep=new Set(), T2=T+PINE_MAXR+2;
   for(let dx=-T2;dx<=T2;dx++)for(let dz=-T2;dz<=T2;dz++){
     if(Math.max(Math.abs(dx),Math.abs(dz))<=T) continue;                  // rooted on the pad → doomed, so not a keeper
-    const wx=cx+dx, wz=cz+dz; if(!pineAt(wx,wz)) continue;
-    pineEmit(wx,wz,(bx,by,bz)=>{ keep.add(_pk(bx,by,bz)); }); }
+    const wx=cx+dx, wz=cz+dz; if(!_pineAtPreZone(wx,wz)) continue;
+    _pineEmitPreZone(wx,wz,(bx,by,bz)=>{ keep.add(_pk(bx,by,bz)); }); }
   for(let dx=-T;dx<=T;dx++)for(let dz=-T;dz<=T;dz++){ const wx=cx+dx, wz=cz+dz;
-    if(!pineAt(wx,wz))continue;
-    pineEmit(wx,wz,(bx,by,bz)=>{ const b=getBlock(bx,by,bz);
+    if(!_pineAtPreZone(wx,wz))continue;
+    _pineEmitPreZone(wx,wz,(bx,by,bz)=>{ const b=getBlock(bx,by,bz);
       if(b!==BID.log && b!==BID.leaves && b!==BID.leaves_core) return;
       if(keep.has(_pk(bx,by,bz))) return;                                 // a tree that is staying also owns this block
       setBlockWorld(bx,by,bz,AIR,true); }); }
@@ -14835,19 +14938,11 @@ function groundStructure(cx,cz,gy,R,pathR){
     for(let y=tH+1;y<=yTop;y++){ const b=getBlock(wx,y,wz); if(b!==AIR && isSolid[b] && b!==BID.leaves_core){ setBlockWorld(wx,y,wz,AIR,true); touched=true; } }   // cut everything above the ramp — EXCEPT canopy core. leaves_core is cat:'solid', so the old cut sliced holes through the canopy of trees rooted OUTSIDE the pad (the other half of "broken trees over buildings"); the overhang is wanted, and pad-rooted trees were already erased whole above. (Ben 07-27)
     for(let y=tH;y>tH-24 && y>2;y--){ const b=getBlock(wx,y,wz); if(b===AIR||b===WATER){ setBlockWorld(wx,y,wz,BID.dirt,true); touched=true; } else break; }   // fill under the ramp — no floating pads
     if(touched){ const b=getBlock(wx,tH,wz); if(b!==AIR&&b!==WATER) setBlockWorld(wx,tH,wz, tH>CFG.SEA+38?BID.stone : tH<=CFG.SEA+1?BID.sand : BID.grass, true); }
-    // …and LAST, the decoration, which falls through both passes above: the cut only takes blocks where isSolid[b] and every
-    // cross block (bush, fern, grass, flowers, berry) is declared solid:false, while the fill only writes into AIR or WATER
-    // so it will not overwrite one either. A column whose pad RAISES therefore keeps the shrub that stood on the old surface
-    // sitting at its old height with fresh dirt packed around it and the grass cap laid on top — a shrub one block down
-    // inside the ground, lit by nothing, its crossed quads clipped by the blocks around it into the recessed diamond shapes
-    // Ben photographed. A column whose pad LOWERS leaves the same shrub floating instead. Measured at a forced village:
-    // 42 buried and 68 floating inside 22 blocks, against 0 and 0 in pristine ground.
-    // It runs AFTER the cap, not before, and SPARES y===tH+1. Running it first (and clearing the whole column) also wiped
-    // every shrub that legitimately ends up standing on the finished pad — decoration in the region fell 492 to 280, so the
-    // building sites came out barren. tH+1 is exactly "standing on the final surface", so that one case is kept.
-    if(!_NO_DECO_CLEAR) for(let y=Math.max(3,tH-24); y<=yTop; y++){ if(y===tH+1) continue;
-      const b=getBlock(wx,y,wz);
-      if(b!==AIR && b!==WATER && blockCat[b]==='cross') setBlockWorld(wx,y,wz,AIR,true); }
+    // THE PER-SITE DECORATION CLEAR THAT USED TO LIVE HERE IS GONE. It was a bandaid: it fixed buried shrubs for THIS
+    // builder only, and every other path that moves ground — trail carving, tree falls, the cathedral, a player edit —
+    // reintroduced them. The rule is now enforced globally at the three block-write chokepoints (see _decoSeatColumn),
+    // and this function's writes go through setBlockWorld inside a bulk, so endBulk cleans this pad as a side effect of
+    // a rule that also cleans everything else. Nothing needs to be special-cased here.
   }
 }
 let _cabinDone=false, cabinRifle=null;
