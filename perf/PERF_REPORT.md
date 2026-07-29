@@ -60,11 +60,13 @@ V6 flag matrix verified: booting with `?perfoff=all` reproduces the baseline exa
   the door merge is geometrically exact at three swing angles, and **V5** (`bench/perf-verify-v5.mjs`) diffs 21
   read-only QA helpers between baseline and shipped: **one difference, `envStats.visible` 1 220 → 561, which is
   the merge doing its job.** Nothing else moved.
-- **V7 soak — heap PASS, programs FAIL.** With GC forced, heap / draws / geometries are flat over a soak. But
-  **shader programs grow ~7 per minute for as long as you keep walking** (84 → 119 in three minutes). Cause,
-  from three's own cache keys: the total point-light count still moves (43 / 44 / 46) as streaming chunks bring
-  their own lights, and three recompiles every material at each new count. Same root cause as the light-pool
-  question below.
+- **V7 soak (30 min, n = 126) — PASS on everything except program count.** With GC forced: heap +0.13 MB/min
+  (60.4 → 61.6), draws 380 → 380, geometries 349 → 349, textures 67 → 69, and **median frame time degrades 2 %
+  from the first quarter to the last**. No leak of any kind. The one exception is shader programs, 98 → 125 at
+  +0.21/min and clearly converging (122 → 125 across the final twenty minutes). Cause, straight from three's
+  cache keys: the total point-light count moves (43 / 44 / 46) as streaming chunks bring their own lights, and
+  three recompiles every material at each new count. A first-few-minutes cost, same root cause as the
+  light-pool question below.
 - **C5 (still one file, no new deps).** Held. No build step, no CDN, no new runtime dependency.
 - **C6 (numbers-backed).** Every claim here has a JSON artifact under `bench/results/`.
 

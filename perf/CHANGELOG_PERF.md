@@ -416,19 +416,28 @@ against elapsed time. Chrome runs with `--expose-gc` and `gc()` is called before
 measured is **retained** memory rather than garbage that has not been collected yet — without that, every run
 looks like a leak.
 
-| | slope / min | over 3 min | verdict |
+**The full 30-minute run, n = 126 samples** (`bench/results/perf-soak-30min.log`, `perf-soak.json`):
+
+| | slope / min | over 30 min | verdict |
 |---|---|---|---|
-| heap | +0.77 MB | 76.6 → 78.2 MB | **flat** |
-| draw calls | −2.8 | 407 → 407 | **flat** |
-| geometries | −2.7 | 385 → 385 | **flat** |
-| **programs** | **+7.0** | **84 → 119** | **GROWS** |
-| textures | +0.97 | 67 → 69 | grows, tracks the above |
+| heap | +0.13 MB | 60.4 → 61.6 MB | **flat — no leak** |
+| draw calls | −0.23 | 380 → 380 | **flat** |
+| geometries | −0.21 | 349 → 349 | **flat** |
+| textures | +0.01 | 67 → 69 | **flat** |
+| median frame time | +0.002 ms | 2.5 → 3.0 ms | **first quarter → last quarter: +2 %** |
+| **programs** | **+0.21** | **98 → 125** | grows, but **converging** |
+
+**The 30-minute run corrected my own three-minute reading.** A short soak measured programs growing at
+**7 per minute** and I wrote that up as growth "for as long as you keep walking". Over 30 minutes the slope is
+**0.21 per minute** and the count is 122 → 125 across the final twenty — it is a saturating curve, not a leak.
+There is a finite set of (light count × material) combinations and the game eventually compiles all of them.
+That makes it a **first-few-minutes cost**, which is materially different from what I first claimed, and the
+short-run number should not have been extrapolated.
 
 **This settles the heap question, and it settles it against my earlier guess.** With GC forced, the heap is
 flat. The 165–327 MB figures in the benchmark suite were uncollected garbage, not a leak and not `BR.gen`.
 
-**The programs finding is a real, previously invisible defect.** Programs grow ~7 per minute *for as long as
-you keep walking* — not just on first entry. `__hcPERF.programKeys()` was added to diff three's own cache keys
+**The programs finding is real but bounded.** Programs climb over the first minutes and then plateau. `__hcPERF.programKeys()` was added to diff three's own cache keys
 and it names the cause exactly: the differing field is the **point-light count**, measured at **43, 44 and 46**.
 `brStableLightCount` pinned the Backrooms pool of 16, but the total still moves as streaming chunks bring their
 own lights in, and three recompiles **every material in the scene** at each new count.
