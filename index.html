@@ -14620,6 +14620,7 @@ function buildSpawnChest(){ if(_spawnChestDone)return; const sx=spawnX, sz=spawn
 // _treeFlood is gone (Ben 07-27): a bounded flood can never match a pine's real extent — radius 6 / 700 blocks against a
 // canopy radius of 9 and thousands of blocks, so it truncated trees and left floating canopy over buildings. groundStructure
 // now replays pineEmit, the generator itself, to erase a tree exactly.
+const _NO_DECO_CLEAR = Q.get('nodecoclear')!=null;   // measurement only: leaves buried/floating shrubs in, to A/B the pad's decoration pass
 function groundStructure(cx,cz,gy,R,pathR){
   const SK=4, P=R+1, T=P+SK;
   // FIRST: remove every tree that reaches onto this pad — DETERMINISTICALLY, via the same generator that planted it
@@ -14629,17 +14630,67 @@ function groundStructure(cx,cz,gy,R,pathR){
   // and never bridges into a neighbour's canopy the way a flood does. (Ben 07-27)
   // Only trees ROOTED on the pad go — a tree rooted outside keeps its whole canopy, which overhangs the clearing for a
   // soft, natural forest edge (Ben 07-21). What changed is that a doomed tree now goes COMPLETELY, canopy and all.
+  // A TRUNK COLUMN CAN BELONG TO TWO TREES, AND THE ERASE WAS TAKING BOTH (Ben 07-29: "trees too close to a structure to
+  // spawn fully"). A `thick` pine's footprint is 2x2 — (0,0),(1,0),(0,1),(1,1) from its root — so a single column can carry
+  // trunk from its own pine AND from a thick pine rooted one step up-left. Replaying a doomed tree and deleting every log it
+  // emits therefore also deletes the SURVIVING neighbour's trunk in any shared column, which leaves that tree standing with
+  // a hole punched through it and everything above the hole floating.
+  //
+  // Measured at a forced village: 55 floating trunk runs / 382 blocks inside 24 blocks of the site, and ZERO in pristine
+  // forest 1800 blocks away — so it is the erase, not generation. Every single orphaned run sat directly above MORE LOG
+  // (under-tally: log x55, masonry x0), which is the signature of one column being partially deleted rather than of a tree
+  // planted into a finished building. Column (315,-58) had th=31 on ground 50 — trunk y51..y81 — and came out as y51..y67,
+  // air, y70..y81, with every pineEmit gate passing and emits=true.
+  //
+  // So a trunk block is now only removed if no SURVIVING pine also owns that column at that height. Leaves are still taken
+  // unconditionally: canopies interpenetrate everywhere and a slightly thinner neighbour is invisible, whereas a severed
+  // trunk is the artefact. Four candidate roots per block, ~30 trunk blocks per tree — the cost is nothing.
+  const _survivingTrunkOwner=(bx,by,bz)=>{
+    for(const o of [[0,0],[-1,0],[0,-1],[-1,-1]]){ const rx=bx+o[0], rz=bz+o[1];
+      if(Math.max(Math.abs(rx-cx),Math.abs(rz-cz))<=T) continue;          // rooted on the pad → doomed too, not a reason to keep the block
+      if(!pineAt(rx,rz)) continue;
+      const sh=_pineShape(rx,rz);
+      if((o[0]||o[1]) && !sh.thick) continue;                             // only a THICK pine reaches a neighbouring column
+      const rh=surfaceH(rx,rz), gy=Math.min(rh, surfaceH(bx,bz));
+      if(by>gy && by<=rh+sh.th) return true;                              // that tree's own trunk really does occupy this block
+    }
+    return false; };
   for(let dx=-T;dx<=T;dx++)for(let dz=-T;dz<=T;dz++){ const wx=cx+dx, wz=cz+dz;
     if(!pineAt(wx,wz))continue;
-    pineEmit(wx,wz,(bx,by,bz)=>{ const b=getBlock(bx,by,bz); if(b===BID.log||b===BID.leaves||b===BID.leaves_core) setBlockWorld(bx,by,bz,AIR,true); }); }
+    pineEmit(wx,wz,(bx,by,bz,id,trunk)=>{ const b=getBlock(bx,by,bz);
+      if(b!==BID.log && b!==BID.leaves && b!==BID.leaves_core) return;
+      if(b===BID.log && _survivingTrunkOwner(bx,by,bz)) return;           // shared column with a tree that is staying — leave it standing
+      setBlockWorld(bx,by,bz,AIR,true); }); }
   for(let dx=-T;dx<=T;dx++)for(let dz=-T;dz<=T;dz++){ const wx=cx+dx, wz=cz+dz, cheb=Math.max(Math.abs(dx),Math.abs(dz));
     const nH=surfaceH(wx,wz), f=cheb<=P?0:(cheb-P)/SK, e=f*f*(3-2*f);
     const tH=Math.round(gy+(nH-gy)*e);                            // pad level ramping smoothly back to the noise surface
     let touched=false;
     const yTop=Math.max(nH,tH)+20;                                // high enough to take tree canopy standing on the old ground
+    // SHRUBS BURIED A BLOCK INTO THE PAD (Ben 07-29: "shrubs spawning one block deep in the ground"). Decoration blocks
+    // fall through BOTH of this function's passes. The cut below only takes blocks where isSolid[b], and every cross block
+    // — bush, fern, grass, flowers, berry — is declared solid:false; the fill below only writes into AIR or WATER, so it
+    // will not overwrite one either. So when a pad RAISES a column, the shrub that was standing on the old surface is
+    // still sitting at the old height with new dirt packed around it, and the grass cap goes on above it: a shrub one
+    // block down inside the ground, lit by nothing, its crossed quads clipped by the blocks around it into the recessed
+    // diamond shapes Ben photographed. When a pad LOWERS a column the same gap leaves them floating instead.
+    // ?nodecoclear=1 restores the old behaviour, so this can be A/B'd in one build the way ?perfoff and ?brseed are —
+    // stashing the fix to get a baseline also stashes the QA hooks the probe needs, which makes that route useless.
     for(let y=tH+1;y<=yTop;y++){ const b=getBlock(wx,y,wz); if(b!==AIR && isSolid[b] && b!==BID.leaves_core){ setBlockWorld(wx,y,wz,AIR,true); touched=true; } }   // cut everything above the ramp — EXCEPT canopy core. leaves_core is cat:'solid', so the old cut sliced holes through the canopy of trees rooted OUTSIDE the pad (the other half of "broken trees over buildings"); the overhang is wanted, and pad-rooted trees were already erased whole above. (Ben 07-27)
     for(let y=tH;y>tH-24 && y>2;y--){ const b=getBlock(wx,y,wz); if(b===AIR||b===WATER){ setBlockWorld(wx,y,wz,BID.dirt,true); touched=true; } else break; }   // fill under the ramp — no floating pads
     if(touched){ const b=getBlock(wx,tH,wz); if(b!==AIR&&b!==WATER) setBlockWorld(wx,tH,wz, tH>CFG.SEA+38?BID.stone : tH<=CFG.SEA+1?BID.sand : BID.grass, true); }
+    // …and LAST, the decoration, which falls through both passes above: the cut only takes blocks where isSolid[b] and every
+    // cross block (bush, fern, grass, flowers, berry) is declared solid:false, while the fill only writes into AIR or WATER
+    // so it will not overwrite one either. A column whose pad RAISES therefore keeps the shrub that stood on the old surface
+    // sitting at its old height with fresh dirt packed around it and the grass cap laid on top — a shrub one block down
+    // inside the ground, lit by nothing, its crossed quads clipped by the blocks around it into the recessed diamond shapes
+    // Ben photographed. A column whose pad LOWERS leaves the same shrub floating instead. Measured at a forced village:
+    // 42 buried and 68 floating inside 22 blocks, against 0 and 0 in pristine ground.
+    // It runs AFTER the cap, not before, and SPARES y===tH+1. Running it first (and clearing the whole column) also wiped
+    // every shrub that legitimately ends up standing on the finished pad — decoration in the region fell 492 to 280, so the
+    // building sites came out barren. tH+1 is exactly "standing on the final surface", so that one case is kept.
+    if(!_NO_DECO_CLEAR) for(let y=Math.max(3,tH-24); y<=yTop; y++){ if(y===tH+1) continue;
+      const b=getBlock(wx,y,wz);
+      if(b!==AIR && b!==WATER && blockCat[b]==='cross') setBlockWorld(wx,y,wz,AIR,true); }
   }
 }
 let _cabinDone=false, cabinRifle=null;
@@ -16287,6 +16338,16 @@ window.__hc={
     return { sample:[px,py,pz], wasBlock:was, nowBlock:getBlock(px,py,pz), scarSize:bossScar.size }; }catch(e){ return {err:e.message, stack:(e.stack||'').slice(0,200)}; } },
   qaAtlasUse(){ try{ return { returned:useAtlas() }; }catch(e){ return {err:e.message, stack:(e.stack||'').slice(0,200)}; } },
   qaBlock(x,y,z){ try{ return getBlock(x,y,z); }catch(e){ return -1; } },
+  bid(name){ try{ return name==null? Object.keys(BID) : (BID[name]!=null?BID[name]:null); }catch(e){ return null; } },   // QA/bench: block NAME -> numeric id. blockAt hands back raw ids, so a probe looking for logs or thatch has no way to name what it found.
+  // QA/bench: every gate pineEmit consults for the tree rooted at (x,z), each reported separately. A probe can see THAT a
+  // trunk is broken but not WHICH rule broke it, and these gates are otherwise all module-private.
+  treeGates(x,z){ try{ x=Math.round(x); z=Math.round(z); const h=surfaceH(x,z), sh=_pineShape(x,z);
+    const foot = sh.thick ? [[0,0],[1,0],[0,1],[1,1]] : [[0,0]];
+    let drop=0; for(const fp of foot) drop=Math.max(drop, h-surfaceH(x+fp[0],z+fp[1]));
+    return { h, th:sh.th, thick:!!sh.thick, trunkTop:h+sh.th, pineAt:!!pineAt(x,z), drop,
+             trailDist:+trailDist(x,z).toFixed(2), inCabin:!!inCabin(x,z), nearOpening:!!nearOpening(x,z),
+             inTower:(typeof inTower==='function')?!!inTower(x,z):null, grassSurface:!!isGrassSurface(x,z),
+             noTreeHit:!!noTreeHit(x,z,sh.thick?1:0), emits:!!pineEmit(x,z,()=>{}) }; }catch(e){ return {err:e.message}; } },
   postfx(){ try{ return { mbOn:_mbOn, mbMode:_mbMode, motionPass:!!motionPass, softShadows:_softShadows, shadowType:renderer.shadowMap.type, grain:gradePass?+gradePass.uniforms.uGrain.value.toFixed(3):null }; }catch(e){ return {err:e.message}; } },
   setMB(on){ try{ return { mbMode:setMotionBlur(on) }; }catch(e){ return {err:e.message}; } },
   equipHat(id){ try{ id=id||'straw_hat'; armor[0]={id,n:1}; if(typeof openInventory==='function')openInventory(2); if(typeof updateArmorView==='function')updateArmorView(); return { helm:armor[0].id, hatVisible:!!(_pv&&_pv.P&&_pv.P.strawHat&&_pv.P.strawHat.visible) }; }catch(e){ return {err:e.message}; } },   // QA: equip a helmet + open the paperdoll
