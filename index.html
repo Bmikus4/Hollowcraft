@@ -2752,6 +2752,40 @@ scene.add(nvLight); scene.add(nvLight.target);
 const LIGHT_POOL = 10;   // dynamic warm-light pool: the nearest placed torches/lanterns/candles are lit (the "baked" volume wasn't lighting spawned lights — dungeon/structures went dark)
 const pointPool = [];
 for(let i=0;i<LIGHT_POOL;i++){ const pl=new THREE.PointLight(0xff9838,0,34,1.3); pl.position.set(0,-999,0); pl.castShadow=false; scene.add(pl); pointPool.push(pl); }
+// ---- NOTHING CAST A SHADOW IN THE DARK (Ben 07-29: "animals and creatures dont have shadows in dark places") ----
+// It was never an animal problem — their meshes already set castShadow. It is that in a dark place there was no CASTER at
+// all: this whole pool shipped with castShadow=false, and updateSky switches sunLight.castShadow off below day<0.06. So
+// after dusk, or in a cave, or anywhere lit only by torchlight, every shadow in the overworld was simply absent.
+//
+// The Backrooms already solved the same problem with a BOUNDED casting pool (BR_SHADOW_LIGHTS + brApplyShadowLights) and
+// this is that pattern brought outside. Two things make it affordable:
+//   · castShadow is set ONCE, here, and never toggled per-frame. Changing it alters the program's shadow-map count and
+//     recompiles every lit material — the pool below carries the renderer's own warning about a 50-300 ms hitch.
+//     assignPointLights already sorts candidates by distance, so slot 0 is always the NEAREST torch: the caster follows
+//     the player without anything being switched on or off.
+//   · shadow.autoUpdate stays false and needsUpdate is requested only for a caster that actually has a light in it, on
+//     the same SHADOW_EVERY cadence the sun uses. A point light's shadow is six cube faces, so an idle caster left on
+//     autoUpdate would pay that every frame for a light sitting at intensity 0 under the world.
+const OW_SHADOW_LIGHTS=2;   // ceiling; the tier below picks how many are actually used
+let OW_SHADOW_EVERY=8;      // point-shadow cadence: HALF the sun's rate. A creature at 4 m/s moves ~23 cm in 8 frames at 140 fps — invisible — and the six cube faces then land on one frame in eight instead of one in four
+let _owShTick=0;            // its OWN counter. shadowTick is kept modulo SHADOW_EVERY (4) by the sun's cadence, so testing shadowTick % 8 would have been true exactly whenever it was 0 — every fourth frame, i.e. no change at all
+function applyOverworldShadowLights(){
+  const want = (CFG.quality==='Low') ? 0 : (CFG.quality==='Ultra' ? 2 : 1);
+  // 256, not 512. Measured at night in torchlight on the 5700 XT: the caster costs +0.12 ms on the MEDIAN frame, which is
+  // nothing, but at 512 it took p95 from 8.4 ms to 14.3 ms — the six cube faces landing on one frame in four. The FPS pass
+  // that shipped hours earlier was fought largely over hitches, so the tail is the number that matters here, not the mean.
+  // Halving the face size and halving the cadence (OW_SHADOW_EVERY below) puts the spike back down without the shadow
+  // reading as blocky: it is a torch-lit shadow a few blocks long, not a sun shadow across a landscape.
+  const SS = CFG.quality==='Ultra'?512:256;
+  for(let i=0;i<pointPool.length;i++){ const pl=pointPool[i];
+    const cast = i<Math.min(OW_SHADOW_LIGHTS,want);
+    if(cast){ pl.castShadow=true; pl.shadow.mapSize.set(SS,SS);
+      pl.shadow.bias=-0.006; pl.shadow.normalBias=0.06; pl.shadow.camera.near=0.3; pl.shadow.camera.far=36;   // far covers the pool's 34-block reach
+      pl.shadow.autoUpdate=false; }
+    else if(pl.castShadow){ pl.castShadow=false; }
+    pl.userData.owCaster=cast; }
+  return Math.min(OW_SHADOW_LIGHTS,want); }
+applyOverworldShadowLights();
 let _heldST=0;
 const heldLight = new THREE.PointLight(0xffb060, 0, 14, 2); scene.add(heldLight);   // torch/lantern in hand — NO shadow (baked world handles occlusion; the hand light is a soft personal glow)
 // GLOW POOL — the ONLY dynamic world-glow lights (cook fires, glowing drops, lair hall/crypt). Fixed
@@ -2950,6 +2984,7 @@ function applyQuality(q){ if(['Low','Medium','High','Ultra'].indexOf(q)<0)return
   try{ const sz=q==='Ultra'?2048:q==='Low'?512:1024;   // live shadow-map resize (dispose the old target so THREE rebuilds it)
     if(sunLight.shadow.mapSize.x!==sz){ if(sunLight.shadow.map){ sunLight.shadow.map.dispose(); sunLight.shadow.map=null; } sunLight.shadow.mapSize.set(sz,sz); sunLight.shadow.needsUpdate=true; } }catch(e){}
   try{ if(gradePass) gradePass.uniforms.uFXAA.value = (q==='Low'?0:1); }catch(e){}
+  try{ if(typeof applyOverworldShadowLights==='function') applyOverworldShadowLights(); }catch(e){}   // the torch-shadow caster count is tier-dependent; a quality change already pays a recompile, so this is the one safe place to re-toggle castShadow
   flashName('quality: '+q+' — some effects apply on next launch'); }
 
 // screenshot pipeline for the entity's vision (renders to a small offscreen target;
@@ -3471,6 +3506,7 @@ function _lightBlocked(ex,ey,ez,px,py,pz){ const dx=px-ex,dy=py-ey,dz=pz-ez, dis
 const _plCand=[], _plPool=[];
 function assignPointLights(){
   const t=globalU.uTime.value;
+  const _owShFire = ((_owShTick=(_owShTick+1)%OW_SHADOW_EVERY)===0);   // one shadow-cube refresh per OW_SHADOW_EVERY frames, counted here so it is independent of the sun's tick
   // Placed torches are BAKED into the per-chunk light volume, so the point-light POOL is empty (LIGHT_POOL=0).
   // Skip the whole per-frame world scan + sort in that case — it was iterating every chunk's emitters for nothing.
   if(pointPool.length){
@@ -3487,6 +3523,10 @@ function assignPointLights(){
         const dist=Math.sqrt(_plCand[i][0]), edge=clamp((34-dist)/12,0,1);
         const lvl=e[3], strong=lvl>=15, dim=lvl<=10;
         pl.color.setHex(strong?0xff9838:0xff6a22); pl.intensity=(strong?60:dim?18:46)*fl*edge; pl.distance=strong?34:dim?12:27; pl.decay=1.3;
+        // A caster that HAS a light re-renders its cube on the sun's cadence — creatures move, so a one-shot map would
+        // freeze their shadow in place. Gated on intensity because a torch faded out at the edge of the pool has nothing
+        // to cast, and on _streamMeshed for the same reason the sun's cadence is: don't stack a shadow pass on a meshing frame.
+        if(pl.userData.owCaster && pl.intensity>0.5 && !_streamMeshed && _owShFire) pl.shadow.needsUpdate=true;
       } else { pl.intensity=0; pl.position.set(0,-999,0); } }
   }
   // held torch/lantern lights the player's surroundings
@@ -16339,6 +16379,15 @@ window.__hc={
   qaAtlasUse(){ try{ return { returned:useAtlas() }; }catch(e){ return {err:e.message, stack:(e.stack||'').slice(0,200)}; } },
   qaBlock(x,y,z){ try{ return getBlock(x,y,z); }catch(e){ return -1; } },
   bid(name){ try{ return name==null? Object.keys(BID) : (BID[name]!=null?BID[name]:null); }catch(e){ return null; } },   // QA/bench: block NAME -> numeric id. blockAt hands back raw ids, so a probe looking for logs or thatch has no way to name what it found.
+  // QA/bench: the overworld torch-shadow casters. owShadow(n) forces how many pool lights cast, so a screenshot pair can
+  // prove a creature's shadow appeared rather than assuming it did. Reports the live pool so an A/B can confirm the light
+  // was actually ON and in range at the moment the frame was taken — a caster parked at intensity 0 casts nothing.
+  owShadow(n){ try{ if(n!=null){ for(let i=0;i<pointPool.length;i++){ const pl=pointPool[i], cast=i<(n|0);
+        if(cast && !pl.castShadow){ pl.castShadow=true; pl.shadow.mapSize.set(512,512); pl.shadow.bias=-0.006; pl.shadow.normalBias=0.06; pl.shadow.camera.near=0.3; pl.shadow.camera.far=36; pl.shadow.autoUpdate=false; }
+        else if(!cast && pl.castShadow) pl.castShadow=false;
+        pl.userData.owCaster=cast; } }
+    return { casters:pointPool.filter(p=>p.castShadow).length, tier:CFG.quality, sunCasts:!!sunLight.castShadow, sunI:+sunLight.intensity.toFixed(2),
+             pool:pointPool.map(p=>({cast:!!p.castShadow, i:+p.intensity.toFixed(1), y:+p.position.y.toFixed(1), d:p.distance})).filter(p=>p.i>0||p.cast) }; }catch(e){ return {err:e.message}; } },
   // QA/bench: every gate pineEmit consults for the tree rooted at (x,z), each reported separately. A probe can see THAT a
   // trunk is broken but not WHICH rule broke it, and these gates are otherwise all module-private.
   treeGates(x,z){ try{ x=Math.round(x); z=Math.round(z); const h=surfaceH(x,z), sh=_pineShape(x,z);
