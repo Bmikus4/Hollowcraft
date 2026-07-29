@@ -2207,12 +2207,19 @@ const _uHorizonBlend={value:new THREE.Color(0.10,0.14,0.20)};
 // (texture-array atlas is built earlier; V handled in shader)
 
 // inject texture-array sampling + skylight darkening (+ optional wind) into a Lambert material
+// The night target for real foliage: the SAME colour the horizon pine backdrop fades to, so the wood and the treeline
+// behind it sink into darkness together instead of at two different rates. Driven per frame in updateSky.
+const _uFolNight={ value:new THREE.Color(0.006,0.008,0.014) };
+// ?nofolnight=1 compiles the foliage shaders WITHOUT the night term, so bench/assert-foliage-night.mjs can prove itself
+// capable of failing against this build. A check that has only ever run on working code is not evidence.
+const _NO_FOL_NIGHT = Q.get('nofolnight')!=null;
 function injectAtlas(mat, opts={}){
   mat.onBeforeCompile = (sh)=>{
     sh.uniforms.uTime = globalU.uTime;
     sh.uniforms.uAtlas = { value: arrayTex };
     sh.uniforms.uLight3D = { value: _emptyLight3D };   // per-chunk block-light volume — a per-chunk material clone overrides this at compile (see _chunkMat)
     if(globalU.uWhiteTile.value<0 && typeof TILEIDX!=='undefined' && TILEIDX.vantawhite!=null) globalU.uWhiteTile.value=TILEIDX.vantawhite;   // latch the real tile index the first time it's known
+    if(opts.nightFoliage && !_NO_FOL_NIGHT){ sh.uniforms.uDayF = globalU.uDay; sh.uniforms.uFolNight = _uFolNight; }   // SHARED refs, so per-chunk material clones all track the same live value
     sh.uniforms.uWhiteTile = globalU.uWhiteTile;   // SHARED ref → the vantawhite glow survives every material clone / recompile / composer rebuild / VFX toggle (was a fresh per-material uniform that a pre-tile-index recompile could latch at -1)
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>',
@@ -2225,6 +2232,25 @@ function injectAtlas(mat, opts={}){
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>',
         '#include <common>\nprecision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;')
+      // ---- NIGHT VOLUMETRIC DARKNESS ON REAL FOLIAGE (Ben 07-29) ----
+      // "volumetric darkness at night is applied to horizon pines, but not to forest trees." Correct, and the two fade to
+      // different targets. The horizon backdrop fades to _uPineFog, which is scene.fog.color pulled toward storm blue and
+      // then scaled by (0.10+0.90*day) — at midnight that measures 0.0084 luminance. Real leaves fade to scene.fog.color
+      // itself, which measures 0.0412: five times brighter. So the backdrop sinks into black after dusk and the actual
+      // wood stays a readable navy, which is the discrepancy he is looking at.
+      //
+      // The shared fog colour is NOT the place to fix it. Its night floor of (0.028,0.042,0.072) is deliberate and load-
+      // bearing — the comment where it is set records that removing it let the colour fall to ~0.014 and distant chunks
+      // "stopped reading as dark mass and started reading as void-black holes". Cliffs and terrain need that floor.
+      // Foliage does not, because a wood receding into blackness is the intended read.
+      //
+      // So the extra darkening is applied HERE, to the leaf and foliage materials only, riding three's own fogFactor so it
+      // is genuinely distance-weighted rather than a flat tint: near leaves are untouched, far ones sink to the same
+      // target the horizon pines use. fogFactor is still in scope after <fog_fragment> because three declares it inside
+      // main(), so this needs no second depth computation of its own.
+      .replace('uniform float uWhiteTile;', 'uniform float uWhiteTile;'+(opts.nightFoliage?'\nuniform float uDayF;\nuniform vec3 uFolNight;':''))
+      .replace('#include <fog_fragment>', '#include <fog_fragment>'+((opts.nightFoliage&&!_NO_FOL_NIGHT)?
+        '\n{ float _nt=1.0-uDayF; gl_FragColor.rgb=mix(gl_FragColor.rgb, uFolNight, clamp(fogFactor*_nt*0.94,0.0,1.0)); }':''))
       .replace('#include <color_fragment>',
         '#include <color_fragment>\n'+
         'vec2 _fr=fract(vBUV); _fr.y=1.0-_fr.y;\n'+
@@ -2257,8 +2283,8 @@ const opaqueMat = injectAtlas(new THREE.MeshPhongMaterial({ shininess:1, specula
 const cutoutMat = injectAtlas(new THREE.MeshPhongMaterial({ side:THREE.DoubleSide, shininess:0, specular:0x000000 }), {cutout:true});   // glass etc — genuinely see-through both sides
 // leaves get their OWN FrontSide material: the mesher emits all 6 faces of every leaf block, each seen from its normal side,
 // so single-sided is visually identical to the old DoubleSide while halving canopy fragment work (the scene's biggest fill sink).
-const leafMat   = injectAtlas(new THREE.MeshPhongMaterial({ side:THREE.FrontSide, shininess:0, specular:0x000000 }), {});   // OPAQUE now (was cutout/alpha-test): with the solid needle texture, leaves render with early-Z and zero discard overdraw — the big forest fill win
-const foliageMat= injectAtlas(new THREE.MeshPhongMaterial({ side:THREE.FrontSide, shininess:0, specular:0x000000 }), {cutout:true, wind:true});   // FrontSide (was DoubleSide) — the mesher emits both crossed quads, so one always faces you; halves grass/flower alpha-test overdraw
+const leafMat   = injectAtlas(new THREE.MeshPhongMaterial({ side:THREE.FrontSide, shininess:0, specular:0x000000 }), {nightFoliage:true});   // OPAQUE now (was cutout/alpha-test): with the solid needle texture, leaves render with early-Z and zero discard overdraw — the big forest fill win
+const foliageMat= injectAtlas(new THREE.MeshPhongMaterial({ side:THREE.FrontSide, shininess:0, specular:0x000000 }), {cutout:true, wind:true, nightFoliage:true});   // FrontSide (was DoubleSide) — the mesher emits both crossed quads, so one always faces you; halves grass/flower alpha-test overdraw
 opaqueMat.shadowSide = THREE.FrontSide;
 // distinct cache keys so the shared-source injected materials don't collide in the program cache
 opaqueMat.customProgramCacheKey = ()=>'vox_opaque';
@@ -2711,6 +2737,10 @@ function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.p
       // is now the live fog colour scaled BY THE HOUR: full strength by day, so the pines melt into white air, and a tenth of
       // it pulled toward storm blue at night, so distance into the forest reads as depth going dark.
       _uPineFog.copy(scene.fog.color).lerp(_stormBlue, 0.55*(1-day)).multiplyScalar(0.10+0.90*day);
+      // REAL FOLIAGE FADES TO THE SAME PLACE THE BACKDROP DOES. Copied from _uPineFog rather than recomputed, because the
+      // whole complaint was that the treeline and the wood in front of it were darkening at two different rates — deriving
+      // both from one expression is the only way that cannot drift again.
+      _uFolNight.value.copy(_uPineFog);
       const _wf2=(typeof weather!=='undefined'?(weather.fog||0):0); if(_wf2>0.01) _uPineFog.lerp(scene.fog.color, Math.min(1,_wf2*0.95)); pineMat.uniforms.uWx.value=_wf2; }   // WEATHER FOG overrides the hour's tint AND fades the layer's alpha out (see pineMat fragment). Toward the LIVE fog colour, not the pale constant _fogShellCol: that constant is a daylight grey (0xbfc4cc), so in night rain the treeline was washed pale while everything around it was black
     pineMat.uniforms.uCamY.value=camera.position.y; pineMat.uniforms.uVisD.value=CFG.RENDER_DIST*CK;   // per-frame (jumps/climbs shift the eye between mask recomputes; RD slider moves the wall)
     { const EP=entrancePoint();   // the mouth's live bearing — atan2(z,x) to match the shader's atan(vPos.z,vPos.x) exactly
@@ -16885,6 +16915,19 @@ window.__hc={
   // QA/bench + the VISUALS panel's own values, readable and settable: {skydark, waterdeep, cloud, stars, fogmul}
   // QA/bench: the fog, as REACH rather than density. `coef` is the day/night coefficient before the view-distance divide, so a
   // harness can check the day/night split without hardcoding the constant; `reach` is the distance at which FogExp2 hits ~99%.
+  // QA/bench: the two NIGHT FADE TARGETS side by side, which is the actual quantity behind "darkness is applied to the
+  // horizon pines but not the forest trees". pineFog is what the backdrop fades to; folEff is what real foliage fades to
+  // once the night term has been applied on top of three's own fog. If those two disagree the treeline and the wood in
+  // front of it sink at different rates, which is the artefact. A near/far brightness comparison CANNOT see this — it
+  // measures fog density, and passed identically with the fix compiled out.
+  fadeTargets(){ try{ const L=(c)=>c.r*0.2126+c.g*0.7152+c.b*0.0722;
+    const on=!_NO_FOL_NIGHT, k=on?0.94:0.0, nt=1-globalU.uDay.value, m=Math.min(1,Math.max(0,k*nt));
+    const eff=new THREE.Color(scene.fog.color.r+(_uFolNight.value.r-scene.fog.color.r)*m,
+                              scene.fog.color.g+(_uFolNight.value.g-scene.fog.color.g)*m,
+                              scene.fog.color.b+(_uFolNight.value.b-scene.fog.color.b)*m);
+    return { day:+globalU.uDay.value.toFixed(3), termOn:on, mix:+m.toFixed(3),
+             fogLum:+L(scene.fog.color).toFixed(5), pineLum:+L(_uPineFog).toFixed(5), folEffLum:+L(eff).toFixed(5),
+             ratio:+(L(eff)/Math.max(L(_uPineFog),1e-6)).toFixed(3) }; }catch(e){ return {err:e.message}; } },
   fogInfo(){ const d=scene.fog.density, c=scene.fog.color;
     return { density:d, coef:d*(CFG.RENDER_DIST*CK)/Math.max(1e-6,CFG.fogMul), reach: d>0? 2.146/d : Infinity,
              day:+globalU.uDay.value.toFixed(3), fogMul:CFG.fogMul,
