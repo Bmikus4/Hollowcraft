@@ -4494,7 +4494,17 @@ function iconURL(id){ if(iconCache[id])return iconCache[id]; const cv=document.c
 // =====================================================================
 const INV_N=36;
 const inv=new Array(INV_N).fill(null);
-const armor=[null,null,null,null];   // equipped: 0=helmet 1=chestplate 2=leggings 3=boots
+// EQUIPMENT — the four armour slots plus two carry slots. It stays ONE array because every path that already exists
+// (getSlot/setSlot 'armor', the save writer's bare `armor`, slotClick's equip branch) is indexed, so widening the array
+// is the whole feature and nothing has to learn a second container. What each index ACCEPTS is the one new rule; see
+// eqAccepts. Guards that must stay armour-only (armorDefense, durability wear, the paperdoll overlays) count 0..3
+// explicitly rather than iterating the array, or a chestplate parked in the offhand would grant its defence.
+const EQ_ARMOR=4, EQ_OFF=4, EQ_PACK=5;
+const _NO_EQ2 = Q.get('noequip2')!=null;   // ?noequip2=1 → build the old 4-slot column and refuse the carry slots, so bench/assert-equip.mjs can prove it fails
+const EQ_N = _NO_EQ2 ? 4 : 6;
+const armor=[null,null,null,null,null,null];   // equipped: 0=helmet 1=chestplate 2=leggings 3=boots · 4=offhand · 5=backpack
+const _NO_Q_DROP = Q.get('noqdrop')!=null;     // ?noqdrop=1 → Q does nothing while a container is open (the pre-fix behaviour)
+const _NO_SHIELD = Q.get('noshield')!=null;    // ?noshield=1 → shields stop blocking and stop rendering as 3D objects
 const decoys=[];                     // placed scarecrows — false leads the Wretch investigates (buys you time)
 const chimes=[];                     // placed wind chimes — emit soft procedural tones from their position
 // ============================================================================
@@ -4878,7 +4888,7 @@ function applySave(s){
   player.water=P.water!=null?P.water:20; player.sat=P.sat||0; player.blessT=P.blessT||0; player.sick=P.sick||0;
   player.creative=!!P.creative; window._allowCreative=!!P.creative;   // the save's mode wins on resume — survival worlds stay survival
   for(let i=0;i<INV_N;i++) inv[i]=(s.inv&&s.inv[i])||null;
-  for(let i=0;i<4;i++) armor[i]=(s.armor&&s.armor[i])||null;
+  for(let i=0;i<6;i++) armor[i]=(s.armor&&s.armor[i])||null;   // 6, not EQ_N: a save written with the carry slots filled must not lose them just because this boot ran ?noequip2=1
   // BACKPACK CONTENTS. Rebuilt into a fresh 27-slot array rather than assigned, so a save written before the backpack
   // existed (no field), or one with a short or over-long array, still loads into a well-formed store.
   if(s.backpackStore){ backpackStore=new Array(27).fill(null); for(let i=0;i<27;i++) backpackStore[i]=s.backpackStore[i]||null; }
@@ -8740,7 +8750,11 @@ function buildContainers(){
   for(let i=0;i<27;i++) cc.appendChild(slotEl('chest',i));
   for(let i=9;i<36;i++) cm.appendChild(slotEl('inv',i));
   for(let i=0;i<9;i++) ch.appendChild(slotEl('inv',i));
-  const ac=$('armorcol'); if(ac){ ac.innerHTML=''; for(let i=0;i<4;i++) ac.appendChild(slotEl('armor',i)); }   // 4 equip slots
+  const ac=$('armorcol'); if(ac){ ac.innerHTML='';
+    for(let i=0;i<EQ_N;i++){ const d=slotEl('armor',i);
+      if(i===EQ_OFF){ d.style.marginTop='12px'; d.title='Offhand'; d.style.boxShadow='inset 0 0 0 1px #6b5a34'; }        // a gap + a warm rim separates the CARRY pair from the four armour slots
+      if(i===EQ_PACK){ d.title='Backpack'; d.style.boxShadow='inset 0 0 0 1px #6b5a34'; }
+      ac.appendChild(d); } }   // 4 armour slots + offhand + backpack
   initPView();
   uiBuilt=true;
 }
@@ -8763,16 +8777,24 @@ function addTo(arr,id,n){ const max=itMax(id); for(let i=0;i<arr.length&&n>0;i++
 function moveWithin(idx){ const s=inv[idx]; if(!s)return; const from=idx<9?9:0, to=idx<9?36:9; const max=itMax(s.id);
   for(let i=from;i<to&&s.n>0;i++){ const d=inv[i]; if(d&&d.id===s.id&&d.n<max){ const t=Math.min(max-d.n,s.n); d.n+=t; s.n-=t; } }
   for(let i=from;i<to&&s.n>0;i++){ if(!inv[i]){ inv[i]={id:s.id,n:s.n}; s.n=0; } } if(s.n<=0)inv[idx]=null; }
+// What each equip slot will take. The armour slots keep their old rule (the piece must name that slot); the offhand takes
+// ANY item — Ben asked for shields in "main or offhand", and a torch or a spear in the left hand is the same mechanism —
+// and the pack slot takes the backpack only, so wearing it is what frees the hotbar space it was costing.
+function eqAccepts(idx,id){ const it=ITEMS[id]; if(!it) return false;
+  if(_NO_EQ2 && idx>=EQ_ARMOR) return false;
+  if(idx===EQ_PACK) return id==='backpack';
+  if(idx===EQ_OFF)  return true;
+  return !!(it.armor && it.armor.slot===idx); }
 function slotClick(src,idx,btn,shift){
   if(src==='out'){ takeOutput(shift); return; }
   const cell=getSlot(src,idx);
-  if(src==='armor'){                                                                       // equip slot: only the matching piece fits
+  if(src==='armor'){                                                                       // equip slot: only what the slot accepts fits
     if(shift){ if(cell){ const l=invAdd(cell.id,cell.n); if(l<=0)setSlot('armor',idx,null); } }
     else if(!cursor){ if(cell){ cursor=cell; setSlot('armor',idx,null); } }
-    else if(ITEMS[cursor.id]&&ITEMS[cursor.id].armor&&ITEMS[cursor.id].armor.slot===idx){ const old=cell; setSlot('armor',idx,cursor); cursor=old; }
+    else if(eqAccepts(idx,cursor.id)){ const old=cell; setSlot('armor',idx,cursor); cursor=old; }   // same swap the armour slots always did — everything equippable is max:1, so there is no partial stack to split
     updateCraftOut(); renderInvUI(); return; }
   if(shift){ if(cell){
-      if(src==='inv' && ITEMS[cell.id]&&ITEMS[cell.id].armor && !armor[ITEMS[cell.id].armor.slot]){ armor[ITEMS[cell.id].armor.slot]={id:cell.id,n:1}; cell.n--; if(cell.n<=0)inv[idx]=null; updateArmorView(); }   // shift-click to auto-equip
+      if(src==='inv' && eqTarget(cell.id)>=0){ const t=eqTarget(cell.id); armor[t]={id:cell.id,n:1}; cell.n--; if(cell.n<=0)inv[idx]=null; updateArmorView(); }   // shift-click to auto-equip — armour to its own slot, a shield to the offhand, the pack to the pack slot
       else if(src==='craft'||src==='chest'){ const left=invAdd(cell.id,cell.n); if(left<=0)setSlot(src,idx,null); else cell.n=left; }
       else if(openUI==='chest'&&curChest){ const left=addTo(curChest,cell.id,cell.n); if(left<=0)inv[idx]=null; else cell.n=left; }
       else moveWithin(idx);
@@ -8862,7 +8884,7 @@ function updateArmorView(){ if(!_pv)return; const isStraw=!!(armor[0]&&armor[0].
   for(let i=0;i<4;i++){ const a=armor[i], ar=a&&ITEMS[a.id]&&ITEMS[a.id].armor; const grp=_pv.P.armorMesh[i]; const show=!!ar && !(i===0&&isStraw) && !hz; grp.visible=show;   // the suit hides the piecemeal armour overlays
   if(show){ const col=ar.col||0x7a4a24; grp.traverse(o=>{ if(o.material&&o.material.color) o.material.color.setHex(col); }); } } }   // tint the mannequin overlay to the equipped tier (leather brown / iron grey)
 function renderPView(dt){ if(!_pv){ initPView(); if(!_pv)return; } _pv.t+=dt; _pv.P.group.rotation.y=Math.sin(_pv.t*0.6)*0.7; _pv.rn.render(_pv.sc,_pv.cam); }
-function armorDefense(){ let d=0; for(const a of armor){ if(a&&ITEMS[a.id]&&ITEMS[a.id].armor) d+=ITEMS[a.id].armor.def; } return d; }
+function armorDefense(){ let d=0; for(let i=0;i<EQ_ARMOR;i++){ const a=armor[i]; if(a&&ITEMS[a.id]&&ITEMS[a.id].armor) d+=ITEMS[a.id].armor.def; } return d; }   // 0..3 ONLY — the offhand and pack slots hold whatever you like and must never pay out defence
 function openInventory(size){ if(player.grabbed)return; if(!uiBuilt)buildContainers(); craftSize=size; for(let i=0;i<9;i++)craftGrid[i]=null; buildCraftGrid(size); updateCraftOut(); openUI='inv'; invuiEl.style.display='flex'; renderInvUI(); updateArmorView(); document.exitPointerLock&&document.exitPointerLock(); }
 function openChest(x,y,z){ if(!uiBuilt)buildContainers(); curChestKey=x+','+y+','+z; if(!chests[curChestKey])chests[curChestKey]=new Array(27).fill(null); curChest=chests[curChestKey];
   $('ctitle').textContent = B[getBlock(x,y,z)]&&B[getBlock(x,y,z)].name==='barrel'?'Barrel':'Chest'; openUI='chest'; chestuiEl.style.display='flex'; chestLidOpen(x,y,z); renderInvUI(); document.exitPointerLock&&document.exitPointerLock(); }
