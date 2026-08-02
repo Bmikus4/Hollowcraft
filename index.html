@@ -3958,6 +3958,24 @@ function _timedMesh(c){ const t=performance.now(); const r=buildChunkStaged(c); 
 // ---------------------------------------------------------------------
 const _suEst=[6,5];                       // ms, [gen, mesh] — EMA of recent unit cost
 function _suNote(kind, ms){ _suEst[kind] += (ms-_suEst[kind])*0.15; }
+// ---------------------------------------------------------------------
+//  GENERATION WAS STARVING MESHING. Measured on a cold boot, ?nofill=1: 225 generation units ran before the SECOND mesh
+//  unit. Nothing was visible for nine seconds, then the whole ring appeared at once. Both halves share one frame deadline
+//  and generation runs first in streamChunks, so while any chunk still needs generating, generation takes the entire
+//  streaming budget and meshing gets whatever is left, which during a cold boot is nothing. The two phases therefore run
+//  strictly one after the other and the wait is their SUM (~9 s of generating, then ~3 s of meshing) rather than the
+//  larger of the two. A chunk with no mesh is invisible, so all of that generation bought the player nothing to look at.
+//  THE FIX: generation may claim only part of the frame's streaming budget; meshing may use all of it. Meshing cannot run
+//  away with the frame in return, because mesh work is bounded by what has already been generated AND has all eight
+//  neighbours — it drains and hands the frame back on its own. Total streaming time per frame is still one budget, so the
+//  compounding this budget was built to stop stays stopped.
+//  Widening the per-frame slices during a sustained backlog is kept as well: the slice is 3.5 ms at best against a 4.19 ms
+//  generation unit and a 4.09 ms mesh unit, so at steady tuning exactly one unit runs per frame. That tuning is right for
+//  WALKING — a few chunks entering the ring must not hitch you — and wrong for a cold boot, where there is no world drawn
+//  yet to hitch and the player is simply waiting.
+//  NOT the cause, measured and ruled out: the Jul-29 tree sweep, which is 2% of generation time (0.066 ms per chunk).
+// ---------------------------------------------------------------------
+let _lastMeshMS=3.5, _lastGenMS=2.5;   // the live slice values, exposed through __hc.fill() for measurement only
 function _suAdmit(kind, t0){
   if(!PERF.streamBudgetMs) return true;                       // 0 = the old two-budget behaviour
   // THE FIRST UNIT OF A FRAME ALWAYS RUNS. Without this the gate latches shut and the world stops loading:
@@ -3975,12 +3993,14 @@ function streamChunks(genBudget, meshBudget){
   _streamMeshed=false;
   const pcx=Math.floor(player.pos.x)>>4, pcz=Math.floor(player.pos.z)>>4;
   const genT0=performance.now();
+  _lastGenMS=2.5;
   const genR=CFG.RENDER_DIST+1;   // gen only what meshing can ever need (mesh needs neighbors8 → RD+1). unloadFar deletes at RD+2, so gen<unload = real hysteresis. Without this clamp the loop endlessly regenerated rings RD+3..13 that unloadFar kept deleting — a permanent ~2.5ms+/frame streaming storm (THE dominant baseline frame cost), forever, even standing still.
-  for(let i=0;i<RING.length && genBudget>0;i++){ const o=RING[i]; if(o[0]>genR||o[0]<-genR||o[1]>genR||o[1]<-genR) continue; const kk=key(pcx+o[0],pcz+o[1]); let c=world.get(kk); if(!c){ c=makeChunk(pcx+o[0],pcz+o[1]); world.set(kk,c); } if(!c.generated){ if(!_suAdmit(0,_streamT0)) break; const _gu=performance.now(); generateChunk(c); _streamUnit(0,performance.now()-_gu); genBudget--; if(performance.now()-genT0>2.5)break; } }   // time-slice gen too (was uncapped): a slow terrain-gen can't stack into a hitch when you cross into new territory
+  for(let i=0;i<RING.length && genBudget>0;i++){ const o=RING[i]; if(o[0]>genR||o[0]<-genR||o[1]>genR||o[1]<-genR) continue; const kk=key(pcx+o[0],pcz+o[1]); let c=world.get(kk); if(!c){ c=makeChunk(pcx+o[0],pcz+o[1]); world.set(kk,c); } if(!c.generated){ if(!_suAdmit(0,_streamT0)) break; const _gu=performance.now(); generateChunk(c); _streamUnit(0,performance.now()-_gu); genBudget--; if(performance.now()-genT0>_lastGenMS)break; } }   // time-slice gen too (was uncapped): a slow terrain-gen can't stack into a hitch when you cross into new territory
   // meshing is time-sliced AND count-capped: a single heavy forest chunk can cost several ms, so a cluster
   // of them entering the ring at once used to stack into one big frame spike (the "walking into the woods"
   // stutter). Keep the slice well under a 60fps frame (16.6ms) so meshing + render + shadow never blow a frame.
   const meshT0=performance.now(), meshMS=fpsAvg<38?1.5:fpsAvg<52?2.5:3.5;   // smaller per-frame mesh budget → the CHUNK-STREAM HITCH (a 5ms mesh build spiking one frame as you walk) is cut; slightly more pop-in, far smoother motion
+  _lastMeshMS=meshMS;
   // RESUME-FIRST: an in-flight staged build must complete its stage B before any new stage A may run (shared snapshot scratch)
   if(_stagedC){ const cc=_stagedC;
     if(world.get(key(cc.cx,cc.cz))===cc && cc.generated){ if(_timedMesh(cc)){ if(!cc.dirty) remeshSet.delete(key(cc.cx,cc.cz)); _streamMeshed=true; meshBudget--; } if(performance.now()-meshT0>meshMS) return; }   // !dirty: stage B re-flags a chunk edited mid-build — never drop that request
@@ -16657,7 +16677,38 @@ function updateReasoning(dt){
 // DEBUG auto-start (headless verification)
 if(DEBUG){ boot.style.display='none'; started=true; try{ brPrewarmEntry(); }catch(e){ console.error('[BRX] prewarm', e); } if(Q.get('wretch')){ wretch.debug=true; wretch.spawnT=0.3; director.directive.bearing=270; player.pitch=-0.12; } }
 // headless introspection + entity render harness hook
+// CHUNK-GEN PROFILER. The wrappers have to be installed from IN here: the game is an ES module, so makeChunk and the
+// generation helpers are module bindings, not globals, and a bench page cannot reach them to time them from outside.
+// Off by default and costs one boolean test per call when off.
+const _GP={on:false,wrapped:false,mk:0,mkN:0,gen:0,genN:0,bulk:0,bulkN:0,draw:0,drawN:0,sweep:0,sweepN:0,mesh:0,meshN:0,pine:0,pineN:0};
+function _gpWrap(){ if(_GP.wrapped) return; _GP.wrapped=true;
+  const t=(k,f)=>function(){ if(!_GP.on) return f.apply(this,arguments);
+    const t0=performance.now(); try{ return f.apply(this,arguments); } finally { _GP[k]+=performance.now()-t0; _GP[k+'N']++; } };
+  makeChunk=t('mk',makeChunk);
+  if(typeof generateChunk==='function')     generateChunk    =t('gen',generateChunk);   // the REAL terrain cost; makeChunk only allocates the chunk object
+  if(typeof treeSweepClaimed==='function') treeSweepClaimed=t('sweep',treeSweepClaimed);
+  if(typeof buildChunkStaged==='function')  buildChunkStaged =t('mesh',buildChunkStaged);
+  if(typeof _pineAtPreZone==='function')    _pineAtPreZone   =t('pine',_pineAtPreZone);
+  if(typeof _bulkRun==='function')          _bulkRun         =t('bulk',_bulkRun); }      // the structure builders, one per frame — separate from streaming entirely
 window.__hc={
+  genProf(on){ try{ _gpWrap(); if(on===false){ _GP.on=false; return 'off'; }
+      _GP.mk=_GP.gen=_GP.sweep=_GP.mesh=_GP.pine=_GP.bulk=_GP.draw=0; _GP.mkN=_GP.genN=_GP.sweepN=_GP.meshN=_GP.pineN=_GP.bulkN=_GP.drawN=0; _GP.on=true; return 'on'; }catch(e){ return {err:String(e.message||e)}; } },
+  // MESHED-in-ring is the number that matches what the player sees: a chunk that exists but has no mesh is invisible, so
+  // counting world.size (which includes created-but-ungenerated chunks, and the RD+1 generation ring) overstates progress.
+  fill(){ try{ const pcx=Math.floor(player.pos.x)>>4, pcz=Math.floor(player.pos.z)>>4, R=CFG.RENDER_DIST; let meshed=0, want=0;
+      for(let dx=-R;dx<=R;dx++) for(let dz=-R;dz<=R;dz++){ want++; const c=getChunk(pcx+dx,pcz+dz); if(c&&c.meshed&&!c.dirty) meshed++; }
+      return { meshMS:_lastMeshMS, genMS:_lastGenMS,
+      chunks:world.size, meshed, want, ring:Math.pow(R*2+1,2), rd:R, fps:Math.round(fpsAvg),
+      genUnits:_suStat.gen, meshUnits:_suStat.mesh, genMs:+_suStat.genMs.toFixed(0), meshMs:+_suStat.meshMs.toFixed(0) }; }catch(e){ return {err:String(e.message||e)}; } },
+  genRead(){ try{ const f=(a,b)=>b?+(a/b).toFixed(3):0;
+      return { chunks:world.size, fps:Math.round(fpsAvg),
+        makeChunk:{ms:+_GP.mk.toFixed(0), n:_GP.mkN, avg:f(_GP.mk,_GP.mkN)},
+        generateChunk:{ms:+_GP.gen.toFixed(0), n:_GP.genN, avg:f(_GP.gen,_GP.genN)},
+        treeSweep:{ms:+_GP.sweep.toFixed(0), n:_GP.sweepN, avg:f(_GP.sweep,_GP.sweepN), pctOfGen:_GP.gen?+(100*_GP.sweep/_GP.gen).toFixed(1):0},
+        pineAt:{ms:+_GP.pine.toFixed(0), n:_GP.pineN, avg:f(_GP.pine,_GP.pineN)},
+        meshing:{ms:+_GP.mesh.toFixed(0), n:_GP.meshN, avg:f(_GP.mesh,_GP.meshN)},
+        builders:{ms:+_GP.bulk.toFixed(0), n:_GP.bulkN, avg:f(_GP.bulk,_GP.bulkN)},
+        render:{ms:+_GP.draw.toFixed(0), n:_GP.drawN, avg:f(_GP.draw,_GP.drawN)} }; }catch(e){ return {err:String(e.message||e)}; } },
   save(){ try{ return saveGame() ? 'saved '+Object.keys(edits).length+' edits' : 'save refused'; }catch(e){ return e.message; } },
   saveInfo(){ try{ const s=readSave(); return s?{savedAt:s.savedAt,edits:Object.keys(s.edits).length,pos:[s.player.x,s.player.y,s.player.z].map(v=>Math.round(v*10)/10),inv:s.inv.filter(Boolean).length,nights:(s.horror&&s.horror.nightsSurvived)|0}:null; }catch(e){ return e.message; } },
   wipe(){ try{ wipeSave(); return 'wiped'; }catch(e){ return e.message; } },
