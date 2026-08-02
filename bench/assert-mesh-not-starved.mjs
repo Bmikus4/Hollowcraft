@@ -26,7 +26,12 @@ import fs from 'node:fs';
 import { chromium } from 'playwright-core';
 
 const ROOT = 'D:\\code\\Minecraft';
-const MAX_GEN_BEFORE_MESH = 40;   // generation units allowed to run before meshing has produced 2. Measured today: 211.
+// Generation units allowed to run before meshing has produced 2. The bound is PRINCIPLED, not fitted: meshing a chunk
+// needs only that chunk and its 8 neighbours generated (see neighbors8), so meshing can legitimately begin after roughly
+// 9-25 units and anything beyond that is scheduling, not dependency. Observed on this build across 5 runs with the exact
+// in-engine milestone: 74, 53, 53, 41, 48. The earlier limit of 40 sat inside that spread, so a run landing at 41 was one
+// step from reporting a false PASS on a starvation that is plainly still there.
+const MAX_GEN_BEFORE_MESH = 25;
 
 function freePort(){ return new Promise((res, rej)=>{ const s=createServer(); s.listen(0,'127.0.0.1',()=>{ const p=s.address().port; s.close(()=>res(p)); }); s.on('error',rej); }); }
 function waitHttp(url, t=15000){ return new Promise((res,rej)=>{ const t0=Date.now();
@@ -60,13 +65,16 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:120000});
 
     // ---- the cold boot: how much generation runs before meshing gets going? ----
-    let genAt2Mesh=null, last=null;
+    // The milestone is latched INSIDE the engine (__hc.fill().genAtMesh2) rather than sampled here. Reading it from a
+    // poll made the answer depend on the poll interval: this measurement reported 211 and later 78 on the same code,
+    // because generation that landed between two 250ms polls was attributed to whichever side the poll happened to see.
+    let last=null;
     for(let i=0;i<120;i++){
       const f=await page.evaluate('__hc.fill()'); last=f;
-      if(genAt2Mesh==null && f.meshUnits>=2) genAt2Mesh=f.genUnits;
       if(f.meshed>=f.want) break;
       await sleep(250);
     }
+    const genAt2Mesh = last.genAtMesh2;
     console.log('COLD BOOT   ring visible after '+(Date.now()-t0)+'ms');
     console.log('  generation units run before meshing produced its 2nd unit: '+genAt2Mesh+'   (limit '+MAX_GEN_BEFORE_MESH+')');
     console.log('  final totals: gen='+last.genUnits+'  mesh='+last.meshUnits);
@@ -74,13 +82,18 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     const starved = genAt2Mesh > MAX_GEN_BEFORE_MESH;
 
     // ---- CONTROL: already-generated terrain, where mesh work exists with no generation competing ----
+    // Wait for STREAMING TO SETTLE after each move rather than for a fixed 4000ms: the counters only mean something once
+    // the move has been fully absorbed, and a fixed window either cuts the move short or bills idle time to it.
+    const settled = async (ms=15000) => { const t0=Date.now(); let prev=-1;
+      for(;;){ const f=await page.evaluate('__hc.fill()'); const n=f.genUnits+f.meshUnits;
+        if(n===prev) return f; prev=n;
+        if(Date.now()-t0>ms) return f; await sleep(250); } };
+    await settled();
     const before=await page.evaluate('__hc.fill()');
-    await page.evaluate('__hc.look(3.14159,0)').catch(()=>{});
-    await sleep(1200);
-    // walk back and forth over ground already generated so chunks re-enter the ring needing mesh, not gen
     const P=await page.evaluate('__hc.pos()');
-    await page.evaluate('__hc.tp('+Math.round(P.x+40)+','+Math.round(P.z)+')'); await sleep(4000);
-    await page.evaluate('__hc.tp('+Math.round(P.x)+','+Math.round(P.z)+')');    await sleep(4000);
+    // walk back and forth over ground already generated so chunks re-enter the ring needing mesh, not gen
+    await page.evaluate('__hc.tp('+Math.round(P.x+40)+','+Math.round(P.z)+')'); await settled();
+    await page.evaluate('__hc.tp('+Math.round(P.x)+','+Math.round(P.z)+')');    await settled();
     const after=await page.evaluate('__hc.fill()');
     const dGen=after.genUnits-before.genUnits, dMesh=after.meshUnits-before.meshUnits;
     const inverted = dMesh > dGen;
