@@ -1,35 +1,38 @@
-// UNFINISHED PROBE — ITS CONTROL DOES NOT PASS. Do not trust any number this prints yet.
+// UNFINISHED PROBE — ITS CONTROL STILL FAILS. Do not trust any number this prints.
 //
-// Goal: detect the daytime horizon band recorded as still-open in 0ba0f22 (rgb ~(44,74,112), chroma 66 against a median
-// of 46, about one degree below the sight line).
+// Goal: detect the daytime horizon band recorded as still open in 0ba0f22 (rgb ~(44,74,112), chroma 66 against a median
+// of 46, about one degree below the sight line). It measures CHROMA, not luminance, because 0ba0f22 is explicit that the
+// band is a saturation anomaly and DIMMER than the sky above it, so every brightness metric written for it walked past.
 //
-// State, honestly. Two versions were measured:
-//   (a) strongest-chroma-row within 10% of frame centre, full width -> reported a large excess (53.7), but the row it
-//       found was ABOVE the sight line and BRIGHTER than the sky, which is not the artefact 0ba0f22 describes. It was
-//       measuring the sky gradient. A number about the wrong thing.
-//   (b) anchored to the waterline, chroma of the 10 rows just below it, central 40% of width -> the control FAILS:
-//       pushing horizon vibrance 0 -> 1.5 made measured chroma go DOWN (83.1 -> 72.4) instead of up.
-// The likely reason for (b): the waterline is re-detected per screenshot from the sharpest luminance step, so changing
-// vibrance moves the detected row and the two shots no longer sample the same rows. The fix is to lock the waterline
-// once and reuse that row for every subsequent shot. That is the next thing to do here.
+// WHAT HAS BEEN ELIMINATED as a source of run-to-run variance, each by measurement:
+//   - the day clock advancing between captures (the hour is re-pinned before every screenshot)
+//   - the waterline being re-detected per shot (it is locked once and reused; this was a guess and it was NOT the cause)
+//   - weather, exposure and adaptive resolution — __hc.pinScene() freezes them. This one mattered: the `weather` object
+//     is constructed with Math.random() in its rain and fog timers, and scene fog plus toneMappingExposure follow it.
+//   - a single unlucky frame (each measurement is the median of three captures)
 //
-// It is committed unfinished on purpose: the failed control is itself the finding, and the guard doing its job (aborting
-// instead of printing a number) is worth keeping. Renamed tmp-* so nothing treats it as a passing assertion.
+// WHAT IS STILL WRONG, and it is the vantage. Look at bench/results/band-vib0.png: the camera is not pointing at open
+// ocean. Sea fills the left, a forested cliff fills the right, and the sample window — the central 40% of the width —
+// straddles the shoreline, so trees and terrain sit inside the measurement. Terrain and foliage streaming differing
+// slightly between runs is easily worth the 27-point chroma spread the orchestrator measured across three runs of this
+// same command (93.7, 104.9, 77.6) against an effect of about 7 points. The camera yaw formula was also wrong for this
+// engine and is fixed here (lookDir uses x=-sin(yaw), z=-cos(yaw), so the inverse is atan2(-dx,-dz), not
+// -PI/2-atan2(dz,dx)), and the vantage search now requires a whole +/-25 degree fan of water rather than one ray — but
+// neither was enough: from this spawn the search still returns a shore with land inside the frame.
 //
-// It measures CHROMA, not luminance, and that is the whole point. The note in 0ba0f22 is explicit that this is a
-// saturation anomaly and that it is DIMMER than the sky above it -- so every brightness metric written for it walked
-// straight past. A luminance check here would go green while Ben can still see the band.
+// THE NEXT MOVE, for whoever picks this up: stop trying to find a clean vantage by searching the shore. Either place the
+// camera out over open water away from the island entirely, or reject sample COLUMNS that contain land instead of
+// assuming the central 40% is clean — the frame can be classified per column before any chroma is averaged.
 //
-// Already ruled out by measurement in 0ba0f22, do not re-test: the backdrop ring, the sky's anchor value, the water's
-// grazing sheen, the pine layer, the width of the sky convergence. Layer bisection is CONFOUNDED -- hiding the sky dome
-// exposes scene.background and repaints the upper frame -- so this does not bisect, it only measures.
+// Also unresolved and worth knowing: __hc.setTime(0.42) leaves globalU.uDay at 0.99924, so uDay is not the 0..1 fraction
+// the call takes. The frame does look like day, but "midday" here is asserted, not verified.
 //
-// CONTROL: the horizon vibrance dial (__hc.vis({seavib})) pushes chroma at constant luminance. Turning it up must make
-// the measured band stronger, and that is what proves the metric responds to saturation in the real rendered frame
-// rather than to some artefact of the screenshot.
+// Already ruled out by 0ba0f22 itself, do not re-test: the backdrop ring, the sky's anchor value, the water's grazing
+// sheen, the pine layer, the width of the sky convergence. Layer bisection is confounded — hiding the sky dome exposes
+// scene.background and repaints the upper frame.
 //
-// usage: node bench/assert-horizon-band.mjs
-//        exit 0 = pass (no band), 1 = fail
+// usage: node bench/tmp-horizon-band.mjs
+//
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import http from 'node:http';
@@ -136,15 +139,24 @@ function findBand(img, lockedWl){
         const x=Math.round(P.x+Math.cos(th)*r*6), z=Math.round(P.z+Math.sin(th)*r*6);
         const g=__hc.surfH(x,z); if(g<SEA+1 || g>SEA+5) continue;
         const dx=Math.cos(th), dz=Math.sin(th); let open=true;
-        for(let s=20;s<=260;s+=10) if(__hc.surfH(Math.round(x+dx*s), Math.round(z+dz*s))>SEA){ open=false; break; }
+        // the WHOLE forward sector must be water, not just the centre ray: the sample window is the middle 40% of the
+        // frame, so land anywhere in a +/-25 degree fan lands inside it and swamps the measurement
+        for(let a2=-0.44; a2<=0.44 && open; a2+=0.11){ const ux=Math.cos(th+a2), uz=Math.sin(th+a2);
+          for(let s=12;s<=260;s+=8) if(__hc.surfH(Math.round(x+ux*s), Math.round(z+uz*s))>SEA){ open=false; break; } }
         if(!open) continue;
-        return { x, z, g, az:Math.atan2(dz,dx), yaw:-Math.PI/2-Math.atan2(dz,dx) }; }
+        return { x, z, g, az:Math.atan2(dz,dx), yaw:Math.atan2(-dx,-dz) }; }
       return null; })()`);
     if(!cam){ console.log('ABORT: no open-ocean coastal camera found — nothing to measure.'); process.exit(1); }
     await page.evaluate(`__hc.tpAt(${cam.x}, ${cam.g+3}, ${cam.z})`);
     await sleep(7000);
     await page.evaluate('__hc.setTime(0.42)');                     // midday
     await sleep(1500);
+    // Freeze the scene BEFORE anything is measured, and wait for the ring to finish so streaming progress cannot differ
+    // between runs either. Weather alone was worth ~27 points of chroma spread on a ~7 point effect.
+    console.log('pinned: '+JSON.stringify(await page.evaluate('__hc.pinScene()')));
+    for(let i=0;i<60;i++){ const f=await page.evaluate('__hc.fill()'); if(f.meshed>=f.want) break; await sleep(500); }
+    await page.evaluate('__hc.pinScene()');
+    await sleep(2500);
     await page.evaluate(`__hc.cam({yaw:${cam.yaw}, pitch:0.0})`);  // pitch 0 → the sight line is the frame's centre row
     await sleep(1500);
 
@@ -152,9 +164,13 @@ function findBand(img, lockedWl){
     let WL=null;
     // The day clock keeps running between shots. Two captures 2 s apart are at different sun angles, and that difference
     // is larger than the effect being measured — so the hour is re-pinned immediately before every screenshot.
-    const shot=async(tag)=>{ await page.evaluate('__hc.setTime(0.42)'); await sleep(250);
-      const f=path.join(OUT,'band-'+tag+'.png'); await page.screenshot({path:f});
-      const img=readPNG(f); if(WL==null) WL=findBand(img).waterlineY; return findBand(img, WL); };
+    // Median of three captures a few frames apart: one screenshot can land on a frame where something transient is on
+    // screen, and the median rejects that without hiding a real change the way a mean would.
+    const shot=async(tag)=>{ const runs=[];
+      for(let k=0;k<3;k++){ await page.evaluate('__hc.setTime(0.42)'); await page.evaluate('__hc.pinScene()'); await sleep(350);
+        const f=path.join(OUT,'band-'+tag+(k?'-'+k:'')+'.png'); await page.screenshot({path:f});
+        const img=readPNG(f); if(WL==null) WL=findBand(img).waterlineY; runs.push(findBand(img, WL)); }
+      runs.sort((a,b)=>a.band-b.band); return runs[1]; };
 
     // ---------- CONTROL: does the metric respond to chroma at all? ----------
     await page.evaluate('__hc.vis({seavib:0})');   await sleep(900);
