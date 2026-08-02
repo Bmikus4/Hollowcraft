@@ -103,6 +103,23 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
       if(best.d<=2){ nearDup++; console.log('  t+'+String(p.t).padStart(6)+'ms  differs from a loading-screen program in '+best.d+' field(s): '+JSON.stringify(best.where)); }
     }
     console.log('  '+nearDup+' of '+play.length+' in-play programs are within 2 fields of one already compiled');
+
+    // ---- THE ENUMERATION: what a prewarm would actually have to reproduce ----
+    // Grouped by the key field responsible, because the fields need different things done about them. This is the list
+    // the prewarm needs; compiling the scene as-found is what produced 23 keys the real draw never asked for.
+    const tally={};
+    for(const p of play){ let best={d:1e9,w:[]};
+      for(const l of load){ const h=hamming(l.key,p.key); if(h.d<best.d) best=h; }
+      if(best.d<=2) for(const f of best.w){ const i=f.split(':')[0]; (tally[i]=tally[i]||[]).push(f); } }
+    const MEANING={ '0':'material class (lambert/phong/basic/depth/distanceRGBA)',
+      '5':'UV / map attribute present',
+      '34':'point-light count', '35':'point-light count',
+      '49':'three boolean-parameter bitmask A', '50':'three boolean-parameter bitmask B',
+      '52':'material identity (onBeforeCompile source or name)' };
+    console.log('
+=== which condition is responsible, over the near-duplicates ===');
+    for(const [i,arr] of Object.entries(tally).sort((a,b)=>b[1].length-a[1].length))
+      console.log('  field '+i.padStart(3)+'  '+String(arr.length).padStart(2)+' programs  '+(MEANING[i]||'?')+'   e.g. '+arr[0]);
     fs.writeFileSync(path.join(OUT,'shaderdiff.json'), JSON.stringify(all,null,1));
     console.log('\nfull keys written to bench/results/shaderdiff.json');
     await browser.close();
