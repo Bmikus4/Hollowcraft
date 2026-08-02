@@ -37,8 +37,12 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
 
 // BURIED = something solid sits directly on top of it. FLOATING = nothing solid sits directly under it.
 // Read straight off the block array. No pixels, no judgement.
+// SUNKEN is the case Ben kept reporting after this check went green twice: the bush is NOT buried (air above it) and NOT
+// floating (solid under it), so both original rules pass it -- but all four of its horizontal neighbours are solid at its
+// own level, i.e. it is sitting at the bottom of a one-by-one hole with the ground a block higher on every side. Read off
+// the block array like the others; no pixels, no judgement.
 function CHECK(cx,cz,R){
-  return '(()=>{ var out={cols:0,deco:0,buried:0,floating:0,ok:0,ex:[]};'
+  return '(()=>{ var out={cols:0,deco:0,buried:0,floating:0,sunken:0,ok:0,ex:[]};'
   + ' var names={}; var ks=__hc.bid(); for(var i=0;i<ks.length;i++) names[__hc.bid(ks[i])]=ks[i];'
   + ' function cross(b){ return b>0 && __hc.catId(b)==="cross"; }'
   + ' function solid(b){ return b>0 && !cross(b) && __hc.isSolidId(b); }'
@@ -52,7 +56,10 @@ function CHECK(cx,cz,R){
   + '     var a=B(x,y2+1,z), u=B(x,y2-1,z);'
   + '     if(solid(a)){ out.buried++; if(out.ex.length<10) out.ex.push({x:x,y:y2,z:z,ground:g,what:names[b],above:names[a],why:"BURIED"}); }'
   + '     else if(!solid(u)){ out.floating++; if(out.ex.length<10) out.ex.push({x:x,y:y2,z:z,ground:g,what:names[b],below:(names[u]||"air"),why:"FLOATING"}); }'
-  + '     else out.ok++;'
+  + '     else { var w4=0;'
+  + '       if(solid(B(x+1,y2,z)))w4++; if(solid(B(x-1,y2,z)))w4++; if(solid(B(x,y2,z+1)))w4++; if(solid(B(x,y2,z-1)))w4++;'
+  + '       if(w4===4){ out.sunken++; if(out.ex.length<10) out.ex.push({x:x,y:y2,z:z,ground:g,what:names[b],walls:w4,why:"SUNKEN(1x1 hole)"}); }'
+  + '       else out.ok++; }'
   + '   } }'
   + ' return out; })()';
 }
@@ -103,12 +110,30 @@ function CHECK(cx,cz,R){
     await page.evaluate('(()=>{ __hc.setBlockAt('+ctl.x+','+(ctl.g+1)+','+ctl.z+',0); __hc.setBlockAt('+ctl.x+','+ctl.g+','+ctl.z+',"grass"); })()');
     await sleep(800);
 
+    // ---------- CONTROL 2: the one-by-one hole (Ben's actual report) ----------
+    // Build the exact shape by hand -- a bush on the ground with all four neighbours raised one block -- and confirm the
+    // new SUNKEN rule sees it. Without this the rule could be silently inert and its zero would mean nothing.
+    const ctl2 = await page.evaluate('(()=>{ var P=__hc.pos(); var x=Math.floor(P.x)-5, z=Math.floor(P.z)+5; var g=__hc.surfH(x,z);'
+      + ' __hc.setBlockAt(x,g,z,"bush");'
+      + ' __hc.setBlockAt(x+1,g,z,"dirt"); __hc.setBlockAt(x-1,g,z,"dirt"); __hc.setBlockAt(x,g,z+1,"dirt"); __hc.setBlockAt(x,g,z-1,"dirt");'
+      + ' return {x:x,z:z,g:g}; })()');
+    await sleep(1200);
+    const c2 = await page.evaluate(CHECK(ctl2.x, ctl2.z, 1));
+    const there2 = await page.evaluate('(()=>{ var b=__hc.blockAt('+ctl2.x+','+ctl2.g+','+ctl2.z+')|0; var n={}; var ks=__hc.bid();'
+      + ' for(var i=0;i<ks.length;i++) n[__hc.bid(ks[i])]=ks[i]; return b?(n[b]||b):"air"; })()');
+    console.log('CONTROL2 walled a bush into a 1x1 hole at ('+ctl2.x+','+ctl2.z+') y='+ctl2.g+'  block there: '+there2
+                +'  -> sunken='+c2.sunken+'   '+(c2.sunken>0?'CAUGHT — the SUNKEN rule can fail':'NOT CAUGHT — the SUNKEN rule is inert'));
+    if(c2.sunken===0 && there2==='bush'){ console.log('ABORT: the new rule cannot detect the shape it was written for.'); fail=true; }
+    await page.evaluate('(()=>{ for(const d of [[1,0],[-1,0],[0,1],[0,-1]]) __hc.setBlockAt('+ctl2.x+'+d[0],'+ctl2.g+','+ctl2.z+'+d[1],"grass");'
+      + ' __hc.setBlockAt('+ctl2.x+','+ctl2.g+','+ctl2.z+',"grass"); })()');
+    await sleep(800);
+
     // ---------- 1: ordinary generated terrain ----------
     if(!fail){
       const r = await page.evaluate(CHECK(cx, cz, 40));
-      console.log('PLAIN TERRAIN  cols='+r.cols+'  deco='+r.deco+'  ok='+r.ok+'  BURIED='+r.buried+'  FLOATING='+r.floating);
+      console.log('PLAIN TERRAIN  cols='+r.cols+'  deco='+r.deco+'  ok='+r.ok+'  BURIED='+r.buried+'  FLOATING='+r.floating+'  SUNKEN='+r.sunken);
       if(r.deco < 50){ console.log('ABORT: only '+r.deco+' decoration blocks — sample too thin to mean anything.'); fail=true; }
-      else if(r.buried||r.floating){ console.log('  ex '+JSON.stringify(r.ex.slice(0,6))); fail=true; }
+      else if(r.buried||r.floating||r.sunken){ console.log('  ex '+JSON.stringify(r.ex.slice(0,6))); fail=true; }
     }
 
     // ---------- 2: a structure pad has just moved the ground under existing decoration ----------
@@ -117,9 +142,9 @@ function CHECK(cx,cz,R){
       await sleep(6000);
       const Q = await page.evaluate('__hc.pos()');
       const r = await page.evaluate(CHECK(Math.round(Q.x), Math.round(Q.z), 26));
-      console.log('VILLAGE PAD    cols='+r.cols+'  deco='+r.deco+'  ok='+r.ok+'  BURIED='+r.buried+'  FLOATING='+r.floating);
+      console.log('VILLAGE PAD    cols='+r.cols+'  deco='+r.deco+'  ok='+r.ok+'  BURIED='+r.buried+'  FLOATING='+r.floating+'  SUNKEN='+r.sunken);
       if(r.deco < 50){ console.log('ABORT: only '+r.deco+' decoration blocks near the pad.'); fail=true; }
-      else if(r.buried||r.floating){ console.log('  ex '+JSON.stringify(r.ex.slice(0,6))); fail=true; }
+      else if(r.buried||r.floating||r.sunken){ console.log('  ex '+JSON.stringify(r.ex.slice(0,6))); fail=true; }
     }
 
     // ---------- 3: a wide sweep. The spawn ring holds the cabin, the trail network, the shrines and the lookout
@@ -133,10 +158,10 @@ function CHECK(cx,cz,R){
         await sleep(5200);
         const Q = await page.evaluate('__hc.pos()');
         const r = await page.evaluate(CHECK(Math.round(Q.x), Math.round(Q.z), 28));
-        sites++; tot+=r.deco; bad+=r.buried+r.floating;
-        const tag=(r.buried||r.floating)?('   <-- VIOLATIONS buried='+r.buried+' floating='+r.floating):'';
+        sites++; tot+=r.deco; bad+=r.buried+r.floating+r.sunken;
+        const tag=(r.buried||r.floating||r.sunken)?('   <-- VIOLATIONS buried='+r.buried+' floating='+r.floating+' sunken='+r.sunken):'';
         console.log('  sweep '+String(ox).padStart(5)+','+String(oz).padStart(5)+'  deco='+String(r.deco).padStart(4)+'  ok='+String(r.ok).padStart(4)+tag);
-        if(r.buried||r.floating) console.log('    ex '+JSON.stringify(r.ex.slice(0,4)));
+        if(r.buried||r.floating||r.sunken) console.log('    ex '+JSON.stringify(r.ex.slice(0,4)));
       }
       console.log('WIDE SWEEP  '+sites+' sites, '+tot+' decoration blocks, '+bad+' violations');
       if(tot<300){ console.log('ABORT: '+tot+' decoration blocks over '+sites+' sites is too thin a sample.'); fail=true; }
