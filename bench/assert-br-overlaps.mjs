@@ -21,7 +21,18 @@ import fs from 'node:fs';
 import { chromium } from 'playwright-core';
 
 const ROOT = 'D:\\code\\Minecraft';
-const FLAGS = process.argv[2] ? ('&'+process.argv[2]) : '';
+const FLAGS = (process.argv[2] && !process.argv[2].startsWith('--')) ? ('&'+process.argv[2]) : '';
+const STARVED = process.argv.includes('--starve');   // skip the build wait, to prove the guard catches a starved region
+// MINIMUM WALLS PER REGION, from measurement rather than feel. Two independent runs reported 616-676 walls per region
+// across 8 regions, carrying 21-27 overlaps each, so 400 sits well below every real observation.
+//
+// The measurement also REVISED why this guard exists. It was added because a half-built region would report near-zero
+// overlaps, which is indistinguishable from a clean one -- a false pass. Running with --starve, which skips the build
+// wait entirely, still reports 616-676 walls: __hcBRX.walkTo builds the region synchronously, so that starved sample
+// cannot be produced by querying too early, and this harness was never actually at risk. The guard stays as a cheap
+// invariant in case walkTo ever becomes asynchronous, and --minwalls=N exists so it can be proved to FIRE rather than
+// merely to be present, because a guard never observed rejecting anything is not evidence either.
+const MIN_WALLS = (()=>{ const a=process.argv.find(x=>x.startsWith('--minwalls=')); return a?+a.slice(11):400; })();
 function freePort(){ return new Promise((res, rej)=>{ const s=createServer(); s.listen(0,'127.0.0.1',()=>{ const p=s.address().port; s.close(()=>res(p)); }); s.on('error',rej); }); }
 function waitHttp(url, t=15000){ return new Promise((res,rej)=>{ const t0=Date.now();
   (function poll(){ const rq=http.get(url,r=>{r.resume();res();}); rq.on('error',()=>{ if(Date.now()-t0>t)rej(new Error('down')); else setTimeout(poll,250); }); })(); }); }
@@ -35,11 +46,15 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
 (async()=>{
   const port = await freePort();
   const server = spawn(process.execPath, [path.join(ROOT,'mp-server.js')], { cwd:ROOT, env:{...process.env, MP_PORT:String(port), MP_DISC:String(port+1)}, stdio:'ignore' });
-  let fail=false;
+  let fail=false, aborted=false, page=null;
+  // Wait for a STATE, not a duration — same fix the sibling harnesses took.
+  const settleFor = async (expr, pred, ms=20000) => { const t0=Date.now();
+    for(;;){ const v = await page.evaluate(expr); if(pred(v)) return v;
+      if(Date.now()-t0>ms) return v; await sleep(150); } };
   try{
     const base='http://127.0.0.1:'+port; await waitHttp(base+'/index.html');
     let browser=await chromium.launch({ executablePath:findBrowser(), headless:true, args:COMMON_ARGS });
-    let ctx=await browser.newContext({ viewport:{width:900,height:600} }); let page=await ctx.newPage();
+    let ctx=await browser.newContext({ viewport:{width:900,height:600} }); page=await ctx.newPage();
     page.on('pageerror', e=>console.log('PAGEERROR:', String(e.message||e).slice(0,300)));
     await page.goto('about:blank');
     const gl='(()=>{try{const c=document.createElement("canvas");const g=c.getContext("webgl2")||c.getContext("webgl");if(!g)return "NO";const e=g.getExtension("WEBGL_debug_renderer_info");return e?String(g.getParameter(e.UNMASKED_RENDERER_WEBGL)):"?";}catch(e){return "E";}})()';
@@ -76,17 +91,29 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     let total=0, sites=0, worst=0;
     for(const [gx,gz] of [[0,0],[1,0],[0,1],[1,1],[2,0],[-1,0],[0,-1],[-1,-1]]){
       await page.evaluate('__hcBRX.walkTo('+gx+','+gz+')');
-      await sleep(2600);
+      // Wait for the region to BUILD rather than betting on how long building takes. --starve skips this deliberately,
+      // to show the guard below catching a thin sample instead of reporting its near-zero overlaps as success.
+      if(!STARVED) await settleFor('__hcBRX.wallOverlaps().walls', v => v >= MIN_WALLS);
       const r = await page.evaluate('__hcBRX.wallOverlaps()');
       sites++; total+=r.overlaps; worst=Math.max(worst,r.worst||0);
       console.log('  region '+String(gx).padStart(3)+','+String(gz).padStart(3)+'   walls='+String(r.walls).padStart(5)
         +'  OVERLAPS='+String(r.overlaps).padStart(4)+'  worst='+(r.worst||0).toFixed(2));
       if(r.overlaps && r.sample && r.sample.length) console.log('    ex '+JSON.stringify(r.sample.slice(0,2)));
+      // THE GUARD. Zero overlaps in a half-built region is indistinguishable from a clean one, so a thin sample must not
+      // be allowed to read as success. Same shape as assert-shrub-seat's "sample too thin to mean anything".
+      if(r.walls < MIN_WALLS){
+        console.log('    ABORT: only '+r.walls+' walls here (floor '+MIN_WALLS+') — too thin to judge. A near-zero overlap'
+                    +' count in a region this size is an artefact of it not being built, not evidence that it is clean.');
+        aborted=true; break; }
     }
-    console.log('\n'+sites+' regions walked, '+total+' wall overlaps, worst span '+worst.toFixed(2));
-    if(total>0) fail=true;
+    if(!aborted){
+      console.log('\n'+sites+' regions walked, '+total+' wall overlaps, worst span '+worst.toFixed(2));
+      if(total>0) fail=true; }
     await browser.close();
   } finally { try{ server.kill(); }catch(e){} }
+  // ABORT is reported distinctly from FAIL. A thin sample invalidates the total; it is neither evidence of overlaps nor
+  // evidence of their absence, and collapsing it into either verdict is what the guard exists to prevent.
+  if(aborted){ console.log('RESULT: ABORT — sample too thin to judge. This is NOT a pass.'); process.exit(1); }
   console.log(fail?'RESULT: FAIL':'RESULT: PASS');
   process.exit(fail?1:0);
 })().catch(e=>{ console.error(e); process.exit(1); });
