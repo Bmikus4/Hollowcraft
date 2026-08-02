@@ -108,18 +108,34 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     // Grouped by the key field responsible, because the fields need different things done about them. This is the list
     // the prewarm needs; compiling the scene as-found is what produced 23 keys the real draw never asked for.
     const tally={};
-    for(const p of play){ let best={d:1e9,w:[]};
+    for(const p of play){ let best={d:1e9,where:[]};
       for(const l of load){ const h=hamming(l.key,p.key); if(h.d<best.d) best=h; }
-      if(best.d<=2) for(const f of best.w){ const i=f.split(':')[0]; (tally[i]=tally[i]||[]).push(f); } }
+      if(best.d<=2) for(const f of best.where){ const i=f.split(':')[0]; (tally[i]=tally[i]||[]).push(f); } }
     const MEANING={ '0':'material class (lambert/phong/basic/depth/distanceRGBA)',
       '5':'UV / map attribute present',
       '34':'point-light count', '35':'point-light count',
       '49':'three boolean-parameter bitmask A', '50':'three boolean-parameter bitmask B',
       '52':'material identity (onBeforeCompile source or name)' };
-    console.log('
-=== which condition is responsible, over the near-duplicates ===');
+    console.log('\n=== which condition is responsible, over the near-duplicates ===');
     for(const [i,arr] of Object.entries(tally).sort((a,b)=>b[1].length-a[1].length))
       console.log('  field '+i.padStart(3)+'  '+String(arr.length).padStart(2)+' programs  '+(MEANING[i]||'?')+'   e.g. '+arr[0]);
+
+    // ---- CONSOLIDATION vs PREWARM: could there simply be FEWER programs? ----
+    // Splits each key into what the RENDERER needs (parameter-shaped fields) and WHO the material is (the identity suffix
+    // three appends -- a material name, or onBeforeCompile.toString()). Two programs are consolidatable only if their
+    // rendering heads are identical and only the identity differs. Index-based splitting is unsound here: the key's length
+    // varies because field 0 is a type name for built-ins and a pair of shader ids for ShaderMaterials.
+    const PARAM=/^(true|false||highp|mediump|lowp|srgb|srgb-linear|uv|[0-9.+-]+|KERNEL_RADIUS|NUM_MIPS|SRGB_TRANSFER|AGX_TONE_MAPPING|lambert|phong|basic|depth|distanceRGBA|physical|standard|matcap|toon|sprite|shadow|normal|points|dashed|line)$/;
+    const splitKey=k=>{ const f=split(k); let i=0; for(;i<f.length;i++) if(!PARAM.test(f[i])) break;
+      return {head:f.slice(0,i).join(','), id:f.slice(i).join(',')||'(none)'}; };
+    const byHead={}; for(const r of all){ const sp=splitKey(r.key); (byHead[sp.head]=byHead[sp.head]||[]).push({...r,id:sp.id}); }
+    let cg=0, cprog=0, crem=0;
+    console.log('\n=== consolidation: same rendering requirements, different material identity ===');
+    for(const v of Object.values(byHead)){ const ids=new Set(v.map(x=>x.id));
+      if(ids.size>1){ cg++; cprog+=v.length; crem+=v.length-1;
+        console.log('  '+v.length+' programs, identities: '+[...ids].map(t=>t.replace(/\s+/g,' ').slice(0,44)).join(' / ')); } }
+    console.log('  -> '+cg+' groups, '+cprog+' programs, '+crem+' removable by consolidating materials');
+    console.log('  -> '+(all.length-cprog)+' programs have a rendering configuration nothing else shares (forced)');
     fs.writeFileSync(path.join(OUT,'shaderdiff.json'), JSON.stringify(all,null,1));
     console.log('\nfull keys written to bench/results/shaderdiff.json');
     await browser.close();
