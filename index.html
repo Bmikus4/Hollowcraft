@@ -3977,6 +3977,19 @@ function _suNote(kind, ms){ _suEst[kind] += (ms-_suEst[kind])*0.15; }
 //  NOT the cause, measured and ruled out: the Jul-29 tree sweep, which is 2% of generation time (0.066 ms per chunk).
 // ---------------------------------------------------------------------
 let _lastMeshMS=3.5, _lastGenMS=2.5;   // the live slice values, exposed through __hc.fill() for measurement only
+// OVERWORLD SHADER PREWARM — BUILT, MEASURED, AND SHIPS OFF. Same disposition as brPrecompile, for a different reason.
+//   Cold boot compiles 58 programs. 42 are already behind the loading screen (the icon pass); 16 land in play, each
+//   stalling its frame. Compiling the scene on the loading screen looked like the fix and is not:
+//     prewarm off:  loading screen 8191ms, 42 programs behind it, 28 compiled IN PLAY, total 70
+//     prewarm on:   loading screen 8641ms, 65 programs behind it, 28 compiled IN PLAY, total 93
+//   It cost 575 ms, warmed 23 programs, and removed NONE of the in-play compiles. three keys a program on runtime state
+//   — light count, shadow config, fog — so compiling against a half-built scene produces different cache keys from the
+//   ones the real draw asks for later. The 23 are simply never used again.
+//   The likely real cause is the one already fixed for the Backrooms: a MOVING POINT-LIGHT COUNT is a compile storm,
+//   which is what brStableLightCount exists for. Doing the same for the overworld is a visual decision (which lights
+//   survive), so it goes to Ben rather than being taken here. Left switchable so it can be re-measured in one flag.
+const _PREWARM = Q.get('prewarm')!=null;   // ?prewarm=1 → take the trade above. OFF by default: measured to cost 575ms and buy nothing.
+let _prewarmMs=0;                          // what it actually cost the loading screen — reported, never guessed
 function _suAdmit(kind, t0){
   if(!PERF.streamBudgetMs) return true;                       // 0 = the old two-budget behaviour
   // THE FIRST UNIT OF A FRAME ALWAYS RUNS. Without this the gate latches shut and the world stops loading:
@@ -6425,6 +6438,17 @@ function loop(){ try{
       { const lb=document.querySelector('#load .lb'); if(lb) lb.textContent = pct<1 ? '…binding the sigils… '+Math.round(pct*100)+'%' : '…the circle is drawn…'; }
       if(_preI>=_preIcons.length){
         try{ sunLight.castShadow=false; renderer.render(scene,camera); sunLight.castShadow=true; }catch(e){}   // PRE-WARM the shadows-OFF shader variants (night kills the shadow pass) so the first dusk is a cached-program switch, not a compile storm
+        // OVERWORLD PREWARM. Measured: a cold boot builds 58 shader programs, 42 of them already here on the loading
+        // screen (the icon pass above is most of that) and 16 IN PLAY — 9 scene materials and 7 shadow-map ones — each
+        // stalling the frame it lands on. The line above only warms the shadows-OFF variants, so the shadow programs
+        // were still being built ~10 s into play. This compiles what the scene holds now, then renders once WITH the
+        // shadow pass live so the depth/distanceRGBA variants are built here too.
+        // Cheap here in a way it is NOT for the Backrooms: brPrecompile ships off because dressing the scene as the
+        // halls costs 15.8 s of 16-point-light MeshStandard. The overworld scene at this moment is lambert/phong and a
+        // handful of ShaderMaterials, so the same call is a different price. _prewarmMs records what it actually cost.
+        if(_PREWARM){ const _t0w=performance.now();
+          try{ if(renderer.compile) renderer.compile(scene,camera); renderer.render(scene,camera); }catch(e){}
+          _prewarmMs=performance.now()-_t0w; }
         // P3 · The Backrooms shaders are compiled HERE, on the loading screen, or they are compiled the first
         // time you walk into a hall — as a multi-second frame. One slice per frame so the sigil keeps turning.
         if(PERF.brPrecompile && !brPrecompileDone()){
@@ -16738,6 +16762,16 @@ window.__hc={
         for(let i=0;i<N;i++){ const v=ring[f*N+i]; out[TN[i]]=(out[TN[i]]||0)+v; } }
       const rows=Object.entries(out).map(([k,v])=>[k,+(v/n).toFixed(3)]).filter(r=>r[1]>=0.01).sort((a,b)=>b[1]-a[1]);
       return { frames:n, avgFrameMs:+(fsum/n).toFixed(2), progs:p1, progsCompiledInWindow:p1-p0, ms:Object.fromEntries(rows) }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: the shader program census. Which programs exist right now, and what they were built for. Sampled over time
+  // and diffed, this says WHEN each program is compiled and therefore whether warming it up front would help — the
+  // cold-boot cost is 58 of these, and a program is compiled on the frame its material is first drawn.
+  // initialReady is when the loading screen actually hides — `started` flips well before it, so a program compiled after
+  // `started` may still be costing the loading screen rather than the player. The two must not be conflated.
+  loadState(){ try{ return { started, initialReady, prewarmMs:+_prewarmMs.toFixed(0), prewarm:_PREWARM, loadVisible:(document.getElementById('load')||{style:{}}).style.display!=='none',
+      icons:_preI+'/'+((_preIcons&&_preIcons.length)||0), programs:(renderer.info.programs||[]).length }; }catch(e){ return {err:String(e.message||e)}; } },
+  shaders(){ try{ const ps=renderer.info.programs||[];
+      return { n:ps.length, list:ps.map(p=>{ const k=String(p.cacheKey||''); const m=/(\d+),(\d+),(\d+),(\d+)/.exec(k);
+        return { name:String(p.name||'?'), used:p.usedTimes|0, id:p.id|0, key:k.slice(0,64) }; }) }; }catch(e){ return {err:String(e.message||e)}; } },
   perf(){ try{ if(window.__benchInfoSnap) return window.__benchInfoSnap; return {calls:renderer.info.render.calls, tris:renderer.info.render.triangles, geoms:renderer.info.memory.geometries, tex:renderer.info.memory.textures, progs:(renderer.info.programs||[]).length}; }catch(e){ return {err:e.message}; } },
   fauna(){ try{ return animals.map(a=>({t:a.type,x:+a.x.toFixed(1),y:+a.y.toFixed(1),z:+a.z.toFixed(1),intro:!!a.introJesus,leaving:!!a._leaving,pd:+Math.hypot(a.x-player.pos.x,a.z-player.pos.z).toFixed(1),overWater:surfaceH(Math.floor(a.x),Math.floor(a.z))<=CFG.SEA})); }catch(e){ return {err:e.message}; } },   // QA: live animal roster (intro-Jesus departure + spawner checks)
   smelt(x,z){ try{ const bx=Math.floor(x), bz=Math.floor(z), by=surfaceH(bx,bz)+1; setBlockWorld(bx,by,bz,BID.furnace,true); furnaces[ckey(bx,by,bz)]={in:{id:'sand',n:2},t:2,out:null}; return {bx,by,bz}; }catch(e){ return {err:e.message}; } },   // QA: place a furnace mid-smelt at (x,z) — cooking-fx visual checks
