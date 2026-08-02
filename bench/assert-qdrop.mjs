@@ -37,6 +37,16 @@ function check(name, got, want){
   console.log('  '+(ok?'ok  ':'FAIL')+'  '+name.padEnd(50)+' got='+JSON.stringify(got)+(ok?'':'  want='+JSON.stringify(want)));
   return ok;
 }
+// Wait for a STATE, not for a duration. A fixed sleep after an action is a bet on frame timing: it passes while frames
+// are quick and fails when one is slow, which is exactly the one-in-six flake this harness shipped with. Widening the
+// sleep would only lower the rate. This polls to a generous deadline and returns the last value either way, so a genuinely
+// broken feature (kill switch on) still reports a clean FAIL through the normal check() path rather than throwing.
+const settleFor = async (page, expr, pred, ms=6000) => { const t0=Date.now();
+  for(;;){ const v = await page.evaluate(expr); if(pred(v)) return v;
+    if(Date.now()-t0>ms) return v; await sleep(50); } };
+// Absence cannot be polled for: "nothing happened" is only true after enough time has passed. These few waits stay fixed
+// and are deliberately generous, since being slow here costs a second and being short costs a false pass.
+const SETTLE_NOTHING = 900;
 const PRESS_Q = `(()=>{ window.dispatchEvent(new KeyboardEvent('keydown',{code:'KeyQ',key:'q',bubbles:true})); return true; })()`;
 
 (async()=>{
@@ -68,43 +78,59 @@ const PRESS_Q = `(()=>{ window.dispatchEvent(new KeyboardEvent('keydown',{code:'
     await page.evaluate('__hc.qSet("inv",10,"torch",5)');
     await page.evaluate('__hc.qHover("inv",10)');
     const d0 = (await page.evaluate('__hc.qState()')).drops;
-    await page.evaluate(PRESS_Q); await sleep(250);
-    const s1 = await page.evaluate('__hc.qState()');
-    check('a drop entity appeared',      s1.drops - d0, 1);
+    await page.evaluate(PRESS_Q);
+    // Wait on the SLOT (scoped to this action), then read the global drop count immediately. Waiting on `drops` itself
+    // opens a multi-second window in which any unrelated world drop satisfies the predicate — measured: under
+    // ?noqdrop=1 that produced a FALSE PASS on this very check while every scoped check correctly failed.
+    const slot10 = await settleFor(page, '__hc.qGet("inv",10)', v => v === 'torch:4');
+    const drops1 = (await page.evaluate('__hc.qState()')).drops;
+    // If the slot never changed the feature did not fire, and comparing the global drop counter would be comparing noise
+    // -- over the settle timeout an unrelated world drop can land in it and manufacture a pass. Say so explicitly instead.
+    check('a drop entity appeared',      slot10==='torch:4' ? drops1 - d0 : 'slot never changed', 1);
     check('stack went 5 -> 4',           await page.evaluate('__hc.qGet("inv",10)'), 'torch:4');
 
     // ---------- 2. the last one clears the slot ----------
     console.log('\n[2] last item empties the slot');
     await page.evaluate('__hc.qSet("inv",11,"torch",1)');
     await page.evaluate('__hc.qHover("inv",11)');
-    await page.evaluate(PRESS_Q); await sleep(250);
-    check('slot is now empty', await page.evaluate('__hc.qGet("inv",11)'), null);
+    await page.evaluate(PRESS_Q);
+    const slot11 = await settleFor(page, '__hc.qGet("inv",11)', v => v === null);
+    check('slot is now empty', slot11, null);
 
     // ---------- 3. hovering nothing drops nothing ----------
     console.log('\n[3] guards');
+    // These assert on the INVENTORY, not on the world's drop count. `drops` is a global list, so any unrelated world
+    // event that spawns an item lands in it: "the global counter did not move over a window" is not scoped to the action
+    // under test. It was passing only because the old 200ms window was too short to catch anything else, and widening it
+    // to 900ms exposed that immediately. What the guard actually means is that Q removed nothing, which is a property of
+    // the inventory and is true regardless of what else the world is doing.
+    await page.evaluate('__hc.qSet("inv",13,"torch",3)');
+    const inv3 = await page.evaluate('__hc.invList()');
     await page.evaluate('__hc.qHover(null)');
-    const d3 = (await page.evaluate('__hc.qState()')).drops;
-    await page.evaluate(PRESS_Q); await sleep(200);
-    check('no hover -> no drop', (await page.evaluate('__hc.qState()')).drops - d3, 0);
+    await page.evaluate(PRESS_Q); await sleep(SETTLE_NOTHING);
+    check('no hover -> nothing removed', await page.evaluate('__hc.invList()'), inv3);
     await page.evaluate('__hc.qSet("inv",12,null)');
     await page.evaluate('__hc.qHover("inv",12)');
-    const d3b = (await page.evaluate('__hc.qState()')).drops;
-    await page.evaluate(PRESS_Q); await sleep(200);
-    check('hovering an EMPTY slot -> no drop', (await page.evaluate('__hc.qState()')).drops - d3b, 0);
+    const inv3b = await page.evaluate('__hc.invList()');
+    await page.evaluate(PRESS_Q); await sleep(SETTLE_NOTHING);
+    check('hovering an EMPTY slot -> nothing removed', await page.evaluate('__hc.invList()'), inv3b);
 
     // ---------- 4. it works for the equip column too ----------
     console.log('\n[4] equip column');
     await page.evaluate('__hc.eqPut(4,"torch")');
     await page.evaluate('__hc.qHover("armor",4)');
     const d4 = (await page.evaluate('__hc.qState()')).drops;
-    await page.evaluate(PRESS_Q); await sleep(250);
-    check('drop from the offhand slot', (await page.evaluate('__hc.qState()')).drops - d4, 1);
-    check('offhand now empty',          await page.evaluate('__hc.qGet("armor",4)'), null);
+    await page.evaluate(PRESS_Q);
+    const off4 = await settleFor(page, '__hc.qGet("armor",4)', v => v === null);   // scoped wait, as above
+    const drops4 = (await page.evaluate('__hc.qState()')).drops;
+    check('drop from the offhand slot', off4===null ? drops4 - d4 : 'slot never changed', 1);
+    check('offhand now empty',          off4, null);
 
     // ---------- 5. closing the UI restores plain gameplay Q ----------
     // Not a kill-switch case: this must hold in BOTH modes, so it is reported separately below.
     console.log('\n[5] no regression to the gameplay drop path');
-    await page.evaluate('__hc.eqUI("close")'); await sleep(250);
+    await page.evaluate('__hc.eqUI("close")');
+    await settleFor(page, '__hc.qState().ui', v => v===null||v===undefined||v===false||v==='');
     const closed = await page.evaluate('__hc.qState()');
     const uiClosed = (closed.ui===null || closed.ui===undefined || closed.ui===false || closed.ui==='');
     console.log('  '+(uiClosed?'ok  ':'FAIL')+'  container closed (openUI='+JSON.stringify(closed.ui)+')');
@@ -116,6 +142,8 @@ const PRESS_Q = `(()=>{ window.dispatchEvent(new KeyboardEvent('keydown',{code:'
 
   const failed = CASES.filter(c=>!c.ok);
   console.log('\n'+CASES.length+' checks, '+failed.length+' failed');
+  // Name the failing assertion in the summary. Sampling only the tail of a run is how a one-in-six flake went unexplained.
+  if(failed.length) console.log('FAILED: '+failed.map(c=>c.name+' [got '+JSON.stringify(c.got)+' want '+JSON.stringify(c.want)+']').join('  |  '));
   if(KILLED){
     if(failed.length===0){ console.log('ABORT: kill switch ON but every check passed — a check that cannot fail is not evidence.'); fail=true; }
     else { console.log('kill switch caught '+failed.length+' failures — the check can fail. Expected: '+failed.map(c=>c.name).join(', ')); }
