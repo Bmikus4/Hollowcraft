@@ -31,6 +31,13 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
   for(const p of c) if(fs.existsSync(p)) return p; throw new Error('no browser'); }
 
 const CASES = [];
+// Wait for a STATE, not a duration. A fixed sleep after an action is a bet on frame timing: it passes while frames are
+// quick and fails when one is slow. Returns the last value either way, so a genuinely broken feature still reports a
+// clean FAIL through check() rather than throwing.
+const settleFor = async (page, expr, pred, ms=6000) => { const t0=Date.now();
+  for(;;){ const v = await page.evaluate(expr); if(pred(v)) return v;
+    if(Date.now()-t0>ms) return v; await sleep(50); } };
+
 function check(name, got, want){
   const ok = JSON.stringify(got) === JSON.stringify(want);
   CASES.push({name, got, want, ok});
@@ -58,9 +65,11 @@ function check(name, got, want){
     await page.goto(base+'/index.html?debug=1&rd=6'+FLAGS, { waitUntil:'load', timeout:90000 });
     await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:90000});
     await sleep(3000);
-    await page.evaluate('__hc.eqUI("inv")'); await sleep(300);
+    await page.evaluate('__hc.eqUI("inv")');
+    await settleFor(page, '__hc.equip().cells', v => v > 0);
     await page.evaluate('__hc.eqClearInv()');
-    await page.evaluate('__hc.eqUI("close")'); await sleep(200);
+    await page.evaluate('__hc.eqUI("close")');
+    await settleFor(page, '__hc.backpack().ui', v => !v);
     console.log('kill switch '+(KILLED?'ON  (?noshield=1) — no blocking, no 3D shield':'off — feature live'));
 
     // ---------- 1. the item and its recipe exist ----------
@@ -93,6 +102,7 @@ function check(name, got, want){
     console.log('\n[3] it wears');
     await page.evaluate('__hc.shieldHold("none")');
     await page.evaluate('__hc.shieldHold("off")');
+    await settleFor(page, '__hc.shield().equipped', v => v === 'shield');
     const d0 = (await page.evaluate('__hc.shield()')).dur;
     await page.evaluate('__hc.hurt(2)'); await page.evaluate('__hc.hurt(2)');
     const d1 = (await page.evaluate('__hc.shield()')).dur;
@@ -103,14 +113,18 @@ function check(name, got, want){
     // falls through to the generic extruded-icon path and produces 564 triangles against the real board's 312 — so a size
     // threshold reports the disabled shield as present. The tag is the only honest discriminator.
     console.log('\n[4] 3D object in both hands');
-    await page.evaluate('__hc.shieldHold("none")'); await sleep(200);
-    await page.evaluate('__hc.shieldHold("main")'); await sleep(400);
+    await page.evaluate('__hc.shieldHold("none")');
+    await settleFor(page, '__hc.shield().held', v => v == null);
+    await page.evaluate('__hc.shieldHold("main")');
+    await settleFor(page, '__hc.shield().mainView', v => v === 'shield');   // the view swaps on the next updateView tick
     const M = await page.evaluate('__hc.shield()');
     console.log('  main hand: view.id='+JSON.stringify(M.mainView)+' tris='+M.mainTris+' isShieldBoard='+M.mainIsShield);
     check('main-hand mesh is the shield board', M.mainIsShield, true);
 
-    await page.evaluate('__hc.shieldHold("none")'); await sleep(200);
-    await page.evaluate('__hc.shieldHold("off")'); await sleep(400);
+    await page.evaluate('__hc.shieldHold("none")');
+    await settleFor(page, '__hc.shield().offhand', v => v == null);
+    await page.evaluate('__hc.shieldHold("off")');
+    await settleFor(page, '__hc.shield().offView', v => v === 'shield');
     const O = await page.evaluate('__hc.shield()');
     console.log('  offhand:   offView.id='+JSON.stringify(O.offView)+' tris='+O.offTris+' isShieldBoard='+O.offIsShield);
     check('offhand mesh is the shield board', O.offIsShield, true);
@@ -121,6 +135,8 @@ function check(name, got, want){
 
   const failed = CASES.filter(c=>!c.ok);
   console.log('\n'+CASES.length+' kill-switch-gated checks, '+failed.length+' failed');
+  // Name the failing assertion with got/want — the change that made the sibling harness's false pass findable.
+  if(failed.length) console.log('FAILED: '+failed.map(c=>c.name+' [got '+JSON.stringify(c.got)+' want '+JSON.stringify(c.want)+']').join('  |  '));
   if(KILLED){
     if(failed.length===0){ console.log('ABORT: kill switch ON but every gated check passed — a check that cannot fail is not evidence.'); fail=true; }
     else { console.log('kill switch caught '+failed.length+' failures — the check can fail. Expected: '+failed.map(c=>c.name).join(', ')); }

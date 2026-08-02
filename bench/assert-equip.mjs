@@ -34,6 +34,13 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
 
 // Each case returns {name, got, want, ok}. Collected so one run reports every failure, not just the first.
 const CASES = [];
+// Wait for a STATE, not a duration. A fixed sleep after an action is a bet on frame timing: it passes while frames are
+// quick and fails when one is slow. Returns the last value either way, so a genuinely broken feature still reports a
+// clean FAIL through check() rather than throwing.
+const settleFor = async (page, expr, pred, ms=6000) => { const t0=Date.now();
+  for(;;){ const v = await page.evaluate(expr); if(pred(v)) return v;
+    if(Date.now()-t0>ms) return v; await sleep(50); } };
+
 function check(name, got, want){
   const ok = JSON.stringify(got) === JSON.stringify(want);
   CASES.push({name, got, want, ok});
@@ -64,7 +71,7 @@ function check(name, got, want){
 
     // The equip column only exists once the inventory UI has been built.
     await page.evaluate('__hc.eqUI("inv")');
-    await sleep(400);
+    await settleFor(page, '__hc.equip().cells', v => v > 0);   // the equip column exists only once buildContainers has run
     const E = await page.evaluate('__hc.equip()');
     console.log('kill switch '+(KILLED?'ON  (?noequip2=1) — every assertion below is EXPECTED to fail':'off — feature live'));
     console.log('EQ_N='+E.EQ_N+' EQ_OFF='+E.EQ_OFF+' EQ_PACK='+E.EQ_PACK+' _NO_EQ2='+E._NO_EQ2);
@@ -119,7 +126,7 @@ function check(name, got, want){
     await page.evaluate('__hc.save()');
     await page.evaluate('__hc.eqPut(4,null);__hc.eqPut(5,null)');
     await page.evaluate('__hc.loadNow()');
-    await sleep(600);
+    await settleFor(page, '__hc.equip().slots[4]', v => v != null);   // applySave has landed when the carry slot repopulates
     const R = (await page.evaluate('__hc.equip()')).slots;
     check('armor[4] survives save/load', R[4], 'torch:1');
     check('armor[5] survives save/load', R[5], 'backpack:1');
@@ -132,8 +139,8 @@ function check(name, got, want){
     check('inventory emptied first (so only the WORN pack can be found)', await page.evaluate('__hc.eqClearInv()'), 0);
     const worn = await page.evaluate('__hc.equip()');
     check('hasBackpack() true when worn in EQ_PACK, none in inv', worn.pack, true);
-    const opened = await page.evaluate('__hc.eqUI("pack")');
-    await sleep(300);
+    await page.evaluate('__hc.eqUI("pack")');
+    await settleFor(page, '__hc.backpack().ui', v => v === 'chest');
     const bp = await page.evaluate('__hc.backpack()');
     check('openBackpack opens the chest UI', bp.ui, 'chest');
     check('titled Backpack', bp.title, 'Backpack');
@@ -143,6 +150,9 @@ function check(name, got, want){
 
   const failed = CASES.filter(c=>!c.ok);
   console.log('\n'+CASES.length+' checks, '+failed.length+' failed');
+  // Name the failing assertion with got/want. Sampling only the tail of a run is how a one-in-six flake in a sibling
+  // harness went undiagnosed, and it is the single change that made this class of defect findable.
+  if(failed.length) console.log('FAILED: '+failed.map(c=>c.name+' [got '+JSON.stringify(c.got)+' want '+JSON.stringify(c.want)+']').join('  |  '));
   if(KILLED){
     // The kill switch must break the feature. If everything still passes with it on, this file proves nothing.
     if(failed.length===0){ console.log('ABORT: kill switch ON but every check passed — a check that cannot fail is not evidence.'); fail=true; }
