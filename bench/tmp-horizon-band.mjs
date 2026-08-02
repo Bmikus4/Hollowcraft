@@ -85,11 +85,15 @@ const mean=a=>a.reduce((x,y)=>x+y,0)/(a.length||1);
 // BELOW the sight line, and at 600px over a 74-degree vertical FOV that is ~8px — far too fine to find with a "strongest
 // row within 10% of the frame" search, which picks up the sky gradient instead and reports a number about the wrong thing.
 // The waterline is the sharpest luminance step in the middle of the frame, i.e. where sea meets sky.
-function findBand(img){
+// THE WATERLINE IS LOCKED ONCE AND REUSED. Detecting it per screenshot is what broke the control: changing horizon
+// vibrance shifts the luminance step slightly, the detector picks a different row, and the two shots then measure
+// different rows — which read as chroma going DOWN when it had gone up. Pass a fixed wl for every comparison shot.
+function findBand(img, lockedWl){
   const {rows,lum}=rowChroma(img);
   const lo=Math.round(img.h*0.30), hi=Math.round(img.h*0.70);
   let wl=lo, step=-1;
-  for(let y=lo;y<hi;y++){ const d=Math.abs(lum[y]-lum[y+1]); if(d>step){ step=d; wl=y; } }
+  if(lockedWl!=null){ wl=lockedWl; step=Math.abs(lum[wl]-lum[wl+1]); }
+  else for(let y=lo;y<hi;y++){ const d=Math.abs(lum[y]-lum[y+1]); if(d>step){ step=d; wl=y; } }
   const band=[], sky=[], sea=[];
   for(let y=wl+1;  y<=wl+10; y++) if(rows[y]!=null) band.push(rows[y]);   // the first ~1.2 degrees BELOW the sight line
   for(let y=wl-60; y<=wl-20; y++) if(rows[y]!=null) sky.push(rows[y]);    // open sky well above it
@@ -144,7 +148,13 @@ function findBand(img){
     await page.evaluate(`__hc.cam({yaw:${cam.yaw}, pitch:0.0})`);  // pitch 0 → the sight line is the frame's centre row
     await sleep(1500);
 
-    const shot=async(tag)=>{ const f=path.join(OUT,'band-'+tag+'.png'); await page.screenshot({path:f}); return findBand(readPNG(f)); };
+    // Lock the waterline ONCE, from the shipped state, then reuse that row for every shot in the run.
+    let WL=null;
+    // The day clock keeps running between shots. Two captures 2 s apart are at different sun angles, and that difference
+    // is larger than the effect being measured — so the hour is re-pinned immediately before every screenshot.
+    const shot=async(tag)=>{ await page.evaluate('__hc.setTime(0.42)'); await sleep(250);
+      const f=path.join(OUT,'band-'+tag+'.png'); await page.screenshot({path:f});
+      const img=readPNG(f); if(WL==null) WL=findBand(img).waterlineY; return findBand(img, WL); };
 
     // ---------- CONTROL: does the metric respond to chroma at all? ----------
     await page.evaluate('__hc.vis({seavib:0})');   await sleep(900);
