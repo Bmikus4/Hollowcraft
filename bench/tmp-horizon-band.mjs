@@ -1,34 +1,46 @@
-// UNFINISHED PROBE — ITS CONTROL STILL FAILS. Do not trust any number this prints.
+// PARKED. THE DAYTIME HORIZON BAND CANNOT CURRENTLY BE MEASURED BY THIS PROBE. Do not trust any number it prints.
 //
-// Goal: detect the daytime horizon band recorded as still open in 0ba0f22 (rgb ~(44,74,112), chroma 66 against a median
-// of 46, about one degree below the sight line). It measures CHROMA, not luminance, because 0ba0f22 is explicit that the
-// band is a saturation anomaly and DIMMER than the sky above it, so every brightness metric written for it walked past.
+// Goal was to detect the band recorded as still open in 0ba0f22 (rgb ~(44,74,112), chroma 66 against a median of 46,
+// about one degree below the sight line). It measures CHROMA, not luminance, because 0ba0f22 is explicit that the band is
+// a saturation anomaly and DIMMER than the sky above it, so every brightness metric written for it walked straight past.
 //
-// WHAT HAS BEEN ELIMINATED as a source of run-to-run variance, each by measurement:
-//   - the day clock advancing between captures (the hour is re-pinned before every screenshot)
-//   - the waterline being re-detected per shot (it is locked once and reused; this was a guess and it was NOT the cause)
-//   - weather, exposure and adaptive resolution — __hc.pinScene() freezes them. This one mattered: the `weather` object
-//     is constructed with Math.random() in its rain and fog timers, and scene fog plus toneMappingExposure follow it.
-//   - a single unlucky frame (each measurement is the median of three captures)
+// FIVE SOURCES OF VARIANCE ELIMINATED, each by measurement. This is the durable result of the work:
+//   1. The day clock advancing between captures. The hour is re-pinned immediately before every screenshot.
+//   2. The waterline being re-detected per shot. It is locked once and reused. (This was a suggested cause and it was
+//      NOT the cause -- locking it changed nothing.)
+//   3. Weather, exposure and adaptive resolution. THIS ONE MATTERED: the `weather` object is constructed with
+//      Math.random() in its rain and fog timers, and scene.fog plus renderer.toneMappingExposure both follow it, so two
+//      captures seconds apart were not the same scene. __hc.pinScene() freezes all of it; __hc.sceneState() reports it.
+//   4. A single unlucky frame. Each measurement is the median of three captures.
+//   5. The camera yaw. lookDir uses x=-sin(yaw), z=-cos(yaw), so the inverse is atan2(-dx,-dz); the search had
+//      -PI/2-atan2(dz,dx) and the camera never pointed where it intended.
+// RULED OUT, not a cause: __hc.setTime(frac) is correct. It sets worldTime=DAY_LEN*frac. uDay is NOT a time fraction --
+// it is smooth(-0.46,0.46,sunElevation), a daylight-amount curve -- so uDay=0.999 at frac=0.42 is right, not a mismatch.
 //
-// WHAT IS STILL WRONG, and it is the vantage. Look at bench/results/band-vib0.png: the camera is not pointing at open
-// ocean. Sea fills the left, a forested cliff fills the right, and the sample window — the central 40% of the width —
-// straddles the shoreline, so trees and terrain sit inside the measurement. Terrain and foliage streaming differing
-// slightly between runs is easily worth the 27-point chroma spread the orchestrator measured across three runs of this
-// same command (93.7, 104.9, 77.6) against an effect of about 7 points. The camera yaw formula was also wrong for this
-// engine and is fixed here (lookDir uses x=-sin(yaw), z=-cos(yaw), so the inverse is atan2(-dx,-dz), not
-// -PI/2-atan2(dz,dx)), and the vantage search now requires a whole +/-25 degree fan of water rather than one ray — but
-// neither was enough: from this spawn the search still returns a shore with land inside the frame.
+// WHY IT IS PARKED. The final approach was column classification: accept a column only if the rows below the waterline
+// read as water and the rows above read as sky (both blue-dominant), rejecting land instead of assuming the central 40%
+// is clean. Five consecutive runs, control CAUGHT 0 of 5:
+//   run 1  98.1 -> 99.8   NOT CAUGHT (a +1.7 move against a +2 threshold)
+//   run 2  97.6 -> 0      NOT CAUGHT
+//   run 3  0    -> 0      NOT CAUGHT
+//   run 4  0    -> 0      NOT CAUGHT
+//   run 5  0    -> 0      NOT CAUGHT
+// A band chroma of 0 means fewer than 40 columns survived classification. Three runs in five produced NO usable sample
+// at all, which corroborates the vantage diagnosis rather than contradicting it: from this spawn the frame genuinely
+// contains very little open-water-under-open-sky, so a content-based classifier correctly rejects nearly all of it.
+// The effect being chased is ~7 points of chroma; the residual run-to-run spread is larger than that even after five
+// eliminations. It is not measurable this way.
 //
-// THE NEXT MOVE, for whoever picks this up: stop trying to find a clean vantage by searching the shore. Either place the
-// camera out over open water away from the island entirely, or reject sample COLUMNS that contain land instead of
-// assuming the central 40% is clean — the frame can be classified per column before any chroma is averaged.
+// WHAT SOMEONE SHOULD TRY INSTEAD, in order. (a) Put the camera far out over open water away from the island entirely,
+// rather than on a shore -- every version of this has fought the island being in frame. (b) Measure a single fixed
+// column strip rather than a row mean: the per-row profile swings 21 to 174 inside the band window with an unelevated
+// mean, and a thin spatially-uneven artefact is exactly what a mean-based metric cannot see. That swing is the most
+// interesting unexplained signal here. (c) Ask Ben for a screenshot of the band as he sees it, and work backwards from
+// the pixels, because it is not established that the artefact still exists -- three sky commits landed after 0ba0f22
+// (a4d1ac2, 92e79b2, 0cfec7b).
 //
-// Also unresolved and worth knowing: __hc.setTime(0.42) leaves globalU.uDay at 0.99924, so uDay is not the 0..1 fraction
-// the call takes. The frame does look like day, but "midday" here is asserted, not verified.
-//
-// Already ruled out by 0ba0f22 itself, do not re-test: the backdrop ring, the sky's anchor value, the water's grazing
-// sheen, the pine layer, the width of the sky convergence. Layer bisection is confounded — hiding the sky dome exposes
+// Already ruled out by 0ba0f22 itself, do not re-test: the backdrop ring, the sky anchor value, the water grazing sheen,
+// the pine layer, the width of the sky convergence. Layer bisection is confounded -- hiding the sky dome exposes
 // scene.background and repaints the upper frame.
 //
 // usage: node bench/tmp-horizon-band.mjs
@@ -71,17 +83,31 @@ function readPNG(file){
       cur[i]=v&255; } }
   return {w,h,px};
 }
-// Per-row mean chroma (max channel - min channel). Deliberately NOT luminance: the band is dimmer than the sky above it.
-// Central 40% of the width ONLY. The vantage points at open ocean, but land and trees sit at the frame edges, and
-// averaging a full row folds them into the number -- which would dilute a band that exists only over the water.
-function rowChroma(img){
+// COLUMN CLASSIFICATION, replacing "assume the central 40% is clean". A column is usable only if the rows well BELOW the
+// waterline read as water and the rows well ABOVE it read as sky -- both meaning blue-dominant. Land is green or brown,
+// so a cliff, a treeline or a beach fails on the red/green channels and its column is dropped. This works from any spawn,
+// makes the sample self-describing (the accepted-column count is reported), and removes the yaw-search problem entirely:
+// it no longer matters where the camera happens to point, only which columns of the frame are open water under open sky.
+function classifyColumns(img, wl){
+  const {w,h,px}=img, ok=new Uint8Array(w);
+  const avg=(x,y0,y1)=>{ let r=0,g=0,b=0,n=0; for(let y=Math.max(0,y0);y<=Math.min(h-1,y1);y++){ const i=(y*w+x)*4; r+=px[i]; g+=px[i+1]; b+=px[i+2]; n++; } return n?[r/n,g/n,b/n]:[0,0,0]; };
+  for(let x=0;x<w;x++){
+    const sea=avg(x, wl+40, wl+90), sky=avg(x, wl-60, wl-20);
+    const blueSea = sea[2] > sea[0]+8 && sea[2] >= sea[1];
+    const blueSky = sky[2] > sky[0]+8 && sky[2] >= sky[1];
+    ok[x] = (blueSea && blueSky) ? 1 : 0; }
+  return ok;
+}
+// Per-row mean chroma (max channel - min channel) over the ACCEPTED columns only. Deliberately not luminance: 0ba0f22
+// records the band as dimmer than the sky above it, which is why every brightness metric written for it walked past.
+function rowChroma(img, ok){
   const {w,h,px}=img, rows=new Float64Array(h), lum=new Float64Array(h);
-  const x0=Math.round(w*0.30), x1=Math.round(w*0.70), n=x1-x0;
+  let n=0; for(let x=0;x<w;x++) if(ok[x]) n++;
   for(let y=0;y<h;y++){ let c=0,l=0;
-    for(let x=x0;x<x1;x++){ const i=(y*w+x)*4, r=px[i],g=px[i+1],b=px[i+2];
+    for(let x=0;x<w;x++){ if(!ok[x]) continue; const i=(y*w+x)*4, r=px[i],g=px[i+1],b=px[i+2];
       c += Math.max(r,g,b)-Math.min(r,g,b); l += 0.2126*r+0.7152*g+0.0722*b; }
-    rows[y]=c/n; lum[y]=l/n; }
-  return {rows,lum};
+    rows[y]=n?c/n:0; lum[y]=n?l/n:0; }
+  return {rows,lum,cols:n};
 }
 const mean=a=>a.reduce((x,y)=>x+y,0)/(a.length||1);
 // Anchored to the WATERLINE, not to the frame centre and not to the frame median. 0ba0f22 puts the band about one degree
@@ -92,17 +118,21 @@ const mean=a=>a.reduce((x,y)=>x+y,0)/(a.length||1);
 // vibrance shifts the luminance step slightly, the detector picks a different row, and the two shots then measure
 // different rows — which read as chroma going DOWN when it had gone up. Pass a fixed wl for every comparison shot.
 function findBand(img, lockedWl){
-  const {rows,lum}=rowChroma(img);
+  const all=new Uint8Array(img.w).fill(1);
+  const first=rowChroma(img, all);
   const lo=Math.round(img.h*0.30), hi=Math.round(img.h*0.70);
   let wl=lo, step=-1;
-  if(lockedWl!=null){ wl=lockedWl; step=Math.abs(lum[wl]-lum[wl+1]); }
-  else for(let y=lo;y<hi;y++){ const d=Math.abs(lum[y]-lum[y+1]); if(d>step){ step=d; wl=y; } }
+  if(lockedWl!=null){ wl=lockedWl; step=Math.abs(first.lum[wl]-first.lum[wl+1]); }
+  else for(let y=lo;y<hi;y++){ const d=Math.abs(first.lum[y]-first.lum[y+1]); if(d>step){ step=d; wl=y; } }
+  const ok=classifyColumns(img, wl);
+  const {rows,lum,cols}=rowChroma(img, ok);
+  if(cols<40) return { waterlineY:wl, step:+step.toFixed(1), cols, band:0, bandPeak:0, sky:0, sea:0, excess:0, profile:[], lumBand:0, lumSky:0, thin:true };
   const band=[], sky=[], sea=[];
   for(let y=wl+1;  y<=wl+10; y++) if(rows[y]!=null) band.push(rows[y]);   // the first ~1.2 degrees BELOW the sight line
   for(let y=wl-60; y<=wl-20; y++) if(rows[y]!=null) sky.push(rows[y]);    // open sky well above it
   for(let y=wl+40; y<=wl+90; y++) if(rows[y]!=null) sea.push(rows[y]);    // open sea well below it
   const bC=mean(band), sC=mean(sky), wC=mean(sea), bMax=Math.max.apply(null,band.length?band:[0]);
-  return { waterlineY:wl, step:+step.toFixed(1),
+  return { waterlineY:wl, step:+step.toFixed(1), cols,
            band:+bC.toFixed(1), bandPeak:+bMax.toFixed(1), sky:+sC.toFixed(1), sea:+wC.toFixed(1),
            profile:Array.from({length:22},(_,i)=>+(rows[wl-6+i]||0).toFixed(0)),
            excess:+(bC-Math.max(sC,wC)).toFixed(1),
@@ -186,7 +216,7 @@ function findBand(img, lockedWl){
     // ---------- the shipped state ----------
     const b = await shot('shipped');
     console.log('\nSHIPPED (seavib at its default)');
-    console.log('  waterline row y='+b.waterlineY+' (luminance step '+b.step+')');
+    console.log('  waterline row y='+b.waterlineY+' (luminance step '+b.step+')   usable columns='+b.cols+' of 900');
     console.log('  chroma  band(just below sight line)='+b.band+' peak='+b.bandPeak+'   open sky='+b.sky+'   open sea='+b.sea+'   EXCESS='+b.excess);
     console.log('  chroma profile, waterline-6 .. waterline+15: '+b.profile.join(' '));
     console.log('  luminance  band='+b.lumBand+'   sky='+b.lumSky
