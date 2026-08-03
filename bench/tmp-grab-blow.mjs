@@ -67,6 +67,12 @@ const check=(n,ok,d)=>{ console.log((ok?'PASS  ':'FAIL  ')+n+(d!=null?'   '+JSON
     check('it takes hold of the player', gripped);
     if(gripped){
       await page.screenshot({ path: path.join(OUT,'grab-blow-before.png') });
+      // It must still be DRAWN while it drags you. Parking on player.grabbed made the whole capture invisible, so assert the
+      // loop keeps stepping — a parked subject stops advancing its step counter.
+      const d1=(await page.evaluate(`__hc.hwState()`))[0].drift.steps;
+      await sleep(1100);
+      const d2=(await page.evaluate(`__hc.hwState()`))[0].drift.steps;
+      check('it is still rendered while dragging you', d2>d1, {gp:(await page.evaluate(`__hc.hwState()`))[0].gp, steps:d1+'->'+d2});
       // Several swings: mid-grab the cutscene owns the camera, so the facing test may reject a given swing.
       let landed=0, dmg=0, moved=0, parts=0;
       for(let t=0;t<6;t++){
@@ -83,6 +89,16 @@ const check=(n,ok,d)=>{ console.log((ok?'PASS  ':'FAIL  ')+n+(d!=null?'   '+JSON
       check('it applies NO damage', dmg===0, {damage:dmg});
       check('it applies NO knockback', moved<0.01, {moved});
     }
+    // ---- THE DUNGEON-SACRIFICE TRIGGER, through the same function endDrag calls. Also that it cannot stack: a second
+    // sacrifice while one is alive must produce nothing, because the escape paths can call endDrag twice.
+    await page.evaluate(`__hc.hwKill()`); await sleep(400);
+    const s1 = await page.evaluate(`__hc.hwSacrifice()`);
+    console.log('sacrifice #1', JSON.stringify(s1));
+    check('a dungeon sacrifice spawns one', s1.spawned===true && s1.activeAfter===1, s1);
+    const s2 = await page.evaluate(`__hc.hwSacrifice()`);
+    console.log('sacrifice #2', JSON.stringify(s2));
+    check('a second sacrifice cannot stack them', s2.spawned===false && s2.activeAfter===1, s2);
+
     check('no page errors', errs.length===0, errs.slice(0,3));
     await browser.close();
   } finally { try{ server.kill(); }catch(e){} }
