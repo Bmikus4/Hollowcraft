@@ -61,10 +61,22 @@ const check=(n,ok,d)=>{ console.log((ok?'PASS  ':'FAIL  ')+n+(d!=null?'   '+JSON
     await page.evaluate(`__hc.hw(7)`);
     await sleep(400);
     await page.evaluate(`__hc.hwHold(false)`);
-    let gripped=false;
-    for(let k=0;k<45;k++){ const w=(await page.evaluate(`__hc.hwState()`))[0];
-      if(w && w.dragging){ gripped=true; break; } await sleep(600); }
+    // Poll FAST and pin the jumpscare the moment it appears: 'jumpscare' is the first grab phase, over in well under a
+    // second, so a 600ms poll only ever sees 'haul' and the scare looks like it never happens.
+    let gripped=false, scared=null;
+    for(let k=0;k<200;k++){ const w=(await page.evaluate(`__hc.hwState()`))[0];
+      if(w && (w.gp==='jumpscare'||w.gp==='devour')){ scared=w.gp;
+        await page.evaluate(`window.__scareHold=0.55`);                     // the game's own frame-pin, put there for this
+        await sleep(500);
+        console.log('during scare  '+JSON.stringify((await page.evaluate(`__hc.hwState()`))[0]));
+        await page.screenshot({ path: path.join(OUT,'hw-jumpscare.png') });
+        await page.screenshot({ path: path.join(OUT,'hw-jumpscare-crop.png'), clip:{x:340,y:60,width:600,height:600} });
+        await page.evaluate(`window.__scareHold=null`); }
+      if(w && w.dragging){ gripped=true; if(scared) break; }
+      if(gripped && k>60) break;
+      await sleep(150); }
     check('it takes hold of the player', gripped);
+    check('the jumpscare fires and renders', !!scared, scared);
     if(gripped){
       await page.screenshot({ path: path.join(OUT,'grab-blow-before.png') });
       // It must still be DRAWN while it drags you. Parking on player.grabbed made the whole capture invisible, so assert the
@@ -73,6 +85,7 @@ const check=(n,ok,d)=>{ console.log((ok?'PASS  ':'FAIL  ')+n+(d!=null?'   '+JSON
       await sleep(1100);
       const d2=(await page.evaluate(`__hc.hwState()`))[0].drift.steps;
       check('it is still rendered while dragging you', d2>d1, {gp:(await page.evaluate(`__hc.hwState()`))[0].gp, steps:d1+'->'+d2});
+
       // Several swings: mid-grab the cutscene owns the camera, so the facing test may reject a given swing.
       let landed=0, dmg=0, moved=0, parts=0;
       for(let t=0;t<6;t++){

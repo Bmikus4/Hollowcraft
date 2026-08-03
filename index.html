@@ -297,7 +297,7 @@ import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { seraphOn, seraphOff, seraphAnimate, seraphShowBeam, seraphHideBeam, seraphBeamGold, seraphMiniBeam, seraphHideMiniBeam, seraphHideMiniBeams, seraphBloom, seraphEyeSpheres, seraphWingSpheres, seraphFold, seraphWoundEye, seraphHealEyes, seraphFreshEyes, seraphEyeClose, seraphEyesReset, seraphBodyBox, buildSeraphStoneProto, seraphCorpseMode, prewarm as seraphPrewarm } from './src/boss/seraphim/adapter.js';
-import { driftInit, driftAttach, driftDetach, driftStep, driftFlush, driftTune, driftState, driftHas, driftProbe, driftFraming } from './src/entity/drift/index.js';
+import { driftInit, driftAttach, driftDetach, driftStep, driftFlush, driftTune, driftState, driftHas, driftProbe, driftFraming, driftHostWorld } from './src/entity/drift/index.js';
 
 // =====================================================================
 //  THE SUMMONING CIRCLE — the loading screen (Ben 07-27, fix-list #2)
@@ -6724,7 +6724,7 @@ function loop(){ try{
     if(rmbHeld && performance.now()>=nextAct){ doPlace(); nextAct=performance.now()+240; } }   // right-hold = repeat place
   T.end(TID.sim);
   T.begin(TID.entities);
-  if(started && !player.dead && !intro.active && !(typeof BR!=='undefined'&&BR.inside)){ T.begin(TID.brain); if(!NET.on||NET.host)updateBrain(dt); T.end(TID.brain); T.begin(TID.wretch); updateWretch(dt); if(wretchExtra.length) updateWretchExtras(dt); T.end(TID.wretch); if(typeof heartbeatProximity==='function')heartbeatProximity(dt); T.begin(TID.animals); if(NET.on&&!NET.host)netAnimalsTick(); else updateAnimals(dt); T.end(TID.animals); if(typeof updateHerobrine==='function'){ if(NET.on && herobrine.haunting && herobrine.owner!=null && herobrine.owner!==NET.id) hbMirrorTick(dt); else updateHerobrine(dt); } }   // co-op: director + animals run on the host; the HAUNT runs on its interactor, others mirror. THE BACKROOMS suspends ALL overworld-entity sim — the Wretch can never follow you in or grab you there (Ben 07-27)
+  if(started && !player.dead && !intro.active && !(typeof BR!=='undefined'&&BR.inside)){ T.begin(TID.brain); if(!NET.on||NET.host)updateBrain(dt); T.end(TID.brain); T.begin(TID.wretch); wretch=wretchPrime; updateWretch(dt); if(wretchExtra.length){ updateWretchExtras(dt); hwBindGrabber(); } T.end(TID.wretch); if(typeof heartbeatProximity==='function')heartbeatProximity(dt); T.begin(TID.animals); if(NET.on&&!NET.host)netAnimalsTick(); else updateAnimals(dt); T.end(TID.animals); if(typeof updateHerobrine==='function'){ if(NET.on && herobrine.haunting && herobrine.owner!=null && herobrine.owner!==NET.id) hbMirrorTick(dt); else updateHerobrine(dt); } }   // co-op: director + animals run on the host; the HAUNT runs on its interactor, others mirror. THE BACKROOMS suspends ALL overworld-entity sim — the Wretch can never follow you in or grab you there (Ben 07-27)
   if(started && !player.dead && !intro.active) updateGhost(dt);            // hover vehicle — must run BEFORE the camera so a rider's slaved position is current this frame
   if(started) updateNVG(dt);                                               // night-vision overlay (green phosphor + heavy grain) while the goggles are worn+on
   T.end(TID.entities);
@@ -7394,6 +7394,17 @@ function despawnHorrific(inst){
   inst.group.traverse(o=>{ if(o.geometry)o.geometry.dispose(); });
   wretchExtra.splice(i,1); return true;
 }
+// IF AN EXTRA HAS THE PLAYER, THE WHOLE FRAME IS ABOUT IT. The capture presentation is written against the global `wretch`
+// and spread over the renderer, not the AI: the death void, the near-plane change, hiding the terrain, bringing the maw to
+// the lens, the boss bar. All of it ran against the PRIMARY, so a Horrific Wretch could hold the player while the jumpscare
+// asked a dormant creature to fill the screen — and the scare rendered as an empty frame with the terrain still up.
+// There is exactly one grabbed player, so there is no ambiguity about which creature a frame belongs to. Binding is dropped
+// again the moment nothing holds them, and the primary's own update always rebinds explicitly at the call site.
+function hwBindGrabber(){
+  const g=wretchExtra.find(w=>w.dragging || w._intim);
+  wretch = g || wretchPrime;
+  return !!g;
+}
 // Caught per instance, like the backrooms update: an experiment must never be able to take the game down with it.
 // _hwHold freezes the extras' AI for QA only. It exists because the behaviour is genuinely the Wretch's: spawned within
 // hunting range at night it captures the player in about three seconds, and the grab cutscene owns the camera — so any
@@ -7414,13 +7425,17 @@ function updateWretchExtras(dt){
 // this frame. Stepping it beside the AI would leave the billboard's facing a frame stale, which on a fast mouse turn
 // shows up as the quad going edge-on.
 function stepHorrificDrift(dt){
-  // RENDER THROUGH THE GRAB, but not through the two close-up phases. Parking on player.grabbed hid the creature for the
-  // WHOLE capture — the grab, the haul, and the 93-second crypt ritual — so the player was dragged off by nothing at all.
-  // 'jumpscare' and 'devour' stay parked because the game runs its own close-up there (it hides chunkRoot and brings the
-  // rig's maw to the lens), and that presentation is a separate question from this one.
+  // RENDER THROUGH THE WHOLE CAPTURE. Parking on player.grabbed hid the creature for all of it — the grab, the haul and the
+  // 93-second crypt ritual — so the player was dragged off by nothing at all.
+  //
+  // THE JUMPSCARE is the game's own: it hides the terrain, raises a black plane and brings the rig's maw to the lens. That
+  // close-up cannot work through a flat billboard sampled from a private scene, so for those frames the rig is handed back
+  // to the world and the REAL model does the scare — the hallucination breaks exactly when the thing has hold of you. The
+  // eye sprites and their light are drawn in the world either way, so the pair stays lit right through it.
   for(const inst of wretchExtra){ const k=hwKey(inst); if(!driftHas(k)) continue;
     const closeUp = inst.grabPhase==='jumpscare' || inst.grabPhase==='devour';
-    driftStep(k, dt, inst.pos, inst.active && !closeUp); }
+    driftHostWorld(k, closeUp);
+    driftStep(k, dt, inst.pos, inst.active); }
   hwGlowStep(dt);
 }
 // ---- THE EYE GLOW. A real light, not an emissive: emissive materials light nothing, and the ask was that nearby surfaces
@@ -7439,7 +7454,7 @@ function stepHorrificDrift(dt){
 // illuminates. TRAIL samples every 75ms over 8 samples = 600ms of history: at 45ms/6 the streak sat inside the eyes
 // themselves and read as bloom rather than motion.
 const HW_GLOW_COL=0xff1206, HW_GLOW_INT=17, HW_GLOW_DIST=11, HW_TRAIL=8, HW_TRAIL_DT=0.075;
-let _hwTrailG=null, _hwTrailS=[], _hwHist=[], _hwEyeA=null, _hwEyeB=null, _hwEyeM=null;
+let _hwTrailG=null, _hwTrailS=[], _hwEyeS=[], _hwHist=[], _hwEyeA=null, _hwEyeB=null, _hwEyeM=null;
 function hwGlowInit(){
   if(_hwTrailG) return;
   _hwEyeA=new THREE.Vector3(); _hwEyeB=new THREE.Vector3(); _hwEyeM=new THREE.Vector3();
@@ -7450,13 +7465,22 @@ function hwGlowInit(){
     const sp=new THREE.Sprite(new THREE.SpriteMaterial({ map:redGlowTex(), color:0xff2008, transparent:true, opacity:0,
       blending:THREE.AdditiveBlending, depthWrite:false }));
     sp.visible=false; _hwTrailG.add(sp); _hwTrailS.push(sp); }
+  // THE EYES THEMSELVES, drawn in the WORLD rather than through the drift loop. The rig's eyes are part of the subject, so
+  // the loop smears and dims them along with the body — measured on a night frame, they vanished entirely at 6 blocks. Two
+  // dedicated additive sprites at the eye positions stay crisp and lit no matter what the loop does to the flesh, which is
+  // what makes the pair readable at any distance. depthTest stays ON so the world still occludes them.
+  for(let i=0;i<2;i++){
+    const ey=new THREE.Sprite(new THREE.SpriteMaterial({ map:redGlowTex(), color:0xff2a10, transparent:true, opacity:0,
+      blending:THREE.AdditiveBlending, depthWrite:false }));
+    ey.visible=false; _hwTrailG.add(ey); _hwEyeS.push(ey); }
   if(_hwLightSlot<0 && pointPool.length) _hwLightSlot=pointPool.length-1;
 }
 function hwGlowStep(dt){
   const inst=_hwGlowOn ? wretchExtra.find(w=>w.active && w.P && w.P.eyes && w.P.eyes.length>=2 && !player.grabbed) : null;
   const pl=(_hwLightSlot>=0)?pointPool[_hwLightSlot]:null;
   if(!inst){ if(pl){ pl.intensity=0; pl.position.set(0,-999,0); }
-    for(const sp of _hwTrailS){ sp.visible=false; sp.material.opacity=0; } _hwHist.length=0; return; }
+    for(const sp of _hwTrailS){ sp.visible=false; sp.material.opacity=0; }
+    for(const sp of _hwEyeS){ sp.visible=false; sp.material.opacity=0; } _hwHist.length=0; return; }
   // World positions come off the RIG, so they follow the 1.25x scale, the head's animation and the crawl posture for free —
   // rather than an offset from wretch.pos that would sit in the wrong place the moment the body scaled.
   inst.P.eyes[0].getWorldPosition(_hwEyeA); inst.P.eyes[1].getWorldPosition(_hwEyeB);
@@ -7468,6 +7492,11 @@ function hwGlowStep(dt){
     // 15% strength, which is a faint warmth; the effect belongs to the dark, which is also where the creature belongs.
     const dayFade=1-0.85*globalU.uDay.value;
     pl.intensity=HW_GLOW_INT*flick*dayFade; pl.position.copy(_hwEyeM); }
+  // THE PAIR ITSELF — full brightness, never faded by the loop. Sized so it reads at distance without becoming a lamp.
+  { const eyeS=0.30*(inst._sizeMul||1);
+    for(let i=0;i<2;i++){ const ey=_hwEyeS[i], p=(i===0)?_hwEyeA:_hwEyeB;
+      ey.visible=true; ey.position.copy(p); ey.scale.setScalar(eyeS);
+      ey.material.opacity=0.92; } }
   // TRAILS: a short ring buffer of eye positions drawn back-to-front, fading. Sampled on the drift loop's own cadence
   // rather than per frame, so the streak length is the same at 60fps and 140fps.
   _hwTrailAcc=(_hwTrailAcc||0)+dt;

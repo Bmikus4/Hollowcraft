@@ -29,10 +29,10 @@
 // The loop owns no subject. Whoever creates it supplies a scene to render as the clean anchor: the demo harness supplies
 // a throwaway box creature, the game supplies the real Wretch rig.
 
-// 256x256. The grid below stays at 22 cells, so raising this does NOT weaken the latent-grid tell — it sharpens the body
-// inside each cell while the cells stay the same size. 4x the pixels over two passes at 22Hz, which measured 0.059ms at
-// 128 and so has room. Dropping back to 128 is the first thing to try if a slower GPU struggles.
-const RES = 256;
+// 512x512. The grid below stays at 22 cells, so raising this does NOT weaken the latent-grid tell — it sharpens the body
+// inside each cell while the cells stay the same size. 16x the pixels of the original 128 over two passes at 22Hz, which
+// measured 0.059ms at 128 and 0.078ms at 256. Dropping back is the first thing to try if a slower GPU struggles.
+const RES = 512;
 const STEP_HZ = 22;
 
 const FRAG = `
@@ -79,7 +79,12 @@ void main(){
   o.a   = mix(h.a,   f.a,   uFeed*uAlphaLag);          // the silhouette runs behind the body — see the header
 
   float n = vnoise(uv*uGrid*1.9 + uSeed + uTime*2.7) - 0.5;
-  o.rgb += n * (uNoise + uBurst*0.85);
+  // NOISE SCALES WITH THE SIGNAL. It used to be a flat addition, which is fine on a bright subject and ruinous on a dark
+  // one: a near-black body at night has almost no signal, so a fixed 0.022 dominated it and the creature read as a sheet of
+  // grey static rather than as black flesh. Scaling by the pixel's own luminance keeps the grain proportional, so dark
+  // stays dark. The small floor keeps some grain in the near-black so it does not go glassy.
+  float sig = dot(o.rgb, vec3(0.299, 0.587, 0.114));
+  o.rgb += n * (uNoise + uBurst*0.85) * (0.12 + 2.4*sig);
   o.a   += n * uBurst * 0.5;
   // Erode slightly, then re-gain. Feedback alone would let the alpha halo creep outward every step until the subject is
   // a square; the erode holds the silhouette in while still letting it wander.

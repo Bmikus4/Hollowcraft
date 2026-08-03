@@ -73,6 +73,18 @@ export function driftDetach(id){
 
 export function driftHas(id){ return subjects.has(id); }
 
+// Hand the subject BACK to the world scene for a moment, without tearing the loop down. The game's own jumpscare brings the
+// rig's maw to the lens and hides everything else, and that close-up cannot work on a subject that only exists inside a
+// private scene — so for those frames the real model is what gets drawn. Returning it re-hides it and treats the gap as a
+// context loss, which it is: the loop's history is however many seconds stale by then.
+export function driftHostWorld(id, on){
+  const H = subjects.get(id); if(!H) return false;
+  if(!!on === !!H.inWorld) return H.inWorld;
+  if(on){ if(H.home) H.home.add(H.object); H.quad.visible=false; H.inWorld=true; }
+  else { H.scene.add(H.object); H.inWorld=false; H.parked=true; }   // parked → the next step re-flushes and re-frames
+  return H.inWorld;
+}
+
 // Is the anchor in frame AND not behind world geometry? The frustum test alone is not enough: standing behind a tree is
 // the commonest way to lose sight of something in a forest, and if that did not count as a context loss the flush would
 // only ever fire when the mouse moved.
@@ -99,6 +111,7 @@ function visible(cam, x, y, z){
 export function driftStep(id, dt, pos, show){
   const H = subjects.get(id); if(!H) return;
   const on = show !== false;
+  if(H.inWorld) return;                                      // the world scene owns the rig this frame — see driftHostWorld
   if(!on){ H.quad.visible = false; H.parked = true; return; }
   if(H.parked){ H.parked = false; H.age = 0; H.loop.lastAz = H.loop.lastEl = null; driftFlush(id); }
   H.quad.visible = true;
