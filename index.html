@@ -5176,7 +5176,17 @@ function _offReturn(s){ if(!s) return true;
   return invAdd(s.id,s.n)<=0; }
 function invCount(id){ let c=0; for(const s of inv) if(s&&s.id===id) c+=s.n; return c; }
 function invRemove(id,n){ for(let i=0;i<INV_N&&n>0;i++){ const s=inv[i]; if(s&&s.id===id){ const t=Math.min(s.n,n); s.n-=t; n-=t; if(s.n<=0)inv[i]=null; } } refreshHotbar(); }
-function heldSlot(){ return inv[selSlot]; }
+// THE OFFHAND CAN BE THE ACTING HAND (Ben: "if an item is in the offhand, pressing F again with an empty slot will toggle
+// between the uses of left click; when toggled on, left click should allow the user to place blocks / use tools / fire guns
+// in their off hand"). Rather than teach every action site about a second hand -- mining ticks, full-auto repeat fire,
+// durability, reload, the spear charge, block placement -- the mode redefines which slot IS the held one. One definition,
+// and every one of those paths follows it for free.
+// The mode requires an EMPTY main hand, which is what makes it safe: action code that finishes a stack with
+// `if(h.n<=0) inv[selSlot]=null` is then nulling a slot that is already empty, so it cannot destroy anything. A spent
+// offhand item is cleared where the viewmodel is updated, which is the one place that runs every frame.
+let offUse=false;
+function offUseActive(){ return offUse && !!armor[EQ_OFF] && !inv[selSlot]; }
+function heldSlot(){ return offUseActive() ? armor[EQ_OFF] : inv[selSlot]; }
 // starter kit lives in a CHEST at spawn (see buildSpawnChest) — you begin empty-handed and open it
 defItem('field_guide',{name:'Field Guide',max:1,icon:{t:'book',c:'#6a4a28'},book:true});   // held open like the notebook — right-click turns the page (no menus)
 const STARTER_ITEMS=[['field_guide',1],['apple',2],['wood_axe',1],['rifle_ammo',2],['torch',4]];
@@ -5758,7 +5768,13 @@ function applyLook(dt){
     player.yaw+=d*kn; player.pitch+=(n.tp-player.pitch)*kn;
     player.pitch=clamp(player.pitch,-L,L);
     if(n.t>=n.dur)_lookNudge=null; } }
-document.addEventListener('mousedown',e=>{ if(!locked)return; if(e.button===0){ lmbHeld=true; doSwing(); }   // swing/attack now + begin timed mining (held)
+document.addEventListener('mousedown',e=>_onMouseDown(e));
+function _onMouseDown(e){ if(!locked)return; if(e.button===0){ lmbHeld=true;
+    // OFFHAND-USE MODE: left click does what that item is FOR. A gun fires and a tool swings, which is already what a
+    // left click means; a block or a consumable has to run the USE path instead, so the click is re-entered as the right
+    // one. heldSlot() already resolves to the offhand in this mode, so the whole path acts on the correct item.
+    if(offUseActive()){ offhandLeftClick(); return; }
+    doSwing(); }   // swing/attack now + begin timed mining (held)
   else if(e.button===2){ if(typeof brTryPullCord==='function'&&brTryPullCord())return;        // BACKROOMS: right-click a hanging bulb's cord → switch it on/off
     if(typeof brTryEat==='function'&&brTryEat())return;                 // BACKROOMS: right-click a plate of food on a laid table → eat it
     if(typeof brTryToggleDoor==='function'&&brTryToggleDoor())return;   // BACKROOMS: right-click a door you're facing → open/close it
@@ -5771,7 +5787,15 @@ document.addEventListener('mousedown',e=>{ if(!locked)return; if(e.button===0){ 
         flashName(ITEMS[armor[t].id].name+' equipped'); refreshHotbar();
         if(typeof updateArmorView==='function')updateArmorView(); if(typeof renderInvUI==='function')renderInvUI(); return; } }
     if(hs&&ITEMS[hs.id]&&ITEMS[hs.id].spear){ spearCharge.active=true; spearCharge.t=0; }   // SPEAR: right-hold winds up a throw; release looses it (rmbHeld stays false so repeat-place never fires)
-    else { doPlace(); rmbHeld=true; nextAct=performance.now()+280; } } });
+    else { doPlace(); rmbHeld=true; nextAct=performance.now()+280; } } }
+// WHAT A LEFT CLICK DOES WITH THE OFFHAND. A gun, a tool or a spear does what a left click already means for it -- fire,
+// mine, wind up a throw -- and everything else runs the USE path, which is where placing a block and eating live. Named
+// rather than inline so a probe can call the exact thing the mouse calls; the first version of this test could not tell
+// whether a failure to place was in the click plumbing or in doPlace, because there was nothing to call but the mouse.
+function offhandLeftClick(){ if(!offUseActive()) return {no:'mode off'};
+  const o=armor[EQ_OFF], it=ITEMS[o.id];
+  if(it && (it.gun||it.tool||it.spear)){ doSwing(); return {did:'swing', id:o.id}; }
+  doPlace(); return {did:'use', id:o.id}; }
 document.addEventListener('mouseup',e=>{ if(spearCharge.active){ const hs=heldSlot(); if(hs&&ITEMS[hs.id]&&ITEMS[hs.id].spear) throwSpear(hs.id, spearPower()); spearCharge.active=false; } if(e.button===0)lmbHeld=false; else if(e.button===2)rmbHeld=false; });
 document.addEventListener('contextmenu',e=>e.preventDefault());
 addEventListener('wheel',e=>{ if(!locked)return;
@@ -5808,7 +5832,10 @@ addEventListener('keydown',e=>{ if(e.code==='Space')e.preventDefault();
   if(e.code.startsWith('Digit')){ const n=+e.code.slice(5); if(n>=1&&n<=9){ selSlot=n-1; refreshHotbar(); const s=inv[selSlot]; flashName(s?ITEMS[s.id].name:'');} }
   if(e.code==='KeyF' && !e.ctrlKey){   // F swaps the held item into the OFFHAND (Ben). Flight moves to CTRL+F below.
     if(_NO_EQ2){ flashName('no offhand'); return; }
-    const h=heldSlot(), cur=armor[EQ_OFF];
+    // inv[selSlot], NOT heldSlot(): in offhand-use mode heldSlot() IS the offhand, so F saw the offhand item as "held" and
+    // swapped it with itself -- which decremented that object to zero, handed the slot a fresh copy, and returned the spent
+    // object to the pack as a phantom stack of nothing. F is about the two hands, so it must ask about the right one.
+    const h=inv[selSlot], cur=armor[EQ_OFF];
     // THE INSTANCE TRAVELS WITH THE ITEM (Ben: an offhand gun's state must not correlate to the stack it came from).
     // A gun's magazine lives in GUNMAG keyed by a uid branded on the SLOT OBJECT, and this swap built a brand new object
     // both ways -- so moving a half-empty rifle to the offhand handed it a fresh full magazine, and moving it back
@@ -5817,8 +5844,13 @@ addEventListener('keydown',e=>{ if(e.code==='Space')e.preventDefault();
     // a branded item goes back to an empty slot as the object it already is.
     if(h){ armor[EQ_OFF]={id:h.id,n:1,uid:h.uid}; h.n--; if(h.n<=0)inv[selSlot]=null;
       if(cur) _offReturn(cur);                                        // whatever was in the offhand comes back to the pack, never vanishes
+      offUse=false;                                                   // a full main hand acts with itself; the mode is only for an empty one
       flashName(ITEMS[armor[EQ_OFF].id].name+' to offhand'); }
-    else if(cur){ if(_offReturn(cur)){ armor[EQ_OFF]=null; flashName('offhand cleared'); } }
+    // F ON AN EMPTY HAND TOGGLES THE MODE instead of emptying the offhand (Ben). Pressing it used to send the offhand item
+    // back to the pack, which meant there was no way to act with the offhand at all. The slot is still emptied from the
+    // inventory screen, where clearing a slot is what you went there to do.
+    else if(cur){ offUse=!offUse;
+      flashName(offUse ? ('left click uses the '+ITEMS[cur.id].name) : 'offhand idle'); }
     refreshHotbar(); if(typeof updateArmorView==='function')updateArmorView(); renderInvUI(); return; }
   // V FLIES (Ben). CTRL+F is kept as the old binding rather than removed: F was flight until the offhand swap took it, and
   // anyone with that in their fingers should not be dropped out of the air by an update.
@@ -10966,8 +10998,13 @@ function setOffItem(id){ if(offView.id===id)return; offView.id=id;
     // SIZED AGAINST THE MAIN HAND, not by eye. That holds a 0.20 block at z=-0.62, an angular size of 0.2/0.62; this group sits
     // at 0.34, so the same apparent size is 0.11. Two earlier numbers were guessed from nothing and both photographed as a wall
     // across the left of the screen: 0.34 filled 49% of the frame, 0.20 filled 23%.
-    const s=Math.max(0.115/mx, 0.010/mn);
+    // ALL GUNS ONE SIZE (Ben: "all guns should be the same size in the off hand"). The 0.010/mn floor exists so a very flat
+    // item is not scaled down to a sliver -- but a gun is long and THIN, so its smallest axis is tiny and that floor won
+    // every time, sizing each gun by how slim it is instead of how long. A revolver and a minigun came out visibly
+    // different. Guns normalise on their longest axis alone, so every one of them is the same length in the fist.
+    const s = ITEMS[id].gun ? (0.115/mx) : Math.max(0.115/mx, 0.010/mn);
     m.scale.setScalar(s); m.position.set(-ctr.x*s,-ctr.y*s,-ctr.z*s);
+    m.userData.offFit=+(mx*s).toFixed(4);   // the achieved longest side. A world-space AABB of this fist is rotated, so it is NOT the object's size — measuring that reported a 21% spread across guns that are all fitted to the same length.
     const P=OFF_POSE.hand; offView.group.position.set(P.p[0],P.p[1],P.p[2]); offView.group.rotation.set(P.r[0],P.r[1],P.r[2]);
     offView.baseY=P.p[1];
     offView.mesh=m; offView.group.add(m); applyViewFog(m);
@@ -11086,7 +11123,13 @@ function updateView(dt){ updateRecoil(dt);                                      
   if(!started || intro.active){ view.group.visible=false; _hideOffHand(); if(view.holoRet)view.holoRet.visible=false; return; }   // CINEMATICS own the camera — no floating hand/held item in the menu flythrough or the wake-up (Ben 07-20)
   if(cineMode){ if(!heldSlot()){ view.group.visible=false; _hideOffHand(); if(view.holoRet)view.holoRet.visible=false; return; } view.group.visible=true; }   // CINEMATIC (Ben 07-21): a HELD item stays in hand; only the EMPTY hand is hidden
   else if(!_hudOn){ view.group.visible=false; _hideOffHand(); if(view.holoRet)view.holoRet.visible=false; return; }   // the hide-HUD setting still drops the whole viewmodel
-  setViewItem(heldSlot()?heldSlot().id:null);
+  // A SPENT OFFHAND ITEM IS CLEARED HERE, the one place that runs every frame. In offhand-use mode the action paths
+  // decrement the offhand object as if it were the held stack, and their own "stack is empty" cleanup nulls inv[selSlot],
+  // which is empty by definition in that mode -- so this is what actually removes the last torch from the left hand.
+  if(armor[EQ_OFF] && armor[EQ_OFF].n<=0){ armor[EQ_OFF]=null; offUse=false; if(typeof updateArmorView==='function')updateArmorView(); refreshHotbar(); }
+  // The RIGHT hand shows what is in the right hand. heldSlot() answers "which slot is acting", and in offhand-use mode
+  // that is the left one -- reading it here drew the offhand item in BOTH fists.
+  setViewItem(inv[selSlot]?inv[selSlot].id:null);
   setOffItem(armor[EQ_OFF]?armor[EQ_OFF].id:null);   // the left hand shows whatever is in the offhand slot (today: a shield)
   offView.group.visible=true; updateOffArm();        // and the arm that carries it, built on first need
   // SPEAR CHARGE (right-hold = wind up a throw, like drawing a bow). Cancel if we lose focus / swap off the spear.
@@ -18801,6 +18844,20 @@ window.__hc={
   cmdLog(n){ try{ const out=[]; if(_cmdLog){ const k=Math.max(0,_cmdLog.children.length-(n|0||12));
       for(let i=k;i<_cmdLog.children.length;i++) out.push(_cmdLog.children[i].textContent); } return out; }catch(e){ return {err:String(e.message||e)}; } },
   cmdList(){ try{ return Object.keys(CMDS); }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: THE OFFHAND-USE MODE, and the SIZE of what is drawn in that fist. offExtent is measured off the mesh in the
+  // scene rather than derived from the scale factor -- the models come in wildly different intrinsic units, so only the
+  // final world-space extent says whether two guns are the same size to the eye.
+  offhandUse(){ try{ const o=armor[EQ_OFF], h=inv[selSlot];
+      return { offUse, active:offUseActive(), off:o?o.id:null, offN:o?o.n:0, held:h?h.id:null,
+               offViewId:offView.id, offExtent:(offView.mesh&&offView.mesh.userData.offFit)||null,
+               offScale:offView.mesh?+offView.mesh.scale.x.toFixed(5):null }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: put something in the offhand, or clear it. F no longer empties the offhand -- on an empty main hand it toggles
+  // the use mode -- so a probe that needs the slot empty has no key to press.
+  offhandClick(){ try{ const r=offhandLeftClick(); const e=document.getElementById('name');
+      return { routed:r, said:e?e.textContent:null }; }catch(err){ return {err:String(err.message||err)}; } },   // the SAME function the mouse calls
+  offhandSet(id,n){ try{ armor[EQ_OFF]= id? {id, n:(n|0)||1} : null; offUse=false;
+      if(typeof updateArmorView==='function')updateArmorView(); refreshHotbar();
+      return { off:armor[EQ_OFF]?armor[EQ_OFF].id:null }; }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: THE MAGAZINES, and which key each hand's gun owns. GUNMAG is keyed by a uid branded on the slot object, so
   // "did the magazine follow the gun into the offhand" is a question about identity that cannot be asked from outside.
   // fire() shoots through fireGun, the real path, because a probe that decrements GUNMAG itself proves nothing.
@@ -18830,6 +18887,7 @@ window.__hc={
   itemClasses(){ try{ const out={}, pick=(k,fn)=>{ if(out[k])return; for(const id in ITEMS){ const it=ITEMS[id]; try{ if(fn(it,id)){ out[k]=id; return; } }catch(e){} } };
       pick('shield', it=>!!it.shield);
       pick('gun', it=>!!it.gun);
+      out.gunsAll=Object.keys(ITEMS).filter(id=>!!ITEMS[id].gun);   // EVERY gun, not one representative: "all guns are the same size in the offhand" is a claim about the set
       pick('tool_pick', it=>it.tool&&it.tool.kind==='pickaxe');
       pick('tool_axe', it=>it.tool&&it.tool.kind==='axe');
       pick('tool_sword', it=>it.tool&&it.tool.kind==='sword');
