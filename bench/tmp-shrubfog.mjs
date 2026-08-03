@@ -39,7 +39,11 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()', {timeout:90000});
     await sleep(7000);
     await page.evaluate('__hc.cmdRun("/gamemode creative")').catch(()=>{});
-    await page.evaluate('__hc.setTime(0.30)'); await sleep(1200);
+    // The one piece of code that runs AFTER three's fog in the foliage shader is the night-foliage darkening, weighted by
+    // fogFactor*(1-uDay) -- so how much `day` actually is at this hour decides whether it can act at all. Printed, because
+    // "it is daytime" and "uDay is 1.0" are not the same claim.
+    await page.evaluate('__hc.setTime('+(process.argv[2]||0.30)+')'); await sleep(1200);
+    console.log('  clock '+(process.argv[2]||0.30)+' → day='+(await page.evaluate('__hc.skyState().day')));
 
     // chunkRoot is module-scoped and unreachable from here, so the materials cannot be introspected -- which is fine, the
     // frame is the honest test and the shader source is readable by hand once the frame says there is something to look for.
@@ -53,14 +57,17 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
       // pillars were behind terrain, and the reading was of shadow rather than of fog. Up here both subjects stand against
       // sky with nothing between them and the camera, and both are fully skylit, so the only difference left is the fog.
       const bx=Math.round(p.x), bz=Math.round(p.z), y=120;
-      const D=26, out=[];
-      const mk=(zoff, top)=>{ const x=bx+D, z=bz+zoff;
-        out.push(__hc.cmdRun('/setblock '+x+' '+y+' '+z+' '+top).out[0]);
-        return { x, z, top:y }; };
-      const grassPillar = mk(-4, 'grass');
-      const bushBase    = mk(+4, 'dirt');
-      const bushOut     = __hc.cmdRun('/setblock '+bushBase.x+' '+(bushBase.top+1)+' '+bushBase.z+' bush').out[0];
-      return { bx, bz, y, D, grassPillar, bushBase, bushOut, sample:out.slice(0,2) }; })()`).catch(e=>({err:String(e)}));
+      // SEVERAL DISTANCES. One distance cannot tell "shrubs do not fog" apart from "the bank is not thick enough near you",
+      // and those want completely different fixes -- one is a shader bug, the other is the density Ben chose.
+      const Ds=[12,26,45,70], pairs=[];
+      for(const D of Ds){
+        const gx=bx+D, gz=bz-4, ux=bx+D, uz=bz+4;
+        __hc.cmdRun('/setblock '+gx+' '+y+' '+gz+' grass');
+        __hc.cmdRun('/setblock '+ux+' '+y+' '+uz+' dirt');
+        __hc.cmdRun('/setblock '+ux+' '+(y+1)+' '+uz+' bush');
+        pairs.push({ D, grass:{x:gx,z:gz,top:y}, bush:{x:ux,z:uz,top:y+1} });
+      }
+      return { bx, bz, y, pairs, D:26, grassPillar:pairs[1].grass, bushBase:{x:pairs[1].bush.x,z:pairs[1].bush.z,top:y} }; })()`).catch(e=>({err:String(e)}));
     console.log('  two pillars 26 blocks out: '+JSON.stringify(spot).slice(0,280));
 
     const shoot=async(tag)=>{ const f=path.join(OUT,'shrubfog-'+tag+'.png'); await page.screenshot({path:f}); return decodePNG(fs.readFileSync(f)); };
@@ -77,6 +84,11 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
       if(best){ __hcBR.look(best.yaw, 0.0); await f(); await f(); }
       return best; })()`);
     console.log('  aimed at the pillars: '+JSON.stringify(aim));
+    // PIN THE SCENE. Foliage has vertex WIND: between the clear and the foggy frame the bush sways, and a fixed set of
+    // pixels then samples partly background instead of leaf -- which shows up as the shrub "washing less", strongest at
+    // close range where the sway is worth several pixels and gone by 26 blocks. That is a measurement artefact shaped
+    // exactly like the bug being looked for, so the animation is stopped before either frame is taken.
+    await page.evaluate('(()=>{ try{ return __hc.pinScene(); }catch(e){ return String(e.message||e); } })()');
     await sleep(1400);
     const clear=await shoot('clear');
 
@@ -105,6 +117,21 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     // "Wash" = how far this surface travelled from its clear colour toward the fog colour. 1.0 = fully fogged out.
     const wash=(c0,c1)=>{ let num=0,den=0; for(let k=0;k<3;k++){ num+=(c1[k]-c0[k])*(fogRGB[k]-c0[k]); den+=(fogRGB[k]-c0[k])**2; }
       return den>1e-6 ? num/den : 0; };
+
+    // EVERY DISTANCE, bush against block. If the two columns agree at each range, shrubs fog exactly like solid ground and
+    // the complaint is about how far you can see in a bank -- which is a number Ben chose, not a bug in a shader.
+    console.log('  bush vs grass block, wash toward the fog colour at each distance:');
+    for(const pr of spot.pairs){
+      const bx2 = await page.evaluate(`(()=>({ g:__hc.screenOf(`+pr.grass.x+`+0.5,`+pr.grass.top+`+0.5,`+pr.grass.z+`+0.5),
+        b:__hc.screenOf(`+pr.bush.x+`+0.5,`+pr.bush.top+`+0.5,`+pr.bush.z+`+0.5) }))()`);
+      const gp=pick(clear,bx2.g), bp=pick(clear,bx2.b);
+      if(gp.length<20||bp.length<20){ console.log('     d='+String(pr.D).padStart(3)+'  too few pixels to judge (g='+gp.length+' b='+bp.length+')'); continue; }
+      const g0=readAt(clear,gp), g1=readAt(foggy,gp), b0=readAt(clear,bp), b1=readAt(foggy,bp);
+      const wg=wash(g0,g1)*100, wb=wash(b0,b1)*100;
+      const f=c=>'rgb('+c.map(v=>v.toFixed(0)).join(',')+')';
+      console.log('     d='+String(pr.D).padStart(3)+'  block '+wg.toFixed(0).padStart(3)+'% washed   bush '+wb.toFixed(0).padStart(3)+'% washed   difference '+(wg-wb).toFixed(0)+' points'
+        +'\n              block '+f(g0)+' → '+f(g1)+'   bush '+f(b0)+' → '+f(b1)+'   (px g='+gp.length+' b='+bp.length+')');
+    }
 
     const gPx=pick(clear,box.grass), bPx=pick(clear,box.bush);
     console.log('  fog colour rgb('+fogRGB.join(',')+')   grass-top pixels found '+gPx.length+', bush pixels found '+bPx.length);
