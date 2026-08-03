@@ -79,8 +79,10 @@ const SITES = [
   { name:'animals',      setup:`H.setTime(0.35); atSpawn(); for(const c of ['cow','pig','sheep','chicken']) H.cmdRun('/spawn '+c+' 4 9');` },
   { name:'wretch_near',  setup:`H.setTime(0.85); atSpawn(); H.summon(); H.yank();`, settle:5 },
   { name:'horrific',     setup:`H.setTime(0.85); atSpawn(); H.hw(11);`, settle:5 },
-  { name:'boss',         setup:`H.setTime(0.85); atSpawn(); H.boss({dist:24}); H.aimEye();`, settle:9 },
-  { name:'boss_stage2',  setup:`H.setTime(0.85); atSpawn(); H.boss({dist:24}); H.aimEye(); H.stage2&&H.stage2();`, settle:11 },
+  // aimEye alone points the camera up at a 11 m eye and fills the frame with sky: keep the boss in shot but
+  // hold the pitch near level so the world is being drawn too.
+  { name:'boss',         setup:`H.setTime(0.85); atSpawn(); H.boss({dist:24}); H.aimEye(); H.look(null, Math.min(0.12, H.pitchNow()));`, settle:9 },
+  { name:'boss_stage2',  setup:`H.setTime(0.85); atSpawn(); H.boss({dist:24}); H.aimEye(); H.look(null, Math.min(0.12, H.pitchNow())); H.stage2&&H.stage2();`, settle:11 },
   { name:'particles',    setup:`H.setTime(0.35); atSpawn();`, move:`const k=(t*6)|0; if(k!==window.__pk){ window.__pk=k; H.fx(45); }` },
   { name:'gunfire',      setup:`H.setTime(0.35); atSpawn(); H.gun&&H.gun('ar15'); H.sight&&H.sight(true);`,
     move:`const k=(t*8)|0; if(k!==window.__gk){ window.__gk=k; try{ H.shoot(); }catch(e){} }` },
@@ -173,7 +175,8 @@ const HELPERS = `
     try{ H.cmdRun('/kill mobs'); }catch(e){ o.kill=String(e.message||e); }
     try{ H.cmdRun('/weather clear'); }catch(e){}
     try{ H.cmdRun('/heal 20'); }catch(e){}
-    try{ if(H.st().started && H.hwState) for(const w of (H.hwState()||[])) if(H.hwKill) H.hwKill(w.hid); }catch(e){}
+    try{ if(H.hwState) for(const w of (H.hwState()||[])) if(H.hwKill) H.hwKill(w.hid); }catch(e){}
+    try{ H.set({active:false, boss:false, _park:false, _bossPhase:0}); }catch(e){}
     try{ H.freeze(false); }catch(e){}
     try{ H.pinScene(); }catch(e){}
     try{ P.exitBR(); }catch(e){}
@@ -215,28 +218,83 @@ const med = a => { const s=a.slice().sort((x,y)=>x-y); return s.length%2 ? s[(s.
     await page.goto(url,{waitUntil:'load',timeout:120000});
     await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
     await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
-    await page.evaluate(`window.__hcPERF.arm()`);
+    // renderer.info resets per render() call, so an ordinary read reports only the composer's final quad
+    // pass — draws came back as 1. __benchInfo makes the loop accumulate across every pass and snapshot it.
+    await page.evaluate(`window.__hcPERF.arm(); window.__benchInfo = 1;`);
     const hi = await page.evaluate(HELPERS);
     console.log('helpers:', JSON.stringify(hi).slice(0,180));
     const ref = await page.evaluate(`__hcPERF.ref()`);
     console.log('gpu:', ref.gpu, '| cores', ref.cores, '| buffer', ref.drawingBuffer.join('x'), '| rd', ref.renderDist, '| flags', PERFOFF?('perfoff='+PERFOFF):'shipped');
 
+    // CLEANLINESS BASELINE. The first version of this harness reported the dungeon at 16 ms and then the
+    // FIELD GUIDE at spawn at 15.4 ms — the same camera that read 7.9 ms as the first site. The cause was
+    // this harness, not the game: a spawned boss, sixteen animals and a Horrific Wretch survived the reset
+    // and were still being drawn eleven sites later. bench/README.md's rule applies to a harness measuring
+    // itself too, so the baseline is captured once and every site now has to come back to it.
+    // Cleanliness must not count chunk meshes: those arrive as streaming fills and would make a
+    // half-streamed world look "clean" and a settled one look contaminated. What leaks between sites is
+    // scene-level objects — entities, props, boss parts — so that is what gets counted.
+    const sceneObjs = async () => page.evaluate(`(()=>{ const o=__hcPERF.census().byOwner||{}; let n=0;
+      for(const k in o) if(k!=='chunkRoot') n+=o[k]; return n; })()`);
+    const cleanBaseline = async () => {
+      await page.evaluate(`window.censusReset(); atSpawn(); H.look(0.7,-0.05);`);
+      await sleep(6000);
+      return await sceneObjs();
+    };
+    let BASE = await cleanBaseline();
+    const CLEAN_DRAWS = await page.evaluate(`__hc.perf().calls`);
+    console.log('clean scene at spawn: '+BASE+' non-chunk objects, '+CLEAN_DRAWS+' draws');
+
     for(let pass=1; pass<=REPEAT; pass++){
       for(const site of sites){
         await page.evaluate(`window.__census.stop()`);
         await page.evaluate(`window.censusReset()`);
+        // Back to spawn and check the scene really did empty. If it did not, the leftovers would be drawn
+        // inside the next site's number, so reload the page rather than publish a contaminated figure.
+        await page.evaluate(`atSpawn()`); await sleep(2500);
+        let dirty = await sceneObjs();
+        // +150, not +40. The leak this guard exists to catch was 500-700 objects (a boss, sixteen animals
+        // and a Horrific Wretch surviving the reset). The ambient fauna spawner alone moves the count by
+        // ±60 between two identical visits, so a tight threshold fires on noise and reloads the page every
+        // site — a guard that cannot tell contamination from weather is just a slow harness.
+        if(dirty > BASE+150){
+          console.log(`\n  ! scene did not clean up after the previous site (${dirty} non-chunk objects vs ${BASE} baseline) — reloading the page so ${site.name} is measured on a clean world`);
+          await page.goto(url,{waitUntil:'load',timeout:120000});
+          await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
+          await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
+          await page.evaluate(`window.__hcPERF.arm(); window.__benchInfo=1;`);
+          await page.evaluate(HELPERS);
+          BASE = await cleanBaseline();
+          dirty = BASE;
+        }
         const run = body => page.evaluate(`(()=>{ try{ const r=(function(){${body}\nreturn null;})(); return r===null?'ok':r; }catch(e){ return {err:String(e&&e.message||e)}; } })()`);
         let setupOut=null;
         try{ setupOut = await run(site.setup); } catch(e){ setupOut={err:String(e.message||e)}; }
         if(setupOut && setupOut.err){ console.log(`\n${site.name}: SETUP FAILED — ${setupOut.err}`); rows.push({pass, site:site.name, err:setupOut.err}); continue; }
         if(site.move) await page.evaluate(`window.__census.start(${JSON.stringify(site.move)})`);
-        // Streaming and any deferred structure build must finish BEFORE the ring is reset, or the number
-        // measures arriving somewhere rather than being there.
-        await sleep((site.settle!=null?site.settle:SETTLE)*1000);
-        await page.evaluate(`__hc.lock(true); __hcPERF.reset();`);
+        // WAIT FOR THE WORLD TO BE THERE, do not wait for a duration. The cathedral read 3.11 ms with 302
+        // draws on a fixed 14 s settle because a 300-block teleport had not finished streaming: the harness
+        // measured an empty world and called it the fastest place in the game. Poll the game's own
+        // meshed/want ring count, with the old fixed settle only as the deadline.
+        const deadline = Date.now() + (site.settle!=null?site.settle:SETTLE)*3000;
+        let fillState=null;
+        for(;;){
+          fillState = await page.evaluate(`(()=>{ const f=__hc.fill(); return {meshed:f.meshed, want:f.want, chunks:f.chunks}; })()`);
+          if(fillState.meshed >= fillState.want) break;
+          if(Date.now() > deadline){ console.log(`\n  ! ${site.name}: only ${fillState.meshed}/${fillState.want} chunks meshed when the deadline expired — this site is measured on a partly-built world`); break; }
+          await sleep(500);
+        }
+        await sleep(2000);            // one breath past "meshed" so the first-draw uploads are not in the window
+        // Adaptive quality sheds internal resolution, god rays, bloom, shadow rate and render distance when
+        // the frame is tight, so a slow site quietly renders a CHEAPER game and reads faster than it is.
+        // Pin it to full at the start of the window and report where it ended up — a "win" that is really
+        // adaptive handing resolution back is the easiest false positive there is.
+        await page.evaluate(`__hc.lock(true); __hc.pinScene(); __hcPERF.reset();`);
+        const q0 = await page.evaluate(`({ px:__hc.sceneState().pixelScale, rd:__hc.rd() })`);
         await sleep(DUR*1000);
         const r = await page.evaluate(`(()=>{ const f=__hcPERF.live(), p=__hc.frameProf(4000), i=__hc.perf(), L=__hc.lights(), c=__hcPERF.census();
           return { f, p, i, L, drawables:c.drawables, culledOff:c.culledOff, shadowFaces:c.shadowFaces, byOwner:c.byOwner,
+                   px:__hc.sceneState().pixelScale, rd:__hc.rd(),
                    pos:__hc.pos(), st:__hc.st(), heap:(performance.memory?+(performance.memory.usedJSHeapSize/1048576).toFixed(0):null) }; })()`);
         if(site.move) await page.evaluate(`window.__census.stop()`);
         if(site.teardown) await run(site.teardown);
@@ -247,8 +305,16 @@ const med = a => { const s=a.slice().sort((x,y)=>x-y); return s.length%2 ? s[(s.
           draws:r.i.calls, tris:r.i.tris, progs:r.i.progs, progsCompiled:r.p.progsCompiledInWindow,
           drawables:r.drawables, culledOff:r.culledOff, shadowFaces:r.shadowFaces,
           point:r.L.point, pointShadow:r.L.pointShadow, dirShadow:r.L.dirShadow,
-          heap:r.heap, ms:r.p.ms, byOwner:r.byOwner, pos:r.pos, avgFrameMs:r.p.avgFrameMs };
+          heap:r.heap, ms:r.p.ms, byOwner:r.byOwner, pos:r.pos, avgFrameMs:r.p.avgFrameMs,
+          pxStart:q0.px, pxEnd:r.px, rdStart:q0.rd, rdEnd:r.rd, preDrawables:dirty, baseDrawables:BASE };
         rows.push(q);
+        // A site whose camera ended up pointing at empty sky measures the sky, and reads as the fastest
+        // place in the game. boss and cathedral both did exactly that (289 and 302 draws against 894 for
+        // the same clean spawn view) before the cameras were fixed, and 3.1 ms looked like good news.
+        if(q.draws < CLEAN_DRAWS*0.5)
+          console.log(`  ! ONLY ${q.draws} draws against ${CLEAN_DRAWS} for a clean spawn view — this camera is probably looking at sky or into a wall, so the ms below is not a measurement of this place`);
+        if(q.pxEnd < q.pxStart || q.rdEnd < q.rdStart)
+          console.log(`\n  ! ADAPTIVE SHED QUALITY HERE: pixelScale ${q.pxStart}->${q.pxEnd}, renderDist ${q.rdStart}->${q.rdEnd} — the ms below is a cheaper game than the one that started`);
         console.log(`\n${site.name}  ${q.median} ms med (${q.fps} fps)  p99 ${q.p99}  max ${q.max}   >12ms ${q.over12}  >16.6 ${q.over16}  >33 ${q.over33}  n=${q.n}`);
         console.log(`  draws ${q.draws}  tris ${(q.tris/1000|0)}k  drawables ${q.drawables} (${q.culledOff} unculled)  shadowFaces ${q.shadowFaces}  point ${q.point}  progs ${q.progs} (+${q.progsCompiled} here)  heap ${q.heap}MB`);
         console.log(`  ${Object.entries(q.ms||{}).slice(0,7).map(([k,v])=>k+' '+v).join('  ')}`);
