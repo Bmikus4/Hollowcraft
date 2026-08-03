@@ -181,6 +181,20 @@ const check = (name, ok, detail)=>{ console.log((ok?'PASS  ':'FAIL  ')+name+(det
     await page.screenshot({ path: path.join(OUT, TAG+'-2-after-flush.png') });
     await page.screenshot({ path: path.join(OUT, TAG+'-2-after-flush-crop.png'), clip:{ x:460, y:140, width:360, height:360 } });
 
+    // ---- THE SPAWN EGG's own route. Everything above went through spawnHorrific; this goes through the item, so the only
+    // untested link left is the mouse event itself. ITEMS.egg_horrific.egg is exactly what the right-click handler reads
+    // and hands to spawnFromEgg, and the inventory add proves the item is craftable/giveable at all.
+    await page.evaluate(`__hc.hwKill()`);
+    await sleep(400);
+    const held = await page.evaluate(`__hc.giveItem('egg_horrific',1)`);
+    check('the egg exists as an item', held >= 1, held);
+    const eggRoute = await page.evaluate(`__hc.hwEgg()`);
+    await sleep(900);
+    console.log('egg route', JSON.stringify(eggRoute));
+    check('the egg spawns a Horrific Wretch', eggRoute.eggType==='horrific' && eggRoute.extras===1, eggRoute);
+    check('the egg is named for the creature', eggRoute.itemName==='Horrific Wretch Spawn Egg', eggRoute.itemName);
+    await page.evaluate(`__hc.hwHold(true)`);
+
     // ---- 2b. RELEASE THE AI and require it to behave like the Wretch: from a held SCOUT/HUNT at ~10 blocks it must
     // close and commit. Asserted on the instance's own state, never on a world-wide global.
     await page.evaluate(`__hc.hwHold(false)`);
