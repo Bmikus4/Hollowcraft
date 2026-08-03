@@ -1,0 +1,128 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Drift loop — tuning harness</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b0d0c;color:#c8bfa4;font:12px/1.5 Consolas,monospace;overflow:hidden}
+  canvas{display:block}
+  #ui{position:fixed;top:0;left:0;padding:10px 14px;background:rgba(8,11,9,.74);border-right:1px solid #2a3126;
+      width:272px;height:100%;overflow-y:auto;box-sizing:border-box}
+  h1{font:600 13px Georgia;letter-spacing:2px;margin:0 0 2px;color:#c9a24a;text-transform:uppercase}
+  .sub{color:#7d8a6d;font-style:italic;margin:0 0 12px;font-size:11px;line-height:1.45}
+  label{display:block;margin:9px 0 1px;color:#9aad84}
+  label span{float:right;color:#e9e2c8}
+  input[type=range]{width:100%;accent-color:#a9812f}
+  button{width:100%;margin:5px 0 0;padding:6px;background:#1a1f18;color:#c8bfa4;border:1px solid #3a4433;
+         border-radius:4px;cursor:pointer;font:inherit}
+  button:hover{border-color:#a9812f;color:#e9e2c8}
+  pre{margin:10px 0 0;color:#7d8a6d;font-size:11px;white-space:pre-wrap}
+  .hint{margin-top:12px;color:#5f6b53;font-size:11px;line-height:1.5;border-top:1px solid #2a3126;padding-top:8px}
+</style>
+<script type="importmap">{"imports":{"three":"../../../../vendor/three.module.js"}}</script>
+</head><body>
+<div id="ui">
+  <h1>Drift loop</h1>
+  <p class="sub">a 128&times;128 autoregressive loop at 22Hz over a stand-in creature. the clean render (top right) is the
+  anchor; everything else is the loop failing to remember it.</p>
+  <div id="knobs"></div>
+  <button id="flush">flush the context window &nbsp;<b>[F]</b></button>
+  <button id="orbit">pause the orbit &nbsp;<b>[space]</b></button>
+  <button id="anchor">show only the clean render</button>
+  <pre id="stat"></pre>
+  <p class="hint">Top right: <b>clean render</b> above, <b>drifted output</b> below. Look for the silhouette lagging the
+  body, chroma splitting on edges, features snapping to the latent grid. <b>F</b> re-converges it onto a creature that is
+  not the one you were watching &mdash; in game that fires when you lose line of sight, not on a keypress.
+  <b>[</b> and <b>]</b> change distance; judge it at 6 blocks, which is where you fight.</p>
+</div>
+<script type="module">
+import * as THREE from 'three';
+import { driftInit, driftAttach, driftStep, driftFlush, driftTune, driftState } from '../index.js';
+import { TUNING } from '../loop.js';
+import { buildBody, reseedBody } from '../subject.js';
+
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0b0d0c, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0b0d0c, 0.018);
+const camera = new THREE.PerspectiveCamera(58, innerWidth/innerHeight, 0.1, 400);
+scene.add(new THREE.HemisphereLight(0x9fb0c0, 0x201c18, 0.55));
+const sun = new THREE.DirectionalLight(0xffeccc, 0.9); sun.position.set(6,10,4); scene.add(sun);
+
+// A floor and a ring of trunks: the floor gives the eye a scale reference and the trunks give the drift's parallax
+// something to be measured against. Without them a morphing blob looks like a screensaver.
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(200,200), new THREE.MeshLambertMaterial({color:0x2b3326}));
+floor.rotation.x = -Math.PI/2; scene.add(floor);
+const trunkM = new THREE.MeshLambertMaterial({color:0x3b2e20});
+for(let k=0;k<26;k++){ const a=k/26*6.283, r=13+Math.random()*10, h=6+Math.random()*7;
+  const t=new THREE.Mesh(new THREE.BoxGeometry(0.7,h,0.7), trunkM); t.position.set(Math.cos(a)*r, h/2, Math.sin(a)*r); scene.add(t); }
+scene.add(new THREE.GridHelper(60, 60, 0x1d2419, 0x141a12));
+
+driftInit({ THREE, renderer, worldScene:scene, camera, solidAt:null, daylight:()=>1 });
+const body = buildBody(THREE);
+let span = reseedBody(THREE, body, (Math.random()*1e9)|0) * 1.15;
+scene.add(body.mesh);                                            // driftAttach moves it straight back out again
+const H = driftAttach('demo', body.mesh, { span, lift:0,
+  // In game the flush cannot change the Wretch's anatomy, only its colour. Here it can change both, which is the useful
+  // case to look at while tuning: how much of "that is a different creature" comes from the shape and how much from the
+  // burst and the tint.
+  onFlush:()=>{ H.span = reseedBody(THREE, body, (Math.random()*1e9)|0) * 1.15; } });
+
+// The two debug quads, drawn over the frame after the main render.
+const dbgScene = new THREE.Scene(), dbgCam = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const mkQuad = ()=>{ const m=new THREE.Mesh(new THREE.PlaneGeometry(1,1), new THREE.MeshBasicMaterial({transparent:true}));
+  dbgScene.add(m); return m; };
+const qFresh = mkQuad(), qOut = mkQuad();
+// NDC spans -1..1 on BOTH axes regardless of aspect, so a square on screen needs wx = wy/aspect.
+function layoutDbg(){ const wy = 0.42, wx = wy/(innerWidth/innerHeight), x = 1 - wx*0.5 - 0.02;
+  qFresh.scale.set(wx, wy, 1); qFresh.position.set(x, 1 - wy*0.5 - 0.03, 0);
+  qOut  .scale.set(wx, wy, 1); qOut  .position.set(x, 1 - wy*1.5 - 0.06, 0); }
+addEventListener('resize', ()=>{ renderer.setSize(innerWidth, innerHeight); camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix(); layoutDbg(); });
+layoutDbg();
+
+const RANGE = { feed:[0.02,0.6,0.005], alphaLag:[0,1.5,0.01], warp:[0,4,0.02], curl:[0,0.008,0.0001],
+  noise:[0,0.12,0.001], grid:[6,64,1], blockMix:[0,1,0.01], decay:[0.96,1.0,0.001], burstTau:[0.05,1.5,0.01] };
+const knobs = document.getElementById('knobs');
+for(const k in RANGE){ const [lo,hi,st]=RANGE[k];
+  const lab=document.createElement('label'); lab.innerHTML=k+'<span>'+TUNING[k]+'</span>';
+  const inp=document.createElement('input'); inp.type='range'; inp.min=lo; inp.max=hi; inp.step=st; inp.value=TUNING[k];
+  inp.oninput=()=>{ driftTune(k, inp.value);
+    lab.querySelector('span').textContent=(+inp.value).toFixed(4).replace(/0+$/,'').replace(/\.$/,''); };
+  knobs.appendChild(lab); knobs.appendChild(inp); }
+
+let orbit = 0, orbiting = true, dist = 6.2, anchorOnly = false;
+document.getElementById('flush').onclick = ()=>driftFlush('demo');
+document.getElementById('orbit').onclick = ()=>{ orbiting=!orbiting; };
+document.getElementById('anchor').onclick = (e)=>{ anchorOnly=!anchorOnly;
+  e.target.textContent = anchorOnly ? 'resume the drift loop' : 'show only the clean render';
+  driftTune('feed', anchorOnly?1:0.13); driftTune('noise', anchorOnly?0:0.022); driftTune('curl', anchorOnly?0:0.0016); };
+addEventListener('keydown', e=>{ if(e.key==='f'||e.key==='F') driftFlush('demo');
+  if(e.code==='Space'){ e.preventDefault(); orbiting=!orbiting; }
+  if(e.key==='[') dist=Math.max(2.2,dist-0.6); if(e.key===']') dist=Math.min(28,dist+0.6); });
+
+const stat = document.getElementById('stat');
+let last = performance.now(), fps = 0, statT = 0;
+(function frame(){
+  const now = performance.now(), dt = Math.min(0.05, (now-last)/1000); last = now;
+  fps += ((1/Math.max(1e-4,dt)) - fps) * 0.08;
+  if(orbiting) orbit += dt*0.34;
+  camera.position.set(Math.cos(orbit)*dist, 1.7, Math.sin(orbit)*dist);
+  camera.lookAt(0, 1.0, 0);
+  driftStep('demo', dt, {x:0, y:0, z:0});
+
+  renderer.setRenderTarget(null);
+  renderer.render(scene, camera);
+  qFresh.material.map = H.loop.fresh.texture; qOut.material.map = H.loop.texture();
+  renderer.autoClear = false; renderer.render(dbgScene, dbgCam); renderer.autoClear = true;
+
+  if((statT += dt) > 0.2){ statT = 0; const s = driftState('demo');
+    stat.textContent = 'fps '+Math.round(fps)+'   dist '+dist.toFixed(1)+'   [ ] to move\n'
+      + 'span '+s.span+'  quad '+s.quad+'  tint '+s.tint+'\n'
+      + 'steps '+s.steps+'  burst '+s.burst+'  flushes '+s.flushes+'\n'
+      + 'seen '+s.seen+'  unseen '+s.unseen+'s'; }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>
