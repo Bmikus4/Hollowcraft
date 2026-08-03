@@ -67,7 +67,7 @@ const med = a => { const s=a.slice().sort((x,y)=>x-y); return s.length%2 ? s[(s.
         return { median:f.median, p99:f.p99, max:f.max, over12:f.over12, over16:f.over16_6, n:f.n,
                  drift:(p.ms&&p.ms.drift)||0, wretch:(p.ms&&p.ms.wretch)||0, draw:(p.ms&&p.ms.drawBlocked)||((p.ms&&p.ms.draw)||0),
                  draws:i.calls, tris:i.tris, point:L.point, poolLit:L.poolLit, progs:i.progs,
-                 hw:(__hc.hwState()||[]).length,
+                 hw:(__hc.hwState()||[]).length, ringFrames:(p&&p.frames)||0, perfOn:__hcPERF.flags().on, profErr:p&&p.err||null,
                  heap:(performance.memory?+(performance.memory.usedJSHeapSize/1048576).toFixed(0):null) }; })()`);
       r.setup=st; return r;
     };
@@ -77,6 +77,8 @@ const med = a => { const s=a.slice().sort((x,y)=>x-y); return s.length%2 ? s[(s.
       if(p===0){ console.log(`warm-up pair discarded (absent ${a.median} ms, present ${b.median} ms — includes this creature's first shader compiles)`); continue; }
       A.push(a); B.push(b);
       console.log(`pair ${p}: absent ${String(a.median).padStart(6)} ms (p99 ${a.p99})  ->  present ${String(b.median).padStart(6)} ms (p99 ${b.p99})   delta ${(b.median-a.median>=0?'+':'')}${(b.median-a.median).toFixed(3)} ms   drift ${b.drift} ms   lights ${a.point}->${b.point}  poolLit ${a.poolLit}->${b.poolLit}  hw ${a.hw}->${b.hw}`);
+      // A window with no frames in it is not a fast window. Say so instead of publishing its zero.
+      if(!a.n || !b.n) console.log(`  ! NO FRAMES COMMITTED in one of those windows (absent n=${a.n} ring=${a.ringFrames} perfOn=${a.perfOn} ${a.profErr||''} | present n=${b.n} ring=${b.ringFrames} perfOn=${b.perfOn} ${b.profErr||''}) — that pair is not a measurement`);
     }
     const dMed=A.map((a,i)=>B[i].median-a.median), dP99=A.map((a,i)=>B[i].p99-a.p99), dMax=A.map((a,i)=>B[i].max-a.max);
     const wins=dMed.filter(d=>d>0).length;
