@@ -2450,10 +2450,16 @@ const skyMat = new THREE.ShaderMaterial({
       // original value and the zenith is lifted a little on top, because the ask was for the ENTIRE sky lighter, not just
       // the band. The near-horizon problem is now solved geometrically instead, by bringing the water in and curving it
       // away — see WATER, which is the approach he asked for in place of this one.
-      vec3 zenD=vec3(0.14,0.38,0.78), horD=vec3(0.64,0.76,0.89);
+      vec3 zenD=vec3(0.14,0.38,0.78), horD=vec3(0.58,0.73,0.92);
       vec3 zenN=vec3(0.005,0.011,0.030), horN=vec3(0.018,0.032,0.066);
       vec3 zen=mix(zenN,zenD,uDay), hor=mix(horN,horD,uDay);
-      vec3 col=mix(hor,zen,pow(up,0.55));
+      // 0.55 -> 0.35 COMPRESSES THE PALE. The exponent decides how far up the sky the horizon colour reaches: at 0.55 the
+      // pale was still 41% of the mix a good 7 degrees up, which is the wide grey-white shelf sitting on the water in every
+      // daytime frame -- the brightest row of the whole sky measured just above the waterline. At 0.35 the zenith blue comes
+      // down to meet it and the pale is a few degrees, which is what a clear sky actually does. horD is also a touch deeper
+      // and bluer (0.64,0.76,0.89 -> 0.58,0.73,0.92): the greyness, not the brightness, is what read as haze.
+      // NOT the dark-horizon experiment, which Ben rejected -- the gradient still runs pale at the bottom, just less of it.
+      vec3 col=mix(hor,zen,pow(up,0.35));
       if(dir.y<-0.1) col=mix(col, hor*0.42, clamp(-(dir.y+0.1)*3.2,0.0,1.0));   // curvature: fade past the horizon into ground haze
       // ---- FORWARD SCATTER (Ben 07-28, "a beautiful in-game sky") ----
       // The sky is BRIGHTER toward the sun and dimmest at 90 degrees from it. The dome had none of this, which is the main
@@ -2462,7 +2468,12 @@ const skyMat = new THREE.ShaderMaterial({
       col += mix(vec3(0.95,0.60,0.30), vec3(0.55,0.72,0.96), clamp(sunH*2.2,0.0,1.0)) * fw * uDay;
       // ---- GOLDEN HOUR, DIRECTIONAL ---- the warm band follows the sun's AZIMUTH instead of ringing the whole horizon, and
       // the opposite side goes violet, which is what makes the warm side read as warm rather than merely orange.
-      float dusk = pow(1.0-abs(sunH),3.0);
+      // GOLDEN HOUR IS AN HOUR, not all afternoon. pow(1-|sunH|,3) is 0.18 at sunH=0.44 -- the sun 26 degrees up, the middle
+      // of the afternoon -- and that 18% of orange plus violet was painted across the whole width of the sky below the
+      // horizon. Hiding the ocean ring exposed it as a mauve wash, and the sliver of it visible ABOVE the ring is the pink
+      // line on the waterline that has been in every daytime frame. A real sky starts this below about 10 degrees.
+      // Now it is zero above sunH 0.22 and reaches full strength at the horizon, so dawn and dusk keep everything they had.
+      float dusk = pow(clamp(1.0-abs(sunH)/0.22, 0.0, 1.0), 1.6);
       col += vec3(1.00,0.41,0.13)*dusk*lowBand*(0.18+0.95*pow(sd,2.0));
       col += vec3(0.28,0.15,0.42)*dusk*lowBand*(1.0-sd)*0.38;
       // ---- NIGHT ---- gated, so a clear day pays none of it
@@ -2476,7 +2487,13 @@ const skyMat = new THREE.ShaderMaterial({
           add += vec3(0.36,0.38,0.55)*band*smoothstep(0.34,0.92,dust)*0.30*nt*uStars; }
       }
       // ---- SUN DISC + DUSK MIE ----
-      add += vec3(1.0,0.92,0.78)*pow(sd,900.0)*8.0*step(-0.12,sunH);
+      // THE SUN GETS AN EDGE. pow(sd,900) is a smooth falloff with no rim, so the only thing giving the sun a shape on screen
+      // was the bloom pass -- which is why it photographed as a soft ellipse rather than a disc. A smoothstep across the last
+      // thousandth of a radian is a real limb, and the tight halo outside it is the Mie glow that should surround it.
+      float sunDisc = smoothstep(0.99955, 0.99985, sd);
+      add += vec3(1.0,0.965,0.90)*sunDisc*7.0*step(-0.12,sunH);
+      add += vec3(1.0,0.90,0.72)*pow(sd,260.0)*0.55*step(-0.12,sunH)*uDay;   // tight halo hugging the limb
+      add += vec3(1.0,0.92,0.78)*pow(sd,900.0)*2.0*step(-0.12,sunH);         // the old falloff kept, quieter, so the disc still has a core
       add += vec3(0.95,0.42,0.16)*dusk*pow(sd,4.0)*(1.0-up)*0.9;
       // moon - a real disc with a cratered face: project the view ray onto the tangent plane at the
       // moon direction, so the texture maps ACROSS the disc (the old fract(muv*3) sampled ~one texel flat).
@@ -17704,6 +17721,17 @@ window.__hc={
   mineState(x,y,z){ try{ return { block:getBlock(x|0,y|0,z|0), isMine:getBlock(x|0,y|0,z|0)===BID.landmine, health:+player.health.toFixed(2),
       solidAround:(()=>{ let n=0; for(let ax=-3;ax<=3;ax++)for(let ay=-3;ay<=3;ay++)for(let az=-3;az<=3;az++){ const b=getBlock((x|0)+ax,(y|0)+ay,(z|0)+az); if(b && b!==WATER) n++; } return n; })(),
       groundBelow:getBlock(x|0,(y|0)-2,z|0) }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: hide horizon layers one at a time. The daytime horizon has been chased by theory twice and both times the
+  // theory was wrong; the only thing that has ever worked on it is hiding one layer and seeing whether the artefact goes.
+  // Names: sky (the dome), ocean (the far ring), fogShell, pine (treeline + its woody band), chunks (the real world).
+  hideLayer(name,on){ try{ const t={ sky:(typeof skyDome!=='undefined')?skyDome:null, ocean:(typeof oceanLayer!=='undefined')?oceanLayer:null,
+        fogShell:(typeof fogShell!=='undefined')?fogShell:null, pine:(typeof pineLayer!=='undefined')?pineLayer:null,
+        chunks:(typeof chunkRoot!=='undefined')?chunkRoot:null }[name];
+      if(!t) return {err:'no layer '+name};
+      t.visible=(on!==false);   // second arg is VISIBILITY: hideLayer(x,false) hides. The first version had this inverted and reported the layer still visible while claiming to hide it
+      const st={}; for(const k of ['sky','ocean','fogShell','pine','chunks']){ const o={ sky:(typeof skyDome!=='undefined')?skyDome:null, ocean:(typeof oceanLayer!=='undefined')?oceanLayer:null,
+        fogShell:(typeof fogShell!=='undefined')?fogShell:null, pine:(typeof pineLayer!=='undefined')?pineLayer:null, chunks:(typeof chunkRoot!=='undefined')?chunkRoot:null }[k]; st[k]=o?!!o.visible:null; }
+      return st; }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: FOLIAGE IN A PIT. Sweeps every loaded chunk for cross blocks and classifies each one by how enclosed it is,
   // reading neighbours through getBlock so a plant on a CHUNK BOUNDARY is judged against the real world rather than
   // against the edge of its own array. Done in one hook because the alternative is ~10^6 round trips to the harness.
@@ -17925,6 +17953,13 @@ window.__hc={
     return { ring:ring.map(v=>+v.toFixed(4)), anchor:anch.map(v=>+v.toFixed(4)), surfaceReadsRing,
              anchorVsRing:+dev(anch,ring).toFixed(4), lum:+L(ring).toFixed(4), sat:sat(ring),
              vib:_uSeaVib.value, day:+globalU.uDay.value.toFixed(3) }; },
+  // QA/bench: the sky's own inputs at this instant. The daytime horizon wash is driven by SUN ELEVATION through a cubic,
+  // and reasoning about what that cubic is worth at a given clock time is exactly how this got chased wrong twice.
+  skyState(){ try{ const s=globalU.uSunDir.value; return { day:+globalU.uDay.value.toFixed(3), worldTime:+worldTime.toFixed(1),
+      sunDir:[+s.x.toFixed(3),+s.y.toFixed(3),+s.z.toFixed(3)], sunH:+s.y.toFixed(3),
+      duskCubic:+Math.pow(1-Math.abs(s.y),3).toFixed(4),            // the term the golden-hour wash actually multiplies by
+      skyDark:_uSkyDark.value, horizonAnchor:[+_uHorizonBlend.value.r.toFixed(3),+_uHorizonBlend.value.g.toFixed(3),+_uHorizonBlend.value.b.toFixed(3)],
+      fog:[+scene.fog.color.r.toFixed(3),+scene.fog.color.g.toFixed(3),+scene.fog.color.b.toFixed(3)], fogDensity:+scene.fog.density.toFixed(5) }; }catch(e){ return {err:String(e.message||e)}; } },
   seaColor(){ return { deep:[+_uWater.value.r.toFixed(3),+_uWater.value.g.toFixed(3),+_uWater.value.b.toFixed(3)], horizon:[+_uHorizonBlend.value.r.toFixed(3),+_uHorizonBlend.value.g.toFixed(3),+_uHorizonBlend.value.b.toFixed(3)], day:+globalU.uDay.value.toFixed(2) }; },   // QA: under-horizon deep-blue readout
   holeProbe(dist){ dist=(dist==null?2:dist); for(let i=0;i<9;i++){ if(!inv[i]){ selSlot=i; break; } }   // QA: pillar + bullet hole in front at eye height, stand back `dist`, look straight at it (daytime, empty hand)
     const px0=Math.round(player.pos.x), pz0=Math.round(player.pos.z), gy=Math.round(groundYAt(px0+0.5,pz0+0.5,player.pos.y));
