@@ -1855,6 +1855,15 @@ function generateChunk(c){
   // terrain enrichment and any replayed player edits all together. A chunk therefore cannot come into existence with a
   // buried or floating shrub in it, whatever order those passes ran in.
   decoSeatChunk(c);
+  // ...AND RE-SEAT THE FOUR NEIGHBOURS. This is the hole Ben kept reporting after the sideways rule was added, and it is a
+  // hole in the rule's own safety valve: for a plant on a chunk EDGE, one of its four horizontal neighbours lives in the
+  // next chunk, and if that chunk is not generated yet getBlock returns AIR. The rule counts that as "not a wall" on
+  // purpose -- it must never delete on missing information -- so the plant survives, and until now nothing ever asked
+  // again once the missing neighbour arrived. Measured before this line existed: 5 surviving 1x1 pits across 381 chunks,
+  // ALL FIVE of them on a chunk boundary, which is the whole population.
+  // Cheap: gated on hasCross, so a neighbour with no decoration costs one boolean.
+  for(const [ox,oz] of [[1,0],[-1,0],[0,1],[0,-1]]){ const nb=getChunk(c.cx+ox,c.cz+oz);
+    if(nb && nb.generated && nb.hasCross){ decoSeatChunk(nb); if(typeof remeshSet!=='undefined') remeshSet.add(nb); } }
   // ---- AND THE SAME SHAPE OF RULE FOR TREES INSIDE A CLAIMED SITE ----
   // registerNoTree stops the generator planting in a structure's footprint, but only for chunks generated AFTER the site
   // was claimed. groundStructure's erase handles the ones that already existed — except setBlockWorld returns silently
@@ -17690,6 +17699,31 @@ window.__hc={
   mineState(x,y,z){ try{ return { block:getBlock(x|0,y|0,z|0), isMine:getBlock(x|0,y|0,z|0)===BID.landmine, health:+player.health.toFixed(2),
       solidAround:(()=>{ let n=0; for(let ax=-3;ax<=3;ax++)for(let ay=-3;ay<=3;ay++)for(let az=-3;az<=3;az++){ const b=getBlock((x|0)+ax,(y|0)+ay,(z|0)+az); if(b && b!==WATER) n++; } return n; })(),
       groundBelow:getBlock(x|0,(y|0)-2,z|0) }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: FOLIAGE IN A PIT. Sweeps every loaded chunk for cross blocks and classifies each one by how enclosed it is,
+  // reading neighbours through getBlock so a plant on a CHUNK BOUNDARY is judged against the real world rather than
+  // against the edge of its own array. Done in one hook because the alternative is ~10^6 round trips to the harness.
+  // walls4 is the violation Ben reports; walls3 is reported beside it because a pit with one non-solid wall (another
+  // plant, a slab, a fence) looks identical to a person and would slip past a rule that demands all four.
+  pitScan(){ try{ const out={ chunks:0, crossCells:0, walls4:0, walls3:0, buried:0, edgeWalls4:0, noHasCross:0, samples:[] };
+      for(const c of world.values()){ if(!c||!c.blocks||!c.generated) continue; out.chunks++;
+        let sawCross=false;
+        for(let lz=0;lz<CK;lz++)for(let lx=0;lx<CK;lx++)for(let y=1;y<WH-1;y++){
+          const b=c.blocks[idx(lx,y,lz)]; if(!b || blockCat[b]!=='cross') continue;
+          sawCross=true; out.crossCells++;
+          const wx=(c.cx<<4)+lx, wz=(c.cz<<4)+lz;
+          const a=c.blocks[idx(lx,y+1,lz)];
+          if(a && isSolid[a]){ out.buried++; if(out.samples.length<12) out.samples.push({kind:'buried',x:wx,y,z:wz,above:a}); continue; }
+          let walls=0, edge=false;
+          for(let i=0;i<4;i++){ const dx=(i===0)?1:(i===1)?-1:0, dz=(i===2)?1:(i===3)?-1:0;
+            const nx=lx+dx, nz=lz+dz; if(nx<0||nx>=CK||nz<0||nz>=CK) edge=true;
+            const b2=getBlock(wx+dx,y,wz+dz);
+            if(b2 && isSolid[b2] && blockCat[b2]!=='cross') walls++; }
+          if(walls===4){ out.walls4++; if(edge) out.edgeWalls4++;
+            if(out.samples.length<12) out.samples.push({kind:'pit',x:wx,y,z:wz,block:b,edge,hasCross:!!c.hasCross}); }
+          else if(walls===3){ out.walls3++; if(out.samples.length<12) out.samples.push({kind:'pit3',x:wx,y,z:wz,block:b,edge}); } }
+        if(sawCross && !c.hasCross) out.noHasCross++;   // the invariant is gated on hasCross: a chunk with plants and a false flag is skipped entirely
+      }
+      return out; }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: why is a model block not drawn? The chunk mesher dispatches on B[id].model and its per-block clone path
   // swallows a throwing builder with `catch{ continue }`, so a broken model is silently nothing at all. This reports the
   // dispatch inputs and CALLS the builder, so a throw shows up as a message instead of an empty patch of grass.
