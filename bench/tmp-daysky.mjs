@@ -91,6 +91,7 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
       const pitch = Math.asin(Math.max(-1,Math.min(1,sk.sunDir[1])));
       console.log('  sun at sunH='+sk.sunH+' -> look yaw '+yaw.toFixed(3)+' pitch '+pitch.toFixed(3));
       await page.evaluate('__hcBR.look('+yaw+','+pitch+')'); await sleep(900);
+      console.log('  post-bloom overlay: '+JSON.stringify(await page.evaluate('__hc.sunOverlay()')));
       const f=path.join(OUT,'daysky-'+TAG+'-sun.png');
       await page.screenshot({path:f});
       const img=decodePNG(fs.readFileSync(f));
@@ -124,6 +125,22 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
         const inner=(()=>{ const r=Math.max(2,(sx.fwhm>>2)); let mn=1e9,mx=-1e9; for(let k=cxp-r;k<=cxp+r;k++){ mn=Math.min(mn,px[k]); mx=Math.max(mx,px[k]); } return +(mx-mn).toFixed(1); })();
         console.log('  limb: steepest drop '+edge+' luminance per pixel;  interior variation across the inner half: '+inner
           +'   (a body wants a big drop and a small interior number)'); }
+    }
+
+    // OCCLUSION. The post-bloom disc is drawn over the finished frame with no depth buffer to test against, so its
+    // visibility comes from voxel rays. Underground, all five must be blocked and the disc must go out entirely -- if this
+    // reads anything above zero, the sun is being painted through solid rock.
+    {
+      const p = await page.evaluate('__hc.probe()');
+      await page.evaluate('__hc.tpExact('+p.x+','+p.z+',12)');   // well below the surface
+      await sleep(1600);
+      const under = await page.evaluate('__hc.sunOverlay()');
+      console.log('  UNDERGROUND overlay: '+JSON.stringify(under)+'   opacity must be ~0');
+      await page.screenshot({path:path.join(OUT,'daysky-'+TAG+'-underground.png')});
+      await page.evaluate('__hc.tpExact('+(P.x-40)+','+P.z+','+(P.sea+34)+')');
+      await sleep(1600);
+      const back = await page.evaluate('__hc.sunOverlay()');
+      console.log('  back in the open:    '+JSON.stringify(back)+'   opacity must be high again');
     }
 
     // And one looking UP, to see the zenith and the cloud layers, plus one at the sun.

@@ -2593,6 +2593,90 @@ const skyMat = new THREE.ShaderMaterial({
 });
 const skyDome = new THREE.Mesh(skyGeo, skyMat);
 skyDome.renderOrder = -10; skyDome.frustumCulled=false;
+// ---- THE SUN'S LIMB, DRAWN AFTER THE POST CHAIN ------------------------------------------------------------------
+// The disc in the sky shader is the bloom SEED and stays: it is what makes the glow, and it is occluded by terrain for
+// free because it is in the scene. What it cannot be is sharp, because the bloom pass blurs the very pixels it is drawn
+// from -- measured, the limb fell about 12 luminance per pixel where a hard edge is four times that.
+// So the crisp disc is drawn over the composed frame, after bloom, grade and motion blur have all had their turn.
+//
+// OCCLUSION IS THE WHOLE DIFFICULTY. A pass after the composer has no depth buffer to test against: _sceneRT carries a
+// depth texture but ONLY on the motion-blur path, and the classic fallback path has none, so anything depth-based would
+// work on one machine and put the sun through a mountain on another. Instead the visibility is sampled the way the game
+// already knows how -- voxel rays. Nine rays across the disc, and the overlay's opacity is the fraction that reach the
+// sky, so a hillside eats the sun progressively at sunset instead of popping it out in one frame.
+const _sunOv={ scene:new THREE.Scene(), cam:new THREE.OrthographicCamera(-1,1,1,-1,0,1), mesh:null, mat:null, ndc:new THREE.Vector3(), vis:1 };
+(function buildSunOverlay(){
+  // A unit quad in NDC space with the disc cut out of it in the fragment shader: a circle from a polygon is a lot of
+  // triangles for something two pixels of limb wide, and this way the edge is exactly as hard as the antialias allows.
+  _sunOv.mat=new THREE.ShaderMaterial({ transparent:true, depthTest:false, depthWrite:false,
+    uniforms:{ uCentre:{value:new THREE.Vector2()}, uRadius:{value:new THREE.Vector2(0.05,0.05)}, uOpacity:{value:0}, uColour:{value:new THREE.Color(1,0.975,0.93)} },
+    vertexShader:'varying vec2 vP; void main(){ vP=position.xy; gl_Position=vec4(position.xy,0.0,1.0); }',
+    fragmentShader:['precision highp float; varying vec2 vP; uniform vec2 uCentre, uRadius; uniform float uOpacity; uniform vec3 uColour;',
+      'void main(){ vec2 d=(vP-uCentre)/uRadius; float r=length(d);',
+      // ONE pixel of feather, no more. The limb is the point of this whole pass.
+      '  float a=1.0-smoothstep(0.965,1.0,r); if(a<=0.001) discard;',
+      '  gl_FragColor=vec4(uColour, a*uOpacity); }'].join('\n') });
+  _sunOv.mesh=new THREE.Mesh(new THREE.PlaneGeometry(2,2), _sunOv.mat);
+  _sunOv.mesh.frustumCulled=false; _sunOv.scene.add(_sunOv.mesh);
+})();
+const SUN_ANG=0.0593;   // the disc's angular RADIUS in radians (3.4 degrees), the same body the sky shader draws — kept here so the two cannot drift apart
+const _sunAx=new THREE.Vector3(), _sunT1=new THREE.Vector3(), _sunT2=new THREE.Vector3();   // scratch: this runs every frame and must not allocate
+function drawSunOverlay(){
+  try{
+    if(!_sunOv.mat || !started || intro.active) return;
+    if(typeof BR!=='undefined' && BR.inside) return;              // no sun inside the Backrooms
+    if(typeof skyDome!=='undefined' && !skyDome.visible) return;   // whoever hid the sky (boss whiteout, the void, a QA hook) hid the sun with it
+    const sd=globalU.uSunDir.value;
+    if(sd.y < -0.14) return;                                       // below the horizon: the sky shader's own step() gate, matched
+    // WHERE IS IT ON SCREEN. Not by projecting a point down the sun's direction: at any distance far enough to be "the sky"
+    // that point is at or beyond the far plane, so .project() returns ndc.z === 1 and the off-screen guard threw it away
+    // every frame -- drawn:0, no error, every other state reading perfectly healthy.
+    // The direction alone is enough. Rotate it into view space, where the camera looks down -z, and divide.
+    const halfV=Math.tan(camera.fov*Math.PI/360);
+    _sunOv.ndc.copy(sd).transformDirection(camera.matrixWorldInverse);
+    if(_sunOv.ndc.z >= -1e-4) return;                                   // behind the camera
+    const nx=(_sunOv.ndc.x/-_sunOv.ndc.z)/(halfV*camera.aspect), ny=(_sunOv.ndc.y/-_sunOv.ndc.z)/halfV;
+    if(Math.abs(nx)>1.6 || Math.abs(ny)>1.6) return;                    // off screen, with a margin so the limb still enters correctly
+    _sunOv.ndc.set(nx,ny,0);
+    // Angular radius -> NDC. Vertical is tan(fov/2) of NDC; horizontal divides by the aspect.
+    const ry=Math.tan(SUN_ANG)/halfV, rx=ry/camera.aspect;
+    // VISIBILITY, by voxel ray: centre plus eight around the rim. Cast far enough to clear any terrain that could be in
+    // front, and treat leaves as blocking, because they do block the sun.
+    // raycastVoxel is no use here: it always casts from the player's eye along the LOOK direction, and these five rays go
+    // toward the sun. So this is its own coarse march -- one block per step, 100 blocks -- which is plenty to decide whether
+    // a hillside is in the way. isOpaque means the solid canopy core blocks the sun while the cutout leaf skin does not,
+    // which is the same distinction the lighting already makes.
+    let open=0;
+    const ex=camera.position.x, ey=camera.position.y+((typeof EYE!=='undefined')?0:0), ez=camera.position.z;
+    const ax=Math.abs(sd.y)<0.9 ? _sunAx.set(0,1,0) : _sunAx.set(1,0,0);
+    const t1=_sunT1.crossVectors(sd,ax).normalize(), t2=_sunT2.crossVectors(sd,t1).normalize();
+    for(let i=0;i<5;i++){
+      const a=i*Math.PI*0.5, rr=(i===0)?0:SUN_ANG*0.72;
+      const dx=sd.x+(i?(t1.x*Math.cos(a)+t2.x*Math.sin(a))*rr:0), dy=sd.y+(i?(t1.y*Math.cos(a)+t2.y*Math.sin(a))*rr:0), dz=sd.z+(i?(t1.z*Math.cos(a)+t2.z*Math.sin(a))*rr:0);
+      const L=Math.hypot(dx,dy,dz)||1, ux=dx/L, uy=dy/L, uz=dz/L;
+      let blocked=false;
+      for(let t=1.2;t<100;t+=1.0){ const b=getBlock(ex+ux*t, ey+uy*t, ez+uz*t);
+        if(b && isOpaque[b]){ blocked=true; break; } }
+      if(!blocked) open++;
+    }
+    const target=open/5;
+    _sunOv.vis += (target-_sunOv.vis)*0.25;                        // eased, so a ray flicking on and off across a block edge does not strobe
+    if(_sunOv.vis<0.004) return;
+    _sunOv.mat.uniforms.uCentre.value.set(_sunOv.ndc.x,_sunOv.ndc.y);
+    _sunOv.mat.uniforms.uRadius.value.set(rx,ry);
+    // Fades out as the sun sets so the hard disc does not sit on top of the sunset's own soft glow, and with daylight so
+    // it never appears at night if uDay and the sun direction ever disagree.
+    _sunOv.mat.uniforms.uOpacity.value = _sunOv.vis * clamp((sd.y+0.14)/0.22,0,1) * clamp(globalU.uDay.value*1.6,0,1) * 0.92;
+    if(_sunOv.mat.uniforms.uOpacity.value<=0.004) return;
+    // setRenderTarget(null) EXPLICITLY. EffectComposer leaves its own target bound after the chain, so without this the
+    // overlay is drawn correctly into an off-screen buffer nobody looks at -- which is exactly what the first version did,
+    // and the profile came back unchanged while every state check said the disc was being rendered.
+    const pAC=renderer.autoClear; renderer.autoClear=false; renderer.setRenderTarget(null);
+    renderer.render(_sunOv.scene, _sunOv.cam);
+    renderer.autoClear=pAC;
+    _sunOv.drawn=(_sunOv.drawn||0)+1; _sunOv.lastOpacity=_sunOv.mat.uniforms.uOpacity.value;
+  }catch(e){ _sunOv.err=String(e&&e.message||e); }
+}
 // PROCEDURAL MOON FACE — bake a cratered/maria disc to a canvas (the spec's fallback for the NASA LRO texture,
 // which needs a TIFF decoder + survives CORS). Grey highlands, darker maria blotches, scattered rim-lit craters.
 (function bakeMoon(){ try{
@@ -6597,6 +6681,7 @@ function loop(){ try{
   if(_mbMode){ if(PERF.on) PERF.gpu.mark(2); renderer.setRenderTarget(_sceneRT); renderer.render(scene, camera); renderer.setRenderTarget(null); }   // scene → our depth-carrying target (feeds motionPass); classic path renders inside composer
   if(PERF.on) PERF.gpu.mark(3);
   composer.render();
+  drawSunOverlay();   // AFTER the post chain, so the limb is a limb — see buildSunOverlay
   T.end(TID.draw);
   // BENCH-ONLY: when the harness sets __benchInfo, accumulate renderer.info across ALL passes in the frame (autoReset off) and snapshot+reset here — otherwise info only ever shows the composer's final quad pass
   if(window.__benchInfo){ const _I=renderer.info; _I.autoReset=false; window.__benchInfoSnap={calls:_I.render.calls,tris:_I.render.triangles,geoms:_I.memory.geometries,tex:_I.memory.textures,progs:(_I.programs||[]).length}; _I.reset(); } else if(renderer.info.autoReset===false) renderer.info.autoReset=true;
@@ -17975,6 +18060,12 @@ window.__hc={
     return { ring:ring.map(v=>+v.toFixed(4)), anchor:anch.map(v=>+v.toFixed(4)), surfaceReadsRing,
              anchorVsRing:+dev(anch,ring).toFixed(4), lum:+L(ring).toFixed(4), sat:sat(ring),
              vib:_uSeaVib.value, day:+globalU.uDay.value.toFixed(3) }; },
+  // QA/bench: did the post-bloom sun overlay actually draw, and with what? Its whole purpose is to be the pixels on screen,
+  // so "the disc exists" is not the question -- the first version rendered it into the composer's still-bound target and no
+  // state check could tell, which is the same trap the offhand shield sat in for a day.
+  sunOverlay(){ try{ return { drawn:_sunOv.drawn||0, err:_sunOv.err||null, opacity:+(_sunOv.lastOpacity||0).toFixed(3),
+      vis:+_sunOv.vis.toFixed(3), ndc:[+_sunOv.ndc.x.toFixed(3),+_sunOv.ndc.y.toFixed(3),+_sunOv.ndc.z.toFixed(3)],
+      radius:[+_sunOv.mat.uniforms.uRadius.value.x.toFixed(4),+_sunOv.mat.uniforms.uRadius.value.y.toFixed(4)] }; }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: the sky's own inputs at this instant. The daytime horizon wash is driven by SUN ELEVATION through a cubic,
   // and reasoning about what that cubic is worth at a given clock time is exactly how this got chased wrong twice.
   skyState(){ try{ const s=globalU.uSunDir.value; return { day:+globalU.uDay.value.toFixed(3), worldTime:+worldTime.toFixed(1),
