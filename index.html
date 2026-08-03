@@ -4614,13 +4614,23 @@ function updateSky(dt){
   { const gz=smooth(0.0,0.25,Math.abs(elev));                                       // grazing (dawn/dusk orange) → high (white)
     const wR=1.0, wG=lerp(0.74,0.96,gz), wB=lerp(0.52,0.88,gz);                      // warm key color; oranger near the horizon
     sunLight.color.setRGB(lerp(0.36,wR,day), lerp(0.44,wG,day), lerp(0.74,wB,day));  // deeper moon-blue → warm sun, driven by `day`
-    sunLight.intensity=lerp(0.42,3.4,day); }                                         // DARKNESS-FIRST night: moon 0.55→0.42 (Ben 07-21) so distant bare-stone peaks stop catching pale moonlight and reading GREY on the night horizon; near ground stays readable via the hemi ground-fill, not the moon (was 0.9→0.55)
+    // A NOTCH WHERE THE KEY FLIPS (Ben: "entire day/night lighting cycle needs to be smooth"). Everything else here is a lerp
+    // on `day`, but _keyDir INVERTS at elev -0.1 -- sun to moon -- and a 180-degree swing of the key light moves every shadow
+    // in the world in one frame. It cannot be interpolated as a direction (halfway between a vector and its negation is zero
+    // length), so instead the key is faded almost out across the crossing: a soft notch centred on -0.1, about 0.12 of
+    // elevation wide, taking it to a fifth of its value at the flip itself. The swing still happens, in near-darkness, where
+    // there is no shadow left to see moving. Shadow casting is already off in that window, which is what makes it invisible.
+    const _fl=Math.exp(-Math.pow((elev+0.1)/0.055,2.0));                             // 1 at the flip, ~0 a tenth of an elevation away
+    sunLight.intensity=lerp(0.42,3.4,day)*(1.0-0.80*_fl); }                          // DARKNESS-FIRST night: moon 0.55→0.42 (Ben 07-21) so distant bare-stone peaks stop catching pale moonlight and reading GREY on the night horizon; near ground stays readable via the hemi ground-fill, not the moon (was 0.9→0.55)
   hemi.intensity=lerp(0.24,0.62,day);                                                // pre-hunt baseline (the "dark faces" were the vSky/htop bug, fixed at source — no fill band-aid needed)
   ambient.intensity=lerp(0.055,0.32,day);
   // NIGHT SHADOW KILL — in deep night the realtime shadow pass buys nothing the baked light volume +
   // low ambient don't already sell, and it costs a full caster-scene re-render every SHADOW_EVERY frames
   // plus a shadow-map fetch in every lit fragment, all night long. Hysteresis so dusk doesn't flap.
   // (Both shader variants are prewarmed behind the load screen — the toggle is a cached-program switch, not a compile hitch.)
+  // The shadow toggle is a hard on/off, so it has to land where the key is too dim for anyone to see it happen. day<0.06 is
+  // elevation about -0.4, well past the -0.1 flip notch above and deep into the moon's own dimness, so the pop it used to make
+  // at dusk now happens in the dark. Hysteresis kept, or it flaps for the whole of twilight.
   if(day<0.06 && sunLight.castShadow) sunLight.castShadow=false;
   else if(day>0.12 && !sunLight.castShadow) sunLight.castShadow=true;
   const oc=weather.overcast||0;                                                    // OVERCAST: rain snuffs the sun, greys the air
@@ -4632,9 +4642,15 @@ function updateSky(dt){
   // The night end keeps a FLOOR (Ben 07-20, re-broken and re-fixed 07-27): with no floor the fog colour went to ~0.014
   // and distant chunks stopped reading as dark mass and started reading as void-black holes. Floor = the horizon
   // system's deep moonlit blue, same as before; only the DAY end changed, to white.
-  const fc=scene.fog.color; const dcol=0.014+0.76*day;
-  fc.setRGB(Math.max(0.028,dcol), Math.max(0.042,dcol*1.005), Math.min(1, Math.max(0.072,dcol*1.04)));
-  if(oc>0.01) fc.lerp(_fogGrey.setRGB(lerp(0.030,0.28,day),lerp(0.036,0.30,day),lerp(0.050,0.34,day)), oc*0.6);   // rainy grey haze rolls the horizon in — day end unchanged, night end taken down with the rest of the night fog (it sat at 0.16 against a 0.03 sky)
+  // The base itself, not just the floors: dcol was 0.014 at day=0, which is what deep night actually measured (0.0141) -- the
+  // floors below never even engaged. 0.006 lets night reach the floors. The day end moves by 0.008, which is nothing.
+  const fc=scene.fog.color; const dcol=0.006+0.76*day;
+  // BLACK AT NIGHT (Ben, again: "nighttime fog, is still not blackness"). The floor was 0.028/0.042/0.072 -- a deep blue that
+  // never let the far distance go dark, which is what he keeps seeing. It was put there because with no floor at all distant
+  // chunks read as void-black HOLES rather than as mass; 0.005/0.006/0.009 keeps a hair of blue for that, at a fifth of the
+  // luminance, so night fog is black to the eye and the horizon still has a body rather than a hole in it.
+  fc.setRGB(Math.max(0.005,dcol), Math.max(0.006,dcol*1.005), Math.min(1, Math.max(0.009,dcol*1.04)));
+  if(oc>0.01) fc.lerp(_fogGrey.setRGB(lerp(0.008,0.28,day),lerp(0.009,0.30,day),lerp(0.013,0.34,day)), oc*0.6);   // rainy grey haze rolls the horizon in — day end unchanged, night end taken down with the night fog floor above, or rain re-lit the dark it was just made to have
   const _under=(typeof inDungeon==='function' && inDungeon(Math.floor(camera.position.x),Math.floor(camera.position.y),Math.floor(camera.position.z))) || (typeof playerRoofed==='function' && playerRoofed());
   const wf=_under?0:weather.fog;                                                    // FOG WEATHER: thickens the haze + pales the air — but it NEVER seeps underground/into the dungeon, so the lantern & room stay readable in fog
   _vfogAmt.value=Math.min(1,wf*1.4);                                                // held-item fog follows WEATHER FOG only (Ben 07-20): crisp viewmodel in clear air
@@ -4642,7 +4658,11 @@ function updateSky(dt){
   // pale grey barely moved with the hour — 0.34 at midnight against a 0.03 sky — so in night rain every distant tree faded
   // toward a colour six times brighter than the air around it and the wood read as a glowing mass. Same day end as before;
   // the night end now goes where the rest of the night fog goes.
-  if(wf>0.01){ fc.lerp(_fogGrey.setRGB(lerp(0.045,0.54,day), lerp(0.055,0.56,day), lerp(0.085,0.60,day)), Math.min(0.88,wf*0.95)); }
+  // THIS was the night fog that would not go black (Ben, three times). The clear-air floor was already dark, but a fog BANK
+  // lerped up to 88% toward 0.045/0.055/0.085 -- measured at deep night with a bank: rgb(0.041,0.049,0.075), BRIGHTER than the
+  // clear night sky it sat against. A fog bank at night is not grey air, it is not being able to see; the night end goes to
+  // 0.008/0.009/0.013 and the day end is untouched.
+  if(wf>0.01){ fc.lerp(_fogGrey.setRGB(lerp(0.008,0.54,day), lerp(0.009,0.56,day), lerp(0.013,0.60,day)), Math.min(0.88,wf*0.95)); }
   if(scene.background&&scene.background.isColor)scene.background.copy(fc);   // guard: a skybox CubeTexture background isn't a Color — don't call .copy on it
   // DAY 3x FARTHER, NIGHT CLOSER (Ben 07-28). Density is inverse to reach, so the day end is divided by three (0.85 -> 0.283)
   // and the night end pushed up (1.10 -> 1.70, the bank about a third nearer). The day/night SPLIT is now wide: clear air to
