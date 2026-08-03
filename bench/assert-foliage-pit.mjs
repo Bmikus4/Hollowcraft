@@ -73,6 +73,8 @@ function ok(label, cond, got){ checks++; if(!cond)fails++; console.log('  '+(con
       ok('CONTROL: violations ARE found with the rule off', (scan.walls4+scan.buried)>0, {pit:scan.walls4, buried:scan.buried});
     } else {
       ok('no foliage in a 1x1 pit', scan.walls4===0, {pit:scan.walls4, onEdge:scan.edgeWalls4});
+      // Ben raised the bar from "fully enclosed" to ALL FOUR SIDES OPEN, so a three-walled pocket is a violation too.
+      ok('no foliage in a three-walled pocket', scan.walls3===0, scan.walls3);
       ok('no foliage buried under a solid block', scan.buried===0, scan.buried);
       ok('no chunk holds plants with hasCross false', scan.noHasCross===0, scan.noHasCross);
     }
