@@ -45,21 +45,25 @@ const HEADED = has('headed');
 // test is movement or streaming. Everything else is a fixed camera on purpose: a scripted walk adds its
 // own variance to a question about draw cost.
 // ---------------------------------------------------------------------------
+// Every at-spawn site uses ONE view. Two sites that differ in where the camera points are not comparable:
+// aimed at the horizon spawn measures 3.37 ms, aimed at the ground two metres away it measures 8.9 ms,
+// because the overworld is fill-bound up close. The entity sites exist to price the entity, not the view.
+const SPAWN_VIEW = '{yaw:0.7, pitch:-0.05}';
 const SITES = [
   // ---- overworld: where the game is actually played ----
-  { name:'spawn_day',    setup:`H.setTime(0.35); atSpawn(); H.look(0.7,-0.05);` },
-  { name:'spawn_night',  setup:`H.setTime(0.85); atSpawn(); H.look(0.7,-0.05);` },
-  { name:'spawn_spin',   setup:`H.setTime(0.35); atSpawn(); H.look(0,0);`, move:`H.look(t*2.2, 0);` },
-  { name:'spawn_run',    setup:`H.setTime(0.35); atSpawn(); H.look(-1.5708,0); H.key('KeyW',true); H.key('ShiftLeft',true);`,
+  { name:'spawn_day',    setup:`H.setTime(0.35); atSpawn(); H.cam({yaw:0.7, pitch:-0.05});` },
+  { name:'spawn_night',  setup:`H.setTime(0.85); atSpawn(); H.cam({yaw:0.7, pitch:-0.05});` },
+  { name:'spawn_spin',   setup:`H.setTime(0.35); atSpawn(); H.cam({yaw:0, pitch:0});`, move:`H.cam({yaw:t*2.2, pitch:0});` },
+  { name:'spawn_run',    setup:`H.setTime(0.35); atSpawn(); H.cam({yaw:-1.5708, pitch:0}); H.key('KeyW',true); H.key('ShiftLeft',true);`,
     teardown:`H.key('KeyW',false); H.key('ShiftLeft',false);` },
-  { name:'forest',       setup:`H.setTime(0.35); goForest(); H.look(0.7,-0.02);` },
-  { name:'forest_night', setup:`H.setTime(0.85); goForest(); H.look(0.7,-0.02);` },
-  { name:'forest_run',   setup:`H.setTime(0.35); goForest(); H.look(0.7,0); H.key('KeyW',true); H.key('ShiftLeft',true);`,
+  { name:'forest',       setup:`H.setTime(0.35); goForest(); H.cam({yaw:0.7, pitch:-0.02});` },
+  { name:'forest_night', setup:`H.setTime(0.85); goForest(); H.cam({yaw:0.7, pitch:-0.02});` },
+  { name:'forest_run',   setup:`H.setTime(0.35); goForest(); H.cam({yaw:0.7, pitch:0}); H.key('KeyW',true); H.key('ShiftLeft',true);`,
     teardown:`H.key('KeyW',false); H.key('ShiftLeft',false);` },
   { name:'shore',        setup:`H.setTime(0.35); goShore();` },
   { name:'underwater',   setup:`H.setTime(0.35); goWater();` },
-  { name:'storm',        setup:`H.setTime(0.40); atSpawn(); H.cmdRun('/weather storm 1');`, teardown:`H.cmdRun('/weather clear');` },
-  { name:'fogbank',      setup:`H.setTime(0.35); atSpawn(); H.cmdRun('/weather fog 1');`, teardown:`H.cmdRun('/weather clear');` },
+  { name:'storm',        setup:`H.setTime(0.40); atSpawn(); H.cam(${SPAWN_VIEW}); H.cmdRun('/weather storm 1');`, teardown:`H.cmdRun('/weather clear');` },
+  { name:'fogbank',      setup:`H.setTime(0.35); atSpawn(); H.cam(${SPAWN_VIEW}); H.cmdRun('/weather fog 1');`, teardown:`H.cmdRun('/weather clear');` },
   { name:'peak_tower',   setup:`H.setTime(0.35); goPeak();`, settle:10 },
 
   // ---- built places ----
@@ -67,8 +71,8 @@ const SITES = [
   { name:'village',      setup:`H.setTime(0.35); goVillage();`, settle:10 },
   { name:'chapel',       setup:`H.setTime(0.35); goChapel();`, settle:10 },
   { name:'golgotha',     setup:`H.setTime(0.85); goGolgotha();`, settle:8 },
-  { name:'cathedral',    setup:`H.setTime(0.35); H.goCathedral(0,3,44); H.look(null,-0.02);`, settle:14 },
-  { name:'cathedral_in', setup:`H.setTime(0.35); H.goCathedral(0,2,0); H.look(null,0.10);`, settle:14 },
+  { name:'cathedral',    setup:`H.setTime(0.35); H.goCathedral(0,3,44); H.cam({pitch:-0.02});`, settle:14 },
+  { name:'cathedral_in', setup:`H.setTime(0.35); H.goCathedral(0,2,0); H.cam({pitch:0.10});`, settle:14 },
 
   // ---- underground ----
   { name:'dungeon_hall', setup:`goDungeon('hall');`, settle:10 },
@@ -76,24 +80,26 @@ const SITES = [
   { name:'dungeon_run',  setup:`goDungeon('lab'); H.key('KeyW',true);`, teardown:`H.key('KeyW',false);`, settle:10 },
 
   // ---- entities, combat, boss ----
-  { name:'animals',      setup:`H.setTime(0.35); atSpawn(); for(const c of ['cow','pig','sheep','chicken']) H.cmdRun('/spawn '+c+' 4 9');` },
-  { name:'wretch_near',  setup:`H.setTime(0.85); atSpawn(); H.summon(); H.yank();`, settle:5 },
-  { name:'horrific',     setup:`H.setTime(0.85); atSpawn(); H.hw(11);`, settle:5 },
+  { name:'animals',      setup:`H.setTime(0.35); atSpawn(); H.cam(${SPAWN_VIEW}); for(const c of ['cow','pig','sheep','chicken']) H.cmdRun('/spawn '+c+' 4 9');` },
+  { name:'wretch_near',  setup:`H.setTime(0.85); atSpawn(); H.cam(${SPAWN_VIEW}); H.summon(); H.yank(); H.look();`, settle:5 },
+  { name:'horrific',     setup:`H.setTime(0.85); atSpawn(); H.cam(${SPAWN_VIEW}); H.hw(11);`, settle:5 },
   // aimEye alone points the camera up at a 11 m eye and fills the frame with sky: keep the boss in shot but
   // hold the pitch near level so the world is being drawn too.
-  { name:'boss',         setup:`H.setTime(0.85); atSpawn(); H.boss({dist:24}); H.aimEye(); H.look(null, Math.min(0.12, H.pitchNow()));`, settle:9 },
-  { name:'boss_stage2',  setup:`H.setTime(0.85); atSpawn(); H.boss({dist:24}); H.aimEye(); H.look(null, Math.min(0.12, H.pitchNow())); H.stage2&&H.stage2();`, settle:11 },
-  { name:'particles',    setup:`H.setTime(0.35); atSpawn();`, move:`const k=(t*6)|0; if(k!==window.__pk){ window.__pk=k; H.fx(45); }` },
-  { name:'gunfire',      setup:`H.setTime(0.35); atSpawn(); H.gun&&H.gun('ar15'); H.sight&&H.sight(true);`,
+  { name:'boss',         setup:`H.setTime(0.85); atSpawn(); H.boss({dist:24}); H.aimEye(); H.cam({pitch:Math.min(0.12, H.pitchNow())});`, settle:9 },
+  { name:'boss_stage2',  setup:`H.setTime(0.85); atSpawn(); H.boss({dist:24}); H.aimEye(); H.cam({pitch:Math.min(0.12, H.pitchNow())}); H.stage2&&H.stage2();`, settle:11 },
+  { name:'particles',    setup:`H.setTime(0.35); atSpawn(); H.cam(${SPAWN_VIEW});`, move:`const k=(t*6)|0; if(k!==window.__pk){ window.__pk=k; H.fx(45); }` },
+  // The camera is aimed AFTER the sight goes up: raising the AR-15's sight pitches the view to +1.50 rad,
+  // which the camera assertion (correctly) refuses to measure.
+  { name:'gunfire',      setup:`H.setTime(0.35); atSpawn(); H.gun&&H.gun('ar15'); H.sight&&H.sight(true); H.cam(${SPAWN_VIEW});`,
     move:`const k=(t*8)|0; if(k!==window.__gk){ window.__gk=k; try{ H.shoot(); }catch(e){} }` },
 
   // ---- views and held UI ----
-  { name:'thirdperson',  setup:`H.setTime(0.35); atSpawn(); tps(true);`, teardown:`tps(false);` },
-  { name:'field_guide',  setup:`H.setTime(0.35); atSpawn(); H.hold('field_guide'); H.book&&H.book(true);` },
+  { name:'thirdperson',  setup:`H.setTime(0.35); atSpawn(); H.cam(${SPAWN_VIEW}); tps(true);`, teardown:`tps(false);` },
+  { name:'field_guide',  setup:`H.setTime(0.35); atSpawn(); H.cam(${SPAWN_VIEW}); H.hold('field_guide'); H.book&&H.book(true);` },
 
   // ---- the Backrooms and the portal: regression watch on the shipped P1-P5 pass ----
-  { name:'br_halls',     setup:`P.enterBR(); H.look(0.7,0);`, settle:9 },
-  { name:'br_run',       setup:`P.enterBR(); H.look(0.7,0); H.key('KeyW',true); H.key('ShiftLeft',true);`,
+  { name:'br_halls',     setup:`P.enterBR(); H.cam({yaw:0.7, pitch:0});`, settle:9 },
+  { name:'br_run',       setup:`P.enterBR(); H.cam({yaw:0.7, pitch:0}); H.key('KeyW',true); H.key('ShiftLeft',true);`,
     teardown:`H.key('KeyW',false); H.key('ShiftLeft',false);`, settle:9 },
   { name:'br_portal',    setup:`P.exitBR(); goPortal();`, settle:9 },
 ];
@@ -141,20 +147,20 @@ const HELPERS = `
     for(let a=0;a<6.283;a+=0.2){ const pts=[]; for(let d=30;d<=120;d+=15) pts.push([Math.round(best.x+Math.cos(a)*d), Math.round(best.z+Math.sin(a)*d)]);
       const hs=H.surfH(pts); let w=0; for(const h of hs) if(h<=probe0.sea) w++;
       if(w>bd){ bd=w; byaw=Math.atan2(-Math.cos(a), -Math.sin(a)); } }
-    H.look(byaw, -0.05); creative(); return {x:best.x, z:best.z, water:bd};
+    H.cam({yaw:byaw, pitch:-0.05}); creative(); return {x:best.x, z:best.z, water:bd};
   };
   window.goWater = ()=>{ const d=H.deepWater(); if(!d || d.err) return {err:'no deep water: '+JSON.stringify(d)};
     const x=d.x!=null?d.x:(d[0]||0), z=d.z!=null?d.z:(d[1]||0);
-    H.tpAt(x, probe0.sea-1.5, z); H.look(0.7,-0.10); return {x, z, water:H.water()}; };
-  window.goCabin = ()=>{ const x=probe0.spawnX+22, z=probe0.spawnZ-14; at(x,z); H.look(0.7,0); creative(); return {x,z}; };
+    H.tpAt(x, probe0.sea-1.5, z); H.cam({yaw:0.7, pitch:-0.10}); return {x, z, water:H.water()}; };
+  window.goCabin = ()=>{ const x=probe0.spawnX+22, z=probe0.spawnZ-14; at(x,z); H.cam({yaw:0.7, pitch:0}); creative(); return {x,z}; };
   window.goVillage = ()=>{ const r=H.qaVillage(); const s=(r&&r.x!=null)?r:null; if(s) at(s.x, s.z, 4); creative(); return r; };
   window.goChapel = ()=>{ const c=H.church(); if(!c || c.x==null) return {err:'no chapel spot: '+JSON.stringify(c)};
-    at(c.x, c.z, 2); H.look(0.7,0); creative(); return c; };
+    at(c.x, c.z, 2); H.cam({yaw:0.7, pitch:0}); creative(); return c; };
   window.goGolgotha = ()=>{ const g=H.golgotha(); if(!g || g.x==null) return {err:'no golgotha: '+JSON.stringify(g)};
-    at(g.x+18, g.z+18, 3); H.look(Math.atan2(-(g.x-(g.x+18)), -(g.z-(g.z+18))), 0); creative(); return g; };
+    at(g.x+18, g.z+18, 3); H.cam({yaw:Math.atan2(18, 18), pitch:0}); creative(); return g; };
   window.goPeak = ()=>{ const p=H.peaks(); const s=p&&p.spots&&p.spots.length?p.spots.slice().sort((a,b)=>b.h-a.h)[0]:null;
     if(!s) return {err:'no peaks: '+JSON.stringify(p)};
-    at(s.x+20, s.z+20, 6); H.look(Math.atan2(-(s.x-(s.x+20)), -(s.z-(s.z+20))), 0.05); creative(); return s; };
+    at(s.x+20, s.z+20, 6); H.cam({yaw:Math.atan2(20, 20), pitch:0.05}); creative(); return s; };
   window.goDungeon = (which)=>{
     const L=H.lairInfo(); if(!L) return {err:'no lair'};
     const cx=(L.cx!=null?L.cx:L.x), cz=(L.cz!=null?L.cz:L.z);
@@ -162,10 +168,10 @@ const HELPERS = `
     const L2=H.lairInfo(), fy=(L2&&L2.fy!=null)?L2.fy:null;
     if(fy==null) return {err:'lair has no floor yet: '+JSON.stringify(L2)};
     if(which==='lab') H.tpAt(cx+22, fy+1.8, cz-13); else H.tpAt(cx, fy+1.8, cz);
-    H.look(0.7,0); creative(); return {which, cx, cz, fy, built:L2.built};
+    H.cam({yaw:0.7, pitch:0}); creative(); return {which, cx, cz, fy, built:L2.built};
   };
   window.goPortal = ()=>{ const d=P.spawnDoor(); if(!d || d.err) return {err:'no door: '+JSON.stringify(d)};
-    H.tpAt(d.x+4, d.y+1.7, d.z+0.2); H.look(Math.atan2(-(d.x-(d.x+4)), -(d.z-(d.z+0.2))), 0); return d; };
+    H.tpAt(d.x+4, d.y+1.7, d.z+0.2); H.cam({yaw:Math.atan2(4, 0.2), pitch:0}); return d; };
   // A site must not inherit the previous one's world: third person, a live boss, a hall of spawned animals
   // and a weather bank all persist, and any of them silently lands in the next site's number.
   window.censusReset = ()=>{
@@ -237,7 +243,7 @@ const med = a => { const s=a.slice().sort((x,y)=>x-y); return s.length%2 ? s[(s.
     const sceneObjs = async () => page.evaluate(`(()=>{ const o=__hcPERF.census().byOwner||{}; let n=0;
       for(const k in o) if(k!=='chunkRoot') n+=o[k]; return n; })()`);
     const cleanBaseline = async () => {
-      await page.evaluate(`window.censusReset(); atSpawn(); H.look(0.7,-0.05);`);
+      await page.evaluate(`window.censusReset(); atSpawn(); H.cam({yaw:0.7, pitch:-0.05});`);
       await sleep(6000);
       return await sceneObjs();
     };
@@ -285,6 +291,13 @@ const med = a => { const s=a.slice().sort((x,y)=>x-y); return s.length%2 ? s[(s.
           await sleep(500);
         }
         await sleep(2000);            // one breath past "meshed" so the first-draw uploads are not in the window
+        // THE CAMERA MUST BE A CAMERA. __hc.look is the world-POINT overload — look(x,y,z) — and calling it
+        // as look(yaw,pitch) leaves z undefined, which makes yaw NaN and pitches the view at the floor. A
+        // whole census ran that way and produced 33 plausible-looking numbers of the ground. Check, do not
+        // assume: a NaN yaw is not a slow frame, it is a measurement of nothing.
+        const cam = await page.evaluate(`(()=>{ const p=__hc.pos(); return { yaw:p.yaw, pitch:p.pitch, ok:Number.isFinite(p.yaw)&&Number.isFinite(p.pitch)&&Math.abs(p.pitch)<1.4 }; })()`);
+        if(!cam.ok){ console.log(`\n${site.name}: CAMERA IS NOT AIMED (yaw ${cam.yaw}, pitch ${cam.pitch}) — refusing to report a number for it`);
+          rows.push({pass, site:site.name, err:`bad camera yaw=${cam.yaw} pitch=${cam.pitch}`}); continue; }
         // Adaptive quality sheds internal resolution, god rays, bloom, shadow rate and render distance when
         // the frame is tight, so a slow site quietly renders a CHEAPER game and reads faster than it is.
         // Pin it to full at the start of the window and report where it ended up — a "win" that is really
