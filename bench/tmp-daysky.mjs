@@ -127,6 +127,16 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
           +'   (a body wants a big drop and a small interior number)'); }
     }
 
+    // THE SEA FROM HEIGHT. This is the vantage that caught the last bow change out: a bow that looks right from a shore at
+    // sea level lifts the ocean ring into a dome floating above the terrain when seen from up high. So both, every time.
+    for(const [tag,h] of [['sealevel',P.sea+3],['high',P.sea+95]]){
+      await page.evaluate('__hc.setTime(0.30)'); await sleep(600);
+      await page.evaluate('__hc.tpExact('+(P.x-40)+','+P.z+','+h+')'); await sleep(2200);
+      await page.evaluate('__hcBR.look('+(Math.PI/2)+',-0.06)'); await sleep(800);
+      await page.screenshot({path:path.join(OUT,'daysky-'+TAG+'-sea-'+tag+'.png')});
+      console.log('  sea frame from '+tag+' (y='+h+')');
+    }
+
     // OCCLUSION. The post-bloom disc is drawn over the finished frame with no depth buffer to test against, so its
     // visibility comes from voxel rays. Underground, all five must be blocked and the disc must go out entirely -- if this
     // reads anything above zero, the sun is being painted through solid rock.
