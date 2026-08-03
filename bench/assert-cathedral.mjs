@@ -78,6 +78,23 @@ function ok(label, cond, got){ checks++; if(!cond)fails++; console.log('  '+(con
       console.log('  after force: '+JSON.stringify(d2));
       await page.screenshot({ path: path.join(OUT,'cathedral-forced.png') }); }
 
+    // THE CHURCH, the untested half of Ben's "cathedrals stopped loading" report. Same shape of question as the cathedral:
+    // does it have a site, and does it build once the player is near it. __hc.church() already reports both.
+    console.log('\n[4] the beach chapel');
+    const ch0 = await page.evaluate('__hc.church()');
+    console.log('  before: '+JSON.stringify(ch0));
+    if(ch0 && ch0.x!=null){
+      await page.evaluate('__hc.tp('+ch0.x+','+(ch0.z+14)+')');
+      for(let i=0;i<10;i++){ await sleep(2500); const c=await page.evaluate('__hc.church()');
+        console.log('   t+'+((i+1)*2.5).toFixed(1)+'s  done='+c.done); if(c.done) break; }
+      const ch1 = await page.evaluate('__hc.church()');
+      await page.evaluate('__hcBR.look(0,-0.05)'); await sleep(900);
+      await page.screenshot({ path: path.join(OUT,'cathedral-church.png') });
+      ok('the chapel built once its area streamed', ch1 && ch1.done===true, ch1&&ch1.done);
+    } else {
+      ok('the chapel has a site at all', false, ch0);
+    }
+
     ok('no page errors', errs.length===0, errs.length);
     console.log('\n'+checks+' checks, '+fails+' failed');
     console.log('RESULT: '+(fails?'FAIL':'PASS'));
