@@ -12980,6 +12980,9 @@ function brSpawnDoorFromEgg(h){ let bx,bz,by;                                   
 
 // ---- SEAMLESS TRANSITION (same world → just move the player; no fade, no cut) ----
 function brEnter(){ if(BR.inside)return; const d=BR.door;
+  // A Pale hunting you in the overworld does not follow you in: BR.pale is one slot, and the halls re-initialise it on
+  // entry, so leaving the overworld one alive would strand its mesh in the scene under a state the halls then overwrote.
+  if(BR.paleOut){ BR.paleOut=false; if(typeof brHidePale==='function')brHidePale(); }
   BR.returnPos = d ? {x:d.x,y:d.y,z:d.z,yaw:player.yaw} : {x:player.pos.x,y:player.pos.y,z:player.pos.z,yaw:player.yaw};   // where the exit spits you back out
   brClearDoor(); BR.inside=true; BR.sealed=false; BR.t=0; BR.dist=0; BR._ppos=null; BR.encT=180+Math.random()*120;         // first encounter 3–5 min; reset the Pale's distance gate
   try{ if(typeof wretch!=='undefined'){ player.grabbed=false; player.tied=false; player.bound=false; wretch.dragging=false; wretch.grabPhase=null; wretch.active=false; if(wretch.group)wretch.group.visible=false;   // DESPAWN the Wretch — it does not exist in the Backrooms, and can never be mid-grabbing you here
@@ -14752,7 +14755,10 @@ function brUpdateSmiler(dt){ const sm=BR.sm||(BR.sm={state:'dormant',t:0,x:0,z:0
 // through a suite it murders the player, brForceLeaveOnDeath dumps you out of the dimension, and every scene
 // after that measures an empty overworld while cheerfully reporting Backrooms numbers. The Pale and the Smiler
 // still walk and still cost what they cost — only the kill is suppressed, and only while a bench run is active.
-function brKill(cause){ if(!BR.inside)return; if(PERF.bench.active){ BR._benchKills=(BR._benchKills|0)+1; return; } if(typeof damage==='function'){ player.health=0; if(typeof die==='function')die(cause||'the Pale'); else player.dead=true; } }
+function brKill(cause){
+  // A Pale loose in the overworld still kills you. This guard exists so nothing in the halls' machinery can kill a player
+  // who is not in the halls, but the Pale can now be out here, and a lunge that cannot kill is a lunge it repeats forever.
+  if(!BR.inside){ if(BR.paleOut && typeof die==='function' && !player.dead){ player.health=0; die(cause||'the Pale'); } return; } if(PERF.bench.active){ BR._benchKills=(BR._benchKills|0)+1; return; } if(typeof damage==='function'){ player.health=0; if(typeof die==='function')die(cause||'the Pale'); else player.dead=true; } }
 
 // ---- KEY TO OLYMPUS: marble pedestal in the far room; pickup silences the halls, then the Smiler escalates ----
 function brKeyMesh(){ const g=new THREE.Group(); const gold=new THREE.MeshBasicMaterial({color:0xffd23a,fog:false,toneMapped:false});
@@ -14966,6 +14972,10 @@ function brPaleKill(){ const p=BR.pale; if(p&&p.mesh&&typeof camera!=='undefined
 // overlap in plan — each chunk owns its own footprint — so a single (x,z) still resolves to exactly one room, and that
 // room's fy is the floor. Flights are checked first so it walks a stair instead of clipping up it.
 function brPaleFloorY(x,z){
+  // OUT IN THE WORLD the floor is the ground (Ben: "pale spawn egg broken in the overworld"). There are no rooms to
+  // resolve out here, so the room lookup returns null and the caller fell back to BR_WY0 — a Backrooms storey height,
+  // which put the Pale hundreds of blocks under the island. Terrain height is the same question asked of the real world.
+  if(BR.paleOut && !BR.inside){ const g=(typeof groundYAt==='function')?groundYAt(x,z):null; return g==null?null:g; }
   const F=brxRampAt(x,z); if(F) return F.surf;                                  // the SAME resolution the player's collider uses — one definition, so it cannot walk a different staircase than you do
   const r=brxRoomAt(x,z); return r ? (r.fy!=null? r.fy : BR_WY0) : null; }
 function brNavGraph(){ if(BR._nav && BR._navSeed===BR.seed) return BR._nav;
@@ -15010,7 +15020,11 @@ function brPushOut(o,rad){ const W=BR.walls; if(!W)return;                      
 // A DOORWAY TO PEEK FROM (Ben 07-27): the peek only happens standing IN an opening, leaning its body through the jamb.
 // Every doorway is a lintel run (BR.lintels), so pick the one nearest the Pale that also sits a sensible distance from
 // the player, and hand back the opening's centre plus which axis the wall runs along.
-function brPalePeekSpot(px,pz,fromX,fromZ){ const L=BR.lintels; if(!L||!L.length)return null;
+function brPalePeekSpot(px,pz,fromX,fromZ){
+  // NO DOORWAYS OUT HERE. BR.lintels survives a visit to the halls, so a Pale hunting you in the overworld would otherwise
+  // "reposition into a doorway" by teleporting to a lintel in Backrooms coordinates, i.e. vanish.
+  if(BR.paleOut && !BR.inside) return null;
+  const L=BR.lintels; if(!L||!L.length)return null;
   let best=null, bd=1e9;
   for(let i=0;i<L.length;i++){ const l=L[i]; if(l.y0)continue;                                   // y0 set = a CRAWL hole, not a doorway
     const cx=l.vert? l.fixed : (l.s0+l.s1)/2, cz=l.vert? (l.s0+l.s1)/2 : l.fixed;
@@ -15100,8 +15114,14 @@ function updateBackrooms(dt){
     // cost for all the time the door is sitting somewhere else in the world.
     if(brPortalWanted(Math.hypot(d.x-player.pos.x, d.z-player.pos.z)) && brPortalDue()){ T.begin(TID.brPortal); brRenderPortal(); T.end(TID.brPortal); }
     if(Math.hypot(player.pos.x-d.x,player.pos.z-d.z)<1.1&&Math.abs(player.pos.y-d.y)<2.2)brEnter(); }
-  if(!BR.inside)return;
-  if(player.dead){ brForceLeaveOnDeath(); return; }                                                                      // any death inside → clean out of the dimension (permadeath: key lost, halls sealed)
+  // A PALE LOOSE IN THE OVERWORLD still has to be ticked. Its update lived behind this return, so an egg that put one out
+  // here produced a statue: mesh in the scene, never moving, never hunting.
+  // Ticking only while it HAS a mesh was wrong and cost a verification run: a withdrawal is exactly when the mesh goes
+  // away (brHidePale), so staring it down cleared paleOut and the thing never came back or ticked again. BR.t is advanced
+  // too, because the dormant branch's return gate reads it and it is otherwise only advanced inside the halls -- where
+  // brEnter resets it to zero anyway, so nothing in there can see this.
+  if(!BR.inside){ if(BR.paleOut){ if(BR.pale){ BR.t=(BR.t||0)+dt; brUpdatePale(dt); } else BR.paleOut=false; } return; }
+  if(player.dead){ brForceLeaveOnDeath(); return; }                                                                    // any death inside → clean out of the dimension (permadeath: key lost, halls sealed)
   BR.t+=dt; if(BR.silenceT>0)BR.silenceT-=dt;
   if(BR._ppos)BR.dist=(BR.dist||0)+Math.hypot(player.pos.x-BR._ppos.x, player.pos.z-BR._ppos.z); BR._ppos={x:player.pos.x,z:player.pos.z};   // track distance walked → the Pale's target gate
   BR.zone=0; brSetAtmo(0);                                                                                               // re-assert atmosphere each frame (updateSky/streaming repaint bg/fog + chunkRoot first)
@@ -15685,6 +15705,8 @@ if(typeof window!=='undefined'){ window.__hcBR={ door:()=>brSpawnDoorNearPlayer(
   paleState:()=>{ const p=BR.pale; if(!p)return null; const f=(typeof _paleFaceImg!=='undefined'&&_paleFaceImg);
     return { state:p.state, phase:p.phase||'', anim:p.anim||'', peek:!!p.peek, lean:p.leanSide||0, thrashT:+((p.thrashT||0)).toFixed(2), gape:+((p.gape||0)).toFixed(2),
       dist:+Math.hypot((p.x||0)-player.pos.x,(p.z||0)-player.pos.z).toFixed(1), faceLoaded: !!(f&&f.width>0),
+      x:+((p.x||0)).toFixed(2), z:+((p.z||0)).toFixed(2), out:!!BR.paleOut,   // WHERE it is, not only how far: "did it move" and "is it standing on the ground here" both need the position
+
       y:+((p.y!=null?p.y:0)).toFixed(2), floorY:(()=>{ const v=brPaleFloorY(p.x||0,p.z||0); return v==null?null:+v.toFixed(2); })(),
       myRoom:(()=>{ const r=brxRoomAt(p.x||0,p.z||0); return r? {id:r.id, fy:+((r.fy||0)).toFixed(1)} : null; })(),
       yourRoom:(()=>{ const r=brxRoomAt(player.pos.x,player.pos.z); return r? {id:r.id, fy:+((r.fy||0)).toFixed(1)} : null; })(),
@@ -15956,10 +15978,20 @@ function spawnFromEgg(type, h){ h = h || raycastVoxel(); let x,z;
     HORROR._firstNight=true; if(!wretch.active){ wretch.spawnT=0; if(!spawnWretch(bearing,dist)) wretch.spawnT=0.5; } flashName('something answers the call'); return; }
   if(type==='herobrine'){ if(typeof startHaunt==='function')startHaunt(); flashName('a pale watcher stirs — it will show itself, then surrender'); return; }   // begins the Herobrine surrender sequence
   if(type==='ceraphim'){ const gy=groundYAt(x,z); if(typeof beginBossSummon==='function')beginBossSummon(x,gy,z); return; }   // spacetime-rip cutscene → the winged boss tears through at the aimed spot
-  if(type==='pale'){                                                                       // THE PALE (Ben 07-27) — the Backrooms entity. Only exists in the halls, so the egg opens a Void Door out here and wakes it in there.
-    if(typeof BR!=='undefined' && BR.inside){ if(typeof brSpawnPale==='function'){ brSpawnPale(); if(BR.pale){ BR.pale.state='hunt'; BR.pale.x=x; BR.pale.z=z; if(BR.pale.mesh)BR.pale.mesh.position.set(x,BR_FLOOR+1,z); } }
-      flashName('it was already here'); }
-    else { if(typeof brSpawnDoorNearPlayer==='function')brSpawnDoorNearPlayer(); flashName('a door opens — it waits on the other side'); }
+  if(type==='pale'){                                                                       // THE PALE — the Backrooms entity
+    if(typeof BR!=='undefined' && BR.inside){ BR.paleOut=false; if(typeof brSpawnPale==='function'){ brSpawnPale(); if(BR.pale){ BR.pale.state='hunt'; BR.pale.x=x; BR.pale.z=z; if(BR.pale.mesh)BR.pale.mesh.position.set(x,BR_FLOOR+1,z); } }
+      flashName('it was already here'); return; }
+    // IT COMES OUT NOW (Ben: "pale spawn egg broken in the overworld"). The egg used to open a Void Door instead of
+    // spawning anything, on the reasoning that the Pale only exists in the halls — but a spawn egg that spawns nothing
+    // where you clicked reads as broken, and it is the one item in the game whose whole purpose is to put the creature
+    // in front of you. Out here it hunts across open ground: no rooms to path through, so it walks straight at you, and
+    // the SCP-173 rule that it only moves while unseen carries over unchanged.
+    if(typeof brSpawnPale==='function'){
+      BR.paleOut=true; brSpawnPale();
+      if(BR.pale){ const p=BR.pale; p.state='hunt'; p.x=x; p.z=z; p.peek=null;
+        p.y=brPaleFloorY(x,z); if(p.y==null)p.y=groundYAt(x,z);
+        if(p.mesh)p.mesh.position.set(p.x,p.y,p.z); }
+      flashName('it steps out of nowhere'); }
     return; }
   if(type==='horrific'){ spawnHorrific(x, z); return; }
   if(!ANIMALS[type])return; let gy=groundYAt(x,z); if(type==='jesus' && gy<=CFG.SEA)gy=CFG.SEA+1;   // Jesus spawns standing ON the water
@@ -18017,7 +18049,8 @@ window.__hc={
   viewDbg(){ try{ const vm=view.mesh; return { id:view.id, locked:!!locked, vis:!!view.group.visible, hasMesh:!!vm, meshVis:vm?!!vm.visible:null, children:view.group.children.length, rot:[+view.group.rotation.x.toFixed(3),+view.group.rotation.y.toFixed(3),+view.group.rotation.z.toFixed(3)], pos:[+view.group.position.x.toFixed(3),+view.group.position.y.toFixed(3),+view.group.position.z.toFixed(3)] }; }catch(e){ return e.message; } },
   invList(){ try{ return inv.filter(Boolean).map(s=>s.id+':'+s.n); }catch(e){ return e.message; } },
   pos(){ try{ return {x:player.pos.x,y:player.pos.y,z:player.pos.z,yaw:player.yaw,pitch:player.pitch}; }catch(e){ return e.message; } },
-  st(){ try{ return {started, grabbed:player.grabbed, gp:wretch.grabPhase, ws:wretch.state, wa:wretch.active, dist:+(wretch.dist||0).toFixed(2), watched:!!(wretch.sense&&wretch.sense.watched), seen:!!(wretch.sense&&wretch.sense.seen), obs:+(wretch.observed||0).toFixed(1), form:wretch.form, wy:+wretch.pos.y.toFixed(1), px:+player.pos.x.toFixed(1), pz:+player.pos.z.toFixed(1), sx:(typeof spawnX!=='undefined'?spawnX:null), sz:(typeof spawnZ!=='undefined'?spawnZ:null), py:+player.pos.y.toFixed(1), day:+globalU.uDay.value.toFixed(2), fps:Math.round(fpsAvg) }; }catch(e){ return {err:e.message}; } },
+  st(){ try{ return {started, grabbed:player.grabbed, gp:wretch.grabPhase, ws:wretch.state, wa:wretch.active, dist:+(wretch.dist||0).toFixed(2), watched:!!(wretch.sense&&wretch.sense.watched), seen:!!(wretch.sense&&wretch.sense.seen), obs:+(wretch.observed||0).toFixed(1), form:wretch.form, wy:+wretch.pos.y.toFixed(1), px:+player.pos.x.toFixed(1), pz:+player.pos.z.toFixed(1), sx:(typeof spawnX!=='undefined'?spawnX:null), sz:(typeof spawnZ!=='undefined'?spawnZ:null), py:+player.pos.y.toFixed(1), day:+globalU.uDay.value.toFixed(2), fps:Math.round(fpsAvg),
+      dead:!!player.dead, hp:Math.round(player.health) }; }catch(e){ return {err:e.message}; } },   // whether the player is alive was absent, so "did that kill me" probes read undefined and reported survival
   // QA/bench: the game's OWN per-frame breakdown, averaged over the last n committed frames. Needs ?perf=1 (PERF.on).
   // This reads the existing T ring rather than monkey-patching: wrapping _bulkRun from a bench page hung the probe, and
   // these scopes are already placed where the work is, including the four backrooms ones (br/brPortal/brStream/brBuild).
