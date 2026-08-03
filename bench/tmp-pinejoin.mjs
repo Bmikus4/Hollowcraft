@@ -66,6 +66,13 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
       const canopy=at(gy2), band=at(gy2+26), below=at(gy2+42);
       const fmt=p=>p?('rgb('+p.rgb.map(v=>Math.round(v)).join(',')+')'):'?';
       const lum=p=>p?(0.2126*p.rgb[0]+0.7152*p.rgb[1]+0.0722*p.rgb[2]):0;
+      // HOW FAR UP DOES THE BROWN REACH? Ben: "the brown part of the pines exists but it is too low." Brown is r>=g here --
+      // foliage is green-dominant and the band is red-dominant -- so the first brown row below the canopy is where the wood
+      // starts, and its distance from the canopy is the thing he is describing.
+      let firstBrown=null, lastBrown=null;
+      for(const p of rows){ if(p.y<gy2) continue; const brown=p.rgb[0]>=p.rgb[1]*0.99;
+        if(brown){ if(firstBrown==null) firstBrown=p.y; lastBrown=p.y; } else if(firstBrown!=null && p.y>firstBrown+4) break; }
+      console.log('     brown starts '+(firstBrown!=null?(firstBrown-gy2)+' rows below the canopy, runs to +'+(lastBrown-gy2):'not found'));
       console.log('  '+nm.padEnd(6)+' canopy y'+gy2+' '+fmt(canopy)+' lum '+lum(canopy).toFixed(0)
         +'   band(+26) '+fmt(band)+' lum '+lum(band).toFixed(0)
         +'   base(+42) '+fmt(below)+' lum '+lum(below).toFixed(0)
