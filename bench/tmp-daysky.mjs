@@ -81,6 +81,51 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
       await page.evaluate(`__hc.hideLayer('${layer}',true)`); await sleep(500);
     }
 
+    // DOES THE SUN READ AS A DISC? Look straight at it and measure the bright region: a disc fills about 78.5% of its own
+    // bounding box and is as wide as it is tall. A bloom smear fills less, and its aspect wanders. Reported for the clipped
+    // core (>=250) and for the whole bright area (>=200), because bloom lives between those two.
+    {
+      await page.evaluate('__hc.setTime(0.30)'); await sleep(900);
+      const sk = await page.evaluate('__hc.skyState()');
+      const yaw = Math.atan2(-sk.sunDir[0], -sk.sunDir[2]);        // lookDir convention: facing a delta (dx,dz) is atan2(-dx,-dz)
+      const pitch = Math.asin(Math.max(-1,Math.min(1,sk.sunDir[1])));
+      console.log('  sun at sunH='+sk.sunH+' -> look yaw '+yaw.toFixed(3)+' pitch '+pitch.toFixed(3));
+      await page.evaluate('__hcBR.look('+yaw+','+pitch+')'); await sleep(900);
+      const f=path.join(OUT,'daysky-'+TAG+'-sun.png');
+      await page.screenshot({path:f});
+      const img=decodePNG(fs.readFileSync(f));
+      // PROFILES, NOT A THRESHOLD. A plain "count pixels brighter than N" measured the film GRAIN: it reported 3596 pixels
+      // scattered over a 414x376 box, a speckle rather than a glow. Averaging a band of rows or columns cancels the grain and
+      // gives the shape directly. FWHM in both axes is the size and the aspect; the 90%-to-10% width on the flank is whether
+      // there is an EDGE. A body has a narrow flank relative to its width; a bloom smear is flank all the way down.
+      const L=(x,y)=>{ const i=(y*img.w+x)*img.ch; return 0.2126*img.data[i]+0.7152*img.data[i+1]+0.0722*img.data[i+2]; };
+      const cxp=(img.w>>1), cyp=(img.h>>1);
+      const prof=(axis)=>{ const N = axis==='x'? img.w : img.h, out=new Array(N).fill(0);
+        for(let k=0;k<N;k++){ let s=0; for(let j=-4;j<=4;j++) s += axis==='x'? L(k, Math.min(img.h-1,Math.max(0,cyp+j))) : L(Math.min(img.w-1,Math.max(0,cxp+j)), k);
+          out[k]=s/9; }
+        return out; };
+      const shape=(p,centre)=>{ const peak=p[centre];
+        const base=[...p].sort((a,b)=>a-b)[Math.floor(p.length*0.25)];     // sky level: the lower quartile of the profile
+        const half=base+(peak-base)*0.5, p90=base+(peak-base)*0.9, p10=base+(peak-base)*0.1;
+        const cross=(from,to,level)=>{ const step=to>from?1:-1; for(let k=from;k!==to;k+=step){ if(p[k]<level) return k; } return to; };
+        const rHalf=cross(centre,p.length-1,half), lHalf=cross(centre,0,half);
+        const r90=cross(centre,p.length-1,p90), r10=cross(centre,p.length-1,p10);
+        return { peak:+peak.toFixed(1), sky:+base.toFixed(1), fwhm:rHalf-lHalf, flank90to10:r10-r90 }; };
+      const px=prof('x'), py=prof('y');
+      const sx=shape(px,cxp), sy=shape(py,cyp);
+      console.log('  horizontal: '+JSON.stringify(sx));
+      console.log('  vertical:   '+JSON.stringify(sy));
+      console.log('  aspect fwhm x/y = '+(sy.fwhm?+(sx.fwhm/sy.fwhm).toFixed(2):'n/a')
+        +'   halo skirt / width = '+(sx.fwhm?+(sx.flank90to10/sx.fwhm).toFixed(2):'n/a'));
+      // WHAT ACTUALLY MAKES IT A DISC is a hard LIMB and a flat interior, not the absence of a halo -- a photograph of the real
+      // sun has an enormous halo and still reads as a body. So: the steepest luminance drop per pixel anywhere on the flank,
+      // and how flat the middle is across the inner half of the disc.
+      { const edge=(()=>{ let best=0; for(let k=cxp; k<Math.min(img.w-1,cxp+200); k++){ const d=px[k]-px[k+1]; if(d>best)best=d; } return +best.toFixed(1); })();
+        const inner=(()=>{ const r=Math.max(2,(sx.fwhm>>2)); let mn=1e9,mx=-1e9; for(let k=cxp-r;k<=cxp+r;k++){ mn=Math.min(mn,px[k]); mx=Math.max(mx,px[k]); } return +(mx-mn).toFixed(1); })();
+        console.log('  limb: steepest drop '+edge+' luminance per pixel;  interior variation across the inner half: '+inner
+          +'   (a body wants a big drop and a small interior number)'); }
+    }
+
     // And one looking UP, to see the zenith and the cloud layers, plus one at the sun.
     await page.evaluate('__hc.setTime(0.42)'); await sleep(800);
     await page.evaluate('__hcBR.look('+(Math.PI/2)+',0.62)'); await sleep(900);
