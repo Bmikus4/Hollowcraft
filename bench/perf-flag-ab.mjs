@@ -26,6 +26,11 @@ const argv = process.argv.slice(2);
 const arg = (k,d)=>{ const i=argv.indexOf('--'+k); return i>=0 ? argv[i+1] : d; };
 
 const FLAG  = arg('flag','portalOnScreen');
+// --onjs/--offjs price something that is NOT a flag yet: the shipped starve-one-stage hooks
+// (__hcPERF.fill / nullFrag / halfObj / noShadow, __hc.owShadow) answer "which stage binds here" before any
+// game code is written for it. Same pairing, same page, same sign test.
+const ONJS  = arg('onjs',null), OFFJS = arg('offjs',null);
+const LABEL = arg('label', ONJS?('js:'+ONJS.slice(0,40)):FLAG);
 const ON    = JSON.parse(arg('on','true'));
 const OFF   = JSON.parse(arg('off','false'));
 const SITE  = arg('site','br_portal_away');
@@ -65,7 +70,8 @@ const med = a => { const s=a.slice().sort((x,y)=>x-y); return s.length%2 ? s[(s.
     const one = async (value) => {
       await page.evaluate(`window.__census&&window.__census.stop()`);
       await page.evaluate(`window.censusReset()`);
-      await page.evaluate(`__hcPERF.set(${JSON.stringify(FLAG)}, ${JSON.stringify(value)})`);
+      if(ONJS){ await page.evaluate(value===ON ? ONJS : (OFFJS||'true')); }
+      else await page.evaluate(`__hcPERF.set(${JSON.stringify(FLAG)}, ${JSON.stringify(value)})`);
       const s = await run(site.setup);
       if(s && s.err) throw new Error('setup failed: '+s.err);
       if(site.move) await page.evaluate(`window.__census.start(${JSON.stringify(site.move)})`);
@@ -79,18 +85,25 @@ const med = a => { const s=a.slice().sort((x,y)=>x-y); return s.length%2 ? s[(s.
         return { median:f.median, p99:f.p99, max:f.max, over12:f.over12, over16:f.over16_6, n:f.n,
                  portalMs:(p.ms&&p.ms.brPortal)||0, drawMs:(p.ms&&p.ms.draw)||0,
                  draws:i.calls, progs:i.progs, progsCompiled:p.progsCompiledInWindow, point:L.point,
-                 gpuTotal:g.total, gpuPortal:g.portal, gpuOk:g.ok, flag:__hcPERF.flags()[${JSON.stringify(FLAG)}] }; })()`);
+                 gpuTotal:g.total, gpuPre:g.pre, gpuScene:g.scene, gpuComposer:g.composer, gpuOk:g.ok,
+                 flag:__hcPERF.flags()[${JSON.stringify(FLAG)}] }; })()`);
       if(site.move) await page.evaluate(`window.__census.stop()`);
       if(site.teardown) await run(site.teardown);
       if(!r.n) throw new Error('no frames committed in that window — not a measurement');
       return r;
     };
 
+    // ORDER ALTERNATES. Measuring A then B in every pair lets any warm-up effect inside a pair masquerade as
+    // the flag's doing: owShadowMoveOnly appeared to take p99 from 9.4 to 5.7 ms in three pairs out of three
+    // while a counter proved the gate had not skipped a single shadow refresh. Odd pairs run A,B and even
+    // pairs run B,A, so a per-pair drift cancels instead of accumulating in one side's favour.
     for(let p=0; p<=PAIRS; p++){
-      const a = await one(OFF), b = await one(ON);
+      let a, b;
+      if(p % 2 === 1){ a = await one(OFF); b = await one(ON); }
+      else           { b = await one(ON);  a = await one(OFF); }
       if(p===0){ console.log(`warm-up pair discarded (A ${a.median} ms, B ${b.median} ms — first-encounter compiles land here)`); continue; }
       A.push(a); B.push(b);
-      console.log(`pair ${p}: A ${String(a.median).padStart(7)} ms (p99 ${String(a.p99).padStart(6)}, max ${String(a.max).padStart(8)}, >16.6 ${String(a.over16).padStart(3)})  ->  B ${String(b.median).padStart(7)} ms (p99 ${String(b.p99).padStart(6)}, max ${String(b.max).padStart(8)}, >16.6 ${String(b.over16).padStart(3)})   delta ${(b.median-a.median>=0?'+':'')}${(b.median-a.median).toFixed(3)}   portalMs ${a.portalMs}->${b.portalMs}   progs+ ${a.progsCompiled}->${b.progsCompiled}   lights ${a.point}->${b.point}`);
+      console.log(`pair ${p}: A ${String(a.median).padStart(7)} ms (p99 ${String(a.p99).padStart(6)}, max ${String(a.max).padStart(8)}, >16.6 ${String(a.over16).padStart(3)})  ->  B ${String(b.median).padStart(7)} ms (p99 ${String(b.p99).padStart(6)}, max ${String(b.max).padStart(8)}, >16.6 ${String(b.over16).padStart(3)})   delta ${(b.median-a.median>=0?'+':'')}${(b.median-a.median).toFixed(3)}   gpu ${a.gpuTotal}->${b.gpuTotal}   portalMs ${a.portalMs}->${b.portalMs}   progs+ ${a.progsCompiled}->${b.progsCompiled}   lights ${a.point}->${b.point}`);
     }
     const d = k => A.map((a,i)=>B[i][k]-a[k]);
     const dMed=d('median'), wins=dMed.filter(x=>x<0).length;
@@ -99,9 +112,12 @@ const med = a => { const s=a.slice().sort((x,y)=>x-y); return s.length%2 ? s[(s.
       pairedMedianDelta:+med(dMed).toFixed(3), pairedP99Delta:+med(d('p99')).toFixed(3),
       pairedMaxDelta:+med(d('max')).toFixed(2), pairedOver16Delta:med(d('over16')),
       pairedPortalMsDelta:+med(d('portalMs')).toFixed(3), pairedCompileDelta:med(d('progsCompiled')),
+      pairedGpuDelta:+med(d('gpuTotal')).toFixed(3), aGpu:med(A.map(r=>r.gpuTotal)), bGpu:med(B.map(r=>r.gpuTotal)),
+      aDraws:med(A.map(r=>r.draws)), bDraws:med(B.map(r=>r.draws)), label:LABEL,
       perPair:dMed.map(x=>+x.toFixed(3)), signTest:`${wins}/${dMed.length} pairs faster with the flag ON` };
-    fs.writeFileSync(path.join(OUT,`perf-flag-ab-${FLAG}-${SITE}.json`), JSON.stringify(out,null,2));
+    fs.writeFileSync(path.join(OUT,`perf-flag-ab-${(arg('tag',FLAG)).replace(/[^\w.-]/g,'_')}-${SITE}.json`), JSON.stringify(out,null,2));
     console.log(`\n${FLAG} at ${SITE}:  ${out.aMedian} -> ${out.bMedian} ms   paired median ${out.pairedMedianDelta>0?'+':''}${out.pairedMedianDelta} ms, p99 ${out.pairedP99Delta>0?'+':''}${out.pairedP99Delta}, max ${out.pairedMaxDelta>0?'+':''}${out.pairedMaxDelta}, frames>16.6 ${out.pairedOver16Delta>0?'+':''}${out.pairedOver16Delta}`);
     console.log(`${out.signTest}   per-pair [${out.perPair.join(', ')}]   portal scope ${out.pairedPortalMsDelta} ms   extra compiles ${out.pairedCompileDelta}`);
+    console.log(`gpu ${out.aGpu} -> ${out.bGpu} ms (paired ${out.pairedGpuDelta>0?'+':''}${out.pairedGpuDelta})   draws ${out.aDraws} -> ${out.bDraws}`);
   } finally { try{ if(browser) await browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }
 })().catch(e=>{ console.error(e); process.exit(1); });
