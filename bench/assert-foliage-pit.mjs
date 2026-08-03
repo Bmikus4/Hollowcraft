@@ -73,8 +73,11 @@ function ok(label, cond, got){ checks++; if(!cond)fails++; console.log('  '+(con
       ok('CONTROL: violations ARE found with the rule off', (scan.walls4+scan.buried)>0, {pit:scan.walls4, buried:scan.buried});
     } else {
       ok('no foliage in a 1x1 pit', scan.walls4===0, {pit:scan.walls4, onEdge:scan.edgeWalls4});
-      // Ben raised the bar from "fully enclosed" to ALL FOUR SIDES OPEN, so a three-walled pocket is a violation too.
+      // The bar is walls>=2: pits, slots and inside corners are violations; a plant leaning on ONE face is allowed and is
+      // reported rather than asserted, because that population is what keeps the world from going bare.
       ok('no foliage in a three-walled pocket', scan.walls3===0, scan.walls3);
+      ok('no foliage in a slot or inside corner', scan.walls2===0, scan.walls2);
+      console.log('  kept, leaning on a single face: '+scan.walls1+' of '+scan.crossCells+' plants');
       ok('no foliage buried under a solid block', scan.buried===0, scan.buried);
       ok('no chunk holds plants with hasCross false', scan.noHasCross===0, scan.noHasCross);
     }
