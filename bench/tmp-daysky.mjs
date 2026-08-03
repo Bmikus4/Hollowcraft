@@ -137,6 +137,18 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
       console.log('  sea frame from '+tag+' (y='+h+')');
     }
 
+    // THE HAZE DIAL, both ends, same camera. 0 is the shipped default and Ben's 07-28 rule -- the sky meets the sea on the
+    // sea's own colour, a defined line. Turned up, the SHARED anchor eases toward the daylight fog colour, so both sides move
+    // together and the join dissolves; moving one side alone is what produced the pale stripe.
+    for(const hz of [0, 0.5, 1.0]){
+      await page.evaluate('__hc.setTime(0.30)'); await sleep(400);
+      await page.evaluate('__hc.tpExact('+(P.x-40)+','+P.z+','+(P.sea+34)+')'); await sleep(1600);
+      console.log('  seahaze '+hz+': '+JSON.stringify(await page.evaluate('__hc.vis({seahaze:'+hz+'})')).slice(0,110));
+      await page.evaluate('__hcBR.look('+(Math.PI/2)+',-0.04)'); await sleep(1100);
+      await page.screenshot({path:path.join(OUT,'daysky-'+TAG+'-haze'+String(hz).replace('.','_')+'.png')});
+    }
+    await page.evaluate('__hc.vis({seahaze:0})');
+
     // OCCLUSION. The post-bloom disc is drawn over the finished frame with no depth buffer to test against, so its
     // visibility comes from voxel rays. Underground, all five must be blocked and the disc must go out entirely -- if this
     // reads anything above zero, the sun is being painted through solid rock.
