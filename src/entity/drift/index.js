@@ -145,6 +145,28 @@ export function driftFlush(id){
 // apart from "the loop is producing something you cannot see", and those have completely different causes — an empty
 // subject scene versus lights too dim for the anchor render. Mean luma and mean alpha separate them in one call.
 const _probeBuf = new Uint8Array(32*32*4);
+const _fullBuf = new Uint8Array(128*128*4);
+// How much of the render target does the subject actually cover, and is it touching the edges? The FOV is solved from a
+// `span` the caller measures off the rig, so a span that is too large frames the creature small inside mostly-empty pixels
+// and one that is too small crops it. Both are invisible in a screenshot of a dark forest.
+export function driftFraming(id){
+  const H = subjects.get(id); if(!H) return { attached:false };
+  const rt = H.loop.cur, w = Math.min(128, rt.width), h = Math.min(128, rt.height);
+  renderer.readRenderTargetPixels(rt, 0, 0, w, h, _fullBuf);
+  let covered=0, minX=w, maxX=-1, minY=h, maxY=-1, edge=0;
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+    if(_fullBuf[(y*w+x)*4+3] < 40) continue;
+    covered++;
+    if(x<minX)minX=x; if(x>maxX)maxX=x; if(y<minY)minY=y; if(y>maxY)maxY=y;
+    if(x===0||y===0||x===w-1||y===h-1) edge++;
+  }
+  if(maxX<0) return { attached:true, covered:0, note:'nothing rendered' };
+  return { attached:true, span:+H.span.toFixed(2),
+    coverPct:+(100*covered/(w*h)).toFixed(1),
+    boxW:maxX-minX+1, boxH:maxY-minY+1,
+    heightPct:+(100*(maxY-minY+1)/h).toFixed(1),          // should sit near FILL*100 if the span is measured right
+    edgePixels:edge };                                    // non-zero means it is being cropped
+}
 export function driftProbe(id){
   const H = subjects.get(id); if(!H) return { attached:false };
   const read = (rt)=>{
@@ -158,7 +180,11 @@ export function driftProbe(id){
     const n = _probeBuf.length/4;
     return { luma:+(lum/n).toFixed(1), alpha:+(alpha/n).toFixed(1), maxAlpha:maxA };
   };
-  return { attached:true, fresh:read(H.loop.fresh), out:read(H.loop.cur) };
+  // The light intensities come back too: the subject is a lit MeshPhongMaterial, so if a day/night comparison shows no
+  // change in luma these numbers say whether the lights failed to move or moved and did not matter.
+  return { attached:true, fresh:read(H.loop.fresh), out:read(H.loop.cur),
+    hemi:+H.hemi.intensity.toFixed(3), dir:+H.dir.intensity.toFixed(3),
+    daylight:ctx.daylight?+ctx.daylight().toFixed(3):null, steps:H.loop.steps };
 }
 
 export function driftTune(k, v){

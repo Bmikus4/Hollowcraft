@@ -121,12 +121,45 @@ const check = (name, ok, detail)=>{ console.log((ok?'PASS  ':'FAIL  ')+name+(det
     check('the rig renders into the clean anchor', probeNight.fresh.maxAlpha > 200, probeNight.fresh);
     check('the loop passes it through', probeNight.out.maxAlpha > 120, probeNight.out);
 
-    // And a daylight frame, because "correct but invisible at night" is the failure the night shot cannot distinguish.
-    await page.evaluate(`__hc.setTime(0.5)`); await sleep(1600);
+    // FRAMING. The loop solves its FOV from a span measured off the rig, so a wrong span quietly wastes render-target
+    // pixels on air or crops the creature — neither is visible in a screenshot of a dark forest. FILL is 0.66, so the
+    // subject's height should land near 66% of the frame with nothing touching the edges.
+    const fr = (await page.evaluate(`__hc.hwFraming()`))[0];
+    console.log('framing', JSON.stringify(fr));
+    check('the creature fills the frame as intended', fr.heightPct > 45 && fr.heightPct < 85, fr.heightPct);
+    check('it is not being cropped', fr.edgePixels === 0, fr.edgePixels);
+
+    // And a daylight frame. Two separate claims, kept separate: that the subject's lights TRACK the world clock, and that
+    // the rendered result actually changes because of it. An earlier version asserted only "luma > 8", which the night
+    // value already satisfied — it would have passed with the lights welded shut, and did.
+    // FIND the brightest clock fraction rather than assume one, and read uDay a FRAME LATER than the write. setTime
+    // returns the uDay from before its own change (it is recomputed during the next frame), so scanning inside a single
+    // page.evaluate reports 0 for every fraction — which is also why the first version of this comparison never actually
+    // changed the clock and got byte-identical day and night numbers.
+    let noon = { f:0.72, day:-1 };
+    for(const f of [0, 0.15, 0.25, 0.35, 0.5]){
+      await page.evaluate(`__hc.setTime(${f})`);
+      await sleep(450);
+      const d = await page.evaluate(`__hc.st().day`);
+      if(d > noon.day) noon = { f, day:d };
+    }
+    console.log('brightest clock fraction', JSON.stringify(noon));
+    await page.evaluate(`__hc.setTime(${noon.f})`);
+    await sleep(2200);                                     // let the loop's history converge on the new lighting
     const probeDay = (await page.evaluate(`__hc.hwProbe()`))[0];
     console.log('probe (noon)', JSON.stringify(probeDay));
     await page.screenshot({ path: path.join(OUT, TAG+'-0-noon.png') });
-    check('it is visible in daylight', probeDay.out.luma > 8, {night:probeNight.out.luma, noon:probeDay.out.luma});
+    // A tight crop as well. The camera is aimed at the creature, so it sits at frame centre — and at 1280x720 with a dark
+    // forest behind it, the full frame is not something a person can judge the look from.
+    await page.screenshot({ path: path.join(OUT, TAG+'-0-noon-crop.png'), clip:{ x:460, y:140, width:360, height:360 } });
+    check('the subject lights track the world clock', probeDay.dir > probeNight.dir * 1.5,
+      {night:{day:probeNight.daylight, dir:probeNight.dir}, noon:{day:probeDay.daylight, dir:probeDay.dir}});
+    // The brightening is real but modest — the flesh material carries an emissive floor and the drift lights are only part
+    // of what the anchor render shows, so a 2.4x rise in light intensity moves mean luma by about a fifth. Asserting a
+    // large jump would be asserting something false; the claim is that the world clock reaches the image at all.
+    check('daylight brightens what the loop renders', probeDay.fresh.luma > probeNight.fresh.luma * 1.1,
+      {nightFresh:probeNight.fresh.luma, noonFresh:probeDay.fresh.luma,
+       ratio:+(probeDay.fresh.luma/probeNight.fresh.luma).toFixed(2)});
     await page.evaluate(`__hc.setTime(0.72)`); await sleep(1200);
 
     const beforeFlushes = seen.drift.flushes, beforeTint = seen.drift.tint;
@@ -146,6 +179,7 @@ const check = (name, ok, detail)=>{ console.log((ok?'PASS  ':'FAIL  ')+name+(det
     check('losing sight flushed the context window', after.drift.flushes > beforeFlushes, {before:beforeFlushes, after:after.drift.flushes});
     check('it came back a different colour', after.drift.tint !== beforeTint, {before:beforeTint, after:after.drift.tint});
     await page.screenshot({ path: path.join(OUT, TAG+'-2-after-flush.png') });
+    await page.screenshot({ path: path.join(OUT, TAG+'-2-after-flush-crop.png'), clip:{ x:460, y:140, width:360, height:360 } });
 
     // ---- 2b. RELEASE THE AI and require it to behave like the Wretch: from a held SCOUT/HUNT at ~10 blocks it must
     // close and commit. Asserted on the instance's own state, never on a world-wide global.

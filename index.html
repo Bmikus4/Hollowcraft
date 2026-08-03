@@ -297,7 +297,7 @@ import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { seraphOn, seraphOff, seraphAnimate, seraphShowBeam, seraphHideBeam, seraphBeamGold, seraphMiniBeam, seraphHideMiniBeam, seraphHideMiniBeams, seraphBloom, seraphEyeSpheres, seraphWingSpheres, seraphFold, seraphWoundEye, seraphHealEyes, seraphFreshEyes, seraphEyeClose, seraphEyesReset, seraphBodyBox, buildSeraphStoneProto, seraphCorpseMode, prewarm as seraphPrewarm } from './src/boss/seraphim/adapter.js';
-import { driftInit, driftAttach, driftDetach, driftStep, driftFlush, driftTune, driftState, driftHas } from './src/entity/drift/index.js';
+import { driftInit, driftAttach, driftDetach, driftStep, driftFlush, driftTune, driftState, driftHas, driftProbe, driftFraming } from './src/entity/drift/index.js';
 
 // =====================================================================
 //  THE SUMMONING CIRCLE — the loading screen (Ben 07-27, fix-list #2)
@@ -2436,7 +2436,9 @@ const skyMat = new THREE.ShaderMaterial({
     float n3(vec3 x){ vec3 i=floor(x),f=fract(x); f=f*f*(3.0-2.0*f);
       return mix(mix(mix(h13(i+vec3(0,0,0)),h13(i+vec3(1,0,0)),f.x),mix(h13(i+vec3(0,1,0)),h13(i+vec3(1,1,0)),f.x),f.y),
                  mix(mix(h13(i+vec3(0,0,1)),h13(i+vec3(1,0,1)),f.x),mix(h13(i+vec3(0,1,1)),h13(i+vec3(1,1,1)),f.x),f.y),f.z); }
-    float fbmC(vec3 p){ float v=0.0,a=0.5; for(int i=0;i<4;i++){ v+=a*n3(p); p*=2.02; a*=0.5;} return v; }   // 4 octaves (was 5) - cloud fBm, sampled several times per fragment
+    // 5 octaves. It was cut to 4 for frame time; the fifth is back because "real clouds" is mostly the small-scale detail on
+    // the edges, and without it a big cumulus is a smooth blob however wide you make it. Measured cost is in the commit.
+    float fbmC(vec3 p){ float v=0.0,a=0.5; for(int i=0;i<5;i++){ v+=a*n3(p); p*=2.02; a*=0.5;} return v; }   // cloud fBm, sampled twice per cloud fragment (shape + self-shadow)
     float fbm2(vec3 p){ float v=0.0,a=0.6; for(int i=0;i<2;i++){ v+=a*n3(p); p*=2.31; a*=0.5;} return v; }   // 2 octaves - the cheap one, for high cirrus and the Milky Way dust
     void main(){
       vec3 dir = normalize(vDir);
@@ -2554,13 +2556,27 @@ const skyMat = new THREE.ShaderMaterial({
         float rim = pow(max(dot(dir,lightDir),0.0),3.0);
         vec3 cp = dir/(dir.y*0.9+0.1);
         vec2 uvc = cp.xz*0.55 + vec2(uTime*0.006, uTime*0.002);
+        // HEAVIER, AND WITH A THIRD DIMENSION (Ben: "the daytime sky needs wayy more, real clouds").
+        // Coverage: the threshold band was 0.52..0.95, which is a thin slice off the top of the fBm and left a mostly empty
+        // sky with a few wisps. 0.44..0.82 takes cumulus from roughly 15% of the sky to 35-40%, and the wider low end means
+        // edges ramp in over a longer distance instead of appearing as hard flecks.
         float d = fbmC(vec3(uvc*1.3, uTime*0.02));
-        d = smoothstep(0.52,0.95,d) * smoothstep(0.02,0.25,dir.y) * uCloud;
+        d = smoothstep(0.44,0.82,d) * smoothstep(0.02,0.25,dir.y) * uCloud;
         vec3 lit  = mix(vec3(0.06,0.08,0.12), vec3(0.94,0.94,0.97), uDay);            // lit from the sun/moon side
         vec3 base = mix(vec3(0.02,0.03,0.05), vec3(0.46,0.49,0.56), uDay);            // and dark underneath
         cloudCol = mix(base, lit, 0.35+0.65*rim);
+        // SELF-SHADOW, the thing that makes a cloud read as a body rather than a stain: sample the same field again a short
+        // way TOWARD the light and darken where that sample is denser, i.e. where there is cloud above this point. One extra
+        // fBm, and it is inside this branch, so a clear-sky fragment pays nothing for it.
+        if(d>0.02){
+          vec2 luv = uvc*1.3 + lightDir.xz*0.085;
+          float dl = fbmC(vec3(luv, uTime*0.02));
+          float shade = clamp((dl-0.44)*1.7, 0.0, 1.0);                               // 0 where the light path is clear, 1 under thick cloud
+          cloudCol = mix(cloudCol, base*0.72, shade*0.55*uDay);
+          cloudCol = mix(cloudCol, lit, pow(clamp(1.0-shade,0.0,1.0),3.0)*0.35*uDay);  // and the sunlit crowns stay bright, which is the other half of the read
+        }
         cloudCol = mix(cloudCol, vec3(1.0,0.62,0.34), dusk*rim*0.55);                 // gold on the sun side at dusk
-        cloud = d*0.85;
+        cloud = d*0.92;
         if(dir.y>0.10){                                                               // CIRRUS: higher, faster, stretched into streaks
           vec2 uvh = cp.xz*0.22 + vec2(uTime*0.019, uTime*0.004);
           float c2 = fbm2(vec3(uvh.x*0.55, uvh.y*2.6, uTime*0.011));
@@ -2871,9 +2887,12 @@ const _uPineBand=new THREE.Color(0.020,0.016,0.012);   // dark woody brown — t
 const pineUnderMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, side:THREE.BackSide, fog:false,
   uniforms:{ uMask:{value:_pineMask}, uBand:{value:_uPineBand}, uFogCol:{value:_uPineFog}, uFogAmt:{value:0}, uWx:{value:0},
     uCamY:{value:CFG.SEA+2}, uVisD:{value:CFG.RENDER_DIST*CK}, uBandH:{value:5.0},   // band height in blocks, 9 -> 5 (Ben: too tall). It is still clipped to min(hT+uBandH*hs, canopy tip), so lowering it can only ever shrink the band, never expose it above the crowns
+    // THE PINES' OWN COLOUR, shared by reference from _uPine — the same uniform pineMat draws the treeline with, so the band
+    // fades into whatever the wood is at this hour instead of into a guess at it.
+    uPineCol:_uPine,
     uEntAz:{value:0}, uEntW:{value:0.115}, uEntOn:{value:1} },
   vertexShader:_horizVert, fragmentShader:[
-  'precision highp float; varying vec3 vPos; uniform sampler2D uMask; uniform vec3 uBand, uFogCol; uniform float uFogAmt, uWx, uCamY, uVisD, uBandH;',
+  'precision highp float; varying vec3 vPos; uniform sampler2D uMask; uniform vec3 uBand, uFogCol, uPineCol; uniform float uFogAmt, uWx, uCamY, uVisD, uBandH;',
   'uniform float uEntAz, uEntW, uEntOn;',
   'float hash(float n){ return fract(sin(n)*43758.5453); }',
   'float nz(float x){ float i=floor(x),f=fract(x); return mix(hash(i),hash(i+1.0),f*f*(3.0-2.0*f)); }',
@@ -2906,7 +2925,16 @@ const pineUnderMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false
   '  band*=mix(1.0,0.05,ment);',                                                                 // the entranceway runs through this layer too, or the mouth would have a lit floor across it
   '  float fog=clamp(uFogAmt*0.45*(1.0-0.25*t),0.0,0.72);',                                      // HALF the pines\' fog exposure and capped at 0.72: this band is the one thing on the horizon that must stay dark, and full-strength daylight haze is precisely what erased the seam it replaces
   '  fog=max(fog, 1.0-smoothstep(0.0,0.22,hs));',                                                // …but past the shore it still drowns completely, like everything else on this horizon
-  '  gl_FragColor=vec4(mix(band,uFogCol,fog), smoothstep(0.2,0.45,m)*clamp(1.0-uWx*1.25,0.0,1.0)); }'].join('\n') });
+  // THE JOIN FADES (Ben: "the contrast from the skybox horizon pines to the brown part below it should fade together").
+  // The band drew at full strength right up to its clipped top and the pines began at full strength immediately above it, so
+  // two saturated fields met on a hard line. Two terms, both keyed on t, which is already 0 at the skirt and 1 at the top:
+  //   * the colour eases toward the PINES' own colour over the upper third, so the wood becomes foliage rather than meeting it;
+  //   * the alpha tapers to nothing over the upper quarter, and because this layer draws IN FRONT (renderOrder -4.9) that
+  //     reveals the real pine silhouette behind it progressively instead of covering it up to a cut edge.
+  // Together they are a gradient across about a third of the band's height rather than an edge.
+  '  band=mix(band, uPineCol, smoothstep(0.62,1.0,t)*0.85);',
+  '  float aTop=1.0-smoothstep(0.74,1.0,t);',
+  '  gl_FragColor=vec4(mix(band,uFogCol,fog), smoothstep(0.2,0.45,m)*clamp(1.0-uWx*1.25,0.0,1.0)*aTop); }'].join('\n') });
 // renderOrder -4.9 = IN FRONT of the pines (-5), not behind: a band ON the wood, not a shape seen through it.
 // PARENTED TO pineLayer, not added to the scene. pineLayer.visible is toggled from twelve places — the Backrooms
 // atmosphere, its restore, the boss's stage-2 whiteout and its restore, the void, and three QA hooks — and a sibling
@@ -7074,7 +7102,13 @@ function newWretchState(){ return { active:false, group:null, P:null, pos:new TH
   state:'DORMANT', crawl:0, phase:0, gaitPhase:0, dist:999, seesPlayer:false, playerSees:false, observed:0,
   target:new THREE.Vector3(), repathT:0, spawnT:50+Math.random()*40, hunt:false, debug:false, eyeGlow:0,
   hunger:68, thirst:20, _drinkCd:0, headYaw:0, headDwell:0, headTarget:0, dragging:false, dragT:0, struggle:0, screamed:false,
-  lair:null, up:new THREE.Vector3(0,1,0), form:'wretch', gestureIdx:0, gestureT:0, gestureDur:2.6 }; }
+  lair:null, up:new THREE.Vector3(0,1,0), form:'wretch', gestureIdx:0, gestureT:0, gestureDur:2.6,
+  // sense lives HERE, not as a later `wretch.sense=` at module scope, because it is per-entity: an extra instance without
+  // it crashes on the first frame of sense() (`Cannot set properties of undefined (setting 'fdot')`), which is exactly
+  // what happened the first time this ran. `redLight` is deliberately NOT here — it is the lair's ritual lamp, every use
+  // of it is guarded, and a second scene light would recompile every lit material mid-game.
+  sense:{ seen:false, seenAge:99, lastSeen:new THREE.Vector3(), conf:0, heard:null, heardAge:99,
+    scent:null, scentAge:99, onWall:false, inCave:false, nearWater:false, lit:1, watched:false, fdot:0 } }; }
 // `wretch` IS THE ENTITY CURRENTLY BEING UPDATED, not a singleton — that is why it is `let`. Every one of the 2700-odd
 // `wretch.` references in this file resolves through this binding, so a second creature with identical behaviour costs a
 // rebind and a call rather than a rewrite (see updateWretchExtras). Two rules keep that safe:
@@ -7240,8 +7274,13 @@ function spawnHorrific(x,z){
   try{ HORROR._firstNight=true; inst.spawnT=0;
     const dx=x-player.pos.x, dz=z-player.pos.z, d=Math.max(10,Math.hypot(dx,dz));
     ok=spawnWretch(Math.atan2(dz,dx)*180/Math.PI, d);
-    if(ok){ inst._summoned=true; chooseSummonAction(); } }                         // summoned → persists through daylight
+    if(ok){ inst._summoned=true; chooseSummonAction();
+      placeWretch(0.016,false); } }                                               // summoned → persists through daylight
   finally{ wretch=prev; }
+  // placeWretch is what writes the rig's TRANSFORM — spawnWretch only sets `pos`. Without that one call the group is still
+  // at the origin on the first drift step, the loop camera frames a point in the world where nothing is, and the anchor
+  // render comes back empty (measured: fresh.maxAlpha 0). Nothing about that is visible in a screenshot; it looks like the
+  // shader is broken.
   if(!ok){ wretchExtra.pop(); scene.remove(inst.group); flashName('the ground here will not hold it'); return null; }
   // Measure the rig rather than hard-coding a height: the drift loop solves its FOV from the span, and a wrong span
   // silently crops the head off or frames the creature inside a third of the render target.
@@ -7259,7 +7298,15 @@ function despawnHorrific(inst){
   wretchExtra.splice(i,1); return true;
 }
 // Caught per instance, like the backrooms update: an experiment must never be able to take the game down with it.
+// _hwHold freezes the extras' AI for QA only. It exists because the behaviour is genuinely the Wretch's: spawned within
+// hunting range at night it captures the player in about three seconds, and the grab cutscene owns the camera — so any
+// check on how the thing LOOKS has to be able to stop it acting first.
+let _hwHold=false;
 function updateWretchExtras(dt){
+  // Held: skip the AI but STILL place the rig, exactly as the daytime-peek path does. Skipping placeWretch too leaves the
+  // group at the origin and the drift loop renders empty air.
+  if(_hwHold){ for(const inst of wretchExtra){ if(!inst.active) continue;
+      wretch=inst; try{ placeWretch(dt,false); }catch(e){} finally{ wretch=wretchPrime; } } return; }
   for(const inst of wretchExtra){
     wretch=inst;
     try{ updateWretch(dt); }
@@ -7294,8 +7341,7 @@ function chooseSummonAction(){ if(!wretch.active)return;
 // =====================================================================
 Object.assign(wretch,{ committed:false, commitT:0, posture:'STAND', stealth:0, blinkCd:6, lostT:0,
   angerT:10+Math.random()*22, wound:0, grabPhase:'none', jumpscareT:0, thought:'the wood is quiet' });
-wretch.sense={ seen:false, seenAge:99, lastSeen:new THREE.Vector3(), conf:0, heard:null, heardAge:99,
-  scent:null, scentAge:99, onWall:false, inCave:false, nearWater:false, lit:1, watched:false, fdot:0 };
+// (wretch.sense moved into newWretchState — it is per-entity state; see the note there)
 const PNOISE=[];   // player sound stimuli the entity can HEAR: {x,y,z,loud,t}
 function emitNoise(x,y,z,loud){ if((loud||0)>=3) scareAnimals(x,z,(loud||1)*11);   // a loud noise (a shot, a nearby thunderclap) sends wild animals bolting
   if(!wretch) return; PNOISE.push({x,y,z,loud,t:clock.elapsedTime}); if(PNOISE.length>28)PNOISE.shift(); }
@@ -9905,7 +9951,7 @@ function _orientSpear(s){ const vl=Math.hypot(s.vx,s.vy,s.vz)||1; _spDir.set(s.v
 function stickSpear(s, host, onWretch){ _orientSpear(s);
   const vl=Math.hypot(s.vx,s.vy,s.vz)||1; s.x+=(s.vx/vl)*0.16; s.y+=(s.vy/vl)*0.16; s.z+=(s.vz/vl)*0.16; s.mesh.position.set(s.x,s.y,s.z);   // sink the point in a touch
   const st={mesh:s.mesh, id:s.id, x:s.x, y:s.y, z:s.z, age:0, host:host||null, quat:s.mesh.quaternion.clone(), onWretch:!!onWretch};   // FREEZE the mesh embedded, at the angle it hit
-  if(st.onWretch && wretch.group) wretch.group.attach(s.mesh);   // reparent keeping the world transform → the spear RIDES the wretch/ceraphim: position, yaw, flight lean, all of it (Ben 07-20)
+  if(st.onWretch && wretch.group){ st.wowner=wretch; wretch.group.attach(s.mesh); }   // reparent keeping the world transform → the spear RIDES the wretch/ceraphim: position, yaw, flight lean, all of it (Ben 07-20). wowner records WHICH creature, so a spear in a Horrific Wretch is not culled for not being in the primary's rig.
   if(st.host){ st.ox=s.x-st.host.x; st.oy=s.y-(st.host.y||0); st.oz=s.z-st.host.z; }                            // ride the animal it stuck into
   stuckSpears.push(st);
   const i=spears.indexOf(s); if(i>=0)spears.splice(i,1);
@@ -9916,13 +9962,22 @@ function updateSpears(dt){ for(let i=spears.length-1;i>=0;i--){ const s=spears[i
     const vl=Math.hypot(s.vx,s.vy,s.vz)||1, thrown=(ITEMS[s.id].spear.throw||8)*(1+s.power);
     const steps=Math.max(1,Math.ceil(vl*dt/0.3)), sdt=dt/steps; let stuck=false;                               // sub-step: a fast spear (3× speed) must not tunnel a 1-block wall
     for(let k=0;k<steps;k++){ s.x+=s.vx*sdt; s.y+=s.vy*sdt; s.z+=s.vz*sdt;
-      if(wretch.active && wretch.boss){ let hitB=false, cen=null;                                               // the CERAPHIM: eye spheres + the mantle mass around the central eye are spear-solid
-        const es=(typeof seraphEyeSpheres==='function')?seraphEyeSpheres():[];
-        for(const e of es){ if(e.central)cen=e; const dx=s.x-e.x,dy=s.y-e.y,dz=s.z-e.z; if(dx*dx+dy*dy+dz*dz<e.r*e.r){ hitB=true; break; } }
-        if(!hitB && cen){ const dx=s.x-cen.x,dy=s.y-cen.y,dz=s.z-cen.z, mr=cen.r*3.2; hitB=dx*dx+dy*dy+dz*dz<mr*mr; }
-        if(hitB){ hurtWretch(thrown); spawnParticles(s.x,s.y,s.z,0x3a0608,12,2,0.6); stickSpear(s,null,true); stuck=true; break; } }
-      else if(wretch.active && !wretch.dragging){ const hx=s.x-wretch.pos.x,hz=s.z-wretch.pos.z,hy=s.y-wretch.pos.y;
-        if(hx*hx+hz*hz<1.9*1.9 && hy>-0.5 && hy<4.7){ hurtWretch(thrown); spawnParticles(s.x,s.y,s.z,0x3a0608,12,2,0.6); stickSpear(s,null,true); stuck=true; break; } }
+      // Tested against EVERY live Wretch, not just the primary: a spear in flight is hit by whatever its own position is
+      // inside of, and before this a spear passed clean through a Horrific Wretch (measured 0 damage; now 6/6 land).
+      // The `!wretch.dragging` gate stays. It reads like a bug — a spear does nothing from the moment it grabs you — but
+      // the gun's capsule test and meleeAttack carry the identical gate, and three independent call sites agreeing is a
+      // decision, not an oversight. Removing it here alone would make the spear the one weapon that works mid-drag.
+      if(anyWretch(()=>{
+        if(!wretch.active || wretch.dragging) return false;
+        if(wretch.boss){ let hitB=false, cen=null;                                                              // the CERAPHIM: eye spheres + the mantle mass around the central eye are spear-solid
+          const es=(typeof seraphEyeSpheres==='function')?seraphEyeSpheres():[];
+          for(const e of es){ if(e.central)cen=e; const dx=s.x-e.x,dy=s.y-e.y,dz=s.z-e.z; if(dx*dx+dy*dy+dz*dz<e.r*e.r){ hitB=true; break; } }
+          if(!hitB && cen){ const dx=s.x-cen.x,dy=s.y-cen.y,dz=s.z-cen.z, mr=cen.r*3.2; hitB=dx*dx+dy*dy+dz*dz<mr*mr; }
+          if(!hitB) return false; }
+        else { const hx=s.x-wretch.pos.x,hz=s.z-wretch.pos.z,hy=s.y-wretch.pos.y;
+          if(!(hx*hx+hz*hz<1.9*1.9 && hy>-0.5 && hy<4.7)) return false; }
+        hurtWretch(thrown); spawnParticles(s.x,s.y,s.z,0x3a0608,12,2,0.6); stickSpear(s,null,true); return true;
+      })){ stuck=true; break; }
       let hitA=null; for(const a of animals){ if(a.dead)continue; if(Math.hypot(s.x-a.x,s.y-(a.y+0.4),s.z-a.z)<0.95){ hitA=a; break; } }
       if(hitA){ hurtAnimal(hitA,thrown); spawnParticles(s.x,s.y,s.z,0xcc2018,8,1.6,0.5); stickSpear(s,hitA); stuck=true; break; }   // sticks INTO the animal and rides it
       const b=getBlock(Math.floor(s.x),Math.floor(s.y),Math.floor(s.z));
@@ -9932,7 +9987,8 @@ function updateSpears(dt){ for(let i=spears.length-1;i>=0;i--){ const s=spears[i
     if(s.age>12){ stickSpear(s,null); } } }
 function updateStuckSpears(dt){ for(let i=stuckSpears.length-1;i>=0;i--){ const st=stuckSpears[i]; st.age+=dt;
     if(st.onWretch){ st.mesh.getWorldPosition(_spDir); st.x=_spDir.x; st.y=_spDir.y; st.z=_spDir.z;             // live world position while it rides (pickup range reads this)
-      if(!wretch.active || (wretch.hp!=null&&wretch.hp<=0) || st.mesh.parent!==wretch.group){                   // the beast died / melted away → the spear comes free as a pickup where it was
+      const _W = st.wowner || wretch;                                                                            // the creature it is riding, which may be a Horrific Wretch rather than the primary
+      if(!_W.active || (_W.hp!=null&&_W.hp<=0) || st.mesh.parent!==_W.group){                                    // the beast died / melted away → the spear comes free as a pickup where it was
         if(st.mesh.parent)st.mesh.parent.remove(st.mesh); _disposeView(st.mesh); if(typeof spawnDrop==='function')spawnDrop(st.id,1,st.x,st.y,st.z); stuckSpears.splice(i,1); continue; } }
     else if(st.host){ if(st.host.dead){ st.host=null; }                                                        // animal died → the spear stays where it fell
       else { st.x=st.host.x+st.ox; st.y=(st.host.y||0)+st.oy; st.z=st.host.z+st.oz; st.mesh.position.set(st.x,st.y,st.z); st.mesh.quaternion.copy(st.quat); } }
@@ -10905,7 +10961,27 @@ function updateView(dt){ updateRecoil(dt);                                      
 
 // ---- COMBAT (left-click swing → melee the wretch or an animal in front) ----
 function WEAPON_DMG(tool){ const base=({sword:3,axe:2,pickaxe:1,shovel:1,spear:3})[tool.kind]||1; const tierAdd=({wood:1,stone:2,iron:3})[tool.tier]||0; return base+tierAdd; }   // sword 4/5/6/8, spear 4 (wood) with reach, axe 3/4/5…
-function doSwing(){ const h=heldSlot(); if(h&&ITEMS[h.id]&&ITEMS[h.id].gun){ if(fireGun())view.swing=1.4; return; } view.swing=1; meleeAttack(); }
+// A swing/shot binds `wretch` to the NEAREST live creature before it resolves, so the Horrific Wretch is exactly as
+// hittable as the primary without the aim maths existing twice. Nearest-to-the-eye, not nearest-to-the-crosshair: two of
+// them close enough for the distinction to matter has not happened, and a second ray test would cost every swing.
+// (Thrown spears still resolve against the primary only — they are updated as projectiles, on another path.)
+function withNearestWretch(fn){
+  if(!wretchExtra.length) return fn();
+  let best = wretchPrime.active ? wretchPrime : null;
+  let bd = best ? best.pos.distanceToSquared(camera.position) : Infinity;
+  for(const w of wretchExtra){ if(!w.active) continue; const d=w.pos.distanceToSquared(camera.position); if(d<bd){ bd=d; best=w; } }
+  const prev=wretch; if(best) wretch=best;
+  try{ return fn(); } finally{ wretch=prev; }
+}
+// Run `fn` against every live Wretch in turn, primary first, and stop at the first that returns true. For anything whose
+// OWN position decides which creature it hits — a projectile in flight — rather than the camera's.
+function anyWretch(fn){ const prev=wretch;
+  try{ wretch=wretchPrime; if(wretchPrime.active && fn()) return true;
+    for(const w of wretchExtra){ if(!w.active) continue; wretch=w; if(fn()) return true; }
+    return false; }
+  finally{ wretch=prev; } }
+function doSwing(){ return withNearestWretch(_doSwing); }
+function _doSwing(){ const h=heldSlot(); if(h&&ITEMS[h.id]&&ITEMS[h.id].gun){ if(fireGun())view.swing=1.4; return; } view.swing=1; meleeAttack(); }
 // hitscan down the look ray → first block/entity/animal hit. Muzzle flash + crack + tracer + recoil. Returns true if a shot was actually fired.
 function fireGun(){ const held=heldSlot(), it=held?ITEMS[held.id]:null, bolt = it&&it.gun==='bolt', rev = it&&it.gun==='revolver', sup = !!(it&&it.suppressed);
   if(it&&it.gun)achUnlock('armed');   // sup = the suppressed rifle: 40% quieter (sound + heard-range + emitted-noise) and -20 damage; rev = the .357 revolver (handgun)
@@ -17680,10 +17756,14 @@ window.__hc={
     }catch(e){ return {err:String(e.message||e)}; } },
   hwFlush(){ try{ return wretchExtra.map(w=>driftFlush(hwKey(w))); }catch(e){ return {err:String(e.message||e)}; } },
   hwTune(k,v){ try{ return driftTune(k,v); }catch(e){ return {err:String(e.message||e)}; } },
+  hwHold(on){ try{ _hwHold = on!==false; return _hwHold; }catch(e){ return {err:String(e.message||e)}; } },   // QA: freeze the extras' AI so the image can be checked without being captured mid-check
+  hwProbe(){ try{ return wretchExtra.map(w=>Object.assign({hid:w._hid}, driftProbe(hwKey(w)))); }catch(e){ return {err:String(e.message||e)}; } },
+  hwFraming(){ try{ return wretchExtra.map(w=>Object.assign({hid:w._hid}, driftFraming(hwKey(w)))); }catch(e){ return {err:String(e.message||e)}; } },   // QA: how much of the render target the creature covers, and whether it is being cropped   // QA: mean luma/alpha of both loop stages — tells "producing nothing" apart from "too dark to see"
   hwKill(){ try{ const n=wretchExtra.length; for(let i=wretchExtra.length-1;i>=0;i--) despawnHorrific(wretchExtra[i]); return n; }catch(e){ return {err:String(e.message||e)}; } },
   // QA: prove the AI instance is genuinely separate — the primary must be untouched by anything the extra does.
   hwPrime(){ try{ return { primeActive:wretchPrime.active, primeState:wretchPrime.state, bound:(wretch===wretchPrime),
-      extras:wretchExtra.length, err:window._hwErr||null }; }catch(e){ return {err:String(e.message||e)}; } },
+      extras:wretchExtra.length, grabbed:!!player.grabbed, day:+globalU.uDay.value.toFixed(3),
+      err:window._hwErr||null }; }catch(e){ return {err:String(e.message||e)}; } },
   smelt(x,z){ try{ const bx=Math.floor(x), bz=Math.floor(z), by=surfaceH(bx,bz)+1; setBlockWorld(bx,by,bz,BID.furnace,true); furnaces[ckey(bx,by,bz)]={in:{id:'sand',n:2},t:2,out:null}; return {bx,by,bz}; }catch(e){ return {err:e.message}; } },   // QA: place a furnace mid-smelt at (x,z) — cooking-fx visual checks
   chime(x,z){ try{ const bx=Math.floor(x), bz=Math.floor(z), by=surfaceH(bx,bz)+2; setBlockWorld(bx,by,bz,BID.chime,true); chimes.push({x:bx+0.5,y:by+0.5,z:bz+0.5}); return {bx,by,bz}; }catch(e){ return {err:e.message}; } },   // QA: hang a chime at (x,z)
   place2(x,z,id,dy){ try{ const bx=Math.floor(x),bz=Math.floor(z),by=surfaceH(bx,bz)+1+(dy|0); setBlockWorld(bx,by,bz,BID[id]||BID.torch,true); return {bx,by,bz,id:id||'torch'}; }catch(e){ return {err:e.message}; } },   // QA: place any block at surface(x,z)+1+dy
