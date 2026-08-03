@@ -93,6 +93,18 @@ function findBrowser(){ for(const p of ['C:\\Program Files\\Google\\Chrome\\Appl
     console.log('GLOW COST: '+(onMs-offMs).toFixed(3)+' ms/frame  (on '+onMs.toFixed(2)+' vs off '+off1.toFixed(2)+'/'+off2.toFixed(2)+')');
     console.log('  off-to-off spread '+Math.abs(off1-off2).toFixed(2)+'ms — if that is near the glow figure, the measurement is noise');
 
+    // AFTER THE CREATURE IS GONE, nothing of its glow may remain. The drift/glow step only runs while an instance exists, so
+    // removing the last one could strand the eye light lit and the eye sprites floating in the world with nothing behind
+    // them; and the reserved pool slot must return to the torches rather than being held for the session.
+    await page.evaluate(`__hc.hwKill()`);
+    await sleep(900);
+    const after = await page.evaluate(`(()=>{ const s=__hc.owShadow();
+      const eye=(s.pool||[]).filter(p=>p.i>0 && Math.abs(p.d-11)<0.01);
+      return { strandedEyeLights:eye.length, litPool:(s.pool||[]).filter(p=>p.i>0).length }; })()`);
+    console.log('after kill  '+JSON.stringify(after));
+    if(after.strandedEyeLights!==0) console.log('FAIL: the eye light is still lit with no creature alive');
+    else console.log('PASS: no eye light left behind');
+
     await browser.close();
   } finally { try{ server.kill(); }catch(e){} }
   console.log('DONE');
