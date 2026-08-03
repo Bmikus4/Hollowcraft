@@ -11954,18 +11954,47 @@ function brRestoreAtmo(){ const p=BR.prev; if(!p)return; scene.background=p.bg; 
 // ?brseed=N pins it. Measurement only: with no override the behaviour is byte-for-byte what it always was.
 const BR_SEED_FIXED = Q.get('brseed')!=null ? ((+Q.get('brseed'))>>>0) : null;
 if(BR_SEED_FIXED!=null && !BR.seed) BR.seed=BR_SEED_FIXED;   // the load-time prewarm reads BR.seed too; pin it before that runs or the prewarmed chunks are a different maze
-function brSpawnDoor(x,y,z,yaw){ brClearDoor(); BR.seed = BR_SEED_FIXED!=null ? BR_SEED_FIXED : (Math.random()*4294967296)>>>0; BR.rooms=[];   // fresh maze per door → the layout you see through the portal is the one you enter (Ben 07-27)
+// A FRESH MAZE PER DOOR, BUT ONLY FROM OUTSIDE. The reseed exists so the layout you see through the portal is the one you
+// walk into (Ben 07-27) — which is a statement about entering from the overworld. Re-rolling it while the player is
+// already INSIDE re-rolls the building around them: every BRX chunk's storey level is a function of BR.seed, so columns
+// that were open air become solid concrete and floors move a storey. That is what actually put the portal on the roof.
+// The door's height is computed from the voxels immediately before this call, and a reseed here invalidates it: measured,
+// a door computed at y=41 on the player's own floor ended up in a column whose floor had become 58, solid concrete
+// through 41. Fixing where the height came from was not enough while this line could move the world under it.
+function brSpawnDoor(x,y,z,yaw){ brClearDoor();
+  if(!BR.inside){ BR.seed = BR_SEED_FIXED!=null ? BR_SEED_FIXED : (Math.random()*4294967296)>>>0; BR.rooms=[]; }
   const grp=new THREE.Group(); grp.position.set(x,y+1.0,z); grp.rotation.y=yaw;
   const quad=new THREE.Mesh(new THREE.PlaneGeometry(1.0,2.0), new THREE.MeshBasicMaterial({color:0x000000,side:THREE.DoubleSide,fog:false,toneMapped:false})); grp.add(quad);   // NO border/frame (Ben 07-27) — just the see-through window painted by the portal RT
   grp.userData={quad}; grp.renderOrder=6; scene.add(grp); BR.door={grp,x,y,z,yaw,t:0}; brSubBassTear(); brVHS(); }
 function brClearDoor(){ if(BR.door&&BR.door.grp){ scene.remove(BR.door.grp); BR.door.grp.traverse(o=>{ if(o.geometry)o.geometry.dispose(); if(o.material)o.material.dispose(); }); } BR.door=null; }
-function brSpawnDoorNearPlayer(){ const yaw=player.yaw, dx=-Math.sin(yaw), dz=-Math.cos(yaw); const x=player.pos.x+dx*14, z=player.pos.z+dz*14;
-  // INSIDE the Backrooms, groundYAt is the wrong question. brSlabColumn writes solid concrete for every y BELOW the floor
-  // and a solid br_ceiling lid at FLOOR+BR_CH, so the highest solid block in any interior column is the CEILING -- and a
-  // door placed at groundYAt therefore lands on the roof, which is exactly the bug. Inside, the answer is this column's
-  // own storey floor; the surface height only means anything in the overworld.
-  let gy;
-  if(BR.inside){ const _bc=brxChunkOf(x,z); gy=(BR.levels?brxChunkBaseY(_bc.gx,_bc.gz):BR_FLOOR)+1; }
+function brSpawnDoorNearPlayer(){ const yaw=player.yaw, dx=-Math.sin(yaw), dz=-Math.cos(yaw);
+  let x=player.pos.x+dx*14, z=player.pos.z+dz*14, gy;
+  if(BR.inside){
+    // INSIDE the Backrooms, groundYAt's DEFAULT start is the wrong question. brSlabColumn writes solid concrete for every
+    // y below the floor and a solid br_ceiling lid at FLOOR+BR_CH, so the highest solid block in an interior column is the
+    // CEILING -- a scan from the top of the column puts the door on the roof. That was Ben's bug.
+    // The storey comes from the player's own floor, read from the voxels. NOT from brxChunkBaseY: that is a function of
+    // BR.seed, and the layout can be re-rolled (see brSpawnDoor), so a height derived from the level map can describe a
+    // maze that no longer exists -- measured at the time as floor 40 while the player stood on the slab at 49.
+    gy=groundYAt(player.pos.x,player.pos.z,player.pos.y);
+    // 14 blocks ahead is a DIRECTION, not a promise of open air. Neighbouring BRX chunks sit a storey or two higher, and
+    // every y below their floor is solid concrete, so the fixed distance regularly buried the portal in rock -- which the
+    // roof bug used to hide, because a door on the lid at least stood in air. Walk outward-in and take the furthest spot
+    // on this storey that is actually a doorway: floor underfoot, air at the sill and air above it.
+    const fy=Math.floor(gy);
+    const open=(px,pz)=>{ const cx=Math.floor(px), cz=Math.floor(pz);
+      return solidAt(cx,fy-1,cz) && !solidAt(cx,fy,cz) && !solidAt(cx,fy+1,cz); };
+    let found=false;
+    // Straight ahead first, furthest to nearest. Then fan out: in a maze the view ahead is often a wall within a couple of
+    // metres, and a fixed-distance fallback that skips the check just buries the portal somewhere else -- seed 1 landed the
+    // 2-metre fallback inside a slab. Every candidate is validated; only the last resort is not, and it is the column the
+    // player is standing in, which is open by the fact they are standing in it.
+    for(let d=14; d>=2 && !found; d--){ const px=player.pos.x+dx*d, pz=player.pos.z+dz*d; if(open(px,pz)){ x=px; z=pz; found=true; } }
+    for(const a of [0.44,-0.44,0.90,-0.90,1.40,-1.40]){ if(found) break;
+      const sx=-Math.sin(yaw+a), sz=-Math.cos(yaw+a);
+      for(let d=6; d>=2 && !found; d--){ const px=player.pos.x+sx*d, pz=player.pos.z+sz*d; if(open(px,pz)){ x=px; z=pz; found=true; } } }
+    if(!found){ x=player.pos.x+dx*1.8; z=player.pos.z+dz*1.8; }     // boxed in on every side; close enough to walk straight into, which is the only honest outcome here
+  }
   else { gy=(typeof groundYAt==='function')?groundYAt(x,z):player.pos.y; if(gy<=CFG.SEA)gy=CFG.SEA+1; }
   brSpawnDoor(x,gy,z,yaw+Math.PI);
   if(typeof flashName==='function')flashName('a door that was not there. a hum bleeds through.'); }
@@ -14454,6 +14483,21 @@ if(typeof window!=='undefined'){ window.__hcBRX={          // the chunk substrat
     return out; },
   KIND:{DOOR:BRX_DOOR,TUNNEL:BRX_TUNNEL,STAIR:BRX_STAIR} }; }
 if(typeof window!=='undefined'){ window.__hcBR={ door:()=>brSpawnDoorNearPlayer(), enter:()=>brEnter(), exit:()=>brExit(), key:()=>brGiveKey(),
+  // QA: where did the portal actually land, and where WOULD the old code have put it? Every field here is read from the
+  // VOXELS or from the player, none from BR.seed -- brSpawnDoor re-seeds the maze as it spawns, so any seed-derived
+  // "storey floor" describes a layout that no longer exists and reports a floor the player is not standing on.
+  // fromTop is the old placement: groundYAt started at the top of the column, which indoors is the ceiling lid.
+  doorAt:()=>{ const d=BR.door; if(!d) return null; const fx=Math.floor(d.x), fz=Math.floor(d.z), fy=Math.floor(d.y);
+    return { inside:!!BR.inside, x:+d.x.toFixed(2), y:+d.y.toFixed(2), z:+d.z.toFixed(2), playerY:+player.pos.y.toFixed(2),
+      fromTop:groundYAt(d.x,d.z), fromPlayer:groundYAt(d.x,d.z,player.pos.y), topSolid:opaqueTop(fx,fz),
+      playerFloor:groundYAt(player.pos.x,player.pos.z,player.pos.y),   // the floor UNDER the player, not their current y — a teleported player is often still falling, and mid-air is not a storey
+      onGround:!!player.onGround,
+      // Is the PLAYER inside a solid block? The QA teleports drop you at the entry chunk's floor height, and on some seeds
+      // that column belongs to a higher storey whose every block below the floor is concrete. There is no correct place to
+      // put a door for a player buried in rock, and a player walking the halls cannot get there, so a probe must skip that
+      // sample rather than read it as a placement fault.
+      playerInRock:!!solidAt(Math.floor(player.pos.x),Math.floor(player.pos.y),Math.floor(player.pos.z)),
+      solidUnderSill:!!solidAt(fx,fy-1,fz), airAtSill:!solidAt(fx,fy,fz), airAboveSill:!solidAt(fx,fy+1,fz) }; },
   tp:(dx=0,dz=0)=>{ if(!BR.inside)brEnter(); player.pos.set(BR_ENTRY.x+dx,brEntryFloorY()+1.2,BR_ENTRY.z+dz); if(typeof streamChunks==='function')for(let i=0;i<6;i++)streamChunks(160,160); },
   gotoKey:()=>{ if(!BR.inside)brEnter(); player.pos.set(BR_KEY.x-14,BR_FLOOR+1.2,BR_KEY.z); if(typeof streamChunks==='function')for(let i=0;i<6;i++)streamChunks(160,160); },
   pale:(dist)=>{ if(!BR.inside)brEnter(); brSpawnPale(); const A=player.yaw, D=dist||6; BR.pale.x=player.pos.x-Math.sin(A)*D; BR.pale.z=player.pos.z-Math.cos(A)*D; return BR.pale&&BR.pale.state; },
