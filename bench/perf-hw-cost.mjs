@@ -49,7 +49,12 @@ const med = a => { const s=a.slice().sort((x,y)=>x-y); return s.length%2 ? s[(s.
     await page.evaluate(`window.__hcPERF.arm(); window.__benchInfo=1;`);
     await page.evaluate(`(()=>{ const H=window.__hc; window.H=H; window.pr=H.probe();
       window.park=()=>{ H.tp(pr.spawnX, pr.spawnZ); H.setTime(${NIGHT}); H.cam({yaw:0.7, pitch:0}); H.pinScene(); H.lock(true); return H.pos(); };
-      window.hwOn=()=>{ const r=H.hw(${DIST}); return { spawned:(H.hwState()||[]).length, r }; };
+      // HOLD ITS AI. Left to act, it captures the player in about three seconds, and the grab cutscene hides
+      // the terrain and owns the camera — so the "present" side stopped measuring the creature and started
+      // measuring a capture, which reads FASTER than the world it replaced (3.0-4.3 ms present against
+      // 2.7-9.5 ms absent, the wrong sign). hwHold is the shipped QA switch for exactly this: the rig is
+      // still built, placed, lit and drawn by the drift loop, it just does not hunt.
+      window.hwOn=()=>{ H.hwHold(true); const r=H.hw(${DIST}); H.hwHold(true); return { spawned:(H.hwState()||[]).length, r }; };
       window.hwOff=()=>{ let n=0; for(const w of (H.hwState()||[])){ try{ H.hwKill(w.hid); n++; }catch(e){} } return { killed:n, left:(H.hwState()||[]).length }; };
       return window.pr; })()`);
     const ref = await page.evaluate(`__hcPERF.ref()`);
@@ -68,6 +73,7 @@ const med = a => { const s=a.slice().sort((x,y)=>x-y); return s.length%2 ? s[(s.
                  drift:(p.ms&&p.ms.drift)||0, wretch:(p.ms&&p.ms.wretch)||0, draw:(p.ms&&p.ms.drawBlocked)||((p.ms&&p.ms.draw)||0),
                  draws:i.calls, tris:i.tris, point:L.point, poolLit:L.poolLit, progs:i.progs,
                  hw:(__hc.hwState()||[]).length, ringFrames:(p&&p.frames)||0, perfOn:__hcPERF.flags().on, profErr:p&&p.err||null,
+                 grabbed:!!__hc.st().grabbed, drawables:__hcPERF.census().drawables,
                  heap:(performance.memory?+(performance.memory.usedJSHeapSize/1048576).toFixed(0):null) }; })()`);
       r.setup=st; return r;
     };
@@ -79,6 +85,10 @@ const med = a => { const s=a.slice().sort((x,y)=>x-y); return s.length%2 ? s[(s.
       console.log(`pair ${p}: absent ${String(a.median).padStart(6)} ms (p99 ${a.p99})  ->  present ${String(b.median).padStart(6)} ms (p99 ${b.p99})   delta ${(b.median-a.median>=0?'+':'')}${(b.median-a.median).toFixed(3)} ms   drift ${b.drift} ms   lights ${a.point}->${b.point}  poolLit ${a.poolLit}->${b.poolLit}  hw ${a.hw}->${b.hw}`);
       // A window with no frames in it is not a fast window. Say so instead of publishing its zero.
       if(!a.n || !b.n) console.log(`  ! NO FRAMES COMMITTED in one of those windows (absent n=${a.n} ring=${a.ringFrames} perfOn=${a.perfOn} ${a.profErr||''} | present n=${b.n} ring=${b.ringFrames} perfOn=${b.perfOn} ${b.profErr||''}) — that pair is not a measurement`);
+      // The two sides must differ ONLY by the creature. A grab replaces the view with the capture, and a
+      // pair where one side is held and the other is not compares two different scenes.
+      if(a.grabbed || b.grabbed) console.log(`  ! GRABBED during that pair (absent ${a.grabbed}, present ${b.grabbed}) — the capture hides the world, so this pair prices a cutscene, not a creature`);
+      if(b.hw!==1 || a.hw!==0) console.log(`  ! ROSTER WRONG (absent ${a.hw}, present ${b.hw}) — one side did not have the world it was supposed to`);
     }
     const dMed=A.map((a,i)=>B[i].median-a.median), dP99=A.map((a,i)=>B[i].p99-a.p99), dMax=A.map((a,i)=>B[i].max-a.max);
     const wins=dMed.filter(d=>d>0).length;
