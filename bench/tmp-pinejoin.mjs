@@ -47,6 +47,32 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     await page.evaluate('__hc.tpExact('+(P.x-30)+','+P.z+','+(P.sea+16)+')'); await sleep(2600);
     await page.evaluate('__hcBR.look('+Math.PI+',0.012)'); await sleep(1400);
 
+    // DAY AND NIGHT, because Ben's complaint is "it wasnt darkened either, day or night" -- the band has to read as dark wood
+    // at both, and the daylight haze is the thing that can wash it out.
+    for(const [nm,t] of [['day',0.30],['night',0.66]]){
+      await page.evaluate('__hc.setTime('+t+')'); await sleep(1300);
+      const f2=path.join(OUT,'pinejoin-'+TAG+'-'+nm+'.png');
+      await page.screenshot({path:f2});
+      const im2=decodePNG(fs.readFileSync(f2));
+      const Lf=(x,y)=>{ const i=(y*im2.w+x)*im2.ch; return 0.2126*im2.data[i]+0.7152*im2.data[i+1]+0.0722*im2.data[i+2]; };
+      const rows=[];
+      for(let y=Math.floor(im2.h*0.30); y<Math.floor(im2.h*0.68); y++){
+        let r=0,g=0,b=0,n=0; for(let x=Math.floor(im2.w*0.30);x<Math.floor(im2.w*0.62);x++){ const i=(y*im2.w+x)*im2.ch; r+=im2.data[i]; g+=im2.data[i+1]; b+=im2.data[i+2]; n++; }
+        rows.push({y, rgb:[r/n,g/n,b/n], lum:Lf(Math.floor(im2.w*0.45),y)});
+      }
+      let gy2=rows[0].y, gb=-1e9;
+      for(const p of rows){ const green=p.rgb[1]-(p.rgb[0]+p.rgb[2])/2; if(green>gb){ gb=green; gy2=p.y; } }
+      const at=(y)=>rows.find(p=>p.y===y);
+      const canopy=at(gy2), band=at(gy2+26), below=at(gy2+42);
+      const fmt=p=>p?('rgb('+p.rgb.map(v=>Math.round(v)).join(',')+')'):'?';
+      const lum=p=>p?(0.2126*p.rgb[0]+0.7152*p.rgb[1]+0.0722*p.rgb[2]):0;
+      console.log('  '+nm.padEnd(6)+' canopy y'+gy2+' '+fmt(canopy)+' lum '+lum(canopy).toFixed(0)
+        +'   band(+26) '+fmt(band)+' lum '+lum(band).toFixed(0)
+        +'   base(+42) '+fmt(below)+' lum '+lum(below).toFixed(0)
+        +'   band is '+(canopy&&band?Math.round(100*(1-lum(band)/Math.max(1,lum(canopy)))):0)+'% darker than the canopy');
+    }
+    await page.evaluate('__hc.setTime(0.30)'); await sleep(1200);
+
     const full=path.join(OUT,'pinejoin-'+TAG+'.png');
     await page.screenshot({path:full});
     const img=decodePNG(fs.readFileSync(full));
@@ -66,7 +92,10 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     let gBest=-1e9, gy=prof[0].y;
     for(const p of prof){ const green=p.rgb[1]-(p.rgb[0]+p.rgb[2])/2; if(green>gBest){ gBest=green; gy=p.y; } }
     console.log('  greenest row (canopy) y='+gy+'  greenness '+gBest.toFixed(1));
-    const lo=gy, hi=gy+70;   // from the canopy down through the band to where the haze takes over
+    // ONLY THE BAND'S OWN ROWS. A 70-row window reaches past the band into the beach, and the grass-to-sand boundary of the
+    // real terrain is a genuine 30-luminance edge that has nothing to do with this shader -- it was reported as the join twice.
+    // The band is uBandH=5 blocks at treeline distance, which is a few dozen rows; 34 covers the fade and stops short of land.
+    const lo=gy, hi=gy+34;
     let worst=0, wy=lo;
     for(let i=1;i<prof.length;i++){ const p=prof[i]; if(p.y<lo||p.y>hi) continue;
       const d=Math.abs(p.lum-prof[i-1].lum); if(d>worst){ worst=d; wy=p.y; } }
@@ -76,8 +105,9 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     for(const dy of [-10,-5,-2,0,2,5,10]) console.log('     '+at(wy+dy));
 
     // MAGNIFIED CROP around the join, because a three-pixel line is invisible at 1280 wide and obvious at 4x.
+    // Anchored on the CANOPY row, not the worst step: the worst step wanders onto terrain and the crop went with it.
     await page.screenshot({ path: path.join(OUT,'pinejoin-'+TAG+'-zoom.png'),
-      clip:{ x:x0, y:Math.max(0,wy-70), width:Math.min(520,x1-x0), height:140 } });
+      clip:{ x:x0, y:Math.max(0,gy-26), width:Math.min(520,x1-x0), height:110 } });
     console.log('  shots: bench/results/pinejoin-'+TAG+'.png (+ -zoom.png)');
     await browser.close();
   } finally { try{ server.kill(); }catch(e){} }
