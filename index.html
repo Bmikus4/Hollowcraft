@@ -490,8 +490,19 @@ const PERF = {
   portalHz: 120,
   portalMoveEps: 0.008,        // metres of camera travel that force a fresh portal frame
   portalTurnEps: 0.0015,       // quaternion delta that does the same
+  //
+  // P10 · portalOnScreen  (baseline: false = distance only)
+  //   Skip the portal's second scene render on frames where the door is not in the camera frustum. The gate
+  //   was distance-only, so standing anywhere within 30 m of the door paid a full second scene render every
+  //   frame the view moved — with your back to it, inside a building, or with the door behind a hill.
+  //   The note that used to sit at the call site said a facing test had been tried and abandoned because
+  //   "player.yaw reads back null through the debug hooks". That was not the game: __hc.look is the
+  //   world-POINT overload, so a harness calling look(yaw,pitch) left z undefined and made yaw NaN. The
+  //   facing test was fine and the instrument was broken. This one does not use player.yaw at all — it
+  //   tests the camera's own frustum, which is what actually decides whether the door is on screen.
+  portalOnScreen: true,
 };
-PERF.baseline = { brShadowLights: 2, brMergeRigid: false, brStableLightCount: false, portalHz: 0, brGenCacheMax: 0, streamBudgetMs: 0, preloadSliceMs: 5, brainScanSlice: 0, genColumnSlice: 0 };   // brPrecompile and brPrefetch already ship at their baseline   // brPrecompile already ships at its baseline   // V6 flag matrix: restore any of these and the game is the old game
+PERF.baseline = { brShadowLights: 2, brMergeRigid: false, brStableLightCount: false, portalHz: 0, brGenCacheMax: 0, streamBudgetMs: 0, preloadSliceMs: 5, brainScanSlice: 0, genColumnSlice: 0, portalOnScreen: false };   // brPrecompile and brPrefetch already ship at their baseline   // brPrecompile already ships at its baseline   // V6 flag matrix: restore any of these and the game is the old game
 // ?perfoff=a,b,c  restores those flags to their baseline value AT BOOT — the only way to A/B a change whose
 // whole effect is on the first encounter (shader compilation), where flipping a flag mid-session is too late.
 // ?perfoff=all restores every one of them, which is the V6 "all flags off = baseline behaviour" check.
@@ -857,6 +868,11 @@ window.__hcPERF = {
       tag('pointPool', typeof pointPool!=='undefined'?pointPool:null);
       return { byType:by, visiblePointLights:visPoint, totalPointLights:totPoint, owners };
     }catch(e){ return {err:String(e&&e.message||e)}; } },
+  // The GPU side of the frame, so "the frame is 7 ms and `draw` is 7 ms" can be told apart from "the GPU is
+  // 7 ms and the CPU is waiting for it" — which decides whether a fix should remove work or remove pixels.
+  gpu(){ const a=PERF.gpu.acc; return { ok:PERF.gpu.ok, samples:PERF.gpu.samples, disjoints:PERF.gpu.disjoints,
+    pre:+a[0].toFixed(3), portal:+a[1].toFixed(3), scene:+a[2].toFixed(3), composer:+a[3].toFixed(3),
+    total:+(a[0]+a[1]+a[2]+a[3]).toFixed(3) }; },
   baselineFlags(){ return Object.assign({}, PERF.baseline); },
   restoreBaseline(){ for(const k in PERF.baseline) PERF[k]=PERF.baseline[k];
     try{ brApplyShadowLights(); }catch(e){} return this.flags(); },
@@ -14837,6 +14853,30 @@ let _brPortalRT=null, _brPortalCam=null, _brPortalMat=null;
 const _bv0=new THREE.Vector3(), _bv1=new THREE.Vector3(), _bv3=new THREE.Vector3(), _bq=new THREE.Quaternion(), _bcp=new THREE.Vector4(), _bq4=new THREE.Vector4(), _bPlane=new THREE.Plane(), _bSize=new THREE.Vector2();
 const BR_PORTAL_DIST=30;                                                    // past this the quad is a few pixels wide and a stale RT is indistinguishable
 function brPortalWanted(dist){ return dist < BR_PORTAL_DIST; }              // ONE definition, so the tick and the test cannot drift
+// IS THE DOOR ON SCREEN? Tested against the camera's own frustum, never against player.yaw — see the
+// portalOnScreen note in PERF. The sphere is generous (2.4 m around the door centre) because a miss here is
+// a visible stale portal, while a false positive only costs the frame it was already costing.
+// Preallocated: this runs every frame the player is near a door, and a Frustum built per frame is six planes
+// of garbage per frame.
+// BEHIND YOU, not outside the frustum. A frustum test was tried first and measured WORSE where it matters
+// most: turning on the spot past the door went 8.79 -> 12.74 ms median, p99 15.8 -> 27.9, worst frame 20 ->
+// 243 ms. The door crosses a frustum EDGE many times during a turn, and every re-entry forces an immediate
+// re-render (the camera moved, so the cadence is due) while the Backrooms light pool lights and darkens with
+// it — programs recompile, which is the churn brStableLightCount exists to prevent.
+// A half-space is stable: it flips once per revolution instead of flickering, it needs no hysteresis, and it
+// still removes the whole cost for the case that actually happens — standing near a door facing away from it.
+// The threshold is generous on purpose (-0.15, about 99 degrees off forward): a door just off the edge of the
+// screen keeps rendering, because a wrong skip shows a stale room and a wrong render costs what it already did.
+const _pFwd=new THREE.Vector3(), _pToDoor=new THREE.Vector3();
+function brPortalOnScreen(){
+  if(!PERF.portalOnScreen) return true;
+  const d=BR.door; if(!d) return false;
+  camera.getWorldDirection(_pFwd);
+  _pToDoor.set(d.x-camera.position.x, (d.y+1)-camera.position.y, d.z-camera.position.z);
+  const L=_pToDoor.length(); if(L<3.0) return true;            // right on top of it: never risk a stale frame
+  _pToDoor.multiplyScalar(1/L);
+  return _pFwd.dot(_pToDoor) > -0.15;
+}
 // P5 · THE PORTAL DOES NOT NEED A FRESH FRAME AT 250 FPS. It is a second full scene render; at baseline that
 // was 11.48 ms of CPU a frame, and P1/P2 have it down to 2.9, but that is still 41% of a 7.14 ms budget spent
 // on one prop. updateVoid already throttles its raymarch RT to ~30 Hz for the same reason.
@@ -15280,11 +15320,14 @@ function updateBackrooms(dt){
     // world — with no distance test and no facing test. That is Ben's "massive lag when spawning the backrooms portal": the
     // cost landed the moment the door appeared, whether or not you were anywhere near it or even looking at it.
     // Parallax only has to stay in sync while the door is actually on screen, so gate on that and nothing is lost.
-    // DISTANCE ONLY. A facing test looks tempting and buys a little more, but it needs the live view direction, and this
-    // file's player.yaw is not it (it reads back null through the debug hooks) — a gate built on it skipped the portal at
-    // seemingly random times. Distance needs nothing but the door position, is trivially verifiable, and already removes the
-    // cost for all the time the door is sitting somewhere else in the world.
-    if(brPortalWanted(Math.hypot(d.x-player.pos.x, d.z-player.pos.z)) && brPortalDue()){ T.begin(TID.brPortal); brRenderPortal(); T.end(TID.brPortal); }
+    // Distance AND on-screen. The old note here said a facing test had been tried and abandoned because
+    // player.yaw "reads back null through the debug hooks" — that was the harness, not the game: __hc.look is
+    // the world-POINT overload and a two-argument call leaves z undefined, which makes yaw NaN. The gate below
+    // never touches player.yaw; it asks the camera frustum whether the door is on screen at all.
+    // ORDER MATTERS: the on-screen test comes before brPortalDue(), because due() stamps its cadence timer and
+    // snapshots the camera as a side effect. Stamping it while the door is behind you would make the first
+    // frame you turn back around look "not due" and show a stale room.
+    if(brPortalWanted(Math.hypot(d.x-player.pos.x, d.z-player.pos.z)) && brPortalOnScreen() && brPortalDue()){ T.begin(TID.brPortal); brRenderPortal(); T.end(TID.brPortal); }
     if(Math.hypot(player.pos.x-d.x,player.pos.z-d.z)<1.1&&Math.abs(player.pos.y-d.y)<2.2)brEnter(); }
   // A PALE LOOSE IN THE OVERWORLD still has to be ticked. Its update lived behind this return, so an egg that put one out
   // here produced a statue: mesh in the scene, never moving, never hunting.

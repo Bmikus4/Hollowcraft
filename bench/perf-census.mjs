@@ -49,7 +49,7 @@ const HEADED = has('headed');
 // aimed at the horizon spawn measures 3.37 ms, aimed at the ground two metres away it measures 8.9 ms,
 // because the overworld is fill-bound up close. The entity sites exist to price the entity, not the view.
 const SPAWN_VIEW = '{yaw:0.7, pitch:-0.05}';
-const SITES = [
+export const SITES = [
   // ---- overworld: where the game is actually played ----
   { name:'spawn_day',    setup:`H.setTime(0.35); atSpawn(); H.cam({yaw:0.7, pitch:-0.05});` },
   { name:'spawn_night',  setup:`H.setTime(0.85); atSpawn(); H.cam({yaw:0.7, pitch:-0.05});` },
@@ -102,11 +102,21 @@ const SITES = [
   { name:'br_run',       setup:`P.enterBR(); H.cam({yaw:0.7, pitch:0}); H.key('KeyW',true); H.key('ShiftLeft',true);`,
     teardown:`H.key('KeyW',false); H.key('ShiftLeft',false);`, settle:9 },
   { name:'br_portal',    setup:`P.exitBR(); goPortal();`, settle:9 },
+  // Standing the same 4 m from the door with your BACK to it. The gate on the portal's second scene render
+  // was distance-only, so this cost exactly as much as looking straight through it.
+  { name:'br_portal_away', setup:`P.exitBR(); goPortal(); H.cam({yaw:H.yawNow()+Math.PI, pitch:0});`, settle:9 },
+  // TURNING PAST THE DOOR, over and over. This is the site that can expose the on-screen gate's own risk:
+  // skipping the portal pass also skips brxUpdateLights, so the Backrooms pool goes dark while the door is
+  // behind you and lights again when you turn back. three keys its programs on the light COUNT, so a pool
+  // that toggles 18<->40 once per turn is the exact recompile churn brStableLightCount exists to stop.
+  // Watch progsCompiled and the worst frame here, not the median.
+  { name:'br_portal_turn', setup:`P.exitBR(); goPortal(); window.__y0=H.yawNow();`,
+    move:`H.cam({yaw:window.__y0 + t*1.6, pitch:0});`, settle:9 },
 ];
 
 // Injected helpers. This file is a measuring instrument, so it adds nothing to the game: every helper is
 // a composition of hooks index.html already ships.
-const HELPERS = `
+export const HELPERS = `
 (function(){
   const H = window.__hc, P = window.__hcPERF;
   window.H = H; window.P = P;
@@ -204,7 +214,8 @@ function waitHttp(url,t=20000){ return new Promise((res,rej)=>{ const t0=Date.no
 function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Google/Chrome/Application/chrome.exe']) if(fs.existsSync(p)) return p; throw new Error('no browser'); }
 const med = a => { const s=a.slice().sort((x,y)=>x-y); return s.length%2 ? s[(s.length-1)/2] : (s[s.length/2-1]+s[s.length/2])/2; };
 
-(async()=>{
+const IS_MAIN = process.argv[1] && import.meta.url.endsWith(path.basename(process.argv[1]));
+if(IS_MAIN) await (async()=>{
   fs.mkdirSync(OUT,{recursive:true});
   const want = ONLY ? new Set(ONLY.split(',')) : null;
   const sites = SITES.filter(s=>!want || want.has(s.name));
