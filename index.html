@@ -9996,11 +9996,22 @@ function buildFist(){ const g=new THREE.Group();                                
 // depth fog into its materials: the further a vertex extrudes from the body (camera-space depth), the more it
 // blends toward the live fog colour. A long rifle's muzzle sinks slightly into the murk; the grip stays clear.
 const _vfogAmt={value:0};   // held-item fog strength — WEATHER FOG only (Ben 07-20): clear air leaves the viewmodel crisp; a fog bank sinks the muzzle into the murk. Driven per-frame in updateHorizon.
+// EYE LIGHT, same patch. The world has ONE sun plus a dark hemisphere and 0.12 of near-black ambient, so any viewmodel
+// face turned away from the sun renders BLACK — the shield's board and the offhand forearm both photographed as a black
+// slab in the corner at 0.42 of a day. A camera-mounted fill light cannot fix it: three.js collects lights against the
+// CAMERA's layers, so a light restricted to a viewmodel layer is dropped from the render entirely, and an unrestricted
+// one adds a light type to every material's shader permutation and recompiles the world.
+// So the fill is baked here instead: brightness proportional to how squarely a surface faces the eye. Shape still comes
+// from the sun when the sun is on it; this only stops the unlit side going to zero.
+// 0.32 of the fill lands on EVERY face regardless of facing: a pure facing term still left the side and underside faces
+// at zero, which is the same black slab in the corner, just a smaller one.
+const _veyeAmt={value:0.40};
 function applyViewFog(root){ if(!root)return; root.traverse(o=>{ if(!o.isMesh||!o.material)return; const mats=Array.isArray(o.material)?o.material:[o.material];
   mats.forEach(m=>{ if(!m||m._vfog||m.isMeshBasicMaterial||m.transparent)return; m._vfog=true; const prev=m.onBeforeCompile;
-    m.onBeforeCompile=(sh)=>{ if(prev)prev(sh); sh.uniforms.uVFogCol={value:scene.fog.color}; sh.uniforms.uVFogAmt=_vfogAmt;   // shares the live fog colour by reference (tracks day/night/weather/underwater)
+    m.onBeforeCompile=(sh)=>{ if(prev)prev(sh); sh.uniforms.uVFogCol={value:scene.fog.color}; sh.uniforms.uVFogAmt=_vfogAmt; sh.uniforms.uVEye=_veyeAmt;   // shares the live fog colour by reference (tracks day/night/weather/underwater)
       sh.vertexShader='varying float vVFogD;\n'+sh.vertexShader.replace('#include <project_vertex>','#include <project_vertex>\n vVFogD=-mvPosition.z;');
-      sh.fragmentShader='varying float vVFogD; uniform vec3 uVFogCol; uniform float uVFogAmt;\n'+sh.fragmentShader.replace('#include <dithering_fragment>','#include <dithering_fragment>\n gl_FragColor.rgb=mix(gl_FragColor.rgb, uVFogCol, clamp((vVFogD-0.32)/1.05,0.0,1.0)*0.42*uVFogAmt);');
+      sh.fragmentShader='varying float vVFogD; uniform vec3 uVFogCol; uniform float uVFogAmt; uniform float uVEye;\n'+sh.fragmentShader
+        .replace('#include <dithering_fragment>','#include <dithering_fragment>\n gl_FragColor.rgb+=diffuseColor.rgb*(0.32+0.68*clamp(dot(normal,vec3(0.0,0.0,1.0)),0.0,1.0))*uVEye;\n gl_FragColor.rgb=mix(gl_FragColor.rgb, uVFogCol, clamp((vVFogD-0.32)/1.05,0.0,1.0)*0.42*uVFogAmt);');
       m.needsUpdate=true; };
     m.needsUpdate=true; }); }); }
 // THE SHIELD, as a real object rather than an extruded icon: a planked heater board, iron rim and boss, leather arm strap
@@ -10061,12 +10072,35 @@ camera.add(offView.group);
 // away every frame; z=+0.12, copied from the fist's anchor, sat BEHIND the camera. Both times __hc.shield() cheerfully
 // reported offView='shield' with a real mesh and the correct tag. A mesh existing is not a mesh being seen, and no
 // amount of state-checking finds that -- only a frame does.
-offView.group.position.set(-0.34,-0.26,-0.35);
+// Rest heights; updateView adds the walk bob on top, so nothing else may write .position.y.
+// The arm's height is bounded by the FRAME, not by anatomy. At y=-0.36 the fist projected to 1.3x the half-height at its
+// own depth -- entirely below the bottom edge -- and the probe photographed an empty corner while every state boolean
+// read true. It has to sit no lower than the main fist's -0.22 to be on screen at all.
+const OFF_VIEW_Y=-0.26, OFF_ARM_Y=-0.24;   // -0.24 puts the left wedge's top edge level with the main fist's; at -0.22 it stood taller than the hand it mirrors
+offView.group.position.set(-0.34,OFF_VIEW_Y,-0.35);
 offView.group.rotation.set(0.10,-0.45,0.16);
 function setOffItem(id){ if(offView.id===id)return; offView.id=id;
   if(offView.mesh){ offView.group.remove(offView.mesh); _disposeView(offView.mesh); offView.mesh=null; }
   if(!id||!ITEMS[id]||!ITEMS[id].shield||_NO_SHIELD) return;   // only the shield renders in the left hand today
   offView.mesh=buildHeldShield(); offView.mesh.scale.setScalar(1.55); offView.group.add(offView.mesh); applyViewFog(offView.mesh); }
+// THE OFFHAND ARM. The shield hung in the air on its own: the left hand had a held object and no body attached to it.
+// This is the left forearm and fist, reaching up-and-inward from the shoulder to sit BEHIND the board, where a real arm
+// meets the strap. It gets its own group rather than being parented under offView: that group's placement is Ben's,
+// settled by looking at frames, and hanging the board off an arm would move it again.
+// Arm length is bounded by the board, not by anatomy — the fist must stop short of the shield's plane (~z=-0.35 in
+// camera space) or it pushes through the front face and reads as a hand growing out of the wood.
+const offArm={ group:new THREE.Group(), mesh:null };
+camera.add(offArm.group);
+offArm.group.position.set(-0.26,OFF_ARM_Y,0.10);
+offArm.group.rotation.set(0.14,0.10,-0.18);
+function buildOffArm(){ const g=new THREE.Group();
+  const skin=new THREE.MeshLambertMaterial({color:0xcbb89a});                                                    // the same flesh as buildFist — two different skin tones in one viewport reads as a bug
+  const arm=new THREE.Mesh(new THREE.BoxGeometry(0.095,0.105,0.36),skin); arm.position.set(0,0,-0.16); g.add(arm);
+  const fist=new THREE.Mesh(new THREE.BoxGeometry(0.115,0.115,0.115),skin); fist.position.set(0,0.012,-0.375); g.add(fist);
+  g.userData.offArm=true; return g; }
+function updateOffArm(){ const want=!!offView.mesh;                                                              // an arm with nothing in it is not a viewmodel, it is a floating limb
+  if(want && !offArm.mesh){ offArm.mesh=buildOffArm(); offArm.group.add(offArm.mesh); applyViewFog(offArm.mesh); }
+  offArm.group.visible=want; }
 function setViewItem(id){ if(view.id===id)return; view.id=id;
   if(view.mesh){ view.group.remove(view.mesh); _disposeView(view.mesh); view.mesh=null; }
   if(!id||!ITEMS[id]){ view.mesh=buildFist(); view.group.add(view.mesh); applyViewFog(view.mesh); return; }   // empty hand → a real fist you punch with
@@ -10151,13 +10185,18 @@ function finishReload(){ const key=view.reloadKey, it=view.reloadDef; view.reloa
   if(take>0){ invRemove('rifle_ammo',take); GUNMAG[key]=cur+take; refreshHotbar(); }
   if(AC){ burst(master,0.5,0.03,1600,0.35,700); burst(master,0.35,0.09,900,0.3,300); }                 // seat + charge clicks
   flashName((GUNMAG[key]||0)+' / '+invCount('rifle_ammo')); }
+// Every path that hides the main hand must hide the LEFT hand too. It did not: the offhand group was added to the camera
+// and never touched again, so the shield rode through the menu flythrough, the wake-up cinematic, the Wretch's grab and
+// the hide-HUD setting — the one viewmodel that ignored all four.
+function _hideOffHand(){ offView.group.visible=false; offArm.group.visible=false; }
 function updateView(dt){ updateRecoil(dt);                                          // camera recoil integrates every frame (kick + smooth recovery)
-  if(player.grabbed){ view.group.visible=false; if(view.holoRet)view.holoRet.visible=false; return; }   // no hands/held item during the capture — only the maw fills the screen
-  if(!started || intro.active){ view.group.visible=false; if(view.holoRet)view.holoRet.visible=false; return; }   // CINEMATICS own the camera — no floating hand/held item in the menu flythrough or the wake-up (Ben 07-20)
-  if(cineMode){ if(!heldSlot()){ view.group.visible=false; if(view.holoRet)view.holoRet.visible=false; return; } view.group.visible=true; }   // CINEMATIC (Ben 07-21): a HELD item stays in hand; only the EMPTY hand is hidden
-  else if(!_hudOn){ view.group.visible=false; if(view.holoRet)view.holoRet.visible=false; return; }   // the hide-HUD setting still drops the whole viewmodel
+  if(player.grabbed){ view.group.visible=false; _hideOffHand(); if(view.holoRet)view.holoRet.visible=false; return; }   // no hands/held item during the capture — only the maw fills the screen
+  if(!started || intro.active){ view.group.visible=false; _hideOffHand(); if(view.holoRet)view.holoRet.visible=false; return; }   // CINEMATICS own the camera — no floating hand/held item in the menu flythrough or the wake-up (Ben 07-20)
+  if(cineMode){ if(!heldSlot()){ view.group.visible=false; _hideOffHand(); if(view.holoRet)view.holoRet.visible=false; return; } view.group.visible=true; }   // CINEMATIC (Ben 07-21): a HELD item stays in hand; only the EMPTY hand is hidden
+  else if(!_hudOn){ view.group.visible=false; _hideOffHand(); if(view.holoRet)view.holoRet.visible=false; return; }   // the hide-HUD setting still drops the whole viewmodel
   setViewItem(heldSlot()?heldSlot().id:null);
   setOffItem(armor[EQ_OFF]?armor[EQ_OFF].id:null);   // the left hand shows whatever is in the offhand slot (today: a shield)
+  offView.group.visible=true; updateOffArm();        // and the arm that carries it, built on first need
   // SPEAR CHARGE (right-hold = wind up a throw, like drawing a bow). Cancel if we lose focus / swap off the spear.
   if(spearCharge.active){ const hs=heldSlot(); if(locked && !openUI && !player.dead && hs && ITEMS[hs.id] && ITEMS[hs.id].spear) spearCharge.t+=dt; else spearCharge.active=false; }
   if(spearBar){ if(spearCharge.active){ spearBar.style.display='block'; spearFill.style.width=(spearPower()*100).toFixed(0)+'%'; } else spearBar.style.display='none'; }
@@ -10166,6 +10205,7 @@ function updateView(dt){ updateRecoil(dt);                                      
   view.swing=Math.max(0,view.swing-dt*9);                                                        // one-shot click swing, 2x faster
   const sp=Math.hypot(player.vel.x,player.vel.z); view.bob+=dt*sp*1.2;
   const b=Math.sin(view.bob*2)*0.02*Math.min(1,sp/6);
+  offView.group.position.y=OFF_VIEW_Y+b; offArm.group.position.y=OFF_ARM_Y+b;   // the left hand rides the same walk bob; a pinned shield beside a bobbing tool reads as a HUD sprite
   const gunKind=ITEMS[view.id]&&ITEMS[view.id].gun, isGun=!!gunKind, isBolt=gunKind==='bolt';
   // bolt cycle animation + fire-gating clock
   view.boltT=Math.max(0,(view.boltT||0)-dt); view.gunKick=Math.max(0,(view.gunKick||0)-dt*7);   // viewmodel kick decays (every gun bucks against the shoulder on fire)
@@ -17460,6 +17500,7 @@ window.__hc={
         mainView:view.id, offView:offView.id, mainTris:tris(view.mesh), offTris:tris(offView.mesh),
         mainIsShield:!!(view.mesh&&view.mesh.userData&&view.mesh.userData.shieldBoard),
         offIsShield:!!(offView.mesh&&offView.mesh.userData&&offView.mesh.userData.shieldBoard),
+        offGroupVisible:!!offView.group.visible, armExists:!!offArm.mesh, armVisible:!!(offArm.mesh&&offArm.group.visible), armTris:tris(offArm.mesh),
         health:+player.health.toFixed(3) }; }catch(e){ return {err:String(e.message||e)}; } },
   hurt(n){ try{ player.creative=false; player.dead=false; player.health=20; damage(n||10,'bench'); return +player.health.toFixed(3); }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: freeze the held-item swing at a chosen phase so a swing can be photographed at fixed points rather than
@@ -17480,6 +17521,21 @@ window.__hc={
       view.swing=+v||0; if(typeof updateView==='function') updateView(0.0001); view.swing=+v||0;
       return { swing:+view.swing.toFixed(2), held:(heldSlot()||{}).id||null, off:armor[EQ_OFF]?armor[EQ_OFF].id:null,
                mainView:view.id, offView:offView.id }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: pose the offhand rig for a photograph. hideBoard exists because the board at its shipped scale covers the
+  // whole lower-left of the frame, so the only way to see whether the ARM is drawn at all is to take the board away.
+  offRig(o){ try{ o=o||{}; if(!offView.mesh) return {err:'no offhand mesh'};
+      if(o.scale!=null) offView.mesh.scale.setScalar(+o.scale);
+      if(o.hideBoard!=null) offView.mesh.visible=!o.hideBoard;
+      if(o.armX!=null) offArm.group.position.x=+o.armX;
+      // A crop diff cannot answer "is the arm on screen" in this scene: two empty frames a second apart differ across
+      // 25% of the lower-left crop, because the sea and the foliage animate under a pinned clock. Tinting the limb a
+      // colour no terrain can produce turns the question into a pixel count with no noise floor at all.
+      if(o.armTint!=null && offArm.mesh) offArm.mesh.traverse(m=>{ if(m.material&&m.material.color){ m.material.color.set(o.armTint); m.material.map=null; m.material.needsUpdate=true; } });
+      if(o.rebuildArm){ if(offArm.mesh){ offArm.group.remove(offArm.mesh); _disposeView(offArm.mesh); offArm.mesh=null; } updateOffArm(); }   // drop a tinted arm and get the shipped flesh back, so the same run can also take frames a human judges
+      if(o.pos) offView.group.position.set(+o.pos[0],+o.pos[1],+o.pos[2]);
+      return { scale:+offView.mesh.scale.x.toFixed(3), boardVisible:!!offView.mesh.visible,
+        pos:offView.group.position.toArray().map(v=>+v.toFixed(3)),
+        armVisible:!!(offArm.mesh&&offArm.group.visible), armPos:offArm.group.position.toArray().map(v=>+v.toFixed(3)) }; }catch(e){ return {err:String(e.message||e)}; } },
   shieldHold(where){ try{ if(where==='off'){ armor[EQ_OFF]={id:'shield',n:1}; updateArmorView(); }
       else if(where==='main'){ inv[selSlot]={id:'shield',n:1}; refreshHotbar(); }
       else { armor[EQ_OFF]=null; inv[selSlot]=null; updateArmorView(); refreshHotbar(); }
