@@ -48,7 +48,9 @@ export function driftAttach(id, object, opts){
   const mat = new THREE.MeshBasicMaterial({ map:loop.texture(), transparent:true, depthWrite:false, side:THREE.DoubleSide });
   const quad = new THREE.Mesh(new THREE.PlaneGeometry(1,1), mat);
   quad.frustumCulled = false;                                 // it is one quad; culling it costs more than drawing it
-  quad.renderOrder = 3;
+  // 5, ABOVE the chunk water meshes, which are renderOrder 3. At 3 the two tied, three fell back to depth sorting, and a
+  // transparent water surface won often enough that the creature simply did not render underwater.
+  quad.renderOrder = 5;
   ctx.worldScene.add(quad);
   loop.prewarm();
 
@@ -145,13 +147,13 @@ export function driftFlush(id){
 // apart from "the loop is producing something you cannot see", and those have completely different causes — an empty
 // subject scene versus lights too dim for the anchor render. Mean luma and mean alpha separate them in one call.
 const _probeBuf = new Uint8Array(32*32*4);
-const _fullBuf = new Uint8Array(128*128*4);
+const _fullBuf = new Uint8Array(512*512*4);      // sized past RES so a resolution bump cannot silently read a sub-rectangle
 // How much of the render target does the subject actually cover, and is it touching the edges? The FOV is solved from a
 // `span` the caller measures off the rig, so a span that is too large frames the creature small inside mostly-empty pixels
 // and one that is too small crops it. Both are invisible in a screenshot of a dark forest.
 export function driftFraming(id){
   const H = subjects.get(id); if(!H) return { attached:false };
-  const rt = H.loop.cur, w = Math.min(128, rt.width), h = Math.min(128, rt.height);
+  const rt = H.loop.cur, w = rt.width, h = rt.height;
   renderer.readRenderTargetPixels(rt, 0, 0, w, h, _fullBuf);
   let covered=0, minX=w, maxX=-1, minY=h, maxY=-1, edge=0;
   for(let y=0;y<h;y++) for(let x=0;x<w;x++){

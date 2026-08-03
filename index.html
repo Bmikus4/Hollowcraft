@@ -6897,12 +6897,13 @@ function fleshMatMake(opts){ opts=opts||{};
   const m=new THREE.MeshPhongMaterial({ color:0xffffff, shininess:opts.shin||70, specular:new THREE.Color(opts.spec||0x40121a), emissive:new THREE.Color(opts.emis||0x0a0203), emissiveIntensity:0.18 });
   m.onBeforeCompile=(sh)=>{
     sh.uniforms.uFleshScale={value:opts.scale||5.0}; sh.uniforms.uVein={value:opts.vein!=null?opts.vein:1.0};
+    sh.uniforms.uNoir={value:opts.noir?1.0:0.0};
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>', '#include <common>\nvarying vec3 vFleshP;')
       .replace('#include <begin_vertex>', '#include <begin_vertex>\n  vFleshP = position;');
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>', `#include <common>
-        varying vec3 vFleshP; uniform float uFleshScale; uniform float uVein;
+        varying vec3 vFleshP; uniform float uFleshScale; uniform float uVein; uniform float uNoir;
         float _fh(vec3 p){ p=fract(p*0.3183099+0.1); p*=17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }   // sinless IQ hash — was fract(sin(dot..)): ~96 sin()/fragment on the shared flesh skin, gone. Same mottled look, no reference pattern to preserve.
         float _vn(vec3 p){ vec3 i=floor(p),f=fract(p); f=f*f*(3.0-2.0*f);
           return mix(mix(mix(_fh(i),_fh(i+vec3(1,0,0)),f.x),mix(_fh(i+vec3(0,1,0)),_fh(i+vec3(1,1,0)),f.x),f.y),
@@ -6925,6 +6926,11 @@ function fleshMatMake(opts){ opts=opts||{};
           flesh=mix(flesh, vec3(0.34,0.045,0.05), veins);                  // crimson veins (deep, not bright)
           flesh*= (1.0-pores*0.7);
           flesh += vec3(0.06,0.006,0.0)*smoothstep(0.80,0.97,f2);          // faint wet glints only
+          // NOIR (uNoir=1): the same flesh, drained to wet black. The palette above is hardcoded crimson, so a black skin
+          // cannot come from material.color — that would multiply the crimson down and leave it dark red, or kill the
+          // crevice/vein structure entirely at 0. Desaturating first keeps every fold and vein and only removes the hue.
+          flesh = mix(flesh, vec3(dot(flesh, vec3(0.299,0.587,0.114))), uNoir);
+          flesh *= mix(1.0, 0.42, uNoir);
           diffuseColor.rgb *= flesh*1.7;
         }`);
   };
@@ -7057,7 +7063,7 @@ function setForm(f){ if(!wretch.P||wretch.form===f) return; wretch.form=f;
   // NO red-skin swap anymore — the anger tell is the FACE OPENING (see wretch.faceOpen). The aggravated
   // form just unfolds the extra arms + looms larger and its eyes go cold amber. Skin stays wet-black.
   wretch.P.extra.forEach(a=>a[0].visible=dem);
-  wretch.group.scale.setScalar(dem?WRETCH_DEMON_SCALE:WRETCH_BASE_SCALE);
+  wretchSetScale(dem?WRETCH_DEMON_SCALE:WRETCH_BASE_SCALE);
   wretch.P.eyeMat.color.setHex(dem?0x7a0a0a:0xe9e6de);   // demon = deep red · wretch = pale
   if(dem) wretchVoice&&wretchVoice('scream', wretch.active?wretch.pos:null);
 }
@@ -7282,7 +7288,10 @@ function despawnWretch(retreat){ if(wretch.form==='demon')setForm('wretch'); if(
 //      loop's entire context window is one frame and losing sight throws it away.
 //  NOT hallucinated: position, collision, damage, the grab. It is honest to fight and impossible to describe.
 // ============================================================================================
-let _driftOn=false, _hwSeq=0;
+let _driftOn=false, _hwSeq=0, _hwSkin=null;
+const HW_SIZE=1.25;               // 1.25x the ordinary Wretch. Everything that positions off the body reads group.scale.y
+                                  // (grab reach, eye/beam offsets, the intimidation hoist, the crypt ritual), so those
+                                  // scale with it; the collider is the same pos-relative cylinder the primary uses.
 function _driftBoot(){ if(_driftOn) return; _driftOn=true;
   driftInit({ THREE, renderer, worldScene:scene, camera, solidAt:(x,y,z)=>solidAt(x,y,z),
     daylight:()=>globalU.uDay.value, sunDir:()=>globalU.uSunDir.value }); }
@@ -7291,6 +7300,16 @@ function spawnHorrific(x,z){
   _driftBoot();
   const inst=newWretchState(); inst._hid=++_hwSeq; inst.horrific=true;
   const built=buildWretch(); inst.group=built.group; inst.P=built.P;
+  // buildWretch sets the rig's scale itself at construction, and on a fresh spawn nothing calls setForm — so _sizeMul
+  // alone left it at the ordinary size (measured: span still 6.15 instead of 7.7). Apply it here AND keep _sizeMul, which
+  // is what makes a later form change or crypt-ritual reset preserve it rather than snapping back to base.
+  inst._sizeMul=HW_SIZE;
+  built.group.scale.setScalar(WRETCH_BASE_SCALE*HW_SIZE);
+  // WET BLACK. The flesh palette is hardcoded crimson inside the shader, so this cannot be material.color — that would
+  // either leave it dark red or, at 0, flatten every crevice and vein to nothing. uNoir desaturates and darkens the same
+  // pattern, keeping the folds as value differences. One extra material = one extra program, compiled at spawn.
+  if(!_hwSkin) _hwSkin=fleshMatMake({noir:1});
+  built.group.traverse(o=>{ if(o.isMesh && o.material===wretchMat) o.material=_hwSkin; });
   wretchExtra.push(inst);
   const prev=wretch; wretch=inst; let ok=false;                                   // spawnWretch initialises whatever is bound
   try{ HORROR._firstNight=true; inst.spawnT=0;
@@ -8160,7 +8179,7 @@ function pullUpdate(dt){ const L=wretch.lair; wretch.pullT+=dt; const u=Math.min
   document.getElementById('dmg').style.opacity=0.3;
   if(u>=1){ wretch.grabPhase='tied'; player.tied=true; wretch.tieT=_DUN_TOTAL; wretch.struggle=0; wretch._mash=0;   // the 90s ritual begins
     wretch._dunPhase=-1; wretch._glow=0; wretch._clingN=null; wretch._dunT=null; wretch._dunReach=true;
-    g.scale.setScalar(WRETCH_BASE_SCALE); player.pos.set(L.tieX,L.roomY,L.tieZ); player.yaw=0; player.pitch=0;
+    g.scale.setScalar(WRETCH_BASE_SCALE*(wretch._sizeMul||1)); player.pos.set(L.tieX,L.roomY,L.tieZ); player.yaw=0; player.pitch=0;
     wretchVoice&&wretchVoice('scream',wretch.pos); }
 }
 // ===== PHASE 4 — TIED: the 90s ritual. It crawls the walls/ceiling, descends to the crypt, comes up screaming, dances, spazzes in your face — then drops back down. =====
@@ -8485,7 +8504,7 @@ function endDrag(devoured){ if(devoured||player.tied) player._dragUsed=false;   
     player.onGround=false; }
   if(!devoured){ const _pd=(typeof inDungeon==='function')&&inDungeon(Math.floor(player.pos.x),Math.floor(player.pos.y),Math.floor(player.pos.z));
     wretch._cryptRetreat=!!_pd; }   // tore free INSIDE the lair → it slinks back down to the crypt and waits; broke free on the surface → normal AI
-  if(wretch.group)wretch.group.scale.setScalar(WRETCH_BASE_SCALE); document.getElementById('dmg').style.opacity=0;
+  wretchSetScale(WRETCH_BASE_SCALE); document.getElementById('dmg').style.opacity=0;
   if(devoured){ wretch.hunger=100; die('bound in its dungeon and devoured'); } else { flashName('you tore free'); if(bloomPass)bloomPass.strength=0.55; wretch.thought='It slipped my grasp. No matter — I will run it down.'; wretch._itBucket=null; if(typeof reason!=='undefined')reason.concurrence=''; }   // clear the stale "I have you" thought so the feed stops saying captured
   if(NET.on){ if(!NET.host){ wretch.owner=NET.hostId; netSend({t:'own',owner:NET.hostId}); } else { despawnWretch(true); wretch.owner=NET.id; } }   // co-op: capture over → hand the Wretch back to the host (fresh hunt)
 }
@@ -10995,6 +11014,9 @@ function withNearestWretch(fn){
   const prev=wretch; if(best) wretch=best;
   try{ return fn(); } finally{ wretch=prev; }
 }
+// Every place the rig's scale is set goes through here, so a per-instance `_sizeMul` survives the AI resetting scale on a
+// form change, a death, or the crypt ritual. Setting it once at spawn would be undone by the first setForm.
+function wretchSetScale(s){ if(wretch.group) wretch.group.scale.setScalar(s*(wretch._sizeMul||1)); }
 // Run `fn` against every live Wretch in turn, primary first, and stop at the first that returns true. For anything whose
 // OWN position decides which creature it hits — a projectile in flight — rather than the camera's.
 function anyWretch(fn){ const prev=wretch;
@@ -11567,7 +11589,7 @@ function applyBossVisual(on){ if(!wretch.group)return;
     if(wretch.P&&wretch.P.pelvis)wretch.P.pelvis.visible=false; if(wretch.P&&wretch.P.head)wretch.P.head.visible=false;   // hide the underlying wretch body — only the seraph shows
     if(wretch._bossCore)wretch._bossCore.visible=false;
   } else {
-    wretch.group.scale.setScalar(WRETCH_BASE_SCALE);
+    wretchSetScale(WRETCH_BASE_SCALE);
     if(typeof wretchMat!=='undefined'&&wretchMat.emissive){ wretchMat.emissive.setRGB(0,0,0); wretchMat.emissiveIntensity=0; }
     if(typeof wretchMat!=='undefined'&&wretch._prevSkinMap!==undefined){ wretchMat.map=wretch._prevSkinMap; wretchMat.needsUpdate=true; }
     seraphOff(wretch); if(wretch._eyeRig)wretch._eyeRig.visible=false;

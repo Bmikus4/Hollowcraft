@@ -29,7 +29,10 @@
 // The loop owns no subject. Whoever creates it supplies a scene to render as the clean anchor: the demo harness supplies
 // a throwaway box creature, the game supplies the real Wretch rig.
 
-const RES = 128;             // the whole subject is 128x128. Its own resolution being wrong is part of the read.
+// 256x256. The grid below stays at 22 cells, so raising this does NOT weaken the latent-grid tell — it sharpens the body
+// inside each cell while the cells stay the same size. 4x the pixels over two passes at 22Hz, which measured 0.059ms at
+// 128 and so has room. Dropping back to 128 is the first thing to try if a slower GPU struggles.
+const RES = 256;
 const STEP_HZ = 22;
 
 const FRAG = `
