@@ -2505,7 +2505,17 @@ const skyMat = new THREE.ShaderMaterial({
     float fbm2(vec3 p){ float v=0.0,a=0.6; for(int i=0;i<2;i++){ v+=a*n3(p); p*=2.31; a*=0.5;} return v; }   // 2 octaves - the cheap one, for high cirrus and the Milky Way dust
     void main(){
       vec3 dir = normalize(vDir);
-      float up = clamp((dir.y+0.1)/1.1,0.0,1.0);   // sky (day & night) stretches 10% BELOW the midline before the ground haze takes over
+      // THE SKY GOES ALL THE WAY AROUND (Ben: "delete the dark block at the bottom of the horizon entirely, extend both the
+      // day and night sky all the way fully around the player"). The dark band that used to fill everything below -0.1 is
+      // deleted further down; what is left below there is 'hor', the pale horizon colour, so the sky simply continues.
+      // (quotes, NOT backticks: this comment lives inside a template-literal shader source, so a backtick here
+      //  closes the string and the whole module stops parsing — "Unexpected identifier 'hor'" at boot.)
+      // This expression is LEFT EXACTLY AS IT WAS on purpose. Remapping it to span pole to pole was tried first and is
+      // wrong: at the horizon it put up at 0.5 instead of 0.09, which through pow(up,0.35) drags the horizon 78% of the
+      // way to the zenith colour and rewrites the whole approved sky gradient to fix a band below it.
+      // NO BACKTICKS IN HERE. This shader is a JS template literal, so a backtick in a comment ENDS it: the file stopped
+      // parsing at this point and the game would not load at all.
+      float up = clamp((dir.y+0.1)/1.1,0.0,1.0);   // sky (day & night) stretches 10% BELOW the midline; below that it holds the horizon colour
       float sunH = uSunDir.y;                      // sun elevation, -1..1
       float sd   = max(dot(dir,uSunDir),0.0);      // how near this ray points to the sun
       float md   = dot(dir,uMoonDir);
@@ -2534,7 +2544,7 @@ const skyMat = new THREE.ShaderMaterial({
       // and bluer (0.64,0.76,0.89 -> 0.58,0.73,0.92): the greyness, not the brightness, is what read as haze.
       // NOT the dark-horizon experiment, which Ben rejected -- the gradient still runs pale at the bottom, just less of it.
       vec3 col=mix(hor,zen,pow(up,0.35));
-      if(dir.y<-0.1) col=mix(col, hor*0.42, clamp(-(dir.y+0.1)*3.2,0.0,1.0));   // curvature: fade past the horizon into ground haze
+      // (the dark below-horizon band that used to be mixed in here is gone — see the note on the gradient above)
       // ---- FORWARD SCATTER (Ben 07-28, "a beautiful in-game sky") ----
       // The sky is BRIGHTER toward the sun and dimmest at 90 degrees from it. The dome had none of this, which is the main
       // reason a clear day read as a flat blue lid: wherever you looked, it was the same blue.
@@ -5779,7 +5789,7 @@ function buildPauseSettings(){ const el=document.getElementById('pausesettings')
     det.appendChild(box); el.appendChild(det); } }
 applyFps(); applyMind(); applyHud(); buildPauseSettings(); buildMenuVisuals();
 document.getElementById('respawnbtn').addEventListener('click',()=>{ respawn(); requestLock(); });
-document.addEventListener('pointerlockchange',()=>{ locked=document.pointerLockElement===canvas; if(locked){ pause.style.display='none'; audioResume&&audioResume(); } else if(started && !player.dead && !openUI && !player.grabbed){ buildPauseSettings(); pause.style.display='flex'; for(const k in keys)delete keys[k]; lmbHeld=false; rmbHeld=false; } });   // no pause overlay mid-capture either — the jumpscare/haul owns the screen; settings rebuild so the achievements ledger stays current
+document.addEventListener('pointerlockchange',()=>{ locked=document.pointerLockElement===canvas; if(locked){ pause.style.display='none'; audioResume&&audioResume(); } else if(started && !player.dead && !openUI && !player.grabbed && performance.now()>=_noPauseUntil){ buildPauseSettings(); pause.style.display='flex'; for(const k in keys)delete keys[k]; lmbHeld=false; rmbHeld=false; } });   // no pause overlay mid-capture either — the jumpscare/haul owns the screen; settings rebuild so the achievements ledger stays current
 let _lookDX=0,_lookDY=0;   // raw mouse deltas accumulate here; applyLook() eases them out over a few frames → SMOOTHED looking
 document.addEventListener('mousemove',e=>{ if(!locked)return; _lookDX+=e.movementX; _lookDY+=e.movementY; });   // FROZEN-MOUSE FIX (Ben 07-27): the pointer-lock look handler was dropped in the camera refactor (732174e) → mouse never fed _lookDX; restored
 let _cine=null;            // CERAPHIM arrival state (declared early — built by bossCutscene far below). It NO LONGER owns the camera.
@@ -9902,7 +9912,16 @@ function openConsole(prefill){ _cmdBuild(); openUI='cmd'; _cmdEl.style.display='
   for(const k in keys) delete keys[k];   // whatever was held when the console opened must not stay held while you type
   lmbHeld=false; rmbHeld=false;
   setTimeout(()=>{ try{ _cmdIn.focus(); }catch(e){} },0); }
-function closeConsole(){ if(!_cmdEl) return; _cmdEl.style.display='none'; if(openUI==='cmd') openUI=null; try{ _cmdIn.blur(); }catch(e){} requestLock(); }
+// NO PAUSE MENU ON THE WAY OUT (Ben: "when esc is pressed inside of the command line menu it should not open the game pause
+// menu"). Closing the console asks for pointer lock back, but when the key that closed it was Escape the browser is busy
+// treating that same keypress as "leave pointer lock" and the request does not stick -- which leaves the player unlocked
+// with no UI open, and that is precisely the state pointerlockchange raises the pause overlay for. So the overlay is
+// suppressed for a moment afterwards: the lock attempt still happens, and if it fails the player is in the world with a
+// click needed to re-grab the mouse, which the canvas already handles. A pause menu they did not ask for is the one
+// outcome that must not happen.
+let _noPauseUntil=0;
+function closeConsole(){ if(!_cmdEl) return; _cmdEl.style.display='none'; if(openUI==='cmd') openUI=null; try{ _cmdIn.blur(); }catch(e){}
+  _noPauseUntil=performance.now()+900; requestLock(); }
 // Nearest matches for a bad name, so a typo answers itself instead of just being refused.
 function _cmdNear(want,list){ want=String(want||'').toLowerCase();
   return list.filter(k=>k.toLowerCase().indexOf(want)>=0).slice(0,3).join(', ')
@@ -11019,6 +11038,9 @@ offView.group.rotation.set(0.10,-0.10,0.16);
 // The hand pose is up and inboard of where it started (-0.31,-0.17): the COMPASS ROSE sits in the lower-left of the HUD,
 // exactly where a left-hand item lands, so a torch read as a floating flame with its stick hidden behind the dial.
 const OFF_POSE={ shield:{p:[-0.22,-0.10,-0.35], r:[0.10,-0.10,0.16]}, hand:{p:[-0.25,-0.10,-0.34], r:[0.16,0.34,-0.10]} };
+// How long a GUN is in the offhand fist, in world units along its longest axis. A dial rather than a literal so three
+// candidate sizes can be photographed in one run and Ben can pick, instead of shipping a guess and asking if he likes it.
+let _gunOffFit=0.34;
 function setOffItem(id){ if(offView.id===id)return; offView.id=id;
   if(offView.mesh){ offView.group.remove(offView.mesh); _disposeView(offView.mesh); offView.mesh=null; }
   if(!id||!ITEMS[id]) return;
@@ -11045,7 +11067,13 @@ function setOffItem(id){ if(offView.id===id)return; offView.id=id;
     // item is not scaled down to a sliver -- but a gun is long and THIN, so its smallest axis is tiny and that floor won
     // every time, sizing each gun by how slim it is instead of how long. A revolver and a minigun came out visibly
     // different. Guns normalise on their longest axis alone, so every one of them is the same length in the fist.
-    const s = ITEMS[id].gun ? (0.115/mx) : Math.max(0.115/mx, 0.010/mn);
+    //
+    // GUNS_FIT, NOT 0.115 (Ben, immediately after the first version shipped: "items in the offhand are wayy too tiny, like
+    // literally tiny little items or they dont appear"). 0.115 is the apparent size of a BLOCK held in the main hand, and
+    // fitting a metre-long rifle's LENGTH into that leaves a barrel a few pixels across -- which is precisely the sliver the
+    // mn floor used to prevent, reintroduced by removing it. One size for every gun is still the rule; the size is just the
+    // length of a carried weapon rather than the width of a fist.
+    const s = ITEMS[id].gun ? (_gunOffFit/mx) : Math.max(0.115/mx, 0.010/mn);
     m.scale.setScalar(s); m.position.set(-ctr.x*s,-ctr.y*s,-ctr.z*s);
     m.userData.offFit=+(mx*s).toFixed(4);   // the achieved longest side. A world-space AABB of this fist is rotated, so it is NOT the object's size — measuring that reported a 21% spread across guns that are all fitted to the same length.
     const P=OFF_POSE.hand; offView.group.position.set(P.p[0],P.p[1],P.p[2]); offView.group.rotation.set(P.r[0],P.r[1],P.r[2]);
@@ -18911,6 +18939,11 @@ window.__hc={
   // the use mode -- so a probe that needs the slot empty has no key to press.
   offhandClick(){ try{ const r=offhandLeftClick(); const e=document.getElementById('name');
       return { routed:r, said:e?e.textContent:null }; }catch(err){ return {err:String(err.message||err)}; } },   // the SAME function the mouse calls
+  // QA/bench: the offhand gun length, live. Clearing offView.id is what forces setOffItem to rebuild the mesh, since it
+  // returns early when the id has not changed.
+  offFit(v){ try{ if(v!=null) _gunOffFit=+v; const keep=armor[EQ_OFF]?armor[EQ_OFF].id:null;
+      offView.id=null; if(keep) setOffItem(keep);
+      return { fit:_gunOffFit, extent:(offView.mesh&&offView.mesh.userData.offFit)||null, scale:offView.mesh?+offView.mesh.scale.x.toFixed(5):null }; }catch(e){ return {err:String(e.message||e)}; } },
   offhandSet(id,n){ try{ armor[EQ_OFF]= id? {id, n:(n|0)||1} : null; offUse=false;
       if(typeof updateArmorView==='function')updateArmorView(); refreshHotbar();
       return { off:armor[EQ_OFF]?armor[EQ_OFF].id:null }; }catch(e){ return {err:String(e.message||e)}; } },
