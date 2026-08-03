@@ -5600,6 +5600,10 @@ addEventListener('wheel',e=>{ if(!locked)return;
   if(view&&view.ads&&ITEMS[view.id]&&ITEMS[view.id].gun==='bolt'&&!ITEMS[view.id].dot){ view.scopeFov=clamp((view.scopeFov||7)+(e.deltaY>0?1:-1),4,16); try{localStorage.setItem('hollowcraft_zoom',view.scopeFov);}catch(_){} flashName((Math.round(700/view.scopeFov)/10)+'x zoom'); return; }   // scroll while aimed = adjust + save scope magnification (magnified SCOPE only — the holosight is fixed 1x)
   selSlot=((selSlot+(e.deltaY>0?1:-1))%9+9)%9; refreshHotbar(); const s=inv[selSlot]; flashName(s?ITEMS[s.id].name:''); });
 addEventListener('keydown',e=>{ if(e.code==='Space')e.preventDefault();
+  // THE COMMAND CONSOLE owns the keyboard while it is open. Its input handler deals with Enter, Escape and history; every
+  // other key must die here, or typing "spawn" walks you forward, opens the inventory and drops your held item on the way.
+  if(openUI==='cmd'){ if(e.code!=='Escape') return; }
+  if(!openUI && !player.grabbed && !player.dead && (e.code==='KeyT' || (e.code==='Slash'&&!e.shiftKey))){ e.preventDefault(); openConsole(e.code==='Slash'?'/':''); return; }
   // F3 = THIRD PERSON (Ben). It was on F4 and F3 toggled the profiler; the profiler moves to SHIFT+F3, since a debug
   // overlay is the rarer of the two and third person is a thing you flip constantly.
   if(e.code==='F3' && e.shiftKey){ prof.style.display=prof.style.display==='none'?'block':'none'; return; }
@@ -6424,6 +6428,13 @@ function netMsg(m){
     if(AC){ burst(master,1.6,0.06,150,0.6,44); burst(master,1.2,0.22,64,0.7,30); }
     const pd=Math.hypot(player.pos.x-(x+0.5), player.pos.y-(y+0.5), player.pos.z-(z+0.5));
     if(pd<MINE_R+2.2 && !player.dead && typeof damage==='function') damage(Math.max(4,Math.round(MINE_DMG*(1-pd/(MINE_R+2.6)))),'a landmine took the ground out from under you','blast'); }
+  // CONSOLE COMMAND aimed at a player. /give is the one that needs the wire: giving an item to someone else has to happen in
+  // THEIR inventory, on their client. Addressed by id and ignored by everyone else, so a broadcast relay does not hand the
+  // whole server one player's items.
+  else if(m.t==='cmd'){ if(String(m.to)!==String(NET.id)) return;
+    if(m.do==='give' && m.it && ITEMS[m.it]){ const n=Math.max(1,Math.min(999,m.n|0||1)); invAdd(m.it,n); refreshHotbar();
+      if(typeof flashName==='function')flashName('received '+n+'x '+(ITEMS[m.it].name||m.it));
+      if(typeof cmdEcho==='function')cmdEcho('received '+n+'x '+m.it+' from another player','#cfe0b8'); } }
   else if(m.t==='dmg'){ if(m.to===NET.id && !player.dead && typeof damage==='function') damage(m.v||1, m.c||'struck down', m.k); }           // an authority (the boss / a peer) dealt damage to ME. m.k carries the kind so a remote blast is not shield-blockable either; absent = direct, which is what a peer's melee is
   else if(m.t==='bosscine'){ if(typeof bossCutscene==='function') bossCutscene(m.x,m.y,m.z,false); }                                          // a peer began the summon → every screen gets the rip + prebuilds the rig inside its own flash
   else if(m.t==='bossdead'){ wretch.boss=false; if(typeof applyBossVisual==='function')applyBossVisual(false);                                // the MEGA-WRETCH fell — tear the seraph down on every screen
@@ -9418,6 +9429,175 @@ function closeUI(){ for(let i=0;i<9;i++){ if(craftGrid[i]){ invAdd(craftGrid[i].
   invuiEl.style.display='none'; chestuiEl.style.display='none'; if(openUI==='chest' && curChestKey) chestLidClose();   // curChestKey: the BACKPACK borrows this UI and has no block in the world, so there is no lid to shut
   if(openUI==='chest' && NET.on && curChestKey && curChest && !localChests.has(curChestKey)) netSend({t:'chest',k:curChestKey,c:curChest});   // co-op: share PLAYER-PLACED chests only — loot chests stay local (both players loot their own)
   openUI=null; curChest=null; curChestKey=null; refreshHotbar(); requestLock(); }
+// =====================================================================
+//  THE COMMAND CONSOLE (Ben) — /time, /give, /spawn and twelve more
+// =====================================================================
+// Opens on T, or on / with the slash already typed. It sets openUI='cmd', which is what gates movement, look and every other
+// UI key: the global keydown handler returns early on that flag, because otherwise typing "spawn" walks you forward, opens
+// the inventory and drops your held item on the way through.
+// Everything routes through ONE table of {usage, run} entries, so /help is generated from the same source that dispatches --
+// a help text maintained separately from the commands is a help text that lies within a week.
+let _cmdEl=null, _cmdLog=null, _cmdIn=null, _cmdHist=[], _cmdHistIx=-1;
+function _cmdBuild(){ if(_cmdEl) return;
+  _cmdEl=document.createElement('div');
+  _cmdEl.style.cssText='position:fixed;left:0;right:0;bottom:0;z-index:26;display:none;flex-direction:column;'+
+    'font:13px Georgia;color:#e6dcc0;background:linear-gradient(180deg,rgba(8,7,5,0) 0%,rgba(8,7,5,.82) 38%,rgba(8,7,5,.94) 100%);padding:10px 12px 8px;';
+  _cmdLog=document.createElement('div');
+  _cmdLog.style.cssText='max-height:34vh;overflow-y:auto;display:flex;flex-direction:column;gap:2px;margin-bottom:6px;text-shadow:0 1px 2px #000;';
+  const row=document.createElement('div'); row.style.cssText='display:flex;align-items:center;gap:6px;';
+  const car=document.createElement('span'); car.textContent='>'; car.style.cssText='color:#c0a050;font-weight:bold;';
+  _cmdIn=document.createElement('input'); _cmdIn.type='text'; _cmdIn.autocomplete='off'; _cmdIn.spellcheck=false;
+  _cmdIn.style.cssText='flex:1;background:rgba(0,0,0,.55);border:1px solid #3a2c18;border-radius:4px;color:#f0e6c8;font:13px Georgia;padding:5px 8px;outline:none;';
+  row.appendChild(car); row.appendChild(_cmdIn); _cmdEl.appendChild(_cmdLog); _cmdEl.appendChild(row);
+  document.body.appendChild(_cmdEl);
+  _cmdIn.addEventListener('keydown',e=>{
+    e.stopPropagation();   // the game's global handler must never see a typed letter
+    if(e.key==='Enter'){ const v=_cmdIn.value.trim(); _cmdIn.value='';
+      if(!v){ closeConsole(); return; }
+      _cmdHist.unshift(v); if(_cmdHist.length>60)_cmdHist.pop(); _cmdHistIx=-1;
+      cmdEcho('> '+v,'#9fb08a'); runCommand(v); return; }
+    if(e.key==='Escape'){ closeConsole(); return; }
+    if(e.key==='ArrowUp'){ e.preventDefault(); if(_cmdHist.length){ _cmdHistIx=Math.min(_cmdHist.length-1,_cmdHistIx+1); _cmdIn.value=_cmdHist[_cmdHistIx]||''; } return; }
+    if(e.key==='ArrowDown'){ e.preventDefault(); _cmdHistIx=Math.max(-1,_cmdHistIx-1); _cmdIn.value=_cmdHistIx<0?'':(_cmdHist[_cmdHistIx]||''); return; }
+    if(e.key==='Tab'){ e.preventDefault(); const v=_cmdIn.value.replace(/^\//,''); const hit=Object.keys(CMDS).filter(k=>k.indexOf(v)===0);
+      if(hit.length===1) _cmdIn.value='/'+hit[0]+' '; else if(hit.length>1) cmdEcho(hit.map(h=>'/'+h).join('  '),'#9aa588'); return; }
+  });
+}
+function cmdEcho(text,colour){ _cmdBuild(); const d=document.createElement('div'); d.textContent=text;
+  d.style.cssText='color:'+(colour||'#e6dcc0')+';white-space:pre-wrap;'; _cmdLog.appendChild(d);
+  while(_cmdLog.children.length>120) _cmdLog.removeChild(_cmdLog.firstChild);
+  _cmdLog.scrollTop=_cmdLog.scrollHeight; }
+function openConsole(prefill){ _cmdBuild(); openUI='cmd'; _cmdEl.style.display='flex';
+  _cmdIn.value=prefill||''; document.exitPointerLock&&document.exitPointerLock();
+  for(const k in keys) delete keys[k];   // whatever was held when the console opened must not stay held while you type
+  lmbHeld=false; rmbHeld=false;
+  setTimeout(()=>{ try{ _cmdIn.focus(); }catch(e){} },0); }
+function closeConsole(){ if(!_cmdEl) return; _cmdEl.style.display='none'; if(openUI==='cmd') openUI=null; try{ _cmdIn.blur(); }catch(e){} requestLock(); }
+// Nearest matches for a bad name, so a typo answers itself instead of just being refused.
+function _cmdNear(want,list){ want=String(want||'').toLowerCase();
+  return list.filter(k=>k.toLowerCase().indexOf(want)>=0).slice(0,3).join(', ')
+      || list.filter(k=>k.toLowerCase().indexOf(want.slice(0,3))===0).slice(0,3).join(', '); }
+function _cmdItemIds(){ return Object.keys(ITEMS); }
+// Ordinary animals plus the named horrors, because spawnFromEgg handles both and a /spawn that could not summon the Wretch
+// would be a /spawn nobody uses.
+function _cmdCreatureIds(){ const a=(typeof ANIMALS!=='undefined')?Object.keys(ANIMALS):[];
+  return a.concat(['wretch','herobrine','ceraphim','pale','horrific']); }
+function _cmdBlockIds(){ return Object.keys(BID); }
+// Who is connected. Names come from the peer table; ids are what the wire actually addresses.
+// Ids are NUMBERS. NET.peers is keyed by string, because object keys always are, and the relay looks recipients up in a Map
+// keyed by the numeric id it assigned -- so sending `to:'2'` made clients.get('2') miss and the frame was dropped silently,
+// with the sender cheerfully reporting the item as given.
+function _cmdPlayers(){ const out=[{id:(NET.id!=null?NET.id:0), name:(typeof playerName!=='undefined'&&playerName)||'you', self:true}];
+  try{ for(const k in (NET.peers||{})){ const p=NET.peers[k]; const n=(isFinite(+k)?+k:k); out.push({id:n, name:(p&&p.nm)||('player'+k), self:false}); } }catch(e){}
+  return out; }
+function _cmdResolveTargets(tok){ const all=_cmdPlayers();
+  if(!tok || tok==='@me' || tok==='me' || tok==='self') return all.filter(p=>p.self);
+  if(tok==='@a' || tok==='all') return all;
+  const t=String(tok).toLowerCase();
+  return all.filter(p=>String(p.id)===t || String(p.name).toLowerCase()===t); }
+const CMDS={
+  help:{ usage:'/help [command]', run:(a)=>{ if(a[0]){ const k=String(a[0]).replace(/^\//,''); return CMDS[k]?CMDS[k].usage:('no such command: '+k); }
+      return Object.keys(CMDS).map(k=>CMDS[k].usage).join('\n'); } },
+  time:{ usage:'/time <day|noon|dusk|night|midnight|0..1>', run:(a)=>{ if(!a.length) return CMDS.time.usage;
+      const w=String(a[0]).toLowerCase(), P={dawn:0.22,day:0.30,noon:0.25,dusk:0.50,evening:0.50,night:0.62,midnight:0.72};
+      let f = (P[w]!=null) ? P[w] : (isFinite(+w) ? +w : null);
+      if(f==null) return 'time: expected a keyword or 0..1, got "'+a[0]+'"';
+      f=Math.max(0,Math.min(1,f)); worldTime=CFG.DAY_LEN*f;
+      return 'time set to '+w+' ('+f.toFixed(2)+')'; } },
+  give:{ usage:'/give [player|@a|@me] <item> [count]', run:(a)=>{ if(!a.length) return CMDS.give.usage;
+      // The first token is a TARGET only if it names one; otherwise it is the item, so "/give torch 5" works as typed.
+      let tgt='@me', rest=a.slice();
+      if(a.length>=2 && !ITEMS[a[0]] && _cmdResolveTargets(a[0]).length){ tgt=a[0]; rest=a.slice(1); }
+      const id=rest[0], n=Math.max(1,Math.min(999,parseInt(rest[1]||'1',10)||1));
+      if(!ITEMS[id]) return 'no such item: '+id+(_cmdNear(id,_cmdItemIds())?('  — did you mean: '+_cmdNear(id,_cmdItemIds())):'');
+      const who=_cmdResolveTargets(tgt); if(!who.length) return 'no such player: '+tgt;
+      let mine=0, sent=0;
+      for(const p of who){ if(p.self){ invAdd(id,n); mine+=n; }
+        // `it`, NOT `id`: the relay stamps msg.id with the SENDER's numeric id on every frame it forwards, so an item id sent
+        // in that field arrives as the number 1 and ITEMS[1] is undefined -- the receiver did nothing, silently, while the
+        // sender reported the item as given.
+        else if(NET.on && typeof netSend==='function'){ netSend({t:'cmd',to:p.id,do:'give',it:id,n}); sent++; } }
+      refreshHotbar();
+      return 'gave '+n+'x '+id+(mine?' to you':'')+(sent?(' and to '+sent+' other player'+(sent>1?'s':'')):''); } },
+  spawn:{ usage:'/spawn <creature> [count] [dist]', run:(a)=>{ if(!a.length) return CMDS.spawn.usage+'\n'+_cmdCreatureIds().join(' ');
+      const id=a[0], n=Math.max(1,Math.min(30,parseInt(a[1]||'1',10)||1)), d=Math.max(2,Math.min(40,parseFloat(a[2]||'6')||6));
+      if(!_cmdCreatureIds().includes(id)) return 'no such creature: '+id+(_cmdNear(id,_cmdCreatureIds())?('  — did you mean: '+_cmdNear(id,_cmdCreatureIds())):'');
+      // Through spawnFromEgg, the game's own spawn chokepoint: it already routes the Wretch, Herobrine, the Ceraphim, the Pale
+      // and the horrific to their own summon sequences and everything else to the animal path, so /spawn cannot drift from
+      // what the spawn eggs do. It takes a hit-like {x,y,z}, which is how a position is handed to it.
+      if(typeof spawnFromEgg!=='function') return 'no spawn path in this build';
+      let made=0;
+      for(let i=0;i<n;i++){ const a2=(i/Math.max(1,n))*Math.PI*2;
+        const x=player.pos.x-Math.sin(player.yaw)*d+Math.cos(a2)*(n>1?1.8:0), z=player.pos.z-Math.cos(player.yaw)*d+Math.sin(a2)*(n>1?1.8:0);
+        try{ spawnFromEgg(id,{x:Math.floor(x),y:Math.floor(groundYAt(x,z)),z:Math.floor(z)}); made++; }catch(e){ return 'could not spawn '+id+': '+(e&&e.message||e); } }
+      return 'spawned '+made+'x '+id+' about '+d.toFixed(0)+' blocks ahead'; } },
+  tp:{ usage:'/tp <x> <y> <z> | /tp <player>', run:(a)=>{ if(!a.length) return CMDS.tp.usage;
+      if(a.length>=3 && isFinite(+a[0]) && isFinite(+a[1]) && isFinite(+a[2])){ player.pos.set(+a[0],+a[1],+a[2]); player.vel.set(0,0,0);
+        return 'teleported to '+(+a[0]).toFixed(1)+' '+(+a[1]).toFixed(1)+' '+(+a[2]).toFixed(1); }
+      const who=_cmdResolveTargets(a[0]).filter(p=>!p.self); if(!who.length) return 'no such player: '+a[0];
+      const av=(NET.avatars||{})[who[0].id]; if(!av) return 'no position for '+who[0].name+' yet';
+      player.pos.set(av.g.position.x, av.g.position.y+1, av.g.position.z); player.vel.set(0,0,0);
+      return 'teleported to '+who[0].name; } },
+  gamemode:{ usage:'/gamemode <survival|creative|cinematic>', run:(a)=>{ const m=String(a[0]||'').toLowerCase();
+      if(m==='survival'||m==='s'){ if(typeof cineMode!=='undefined'&&cineMode&&typeof applyCine==='function')applyCine(false); player.creative=false; return 'survival'; }
+      if(m==='creative'||m==='c'){ window._allowCreative=true; player.creative=true; return 'creative'; }
+      if(m==='cinematic'||m==='cine'){ window._allowCreative=true; player.creative=true; if(typeof applyCine==='function')applyCine(true); return 'cinematic'; }
+      return CMDS.gamemode.usage; } },
+  heal:{ usage:'/heal [amount]', run:(a)=>{ const n=a.length?Math.max(1,parseFloat(a[0])||20):20;
+      player.health=Math.min(20,player.health+n); player.hunger=20; player.water=20; player.dead=false;
+      return 'healed to '+player.health.toFixed(0)+'/20, hunger and thirst full'; } },
+  kill:{ usage:'/kill [self|mobs]', run:(a)=>{ const w=String(a[0]||'self').toLowerCase();
+      if(w==='mobs'||w==='all'){ let n=0; if(typeof animals!=='undefined'&&typeof killAnimal==='function')
+          for(const an of animals.slice()){ if(!an.dead){ try{ killAnimal(an); n++; }catch(e){} } } return 'killed '+n+' creature'+(n===1?'':'s'); }
+      if(typeof damage==='function'){ player.creative=false; damage(999,'the console',' blast'.trim()); return 'you died'; }
+      return 'could not'; } },
+  weather:{ usage:'/weather <clear|rain|storm|fog> [0..1]', run:(a)=>{ if(typeof weather==='undefined') return 'no weather system';
+      const w=String(a[0]||'').toLowerCase(), amt=a.length>1?Math.max(0,Math.min(1,parseFloat(a[1])||0)):null;
+      if(w==='clear'){ weather.rainTgt=0; weather.fogTgt=0; return 'clear skies'; }
+      if(w==='rain'){ weather.rainTgt=amt!=null?amt:0.7; return 'rain '+weather.rainTgt.toFixed(2); }
+      if(w==='storm'){ weather.rainTgt=amt!=null?amt:1.0; weather.fogTgt=Math.max(weather.fogTgt||0,0.35); return 'storm'; }
+      if(w==='fog'){ weather.fogTgt=amt!=null?amt:0.8; return 'fog '+weather.fogTgt.toFixed(2); }
+      return CMDS.weather.usage; } },
+  fly:{ usage:'/fly [on|off]', run:(a)=>{ if(!window._allowCreative) return 'flight is locked in survival — /gamemode creative first';
+      const w=String(a[0]||'').toLowerCase(); player.fly = w==='on'?true : w==='off'?false : !player.fly; player.vel.y=0;
+      return player.fly?'flying':'walking'; } },
+  // Through player.speedMul and the speedT window, which is the STIM's own channel and is already read by the movement base.
+  // A new CFG knob would have needed the movement code changed to look at it, and would then be a second way to do this.
+  speed:{ usage:'/speed <multiplier>   (1 = normal)', run:(a)=>{ const m=parseFloat(a[0]); if(!isFinite(m)) return CMDS.speed.usage;
+      const v=Math.max(0.1,Math.min(8,m));
+      if(v===1){ player.speedMul=1; player.speedT=0; return 'speed back to normal'; }
+      player.speedMul=v; player.speedT=1e9;   // no expiry: a console setting should not wear off mid-walk like a drug
+      return 'speed x'+v.toFixed(2); } },
+  clearinv:{ usage:'/clearinv', run:()=>{ let n=0; for(let i=0;i<INV_N;i++) if(inv[i]){ inv[i]=null; n++; } refreshHotbar();
+      return 'cleared '+n+' slot'+(n===1?'':'s'); } },
+  setblock:{ usage:'/setblock <x> <y> <z> <block>', run:(a)=>{ if(a.length<4) return CMDS.setblock.usage;
+      const x=Math.floor(+a[0]), y=Math.floor(+a[1]), z=Math.floor(+a[2]), nm=a[3];
+      if(!isFinite(x)||!isFinite(y)||!isFinite(z)) return 'setblock: x y z must be numbers';
+      const id = (nm==='air'||nm==='0') ? 0 : BID[nm];
+      if(id===undefined) return 'no such block: '+nm+(_cmdNear(nm,_cmdBlockIds())?('  — did you mean: '+_cmdNear(nm,_cmdBlockIds())):'');
+      setBlockWorld(x,y,z,id,true); if(typeof netEdit==='function')netEdit(x,y,z,id);
+      return 'set '+x+' '+y+' '+z+' to '+nm; } },
+  players:{ usage:'/players', run:()=>{ const P=_cmdPlayers();
+      return P.map(p=>(p.self?'* ':'  ')+p.name+'  (id '+p.id+')').join('\n')+'\n'+P.length+' connected'+(NET.on?(NET.host?' — you are the host':' — you are a guest'):' — offline'); } },
+  backrooms:{ usage:'/backrooms [enter|exit]', run:(a)=>{ const w=String(a[0]||'').toLowerCase();
+      if(typeof BR==='undefined') return 'no backrooms';
+      if(w==='exit'){ if(!BR.inside) return 'you are not in the Backrooms'; if(typeof brExit==='function')brExit(); return 'out'; }
+      if(BR.inside) return 'already inside — /backrooms exit';
+      try{ if(typeof brSpawnDoorNearPlayer==='function' && !BR.door) brSpawnDoorNearPlayer(); if(typeof brEnter==='function')brEnter(); }catch(e){ return 'could not: '+e.message; }
+      return BR.inside?'inside':'a door opened ahead'; } }
+};
+function runCommand(line){
+  try{
+    const parts=String(line).trim().replace(/^\//,'').split(/\s+/).filter(Boolean);
+    if(!parts.length) return;
+    const name=parts[0].toLowerCase(), args=parts.slice(1);
+    const c=CMDS[name];
+    if(!c){ const near=_cmdNear(name,Object.keys(CMDS));
+      cmdEcho('unknown command: /'+name+' — try /help'+(near?('   (nearest: /'+near.split(', ').join(', /')+')'):''),'#d08a72'); return; }
+    const out=c.run(args);
+    if(out) cmdEcho(String(out), /^(no such|unknown|could not|expected|.*: expected)/i.test(String(out))||String(out)===c.usage ? '#d08a72' : '#cfe0b8');
+  }catch(e){ cmdEcho('error: '+(e&&e.message||e),'#d08a72'); }
+}
 // ---- THE BACKPACK (fix-list #1) ----
 // 27 slots you carry. It reuses the chest UI wholesale — the same grid, the same drag/stack/shift-click code, the same
 // renderInvUI path — because that is already the container UI and a second one would be a second set of bugs. The only
@@ -18089,6 +18269,17 @@ window.__hc={
       view.swing=+v||0; if(typeof updateView==='function') updateView(0.0001); view.swing=+v||0;
       return { swing:+view.swing.toFixed(2), held:(heldSlot()||{}).id||null, off:armor[EQ_OFF]?armor[EQ_OFF].id:null,
                mainView:view.id, offView:offView.id }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: the command console. cmdOpen/cmdClose drive the same openConsole the T key calls, and cmdRun feeds a line
+  // through runCommand exactly as pressing Enter does -- so what is tested is the parser and the commands, not a shortcut
+  // around them. cmdLog returns what the console printed, which is where errors and usage lines are supposed to land.
+  cmdOpen(prefill){ try{ openConsole(prefill||''); return { ui:openUI, visible:_cmdEl?_cmdEl.style.display:null }; }catch(e){ return {err:String(e.message||e)}; } },
+  cmdClose(){ try{ closeConsole(); return { ui:openUI, visible:_cmdEl?_cmdEl.style.display:null }; }catch(e){ return {err:String(e.message||e)}; } },
+  cmdRun(line){ try{ const before=_cmdLog?_cmdLog.children.length:0; runCommand(String(line));
+      const out=[]; if(_cmdLog) for(let i=before;i<_cmdLog.children.length;i++) out.push(_cmdLog.children[i].textContent);
+      return { ran:String(line), out }; }catch(e){ return {err:String(e.message||e)}; } },
+  cmdLog(n){ try{ const out=[]; if(_cmdLog){ const k=Math.max(0,_cmdLog.children.length-(n|0||12));
+      for(let i=k;i<_cmdLog.children.length;i++) out.push(_cmdLog.children[i].textContent); } return out; }catch(e){ return {err:String(e.message||e)}; } },
+  cmdList(){ try{ return Object.keys(CMDS); }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: one representative item id per KIND the held-item dispatch can hit. A harness that hardcodes ids tests the
   // harness author's memory of the item table -- three of the first thirteen ids guessed for the offhand check did not exist,
   // and the check reported them as "not drawn" when nothing was wrong with the code.
