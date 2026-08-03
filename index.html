@@ -3203,6 +3203,7 @@ scene.add(nvLight); scene.add(nvLight.target);
 // point-lights for them at all. Only the torch IN YOUR HAND needs a live light (it isn't a placed block, so it
 // has no baked contribution). One point light, no shadow map = the whole per-frame lighting budget.
 const LIGHT_POOL = 10;   // dynamic warm-light pool: the nearest placed torches/lanterns/candles are lit (the "baked" volume wasn't lighting spawned lights — dungeon/structures went dark)
+let _hwLightSlot = -1;            // index into pointPool reserved for the Horrific Wretch's eye glow, or -1
 const pointPool = [];
 for(let i=0;i<LIGHT_POOL;i++){ const pl=new THREE.PointLight(0xff9838,0,34,1.3); pl.position.set(0,-999,0); pl.castShadow=false; scene.add(pl); pointPool.push(pl); }
 // ---- NOTHING CAST A SHADOW IN THE DARK (Ben 07-29: "animals and creatures dont have shadows in dark places") ----
@@ -4064,7 +4065,11 @@ function assignPointLights(){
       for(const e of c.emitters){ const dx=e[0]-px,dy=e[1]-py,dz=e[2]-pz; const d2=dx*dx+dy*dy+dz*dz;
         if(d2<1225){ let s=_plPool[_plCand.length]; if(!s){ s=[0,null]; _plPool[_plCand.length]=s; } s[0]=d2; s[1]=e; _plCand.push(s); } } });
     _plCand.sort((a,b)=>a[0]-b[0]);
-    for(let i=0;i<pointPool.length;i++){ const pl=pointPool[i];
+    // The last slot is RESERVED while a Horrific Wretch is alive (see _hwLightSlot). The pool is fixed-size and resident
+    // from boot precisely so the light count never changes mid-game — adding a light for the creature would recompile every
+    // lit material — so its eye-glow borrows a torch slot instead of creating one.
+    const _plN = pointPool.length - (_hwLightSlot>=0 ? 1 : 0);
+    for(let i=0;i<_plN;i++){ const pl=pointPool[i];
       if(i<_plCand.length){ const e=_plCand[i][1]; pl.position.set(e[0],e[1],e[2]);
         const fl=1+Math.sin(t*10+e[0])*0.06+Math.sin(t*23.3+e[2])*0.03+Math.sin(t*1.7)*0.04;
         const dist=Math.sqrt(_plCand[i][0]), edge=clamp((34-dist)/12,0,1);
@@ -7335,6 +7340,11 @@ function spawnHorrific(x,z){
   // WET BLACK. The flesh palette is hardcoded crimson inside the shader, so this cannot be material.color — that would
   // either leave it dark red or, at 0, flatten every crevice and vein to nothing. uNoir desaturates and darkens the same
   // pattern, keeping the folds as value differences. One extra material = one extra program, compiled at spawn.
+  hwGlowInit();
+  // The eyes themselves: emissive so they stay lit in their own right and catch the bloom pass, which is what makes them
+  // read as glowing rather than as two red dots. The light that stains the surroundings is a separate real light — see
+  // hwGlowStep. eyeMat is built per rig, so this cannot touch the primary Wretch's pale eyes.
+  if(built.P.eyeMat){ built.P.eyeMat.color.setHex(0xff1a08); built.P.eyeMat.emissive=new THREE.Color(0xff2a10); built.P.eyeMat.emissiveIntensity=1.6; }
   if(!_hwSkin) _hwSkin=fleshMatMake({noir:1});
   built.group.traverse(o=>{ if(o.isMesh && o.material===wretchMat) o.material=_hwSkin; });
   wretchExtra.push(inst);
@@ -7387,7 +7397,68 @@ function updateWretchExtras(dt){
 function stepHorrificDrift(dt){
   for(const inst of wretchExtra){ const k=hwKey(inst); if(!driftHas(k)) continue;
     driftStep(k, dt, inst.pos, inst.active && !player.grabbed); }
+  hwGlowStep(dt);
 }
+// ---- THE EYE GLOW. A real light, not an emissive: emissive materials light nothing, and the ask was that nearby surfaces
+// take colour from it. So the eyes drive an actual PointLight borrowed from pointPool's reserved slot, which is why the
+// ground, a trunk or a wall reddens as it passes.
+//
+// ONE light for the pair, at the midpoint. Two lights 8cm apart are indistinguishable from one and cost twice as much.
+//
+// Range over brightness: HW_GLOW_DIST is deliberately short. A bright long light turns a horror into a lamp and starts
+// revealing the geometry around it, which is the opposite of the point — so the spill STAINS what it is nearly touching
+// and dies before it lights the room.
+// DIST 11, not 7.5. The light rides the HEAD, which on a 1.25x body is about 7 blocks up, so at 7.5 the falloff died in mid
+// air and stained nothing but the ground directly beneath its feet — measured on a night frame at 6 blocks: no red on any
+// surface at all. 11 reaches the ground around it and a trunk or wall beside it, and still dies well short of lighting a
+// room. Range is the dial to pull if it ever reveals too much geometry; the intensity stays low so it stains rather than
+// illuminates. TRAIL samples every 75ms over 8 samples = 600ms of history: at 45ms/6 the streak sat inside the eyes
+// themselves and read as bloom rather than motion.
+const HW_GLOW_COL=0xff1206, HW_GLOW_INT=17, HW_GLOW_DIST=11, HW_TRAIL=8, HW_TRAIL_DT=0.075;
+let _hwTrailG=null, _hwTrailS=[], _hwHist=[], _hwEyeA=null, _hwEyeB=null, _hwEyeM=null;
+function hwGlowInit(){
+  if(_hwTrailG) return;
+  _hwEyeA=new THREE.Vector3(); _hwEyeB=new THREE.Vector3(); _hwEyeM=new THREE.Vector3();
+  _hwTrailG=new THREE.Group(); _hwTrailG.frustumCulled=false; scene.add(_hwTrailG);
+  // Sprites reusing the boss's existing red-glow texture — camera-facing and additive for free, no new system. Two per
+  // history sample, one per eye, so the pair reads as two streaks rather than one blob.
+  for(let i=0;i<HW_TRAIL*2;i++){
+    const sp=new THREE.Sprite(new THREE.SpriteMaterial({ map:redGlowTex(), color:0xff2008, transparent:true, opacity:0,
+      blending:THREE.AdditiveBlending, depthWrite:false }));
+    sp.visible=false; _hwTrailG.add(sp); _hwTrailS.push(sp); }
+  if(_hwLightSlot<0 && pointPool.length) _hwLightSlot=pointPool.length-1;
+}
+function hwGlowStep(dt){
+  const inst=_hwGlowOn ? wretchExtra.find(w=>w.active && w.P && w.P.eyes && w.P.eyes.length>=2 && !player.grabbed) : null;
+  const pl=(_hwLightSlot>=0)?pointPool[_hwLightSlot]:null;
+  if(!inst){ if(pl){ pl.intensity=0; pl.position.set(0,-999,0); }
+    for(const sp of _hwTrailS){ sp.visible=false; sp.material.opacity=0; } _hwHist.length=0; return; }
+  // World positions come off the RIG, so they follow the 1.25x scale, the head's animation and the crawl posture for free —
+  // rather than an offset from wretch.pos that would sit in the wrong place the moment the body scaled.
+  inst.P.eyes[0].getWorldPosition(_hwEyeA); inst.P.eyes[1].getWorldPosition(_hwEyeB);
+  _hwEyeM.copy(_hwEyeA).add(_hwEyeB).multiplyScalar(0.5);
+  if(pl){ pl.color.setHex(HW_GLOW_COL); pl.distance=HW_GLOW_DIST; pl.decay=1.3;
+    const flick=1+Math.sin(clock.elapsedTime*13.7)*0.07+Math.sin(clock.elapsedTime*4.1)*0.05;   // a pulse, not a steady bulb
+    // FADED OUT BY DAYLIGHT. A fixed intensity ADDS to whatever the surface already has, so the same light that stains dark
+    // ground at night saturated sunlit sand into a flat red carpet — it read as a rendering bug, not a glow. At noon it is
+    // 15% strength, which is a faint warmth; the effect belongs to the dark, which is also where the creature belongs.
+    const dayFade=1-0.85*globalU.uDay.value;
+    pl.intensity=HW_GLOW_INT*flick*dayFade; pl.position.copy(_hwEyeM); }
+  // TRAILS: a short ring buffer of eye positions drawn back-to-front, fading. Sampled on the drift loop's own cadence
+  // rather than per frame, so the streak length is the same at 60fps and 140fps.
+  _hwTrailAcc=(_hwTrailAcc||0)+dt;
+  if(_hwTrailAcc>=HW_TRAIL_DT){ _hwTrailAcc=0;
+    _hwHist.unshift([_hwEyeA.x,_hwEyeA.y,_hwEyeA.z,_hwEyeB.x,_hwEyeB.y,_hwEyeB.z]);
+    if(_hwHist.length>HW_TRAIL) _hwHist.length=HW_TRAIL; }
+  for(let i=0;i<HW_TRAIL;i++){
+    const h=_hwHist[i], a=_hwTrailS[i*2], b=_hwTrailS[i*2+1];
+    if(!h){ a.visible=b.visible=false; continue; }
+    const f=1-(i/HW_TRAIL), s=0.30*f+0.06, op=0.70*f*f;      // the newest sample is biggest and brightest
+    a.visible=b.visible=true;
+    a.position.set(h[0],h[1],h[2]); a.scale.setScalar(s); a.material.opacity=op;
+    b.position.set(h[3],h[4],h[5]); b.scale.setScalar(s); b.material.opacity=op; }
+}
+let _hwTrailAcc=0, _hwGlowOn=true;
 // on SUMMON, the Wretch assesses the moment and CHOOSES what to do right now — intimidate a nearby beast,
 // come straight for you, wander off into a vignette, or slink into a stalk. Different each time.
 function chooseSummonAction(){ if(!wretch.active)return;
@@ -17860,7 +17931,8 @@ window.__hc={
     }catch(e){ return {err:String(e.message||e)}; } },
   hwFlush(){ try{ return wretchExtra.map(w=>driftFlush(hwKey(w))); }catch(e){ return {err:String(e.message||e)}; } },
   hwTune(k,v){ try{ return driftTune(k,v); }catch(e){ return {err:String(e.message||e)}; } },
-  hwHold(on){ try{ _hwHold = on!==false; return _hwHold; }catch(e){ return {err:String(e.message||e)}; } },   // QA: freeze the extras' AI so the image can be checked without being captured mid-check
+  hwHold(on){ try{ _hwHold = on!==false; return _hwHold; }catch(e){ return {err:String(e.message||e)}; } },
+  hwGlow(on){ try{ _hwGlowOn = on!==false; if(!_hwGlowOn) hwGlowStep(0); return _hwGlowOn; }catch(e){ return {err:String(e.message||e)}; } },   // QA: A/B the eye glow's cost — off parks the light and hides the trail, the same path as no creature   // QA: freeze the extras' AI so the image can be checked without being captured mid-check
   hwProbe(){ try{ return wretchExtra.map(w=>Object.assign({hid:w._hid}, driftProbe(hwKey(w)))); }catch(e){ return {err:String(e.message||e)}; } },
   hwFraming(){ try{ return wretchExtra.map(w=>Object.assign({hid:w._hid}, driftFraming(hwKey(w)))); }catch(e){ return {err:String(e.message||e)}; } },   // QA: how much of the render target the creature covers, and whether it is being cropped   // QA: mean luma/alpha of both loop stages — tells "producing nothing" apart from "too dark to see"
   hwKill(){ try{ const n=wretchExtra.length; for(let i=wretchExtra.length-1;i>=0;i--) despawnHorrific(wretchExtra[i]); return n; }catch(e){ return {err:String(e.message||e)}; } },
