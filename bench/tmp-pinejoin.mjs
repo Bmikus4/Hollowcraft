@@ -78,7 +78,22 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
         +'   base(+42) '+fmt(below)+' lum '+lum(below).toFixed(0)
         +'   band is '+(canopy&&band?Math.round(100*(1-lum(band)/Math.max(1,lum(canopy)))):0)+'% darker than the canopy');
     }
-    await page.evaluate('__hc.setTime(0.30)'); await sleep(1200);
+    // AND IN A FOG BANK. Ben: the brown bottom is not affected by fog. So the same view with the weather fog forced up -- the
+    // band has to wash toward the haze with the treeline instead of staying a hard dark strip through it.
+    await page.evaluate('__hc.setTime(0.30)'); await sleep(1000);
+    await page.evaluate('(()=>{ try{ return __hc.fog(0.85); }catch(e){ return __hc.cmdRun("/weather fog 0.85"); } })()');
+    await sleep(4000);
+    {
+      const f3=path.join(OUT,'pinejoin-'+TAG+'-fog.png');
+      await page.screenshot({path:f3});
+      const im3=decodePNG(fs.readFileSync(f3));
+      let r=0,g=0,b=0,n=0;
+      const gy3=Math.floor(im3.h*0.46);
+      for(let y=gy3;y<gy3+26;y++) for(let x=Math.floor(im3.w*0.30);x<Math.floor(im3.w*0.62);x++){ const i=(y*im3.w+x)*im3.ch; r+=im3.data[i]; g+=im3.data[i+1]; b+=im3.data[i+2]; n++; }
+      console.log('  in fog: band rows read rgb('+[r/n,g/n,b/n].map(v=>Math.round(v)).join(',')+')  — should be pale haze, not dark wood');
+    }
+    await page.evaluate('(()=>{ try{ return __hc.fog(0); }catch(e){ return __hc.cmdRun("/weather clear"); } })()');
+    await sleep(3500);
 
     const full=path.join(OUT,'pinejoin-'+TAG+'.png');
     await page.screenshot({path:full});

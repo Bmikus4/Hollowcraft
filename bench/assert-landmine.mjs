@@ -114,6 +114,41 @@ function ok(label, cond, got){ checks++; if(!cond)fails++; console.log('  '+(con
     ok('it destroyed the ground too', after2 && (before2.solidAround-after2.solidAround)>=20, {solidBefore:before2.solidAround, solidAfter:after2.solidAround, removed:before2.solidAround-after2.solidAround});
 
     // ---- CASE 3: the proven-failing control ----------------------------------------------------------------------
+    // ---- A BLOWN-UP CHEST SPILLS ----------------------------------------------------------------------------------
+    // Ben: chests that are blown up should drop all items inside. Mining one already spilled; a blast deleted the block and the
+    // chest record together, so the contents were simply gone. Stock a real chest, blow it up, count the drops.
+    console.log('\n[2b] a chest inside the blast drops its contents');
+    {
+      await page.evaluate('__hc.mineStand('+m2.x+','+(m2.y+8)+','+m2.z+')'); await sleep(1200);
+      const site = await page.evaluate(`(()=>{ const p=__hc.probe(); const x=Math.floor(p.x)+3, z=Math.floor(p.z);
+        let gy=null; for(let y=90;y>2;y--){ if(__hc.blockAt(x,y,z)){ gy=y; break; } }
+        return {x,z,gy,py:Math.floor(p.y)}; })()`);
+      // Place and stock a chest through the real chest UI path, then close it.
+      const ch = await page.evaluate('__hc.chest('+site.x+','+site.z+')');
+      await sleep(700);
+      const stocked = await page.evaluate(`(()=>{ const out=[];
+        out.push(__hc.qSet('chest',0,'diamond',9)); out.push(__hc.qSet('chest',1,'iron_ingot',7)); out.push(__hc.qSet('chest',2,'torch',5));
+        return out; })()`);
+      await page.evaluate('__hc.chestClose()'); await sleep(600);
+      console.log('  chest at '+JSON.stringify(ch)+'  stocked '+JSON.stringify(stocked));
+      const dropsBefore = (await page.evaluate('__hc.qState()')).drops;
+      // STAND BESIDE THE CHEST FIRST. mineAt places relative to the PLAYER, and the player was still parked eight blocks above
+      // an old crater, so the mine went down next to nothing and the chest survived untouched -- the check failed on its own
+      // geometry, not on the code. Two blocks away, mine one block from the chest, then step on it: the 3.4 radius covers it.
+      await page.evaluate('__hc.mineStand('+(ch.bx+2)+','+ch.by+','+ch.bz+')'); await sleep(900);
+      const mn = await page.evaluate('__hc.mineAt(-1,0,0)');
+      await sleep(600);
+      console.log('  mine at '+JSON.stringify(mn)+'  chest at ['+ch.bx+','+ch.by+','+ch.bz+']');
+      await page.evaluate('__hc.mineStand('+mn.x+','+mn.y+','+mn.z+')');
+      await sleep(1600);
+      const st = await page.evaluate('__hc.qState()');
+      const chestGone = await page.evaluate('__hc.blockAt('+ch.bx+','+ch.by+','+ch.bz+')');
+      console.log('  drops '+dropsBefore+' -> '+st.drops+'   chest block now '+chestGone);
+      ok('the chest was destroyed by the blast', chestGone===0, chestGone);
+      ok('its contents dropped as items', st.drops >= dropsBefore+3, {before:dropsBefore, after:st.drops});
+      await page.screenshot({ path: path.join(OUT,'landmine-chestspill.png') });
+    }
+
     console.log('\n[3] CONTROL — standing two blocks to the SIDE must NOT set one off');
     let m3 = await page.evaluate('__hc.mineAt(-8,0,8)');
     await page.evaluate('__hc.mineStand('+(m3.x+2)+','+m3.y+','+(m3.z+2)+')');
