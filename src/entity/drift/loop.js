@@ -89,14 +89,20 @@ const VERT = `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(positi
 
 // Every number here was found by moving it until the thing looked wrong in the right way. The demo harness
 // (demo/harness.html) puts a slider on each one; that page is the only reason these are tunable at all.
+// feed and blockMix were chosen by looking at three frames in-game, not by reasoning: at 0.13/0.55 the creature is a
+// vertical red smear with no head or limbs, which reads as a broken texture, and a glitch is not frightening. At
+// 0.25/0.32 the smear still dominates and the head only appears once you know to look for it. At 0.42/0.15 the brain
+// resolves a body FIRST — head, shoulders, arms, legs, the dark chest cavity — and it is still boiling and mottling, so
+// the hallucinated quality survives. Recognition, then wrongness: that is the order horror has to arrive in.
+// They are swept together deliberately because they fight — feed returns the clean body, blockMix eats its features.
 export const TUNING = {
-  feed:      0.13,   // share of the clean render blended in per step = 1/memory-length. Higher is saner, lower is soup.
+  feed:      0.42,   // share of the clean render blended in per step = 1/memory-length. Higher is saner, lower is soup.
   alphaLag:  0.62,   // silhouette feed as a fraction of colour feed
   warp:      1.00,   // gain on the action-driven flow
   curl:      0.0016, // gain on the idle wander (curl() output is ~1/e, so this is small by construction)
   noise:     0.022,
   grid:      22.0,   // latent cells across the frame
-  blockMix:  0.55,   // how much of the history sample snaps to that grid
+  blockMix:  0.15,   // how much of the history sample snaps to that grid
   decay:     0.994,
   burstTau:  0.30,   // seconds for a flush burst to decay to 1/e
 };
