@@ -2935,12 +2935,12 @@ const oceanLayer=new THREE.Mesh(_horizGeo, oceanMat); oceanLayer.frustumCulled=f
 // Starting at the wall left a ring of nothing; 0.72 nearly closed it and Ben still saw "a slight gap", so it reaches further
 // in again. Overlap costs nothing here -- real water draws over it.
 //
-// OUTER 7.0, and it is the cap above that allows it (Ben: "in general, it is not wide enough"). 3.0 was chosen only because
+// OUTER 16.0 (Ben: "make the ocean ring you created much bigger around to the outside"; was 7.0, and 3.0 before that), and it is the cap above that allows it (Ben: "in general, it is not wide enough"). 3.0 was chosen only because
 // an uncapped quadratic sent anything further out plunging below the view; with the fall flattened, radius is free to grow.
 // Ben's own suggestion was to make this an OVAL, wide across the player's view -- deliberately not done, because to be wide
 // "left to right for the player" an ellipse has to follow the camera's yaw, and then the sea's outer edge slides every time
 // he turns his head. A bigger circle buys the same width with nothing moving.
-const _farSeaGeo=(()=>{ const g=new THREE.RingGeometry(0.55, 7.0, 128, 32);   // radii as fractions of the render wall; scaled each frame
+const _farSeaGeo=(()=>{ const g=new THREE.RingGeometry(0.55, 16.0, 128, 44);   // radii as fractions of the render wall; scaled each frame
   g.rotateX(-Math.PI/2);                                               // RingGeometry is built in XY; the sea is a horizontal plane
   const n=g.attributes.position.count;
   g.setAttribute('aTop', new THREE.BufferAttribute(new Float32Array(n).fill(1), 1));    // every vertex is a top face: this is a surface, never a side
@@ -3155,7 +3155,8 @@ function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.p
   if(!farSea){ farSea=new THREE.Mesh(_farSeaGeo, waterMat); farSea.frustumCulled=false; farSea.renderOrder=-5.5; oceanLayer.add(farSea); }
   // Nudged 3cm below sea level so that in the overlap band real chunk water wins outright. Both surfaces carry the same
   // curve, so without the offset they are coplanar over that whole ring and z-fight into a shimmering mess.
-  { const wall=CFG.RENDER_DIST*CK; farSea.scale.set(wall, 1, wall); farSea.position.set(0, CFG.SEA-0.03-camera.position.y, 0); }
+  { const wall=CFG.RENDER_DIST*CK; farSea.scale.set(wall, 1, wall); farSea.position.set(0, CFG.SEA-0.03-camera.position.y, 0);
+    waterMat.uniforms.uRingFade.value = wall*16.0; }   // the annulus outer radius, so the water shader fades to the ring colour exactly at its rim
   { // ---- THE HORIZON COLOUR: THE NIGHT SEA, AT EVERY HOUR ----
     // Ben 07-28: "much darker even during the day ... zero blending on this even during the day, just make sure it is colour
     // matched to the water 24/7 ... copy the bottom of it at night, with lighting overrides to the day."
@@ -3268,7 +3269,7 @@ const waterMat = new THREE.ShaderMaterial({
   uniforms:Object.assign({
     uTime:globalU.uTime, uSunDir:globalU.uSunDir, uMoonDir:globalU.uMoonDir,
     uDay:globalU.uDay, uCamPos:globalU.uCamPos, uFogColor:{value:scene.fog.color},
-    uFogDensity:{value:scene.fog.density}, uDeep:_uWaterDeep, uRing:_uWater,
+    uFogDensity:{value:scene.fog.density}, uDeep:_uWaterDeep, uRing:_uWater, uRingFade:{value:2400},   // the far-sea annulus's outer radius, set per frame in updateHorizon
     uWx:{value:0}, uCurveR:{value:20.0}, uCurveK:{value:0.0022}   // THE WORLD CURVE — flat to 20 blocks, then k*(d-20)^2. k is small on purpose: at 40 blocks that is 0.9 down, at 96 it is 12.6, so the tip-over is gentle where you can see detail and only steepens where it reads as the sea falling away. "Subtle."
   }),
   vertexShader:`
@@ -3320,7 +3321,7 @@ const waterMat = new THREE.ShaderMaterial({
   fragmentShader:`
     precision highp float;
     varying float vTop; varying float vDepth; varying vec3 vW; varying vec3 vN; varying float vFog; varying float vCrest;
-    uniform vec3 uSunDir,uMoonDir,uCamPos; uniform float uDay,uTime; uniform vec3 uFogColor; uniform float uFogDensity, uDeep, uWx; uniform vec3 uRing;
+    uniform vec3 uSunDir,uMoonDir,uCamPos; uniform float uDay,uTime; uniform vec3 uFogColor; uniform float uFogDensity, uDeep, uWx; uniform vec3 uRing; uniform float uRingFade;
     float h2(vec2 p){ return fract(sin(dot(p,vec2(12.9,78.2)))*43758.5); }
     float vn2(vec2 x){ vec2 i=floor(x),f=fract(x); f=f*f*(3.0-2.0*f); return mix(mix(h2(i),h2(i+vec2(1,0)),f.x),mix(h2(i+vec2(0,1)),h2(i+vec2(1,1)),f.x),f.y); }
     void main(){
@@ -3363,6 +3364,15 @@ const waterMat = new THREE.ShaderMaterial({
       // live scene density — only the TARGET was wrong.
       vec3 fogTo = mix(uRing, uFogColor, clamp(uWx*0.95, 0.0, 1.0));
       col=mix(col, fogTo, ff);    // ONE DEFINITION for the far edge: the ring colour computed in updateHorizon, handed in as a uniform. It used to recompute (uFogColor*0.5+tint)*uDeep here while the backdrop ring built its own value in JS, and the two drifted — same formula, different results, a visible band at the sea line. Now the surface fogs to exactly what stands beyond it, whatever that is, so the sea line cannot mismatch and the colour can be tuned in one place — the far EDGES of the water 5x DARKER (Ben 07-27), meeting the dark backdrop ring without a bright seam. uDeep 0.2 = shipped; Settings > VISUALS drives it.
+      // THE OUTER EDGE LANDS EXACTLY ON THE RING (Ben, choosing this over darkening the ring itself). Fogging toward uRing
+      // is not enough on its own: water is view-dependent and the ring is not. Looked at steeply from above, Fresnel gives
+      // real water its dark deep colour while the painted ring stays flat blue, so the two met on a hard curve far from the
+      // horizon -- the "line or divider" in bench/results/skydiv-night-down.png. Forcing the last stretch onto uRing
+      // regardless of angle or weather means the far sea cannot disagree with what stands beyond it, at any hour.
+      // uRingFade is the annulus's own outer radius, set per frame, so this fade always ends exactly at its rim.
+      // Horizontal distance, not vFog: vFog is view DEPTH, so looking steeply down shortens it and the fade would creep
+      // inward exactly when the divider is most visible. vW is the world position this fragment sits at.
+      col=mix(col, uRing, smoothstep(uRingFade*0.45, uRingFade*0.97, length(vW.xz-uCamPos.xz)));
       gl_FragColor=vec4(col,alpha);
     }`
 });
