@@ -1406,6 +1406,23 @@ function pastelPx(hex,x,y,r){
   return [cr+d, cg+d, cb+d];
 }
 PASTELS.forEach(([n,c])=>paintTile(n,(x,y,r)=>pastelPx(c,x,y,r)));
+// ---- SANDBAG HESSIAN — the surface of ONE bag, not a painted wall of them -------------------------------------------
+// APPENDED, and it has to be: paintTile seeds its rng from the ATLAS INDEX, so inserting a tile re-rolls the grain of
+// every tile below it. For the same reason ind_sandbag STAYS where it is even though the model stops wearing it — that
+// tile draws rows of bags flat onto a cube face, which is correct for a cube and wrong the moment each bag is geometry.
+// Woven, so TWO frequencies: the warp/weft crossing at 1px pitch, then a slow slub that keeps a large face off a flat.
+// The edges darken because every face of a filled bag is a shoulder curving away from the light, and that vignette is
+// what stops a boxy bag reading as a box. The bottom rows are soiled: bags sit in mud and the fill packs down into them.
+// Palette is ind_sandbag's exactly ([g, g-16, g-44]) — a new tile that does not match the industrial pack beside it
+// reads as a mod rather than as the game.
+paintTile('sandbag_cloth',(x,y,r)=>{
+  const warp=((x&1)?4:-4)+((y&1)?3:-3);                                          // the weave: crossing threads
+  const slub=(Math.sin(x*0.8+y*0.35)+Math.sin(x*0.27-y*0.72))*4.5;               // slow slub/sag across the face
+  const edge=-9*Math.max(0, 1-Math.min(Math.min(x,15-x),Math.min(y,15-y))/2.5);  // shoulders falling away from the light
+  const soil=(y>13)?-16-(y-13)*6:0;                                              // ground contact — mud and packed fill
+  const v=jit(r,0,13), g=150+v+warp+slub+edge+soil;
+  return [g, g-16, g-44];
+});
 const ATLAS_COUNT = _tileCursor;
 
 // ---- DataArrayTexture: one layer per tile → zero atlas bleed + per-layer mipmaps ----
@@ -1581,7 +1598,11 @@ block('reinforced_glass',{cat:'cutout', t:['ind_glass','ind_glass','ind_glass'],
 block('riveted_plate',   {cat:'solid', t:['ind_plate','ind_plate','ind_plate'], hard:4.0, tool:'pickaxe'});
 block('corrugated_sheet',{cat:'solid', t:['ind_rust','ind_rust','ind_rust'], hard:1.4, tool:'pickaxe'});
 block('steel_grate',     {cat:'cutout', t:['ind_grate','ind_grate','ind_grate'], opaque:false, solid:true, hard:2.0, tool:'pickaxe', drop:'steel_grate'});        // walkway you can see the drop through
-block('sandbag',         {cat:'solid', t:['ind_sandbag','ind_sandbag','ind_sandbag'], hard:0.9});
+// SANDBAGS ARE LAID BAGS, NOT A CUBE WEARING A BAG PICTURE (Ben 08-04). cat:'model' with opaque:false is not a
+// preference: greedyMesh's opaque pass selects on `id!==AIR && isOpaque[id]` and never consults blockCat, so an opaque
+// model block is drawn TWICE — a full greedy cube AND its model. solid:true keeps it blocking movement, and blockH stays
+// 1 (no h:) because it fills its cell. Sky occlusion is restored through the separate occludesSky mask below.
+block('sandbag',         {cat:'model', opaque:false, solid:true, model:'sandbag', tile:'sandbag_cloth', t:['ind_sandbag','ind_sandbag','ind_sandbag'], hard:0.9});
 block('wall_vent',       {cat:'solid', t:['ind_vent','ind_vent','ind_vent'], hard:1.8, tool:'pickaxe'});
 block('industrial_pipe', {cat:'solid', t:['ind_pipe','ind_pipe','ind_pipe'], hard:2.4, tool:'pickaxe'});
 block('fuse_box',        {cat:'solid', t:['ind_panel','ind_panel','ind_panel'], hard:1.6, tool:'pickaxe', light:5});                                             // its LED is the light: 5 is a glow on the wall beside it, not a lamp
@@ -1647,6 +1668,10 @@ const AIR=BID.air, WATER=BID.water;
 const occludesSky = isOpaque.slice();
 occludesSky[BID.leaves_core] = 0;   // opaque for rendering/culling, transparent to skylight
 occludesSky[BID.leaves]      = 0;   // already non-opaque; explicit for safety
+// THE MIRROR OF THE TWO LINES ABOVE, and the reason this mask is separate from isOpaque at all. A sandbag had to give up
+// isOpaque to stop double-drawing (see its block def), but it is a packed cell of earth: it must still cap its column or
+// every bunker, revetment and gun pit built out of them bakes as open sky and leaks daylight through its own roof.
+occludesSky[BID.sandbag]     = 1;   // non-opaque for RENDERING, solid to SKYLIGHT
 
 // =====================================================================
 //  WORLD STORAGE   (flat Uint8Array per chunk, index x + z*16 + y*256)
@@ -5229,6 +5254,12 @@ function rampSurfAt(wx,wz){ const fx=Math.floor(wx), fz=Math.floor(wz), fy0=Math
 function aabbHits(x,y,z){
   const x0=Math.floor(x-HW),x1=Math.floor(x+HW), y0=Math.floor(y),y1=Math.floor(y+PH-0.02), z0=Math.floor(z-HW),z1=Math.floor(z+HW);
   for(let xx=x0;xx<=x1;xx++)for(let yy=y0;yy<=y1;yy++)for(let zz=z0;zz<=z1;zz++){ const b=getBlock(xx,yy,zz);
+    // AN OPEN DOOR IS STILL A PANEL (Ben 08-04: "we should not be able to walk inside doors"). The open ids are solid:false so
+    // that the DOORWAY is passable, and that made the whole cell passable — including the leaf, which has merely swung 90° to
+    // the -x face and is as physical as it was a moment ago. Tested before the isSolid guard rather than by making the block
+    // solid: isSolid also feeds solidAt(), which is what entities path against, and an open door that mobs will not walk
+    // through is a worse bug than the one being fixed.
+    if(b===BID.door_open||b===BID.door_top_open){ if(x+HW>xx && x-HW<xx+0.33 && z+HW>zz+0.01 && z-HW<zz+0.99) return true; continue; }
     if(b===AIR||!isSolid[b]) continue;
     if(b===BID.door||b===BID.door_top){ if(x+HW>xx+0.01 && x-HW<xx+0.99 && z+HW>zz && z-HW<zz+0.33) return true; continue; }   // door hitbox = the LEAF (thin slab on the -z face), not the whole cell
     const _m=B[b].model;
@@ -6958,6 +6989,47 @@ function updateVaultDoors(dt){
         const sp=Math.min(1,a.t/_VAULT_SPIN), spin=(a.open?1:-1)*(1-(1-sp)*(1-sp))*Math.PI*3;   // three turns of the handwheel, decelerating into the swing
         if(alongX) ud.vaultWheel.rotation.z=done?0:spin; else ud.vaultWheel.rotation.x=done?0:spin; } }
     if(done) delete _vaultFx[k]; } }
+// NO CREATURE PARTS INSIDE THE WORLD (Ben 08-04: "we should not be able to see any creatures body parts clipping through blocks").
+//
+// A creature collides as one upright box, but it is DRAWN as forty jointed parts that reach well outside it: the Wretch's arms are
+// nearly three blocks long, its tentacles spill forward out of the jaw, and a spider's legs splay a block to each side. Standing in
+// a doorway or pressed to a wall, those parts end up inside the stone and stick out of the far face, which is the artefact.
+//
+// The honest fix -- per-limb collision that keeps every part in open air -- is a physics rewrite, and it would also break poses that
+// are deliberately impossible (the cling, the crawl, the grab). What actually has to be true is narrower: a part that is INSIDE a
+// block must not be drawn. So each frame one rig is walked and every mesh whose centre sits in an opaque cell is hidden until it
+// comes back out. Hiding a whole mesh is coarser than clipping it at the wall plane, but the parts are small and jointed, so what
+// you see is a limb ending at the surface it entered rather than a limb passing through it.
+//
+// TWO RULES KEEP THIS FROM FIGHTING THE ANIMATION CODE, which owns .visible for its own reasons (the extra demon arms, the
+// tentacles, the boss forms): it only ever hides something already visible, and it only ever restores something IT hid, tracked in
+// userData._cclip. Anything the game turned off stays off. It also stands down entirely during a grab -- the jumpscare pushes the
+// head through the camera and half the world on purpose, and culling it would delete the scare.
+// ?noclipcull=1 disables it, so a bench can show the artefact still exists to be fixed on this build.
+const _CLIP_OFF = Q.get('noclipcull')!=null;
+let _clipTurn=0; const _clipV=new THREE.Vector3();
+function _clipInSolid(v){ const b=getBlock(Math.floor(v.x),Math.floor(v.y),Math.floor(v.z));
+  return b!==AIR && b!==WATER && isOpaque[b]; }   // opaque only: a part inside glass or leaves is meant to be seen through them
+function clipRig(root, restoreOnly){ if(!root) return 0; let n=0;
+  root.traverse(o=>{ if(!o.isMesh) return;
+    if(!o.visible && !o.userData._cclip) return;                                  // the game hid this one — not ours to touch
+    if(!restoreOnly){ o.getWorldPosition(_clipV);
+      if(_clipInSolid(_clipV)){ if(o.visible){ o.visible=false; o.userData._cclip=1; n++; } return; } }
+    if(o.userData._cclip){ o.visible=true; o.userData._cclip=0; } });
+  return n; }
+function updateCreatureClip(){ if(_CLIP_OFF || player.grabbed) return;
+  const rigs=[];
+  if(typeof wretch!=='undefined' && wretch.group) rigs.push([wretch.group, !wretch.active]);
+  if(typeof wretchExtra!=='undefined' && wretchExtra) for(const w of wretchExtra) if(w&&w.group) rigs.push([w.group, !w.active]);
+  if(typeof animals!=='undefined' && animals) for(const a of animals) if(a&&a.mesh) rigs.push([a.mesh, !!a.dead]);
+  if(!rigs.length) return;
+  // ONE RIG PER FRAME, round-robin. A full walk is a few hundred matrix updates; every rig every frame would be a real cost for a
+  // correction nobody can perceive at 60 Hz, and a part is wrong for at most a frame or two longer this way.
+  _clipTurn=(_clipTurn+1)%rigs.length; const [g,dead]=rigs[_clipTurn];
+  if(dead){ clipRig(g,true); return; }   // a corpse/ragdoll must not inherit our hidden parts — hand every one of them back
+  const dx=g.position.x-player.pos.x, dz=g.position.z-player.pos.z;
+  if(dx*dx+dz*dz > 40*40) return;        // out of sight, out of budget
+  clipRig(g,false); }
 function _vaultBreak(h, drop){ const c=_vaultCells(h.x,h.y,h.z); if(!c) return false;
   for(const p of [[c.x,c.y,c.z], ...c.parts]){ setBlockWorld(p[0],p[1],p[2],AIR,true); if(typeof netEdit==='function') netEdit(p[0],p[1],p[2],AIR); }
   if(!player.creative) drop();
@@ -8164,7 +8236,7 @@ function loop(){ try{
   _bulkRun(buildCabin);   // build the cabin even on the menu so the cinematic's cabin shot has something to frame
   if(started){ const B=_BUILDERS; _builderIdx=(_builderIdx+1)%B.length; _bulkRun(B[_builderIdx]); }   // ONE builder per frame, in bulk-edit mode: a village fires as ~3ms of array writes + a deferred remesh wave instead of a 50-90ms frame; a 16-frame poll rotation delays a structure's appearance imperceptibly
   assignPointLights();
-  updateBlockFx(dt); updateCookingFx(dt); updateChimes(dt); updateVaultDoors(dt);
+  updateBlockFx(dt); updateCookingFx(dt); updateChimes(dt); updateVaultDoors(dt); updateCreatureClip();
   scrUpdate();   // CCTV: point each monitor at its tile and re-render exactly ONE camera this frame (see SCR)
   icbmUpdate(dt);   // mushroom cloud growth/fade + the radiation dose
   icbmFlight(dt);   // …and the rocket's arc, which ends by calling the same icbmDetonate the harness drives
@@ -19215,7 +19287,10 @@ function buildShrine(){ if(_shrineDone)return; const sx=spawnX+90, sz=spawnZ-40;
     for(let y=1;y<=3;y++){ if(xhash(sx+dx,y,sz+dz,41)<0.30) continue;          // gaps = ruin
       if(dz===4&&Math.abs(dx)<=1) continue;                                    // doorway (front, toward the wood)
       setBlockWorld(sx+dx,gy+y,sz+dz, xhash(sx+dx,y,sz+dz,3)<0.5?BID.mossy:BID.cobble, true); } }
-  setBlockWorld(sx,gy+1,sz-3,BID.slab,true);
+  // A FULL BLOCK UNDER THE CANDELABRA, not a slab (Ben 08-04). The candelabra is placed at gy+2 and drawn from its own cell's
+  // floor, so on a half-height altar it stood in air with a visible gap under its base — and the two candles beside it sit on
+  // the ground at gy+1, which made the altar read as sunken rather than as a step up to the thing that holds the light.
+  setBlockWorld(sx,gy+1,sz-3,BID.cobble,true);
   setBlockWorld(sx-1,gy+1,sz-3,BID.candle,true); setBlockWorld(sx+1,gy+1,sz-3,BID.candle,true);
   setBlockWorld(sx,gy+2,sz-3,BID.candelabra,true);
   addNote(sx,gy+1.1,sz-2.6, "They built it facing the wood, not the sea. Whatever they knelt to here, they begged it to stay OUT.");
@@ -20711,6 +20786,51 @@ window.__hc={
       const okB=_vaultBreak({x,y,z,b:getBlock(x,y,z)}, ()=>{ dropped++; });
       player.creative=was;
       return { ok:okB, dropped, cleared:cells.filter(p=>getBlock(p[0],p[1],p[2])===AIR).length }; }catch(e){ return {err:String(e.message||e)}; } },
+  // THE LEAF AS IT IS ACTUALLY BUILT IN THE WORLD -- the clone inside the chunk group, not the item preview. Reports the span it
+  // covers (must fill the 2x2 without reaching a wall's own plane) and the two nodes the open animation turns.
+  vaultLeafProbe(x,y,z){ try{ const c=_vaultCells(x,y,z); if(!c) return {err:'no vault door there'};
+      const ch=getChunk(c.x>>4,c.z>>4); if(!ch||!ch.group) return {err:'chunk not meshed'};
+      let g=null; ch.group.traverse(o=>{ if(!g&&o.userData&&o.userData.vaultModel&&o.userData.vaultHinge
+        && Math.abs(o.position.x-((c.x&15)+0.5))<0.02 && Math.abs(o.position.y-c.y)<0.02 && Math.abs(o.position.z-((c.z&15)+0.5))<0.02) g=o; });
+      if(!g) return {err:'leaf clone not found'};
+      const bb=new THREE.Box3().setFromObject(g), sz=bb.getSize(new THREE.Vector3());
+      let meshes=0; g.traverse(o=>{ if(o.isMesh)meshes++; });
+      return { open:c.open, alongX:c.alongX, meshes, span:+ (c.alongX?sz.x:sz.z).toFixed(3), tall:+sz.y.toFixed(3), thick:+(c.alongX?sz.z:sz.x).toFixed(3),
+               hinge:+g.userData.vaultHinge.rotation.y.toFixed(3),
+               wheel:+(c.alongX?g.userData.vaultWheel.rotation.z:g.userData.vaultWheel.rotation.x).toFixed(3),
+               animating:!!_vaultFx[c.x+','+c.y+','+c.z] }; }catch(e){ return {err:String(e.message||e)}; } },
+  vaultTick(n,dt){ try{ for(let i=0;i<(n|0||1);i++) updateVaultDoors(dt||0.016); return Object.keys(_vaultFx).length; }catch(e){ return {err:String(e.message||e)}; } },
+  // Are any surface decorations standing on nothing? Scans the columns around the player at their own ground level, which is the
+  // only band worldgen puts sulfur/pebbles in. floating must be 0.
+  sulfurSeats(r){ try{ r=Math.max(1,Math.min(96,r|0||48)); const P=player.pos; let n=0; const bad=[];
+      for(let dx=-r;dx<=r;dx++)for(let dz=-r;dz<=r;dz++){ const x=Math.floor(P.x)+dx, z=Math.floor(P.z)+dz;
+        if(!getChunk(x>>4,z>>4)) continue; const g0=groundYAt(x,z);
+        for(let y=Math.max(1,g0-3); y<=g0+3; y++){ const b=getBlock(x,y,z); if(b!==BID.sulfur_ore && b!==BID.pebbles) continue; n++;
+          const u=getBlock(x,y-1,z); if(!(u && isSolid[u] && blockCat[u]!=='cross')) bad.push([x,y,z,u]); } }
+      return { nodes:n, floating:bad.length, first:bad.slice(0,6) }; }catch(e){ return {err:String(e.message||e)}; } },
+  // THIRD PERSON, end to end: is there a body, is it wearing what you are wearing, is the held item in its hand, is the hand
+  // where the held light is coming from, and are all three first-person hand groups actually off.
+  tpsProbe(on){ try{ if(on!=null){ _tpsOn=!!on; _tpsPos.set(0,0,0); }
+      updateTpsBody(0.016); const P=_tpsBody; if(!P) return { tps:_tpsOn, body:false };
+      const hw=new THREE.Vector3(); P.hand.getWorldPosition(hw);
+      return { tps:_tpsOn, body:!!P.group.visible, yaw:+P.group.rotation.y.toFixed(2),
+        dy:+(P.group.position.y-player.pos.y).toFixed(2), dxz:+Math.hypot(P.group.position.x-player.pos.x,P.group.position.z-player.pos.z).toFixed(2),
+        pack:!!(P.pack&&P.pack.visible), hat:!!(P.strawHat&&P.strawHat.visible), hazmat:!!(P.hazmat&&P.hazmat.visible),
+        armor:P.armorMesh.map(m=>!!m.visible), held:P.held||null, heldMesh:!!P.heldMesh,
+        handDist:+Math.hypot(hw.x-player.pos.x, hw.y-(player.pos.y+1.0), hw.z-player.pos.z).toFixed(2),
+        legSwing:+P.legL.rotation.x.toFixed(3),
+        hands:{ main:!!(view&&view.group&&view.group.visible), off:!!(typeof offView!=='undefined'&&offView.group.visible), arm:!!(typeof offArm!=='undefined'&&offArm.group.visible) },
+        lightAtHand:+Math.hypot(heldLight.position.x-hw.x, heldLight.position.y-hw.y, heldLight.position.z-hw.z).toFixed(2),
+        lightOn:+heldLight.intensity.toFixed(1) }; }catch(e){ return {err:String(e.message||e)}; } },
+  pickProbe(){ try{ const h=raycastVoxel(); pickBlock(); const s=inv[selSlot];
+      return { looking:h?B[h.b].name:null, held:s?s.id:null, n:s?s.n:0, slot:selSlot }; }catch(e){ return {err:String(e.message||e)}; } },
+  // How many of the Wretch's parts are currently inside a block. Teleport it into a wall first; hid must be > 0, and every hidden
+  // part must come back when it steps out (call again after moving it).
+  clipProbe(){ try{ const g=(typeof wretch!=='undefined')?wretch.group:null; if(!g) return {err:'no wretch rig'};
+      clipRig(g,false); let tot=0,hid=0; g.traverse(o=>{ if(o.isMesh){ tot++; if(o.userData._cclip)hid++; } });
+      return { meshes:tot, hidden:hid, wx:+g.position.x.toFixed(1), wy:+g.position.y.toFixed(1), wz:+g.position.z.toFixed(1) }; }catch(e){ return {err:String(e.message||e)}; } },
+  clipRelease(){ try{ const g=(typeof wretch!=='undefined')?wretch.group:null; if(!g) return {err:'no wretch rig'};
+      clipRig(g,true); let hid=0; g.traverse(o=>{ if(o.isMesh&&o.userData._cclip)hid++; }); return { hidden:hid }; }catch(e){ return {err:String(e.message||e)}; } },
   // TWO CALLS, not one. updateChimes binds to the per-block model clone inside the chunk group, and that clone does not exist
   // until the chunk has remeshed — a single hook that placed the lamp and shoved it in the same tick reported bound:false and
   // looked like a lamp with no pendulum in it.
@@ -21120,6 +21240,7 @@ window.__hc={
   // wait through); with no argument it reports, per bird, whether the model faces its own velocity and where its wingtip is.
   // Both have to be numbers: "flying sideways" and "wings not flapping" are claims about a heading and about a moving vertex,
   // and a screenshot of a 3-metre black silhouette 110 blocks up cannot settle either.
+  hits(x,y,z){ try{ return aabbHits(+x,+y,+z); }catch(e){ return {err:String(e.message||e)}; } },   // QA: does the player's AABB collide at this exact point? A collision claim tested by walking into something is really a claim about physics, friction and step-up as well
   skyFlock(o){ try{ if(o&&o.spawn){ _birdT=0; return {armed:true, live:skyBirds.length}; }
       return skyBirds.map(b=>{ const f=new THREE.Vector3(0,0,1).applyQuaternion(b.m.getWorldQuaternion(new THREE.Quaternion()));
         const vel=new THREE.Vector3(Math.sin(b.dir),0,Math.cos(b.dir));
