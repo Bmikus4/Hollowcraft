@@ -5581,6 +5581,13 @@ function physics(dt){
     if(aabbHits(p.pos.x,ny,p.pos.z)){
       if(p.vel.y<=0){ const fb=getBlock(p.pos.x,Math.floor(ny),p.pos.z); let topH=1;
         if(fb!==AIR){ if(B[fb].model==='corner')topH=cornerQ(fb,p.pos.x,p.pos.z)?1:0.5; else if(blockH[fb]<1)topH=blockH[fb]; }   // stairs/roofs are ramps (handled below), not here
+        // THE SNAP IS A COLLISION CORRECTION, AND THE EYE SHOULD NOT SEE IT (Ben 08-04: "when i jump there is a weird snap to the
+        // ground, it should be a softer landing"). Falling at 8 m/s, a frame carries you up to 0.14 of a block PAST the surface,
+        // and this clamp puts that back in one frame — an instant upward jolt of the camera at the exact moment you land. The
+        // body still snaps, because collision must be exact; the correction is recorded and the EYE is walked down through it over
+        // about a tenth of a second, so what you see is the ground arriving rather than the camera being shoved.
+        const _corr=(Math.floor(ny)+topH)-ny;
+        if(_corr>0.004) p._landCorr=Math.min(0.34, Math.max(p._landCorr||0, _corr));
         p.pos.y=Math.floor(ny)+topH; p.onGround=true; p._impactVy=p.vel.y; } else { p.pos.y=Math.floor(ny+PH)-PH-0.001; }   // land ON a corner-step/slab top or a full block; else clamp head below the ceiling
       p.vel.y=0;
     } else p.pos.y=ny;
@@ -5591,14 +5598,17 @@ function physics(dt){
   // FALL DAMAGE: based on IMPACT VELOCITY (momentum), not distance — water clamps fall velocity to ~-4, so a splash-landing is harmless
   const landed = p.onGround && !p._wasGround;
   p.landT=Math.max(0,(p.landT||0)-dt*3.0);   // decays BEFORE this frame's landing can set it, or the impact would be eaten on arrival
+  if(p._landCorr) p._landCorr = (p._landCorr>0.0015) ? p._landCorr*Math.exp(-dt*13) : 0;   // the eye catches up with the body in ~0.1 s
   if(landed && p._impactVy!=null){ const spd=-p._impactVy;
     const wet = p.inWater || getBlock(Math.floor(p.pos.x),Math.floor(p.pos.y),Math.floor(p.pos.z))===WATER || getBlock(Math.floor(p.pos.x),Math.floor(p.pos.y+0.9),Math.floor(p.pos.z))===WATER;
     if(spd>16 && !wet) damage(Math.min(20,Math.round((spd-14)*1.1)),'the fall broke you','env');
     // LANDING COSTS YOU SOMETHING. You arrive on your legs, not on wheels: a real landing absorbs into the knees and bleeds
     // speed. Anything under 7 m/s (a hop, a kerb, a stair) is free, so ordinary walking is untouched — this only shows up when
     // you actually drop. p.landT drives the camera dip and the body's knee bend, so one number keeps them in step.
-    if(spd>7 && !wet){ const f=Math.max(0.55, 1-(spd-7)*0.045); p.vel.x*=f; p.vel.z*=f;
-      p.landT=Math.min(0.34,(spd-7)*0.032); } }
+    // The knee-give starts at a plain jump's landing speed (~8) rather than only on a real drop, because a jump that lands with
+    // no give at all is the other half of what reads as a snap. Speed is only bled off above 7, as before.
+    if(spd>7 && !wet){ const f=Math.max(0.55, 1-(spd-7)*0.045); p.vel.x*=f; p.vel.z*=f; }
+    if(spd>4 && !wet) p.landT=Math.min(0.34,(spd-4)*0.026); }
   p._impactVy=null;
   p._wasGround=p.onGround;
   if(p.pos.y<-24 && !p.fly){ damage(4,'the dark below','env'); respawn(); }
@@ -8161,7 +8171,7 @@ function updateCamera(dt){
   // The landing dip rides on the bob because it is the same quantity — where the eye is relative to the body. One sine hump over
 //  the life of p.landT: the knees give, then push back. See the landing block in physics for where landT comes from.
   const landDip = p.landT>0 ? Math.sin(Math.min(1,p.landT/0.34)*Math.PI)*0.20 : 0;
-  const bobY=Math.sin(p.bob*2)*(swim?0.08:0.045)*clamp((speed+(swim?1.6:0))/6,0,1) + (swim?Math.sin(clock.elapsedTime*1.15)*0.04:0) - landDip;   // swim stroke + a gentle buoyant bob even at rest
+  const bobY=Math.sin(p.bob*2)*(swim?0.08:0.045)*clamp((speed+(swim?1.6:0))/6,0,1) + (swim?Math.sin(clock.elapsedTime*1.15)*0.04:0) - landDip - (p._landCorr||0);   // swim stroke + a gentle buoyant bob even at rest, minus the landing correction the body just took
   const bobX=Math.cos(p.bob)*(swim?0.05:0.03)*clamp((speed+(swim?1.0:0))/6,0,1);
   const swimRoll=swim?Math.sin(p.bob)*0.025*clamp(speed/3,0.4,1):0;   // slight body roll with each stroke
   const targetFov = view.ads ? 62 : (74 + (p.sprint?9:0));                 // ADS → only a mild bring-to-eye zoom; the SCOPE GLASS (PiP) does the real magnification
@@ -8302,6 +8312,8 @@ function updateTpsBody(dt){
   P.group.rotation.y = P.bodyYaw + Math.PI;                                     // the model is built facing +z (its feet point that way); the camera looks down -z
   if(P.head){ P.head.rotation.y = dy; P.head.rotation.x = -player.pitch*0.85; } // the neck carries the residual yaw, and all of the pitch
   P.group.position.y -= player.sneak?0.22:0;                                    // crouch: sink the whole body, matching the eye drop
+  P.group.position.y -= (player._landCorr||0);                                  // the body took a collision snap; the eye is walking down through it, and so is this
+  if(player.landT>0) P.group.position.y -= Math.sin(Math.min(1,player.landT/0.34)*Math.PI)*0.10;   // …and the whole body dips with it
   // WALK CYCLE from actual velocity rather than from the keys: knockback, water drift and a slide down a slope all move you
   // without a key held, and a body that only animates while you press W reads as broken in exactly those moments.
   const sp=Math.hypot(player.vel.x,player.vel.z);
@@ -8309,6 +8321,9 @@ function updateTpsBody(dt){
   const sw=Math.sin(P.gait)*Math.min(0.72, sp*0.13);
   P.legL.rotation.x=sw; P.legR.rotation.x=-sw;
   P.armL.rotation.x=-sw*0.8; P.armR.rotation.x=sw*0.8;
+  // The knee-give goes on AFTER the walk cycle, not before it: the cycle ASSIGNS these angles, so a bend applied first is simply
+  // overwritten and the landing reads as a body dropping on straight legs.
+  if(player.landT>0){ const k=Math.sin(Math.min(1,player.landT/0.34)*Math.PI)*0.5; P.legL.rotation.x+=k; P.legR.rotation.x+=k; }
   // THE HELD ITEM IS IN THE HAND (Ben: "should render from the hand"), which is also where a gun has to be for the arm pose to
   // mean anything: holding a rifle raises the right arm to point it down the look direction instead of letting it swing.
   const hs=inv[selSlot], hid=hs?hs.id:null;
@@ -8725,7 +8740,15 @@ function loop(){ try{
   T.begin(TID.uniforms);
   if(gradePass){ gradePass.uniforms.uTime.value=clock.elapsedTime; gradePass.uniforms.uDark.value=1-globalU.uDay.value; gradePass.uniforms.uWhiteVoid.value=(typeof VOID!=='undefined'&&VOID.on)?(VOID.whiteout==null?1:VOID.whiteout):0; }   // grain+vignette rise as it darkens; PURE white glow on the initial void switch, then FADES to standard as the fractal zooms in (VOID.whiteout ramp)
   if(godrayPass){ camera.updateMatrixWorld();                                            // project the sky-sun direction to screen space for the god-ray origin
-    _sunProj.copy(camera.position).addScaledVector(globalU.uSunDir.value, 2000).project(camera);
+    // INSIDE THE FAR PLANE, or this pass never runs at all. The sun proxy was placed 2000 blocks along the sun direction and
+    // projected; camera.far is 326.4 at rd=8 (it scales with render distance and is never remotely 2000), so the point was always
+    // outside the frustum and project() returned z = 1.001 — a hair over 1 — at every hour and every camera angle. `front` is
+    // `_sunProj.z < 1.0`, so it was ALWAYS false, so _grActive was always false, so godrayPass.enabled was always false. The
+    // god-ray pass has never rendered a frame. The plan's note that it is "gated by quality only" was reading buildComposer's
+    // gate and missing this one.
+    // Half the far plane, and the screen position is unchanged by that: a perspective camera maps an entire ray from the eye onto
+    // one NDC x,y, so distance along the sun direction only ever affected the z this test reads.
+    _sunProj.copy(camera.position).addScaledVector(globalU.uSunDir.value, camera.far*0.5).project(camera);
     const front = _sunProj.z<1.0, day=globalU.uDay.value;
     const _grActive = (_godraysOn && front && day>0.15);
     godrayPass.enabled = _grActive;                                                        // a DISABLED pass is skipped by the composer entirely — "uActive=0 passthrough" still paid a full-screen pass every frame (all night long)

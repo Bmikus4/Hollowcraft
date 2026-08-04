@@ -1,6 +1,6 @@
-// THE SOUNDTRACK'S OPENING ORDER: two minutes of silence -> the opening track, once -> the existing looping soundtrack.
-// A short stand-in is copied to sounds/intro_music.ogg for the run and removed afterwards, so this proves the SCHEDULE
-// rather than the contents of any particular file. Run it again after dropping the real track in and the same checks hold.
+// THE SOUNDTRACK'S THREE STATES: two minutes of silence at the start of a session, the existing loop in ordinary weather, and
+// the added track whenever it is RAINING. Uses the real sounds/rain_music.ogg if it is there and a short stand-in if it is not,
+// so this proves the SWITCH rather than the contents of any file.
 //   node bench/assert-music-schedule.mjs
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
@@ -17,7 +17,7 @@ const ARGS=['--enable-gpu','--ignore-gpu-blocklist','--use-angle=d3d11','--autop
 function findBrowser(){ for(const p of ['C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe','C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe']) if(fs.existsSync(p)) return p; throw new Error('no browser'); }
 let fails=0;
 const ok=(name,cond,got)=>{ if(!cond)fails++; console.log(`  ${cond?'ok  ':'FAIL'}  ${name}   ${JSON.stringify(got)}`); };
-const INTRO=path.join(ROOT,'sounds','intro_music.ogg');
+const INTRO=path.join(ROOT,'sounds','rain_music.ogg');
 const STAND_IN=path.join(ROOT,'sounds','cord1.ogg');
 (async()=>{
   const hadReal=fs.existsSync(INTRO);
@@ -37,25 +37,43 @@ const STAND_IN=path.join(ROOT,'sounds','cord1.ogg');
     const quiet = await page.evaluate(`__hc.musicProbe()`);
     console.log('  opening silence:', JSON.stringify(quiet));
     ok('the session clock is running', quiet.clockRunning===true, quiet.elapsed);
-    ok('nothing plays in the first two minutes', quiet.loopPlaying===false && quiet.introPlaying===false, {loop:quiet.loopPlaying, intro:quiet.introPlaying});
-    ok('the silence is 120 s', quiet.silence===120, quiet.silence);
+    ok('the opening silence is 3 minutes', quiet.silence===180, quiet.silence);
+    ok('nothing plays during it', quiet.loopPlaying===false && quiet.rainPlaying===false, {loop:quiet.loopPlaying, rain:quiet.rainPlaying});
+    ok('and the schedule agrees nothing should', quiet.want==='none', quiet.want);
 
-    const atTwo = await page.evaluate(`__hc.musicSkew(121)`);
-    await sleep(600);
-    const afterSilence = await page.evaluate(`__hc.musicProbe()`);
-    console.log('  after the silence:', JSON.stringify(afterSilence));
-    ok('the opening track is what starts', afterSilence.intro!=='pending' || afterSilence.introPlaying===true, {intro:afterSilence.intro, playing:afterSilence.introPlaying});
-    ok('the looping soundtrack is NOT playing under it',
-       afterSilence.intro==='done' ? true : (afterSilence.loopPlaying===false || afterSilence.loopVol===0),
-       {intro:afterSilence.intro, loop:afterSilence.loopPlaying, vol:afterSilence.loopVol});
+    // past the opening silence, dry weather -> the existing soundtrack, FADED IN
+    const dry = await page.evaluate(`(()=>{ __hc.musicRain(0); __hc.musicSkew(181); return __hc.musicTick(4,0.05); })()`);
+    console.log('  first note:', JSON.stringify(dry));
+    ok('the soundtrack starts', dry.loopPlaying===true, {loop:dry.loopPlaying, want:dry.want});
+    ok('it starts NEAR SILENT — a fade, not a cut', dry.loopVol<0.06, dry.loopVol);
+    ok('and a fade-in is actually registered', dry.fades.some(f=>f.which==='loop'&&f.dir>0), dry.fades);
+    const grown = await page.evaluate(`__hc.musicTick(60,0.05)`);   // 3 s of fade
+    ok('the fade climbs over seconds, not frames', grown.loopVol>dry.loopVol, {from:dry.loopVol, to:grown.loopVol});
+    const full = await page.evaluate(`__hc.musicTick(140,0.05)`);   // past the 8 s fade
+    ok('and it reaches the set level', Math.abs(full.loopVol-0.3)<0.02 && full.fades.length===0, {vol:full.loopVol, fades:full.fades});
 
-    const handover = await page.evaluate(`__hc.musicIntroEnd()`);
-    await sleep(400);
-    const settled = await page.evaluate(`__hc.musicProbe()`);
-    console.log('  handover:', JSON.stringify(settled));
-    ok('the opening track is marked done', settled.intro==='done', settled.intro);
-    ok('the existing soundtrack takes over', settled.loopPlaying===true, {loop:settled.loopPlaying, vol:settled.loopVol});
-    ok('and it is audible rather than ducked', settled.loopVol>0, settled.loopVol);
+    // rain: the soundtrack fades OUT, then three minutes of nothing, then the rain track fades IN
+    const wet0 = await page.evaluate(`__hc.musicRain(0.7)`);
+    ok('rain asks for the rain track', wet0.want==='rain', {want:wet0.want, rain:wet0.rain});
+    const out1 = await page.evaluate(`__hc.musicTick(20,0.05)`);
+    ok('the old track fades out rather than stopping dead', out1.fades.some(f=>f.dir<0) || out1.loopPlaying===false, out1.fades);
+    const out2 = await page.evaluate(`__hc.musicTick(120,0.05)`);   // past the 4 s fade-out
+    console.log('  handover:', JSON.stringify(out2));
+    ok('it is stopped once the fade completes', out2.loopPlaying===false, out2.loopPlaying);
+    ok('a 3-minute gap opens', out2.gap===180 && out2.inGap===true, {gap:out2.gap, inGap:out2.inGap});
+    ok('and NOTHING plays inside the gap', out2.rainPlaying===false, out2.rainPlaying);
+    const past = await page.evaluate(`(()=>{ __hc.musicSkew(181+185); return __hc.musicTick(4,0.05); })()`);
+    console.log('  after the gap:', JSON.stringify(past));
+    ok('after the gap the rain track comes in', past.rainPlaying===true, {rain:past.rainPlaying, want:past.want});
+    ok('…on a fade of its own', past.rainVol<0.06 && past.fades.some(f=>f.which==='rain'&&f.dir>0), {vol:past.rainVol, fades:past.fades});
+
+    // the boss is exempt: it cuts in at full level and does not wait for anything
+    const boss = await page.evaluate(`(()=>{ startBossMusic(); return __hc.musicProbe(); })()`).catch(()=>null);
+    if(boss && !boss.err){ ok('boss music does not fade in', boss.boss===true && boss.bossVol>0.5, {boss:boss.boss, vol:boss.bossVol});
+      const back = await page.evaluate(`(()=>{ stopBossMusic(); return __hc.musicTick(4,0.05); })()`);
+      ok('and handing back goes through the fade machine', back.boss===false, {boss:back.boss, fades:back.fades}); }
+    else console.log('  (boss music not reachable from the page scope — skipped)');
+
     ok('no page errors', errors.length===0, errors);
     await browser.close();
   } finally {
