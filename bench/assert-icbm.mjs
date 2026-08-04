@@ -123,6 +123,67 @@ const ok=(n,c,d)=>{ checks++; if(!c){fails++; console.log('  FAIL  '+n+'   '+JSO
     await page.screenshot({path: path.join(OUT, 'icbm-crater.png')});
 
 
+    console.log('\n[8] the silo and its launchpad');
+    const s0=await page.evaluate('__hc.silo()');
+    console.log('  site: '+JSON.stringify(s0));
+    ok('a site was found on dry high ground', s0 && s0.spot && s0.gy>s0.sea+4, s0&&{spot:s0.spot,gy:s0.gy});
+    await page.evaluate('__hc.siloGoto()'); await sleep(9000);
+    const s1=await page.evaluate('__hc.siloForce()');
+    console.log('  forced build: '+JSON.stringify(s1));
+    ok('the silo built', s1 && s1.done===true && s1.pad, s1);
+    // The pad, the shaft and the console must actually be in the world, not merely reported as built.
+    const built=await page.evaluate(`(()=>{ const p=__hc.silo().pad, n=x=>__hc.bid(x);
+      return { apron:__hc.blockAt(p.x+6,p.y,p.z)===n('concrete') || __hc.blockAt(p.x+6,p.y,p.z)===n('warning_block'),
+               stripe:__hc.blockAt(p.x+10,p.y,p.z)===n('warning_block'),
+               shaftLining:__hc.blockAt(p.x+2,p.y-2,p.z)===n('reinforced_wall'),
+               shaftHollow:__hc.blockAt(p.x,p.y-2,p.z)===0,
+               console:__hc.blockAt(p.console.x,p.console.y,p.console.z)===n('launch_console') }; })()`);
+    console.log('  in-world: '+JSON.stringify(built));
+    ok('the apron is concrete', built.apron===true, built.apron);
+    ok('its rim carries warning stripes', built.stripe===true, built.stripe);
+    ok('the shaft is lined and hollow', built.shaftLining===true && built.shaftHollow===true, built);
+    ok('the firing console is in the blockhouse', built.console===true, built.console);
+
+    console.log('\n[9] the flight, and the target marker that only exists during it');
+    const marks0=await page.evaluate('__hc.mmMarks()');
+    ok('the silo shows on the minimap', marks0.some(m=>m.t==='silo'), marks0.filter(m=>m.t==='silo'));
+    ok('and no target does yet', !marks0.some(m=>m.t==='target'), marks0.filter(m=>m.t==='target'));
+    await page.evaluate('__hc.icbmCool(0)');
+    const pad=(await page.evaluate('__hc.silo()')).pad;
+    const tgtX=pad.x+300, tgtZ=pad.z+120;
+    const lch=await page.evaluate('__hc.icbmLaunchAt('+tgtX+','+tgtZ+')');
+    console.log('  launch: '+JSON.stringify(lch));
+    ok('the rocket launched', lch && !lch.err && lch.to, lch);
+    await sleep(1200);
+    const f1=await page.evaluate('__hc.icbmFlightState()');
+    console.log('  1.2s in: '+JSON.stringify(f1));
+    ok('a rocket mesh is in the scene', f1 && f1.inScene===true, f1&&f1.inScene);
+    ok('and it is climbing', f1 && f1.pos && f1.pos[1]>pad.y+10, f1&&f1.pos);
+    const marks1=await page.evaluate('__hc.mmMarks()');
+    const tm=marks1.find(m=>m.t==='target');
+    ok('the target marker appeared, at the target', !!tm && tm.x===tgtX && tm.z===tgtZ, tm);
+    // A SECOND LAUNCH MUST BE REFUSED while one is up, or two rockets share one arc.
+    const dbl=await page.evaluate('__hc.icbmLaunchAt('+tgtX+','+tgtZ+')');
+    ok('a second launch is refused mid-flight', !!(dbl && dbl.err), dbl);
+    await sleep(4500);
+    const f2=await page.evaluate('__hc.icbmFlightState()');
+    ok('it passed apex and is descending', f2 && f2.pos && f2.pos[1]<f1.pos[1]+220, {mid:f2&&f2.pos});
+    // Ride it out: the arc must END in a detonation at the target, and clean itself up.
+    const cratersBefore=(await page.evaluate('__hc.icbm()')).craters.length;
+    for(let i=0;i<14;i++){ await sleep(1200); const f=await page.evaluate('__hc.icbmFlightState()'); if(f.state==='idle') break; }
+    const f3=await page.evaluate('__hc.icbmFlightState()');
+    const st3=await page.evaluate('__hc.icbm()');
+    console.log('  after impact: '+JSON.stringify(f3)+'  craters '+st3.craters.length);
+    ok('the flight ended', f3 && f3.state==='idle', f3&&f3.state);
+    ok('the rocket mesh was disposed', f3 && f3.inScene===false, f3&&f3.inScene);
+    ok('impact made a crater at the target', st3.craters.length===cratersBefore+1
+      && st3.craters.some(c=>Math.abs(c.x-tgtX)<2 && Math.abs(c.z-tgtZ)<2), st3.craters.slice(-1));
+    ok('the silo went onto cooldown', f3 && f3.cool>0, f3&&f3.cool);
+    const marks2=await page.evaluate('__hc.mmMarks()');
+    ok('and the target marker is gone', !marks2.some(m=>m.t==='target'), marks2.filter(m=>m.t==='target'));
+    const cold=await page.evaluate('__hc.icbmLaunchAt('+tgtX+','+tgtZ+')');
+    ok('a launch during cooldown is refused', !!(cold && cold.err), cold);
+
     ok('no page errors', errs.length===0, errs.slice(0,3));
     console.log('\n'+checks+' checks, '+fails+' failed');
     console.log('RESULT: '+(fails?'FAIL':'PASS'));
