@@ -121,9 +121,17 @@ function CHECK(cx,cz,R){
     const c2 = await page.evaluate(CHECK(ctl2.x, ctl2.z, 1));
     const there2 = await page.evaluate('(()=>{ var b=__hc.blockAt('+ctl2.x+','+ctl2.g+','+ctl2.z+')|0; var n={}; var ks=__hc.bid();'
       + ' for(var i=0;i<ks.length;i++) n[__hc.bid(ks[i])]=ks[i]; return b?(n[b]||b):"air"; })()');
+    // WHAT THIS CONTROL PROVES CHANGED WHEN THE GAME GOT FASTER THAN IT. Walls raised BESIDE a plant now re-seat that
+    // plant's column immediately, so by the time the scan runs the bush has already been lifted or removed and the pit
+    // filled — the shape cannot be photographed from outside any more. Demanding sunken>0 here would be demanding the
+    // defect back. So the control now reads the OUTCOME: the bad state must be gone, and it must be gone because
+    // something acted, not because nothing was built. `?nodecoseat=1` is where the scan itself is proven able to fail;
+    // CONTROL above already depends on the invariant being live.
+    const repaired2 = (c2.sunken===0 && there2!=='bush');
     console.log('CONTROL2 walled a bush into a 1x1 hole at ('+ctl2.x+','+ctl2.z+') y='+ctl2.g+'  block there: '+there2
-                +'  -> sunken='+c2.sunken+'   '+(c2.sunken>0?'CAUGHT — the SUNKEN rule can fail':'NOT CAUGHT — the SUNKEN rule is inert'));
-    if(c2.sunken===0 && there2==='bush'){ console.log('ABORT: the new rule cannot detect the shape it was written for.'); fail=true; }
+                +'  -> sunken='+c2.sunken+'   '+(repaired2?'REPAIRED as it was built — the neighbour re-seat is live'
+                                                 :(c2.sunken>0?'CAUGHT by the scan — the SUNKEN rule can fail':'NEITHER — nothing acted and nothing was seen')));
+    if(c2.sunken===0 && there2==='bush'){ console.log('ABORT: a bush is sitting in the shape this rule exists to remove, and the scan did not see it.'); fail=true; }
     await page.evaluate('(()=>{ for(const d of [[1,0],[-1,0],[0,1],[0,-1]]) __hc.setBlockAt('+ctl2.x+'+d[0],'+ctl2.g+','+ctl2.z+'+d[1],"grass");'
       + ' __hc.setBlockAt('+ctl2.x+','+ctl2.g+','+ctl2.z+',"grass"); })()');
     await sleep(800);

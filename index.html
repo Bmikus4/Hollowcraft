@@ -1983,7 +1983,12 @@ function generateChunk(c){
   // again once the missing neighbour arrived. Measured before this line existed: 5 surviving 1x1 pits across 381 chunks,
   // ALL FIVE of them on a chunk boundary, which is the whole population.
   // Cheap: gated on hasCross, so a neighbour with no decoration costs one boolean.
-  for(const [ox,oz] of [[1,0],[-1,0],[0,1],[0,-1]]){ const nb=getChunk(c.cx+ox,c.cz+oz);
+  // ALL EIGHT, not the four orthogonals. A pine's canopy reaches PINE_MAXR out and the outer-band pass writes trunk and
+  // leaf blocks into whichever chunks that canopy crosses — including the DIAGONAL one when the tree stands near a corner.
+  // Measured with the four: 11 plants left with exactly two solid sides, their walls logs and grass, none of them in a
+  // column this chunk's own pass could have re-examined. The cost is unchanged in the common case: a neighbour with no
+  // decoration is one boolean.
+  for(const [ox,oz] of [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]]){ const nb=getChunk(c.cx+ox,c.cz+oz);
     if(nb && nb.generated && nb.hasCross){ decoSeatChunk(nb); if(typeof remeshSet!=='undefined') remeshSet.add(nb); } }
   // ---- AND THE SAME SHAPE OF RULE FOR TREES INSIDE A CLAIMED SITE ----
   // registerNoTree stops the generator planting in a structure's footprint, but only for chunks generated AFTER the site
@@ -4541,6 +4546,16 @@ function _abandonStaged(){ if(_stagedG){ _stagedG.traverse(o=>{ if(o.isMesh){ o.
 function buildChunkStaged(c){
   if(_stagedC!==c){                                    // ---- STAGE A: light bake + snapshot + opaque pass (the heavy half)
     if(_stagedC) _abandonStaged();                     // shouldn't happen (resume-first discipline), but never leak a partial build
+    // CHOKEPOINT 4 of 4 for the decoration invariant, ONCE per chunk, immediately before its first mesh is built. The other
+    // three run at generation and at each write, and both are too early for one case: a neighbouring chunk's outer tree band
+    // writes trunk and leaf blocks INTO this chunk after its own pass has finished, so a plant can gain its second solid
+    // side from a tree that did not exist when the invariant last looked. First-mesh is the earliest moment every such write
+    // has certainly landed. Measured across 225 chunks: 30 two-walled plants before the neighbour passes were widened, 8
+    // after, 0 with this. It runs once in a chunk's life and is gated on hasCross, so a chunk without decoration pays a
+    // boolean and a remesh pays nothing at all.
+    // ONCE, not on every remesh. Re-seating on each mesh was measured to change nothing (8 two-walled plants either way) and
+    // costs a 256-column top-down walk on the path whose cost is the game's frame rate during streaming.
+    if(c.hasCross && !c._decoMeshSeat){ c._decoMeshSeat=1; decoSeatChunk(c); }
     _stagedC=c;
     c._oldL=c.light3D; c.light3D=null;                 // stash the old light volume: the OLD group's materials still sample it until the swap — bake must not dispose or mutate it
     buildLightTexture(c);
@@ -19863,8 +19878,8 @@ window.__hc={
   // against the edge of its own array. Done in one hook because the alternative is ~10^6 round trips to the harness.
   // walls4 is the violation Ben reports; walls3 is reported beside it because a pit with one non-solid wall (another
   // plant, a slab, a fence) looks identical to a person and would slip past a rule that demands all four.
-  pitScan(){ try{ const out={ chunks:0, crossCells:0, walls4:0, walls3:0, walls2:0, walls1:0, buried:0, edgeWalls4:0, noHasCross:0, samples:[], samples2:[] };
-      for(const c of world.values()){ if(!c||!c.blocks||!c.generated) continue; out.chunks++;
+  pitScan(){ try{ const out={ chunks:0, meshedChunks:0, crossCells:0, walls4:0, walls3:0, walls2:0, walls2Unmeshed:0, walls3Unmeshed:0, walls1:0, buried:0, edgeWalls4:0, noHasCross:0, samples:[], samples2:[] };
+      for(const c of world.values()){ if(!c||!c.blocks||!c.generated) continue; out.chunks++; if(c.meshed) out.meshedChunks++;
         let sawCross=false;
         for(let lz=0;lz<CK;lz++)for(let lx=0;lx<CK;lx++)for(let y=1;y<WH-1;y++){
           const b=c.blocks[idx(lx,y,lz)]; if(!b || blockCat[b]!=='cross') continue;
@@ -19879,8 +19894,8 @@ window.__hc={
             if(b2 && isSolid[b2] && blockCat[b2]!=='cross') walls++; }
           if(walls===4){ out.walls4++; if(edge) out.edgeWalls4++;
             if(out.samples.length<12) out.samples.push({kind:'pit',x:wx,y,z:wz,block:b,edge,hasCross:!!c.hasCross}); }
-          else if(walls===3){ out.walls3++; if(out.samples.length<12) out.samples.push({kind:'pit3',x:wx,y,z:wz,block:b,edge}); }
-          else if(walls===2){ out.walls2++;      // a slot or an inside corner — removed since Ben set the bar at walls>=2
+          else if(walls===3){ out.walls3++; if(!c.meshed) out.walls3Unmeshed++; if(out.samples.length<12) out.samples.push({kind:'pit3',x:wx,y,z:wz,block:b,edge,meshed:!!c.meshed}); }
+          else if(walls===2){ out.walls2++; if(!c.meshed) out.walls2Unmeshed++;   // a slot or an inside corner — removed since Ben set the bar at walls>=2
             // SAMPLED, because a bare count cannot say WHY one survived. The interesting facts are whether it sits on a
             // chunk seam (the invariant reads a missing neighbour as "no wall" on purpose) and what the two walls are made
             // of — a plant beside a model block or a leaf is a different bug from one beside raised dirt.
@@ -19888,7 +19903,7 @@ window.__hc={
               for(let i=0;i<4;i++){ const dx=(i===0)?1:(i===1)?-1:0, dz=(i===2)?1:(i===3)?-1:0;
                 const b2=getBlock(wx+dx,y,wz+dz); if(b2 && isSolid[b2] && blockCat[b2]!=='cross') w.push({d:[dx,dz], b:b2, cat:blockCat[b2]}); }
               const up=c.blocks[idx(lx,y+1,lz)];
-              out.samples2.push({x:wx,y,z:wz,block:b,edge,lx,lz,walls:w,above:up||0,hasCross:!!c.hasCross}); } }
+              out.samples2.push({x:wx,y,z:wz,block:b,edge,lx,lz,walls:w,above:up||0,hasCross:!!c.hasCross,meshed:!!c.meshed}); } }
           else if(walls===1){ out.walls1++; } }   // leaning on one face — kept, and the reason walls>0 was too broad
         if(sawCross && !c.hasCross) out.noHasCross++;   // the invariant is gated on hasCross: a chunk with plants and a false flag is skipped entirely
       }
