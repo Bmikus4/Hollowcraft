@@ -269,6 +269,31 @@ const ok=(name,cond,got)=>{ if(!cond)fails++; console.log(`  ${cond?'ok  ':'FAIL
     ok('goggles and a pack are a quarter point each', Math.abs(trinkets.armorPts-0.5)<1e-6, trinkets.armorPts);
     ok('…which is a sixteenth of the first shield', Math.abs(trinkets.shields[0]-0.125)<1e-3, trinkets.shields);
 
+    console.log('\n[16] footprints, blood, and a stamina bar that costs something');
+    const m0 = await page.evaluate(`__hc.marksProbe()`);
+    ok('the mark pools are bounded, not a growing list', m0.foot.cap===96 && m0.blood.cap===72, {foot:m0.foot.cap, blood:m0.blood.cap});
+    const walked = await page.evaluate(`__hc.markDrop('foot',6)`);
+    ok('prints land on the ground under you', walked.made>0 && walked.state.foot.live>0, {made:walked.made, live:walked.state.foot.live});
+    ok('and the pool only draws when it holds something', walked.state.foot.drawn===true, walked.state.foot.drawn);
+    const bled = await page.evaluate(`__hc.markDrop('blood',4)`);
+    ok('blood is its own pool', bled.state.blood.live>0, bled.state.blood.live);
+    const far = await page.evaluate(`(()=>{ const P=__hc.pos(); const before=__hc.marksProbe().foot.live;
+      for(let i=0;i<8;i++) footMark(P.x+200, P.y, P.z+200, 0, 'foot');
+      return { before, after:__hc.marksProbe().foot.live }; })()`).catch(()=>null);
+    if(far) ok('nothing is spent on marks you could never see', far.after===far.before, far);
+    const overrun = await page.evaluate(`__hc.markDrop('foot',200)`);
+    ok('the ring buffer holds the cap rather than growing', overrun.state.foot.live<=96, overrun.state.foot.live);
+    const aged = await page.evaluate(`__hc.markAge(120)`);
+    ok('and they expire on their own', aged.foot.live===0 && aged.foot.drawn===false, aged.foot);
+
+    const s0 = await page.evaluate(`__hc.stamSet(100)`);
+    const s1 = await page.evaluate(`__hc.stamRun(4)`);
+    ok('four seconds of sprinting is a dent, not the bar', s1.stam>55 && s1.stam<95, {after:s1.stam});
+    const empty = await page.evaluate(`(()=>{ __hc.stamSet(0); return __hc.vitalRing(); })()`);
+    ok('an empty bar means no jump', empty.canJump===false, {canJump:empty.canJump, stam:empty.stam});
+    const spent = await page.evaluate(`__hc.stamRun(0.2)`);
+    ok('and running yourself out costs a 3 s wind-down', spent.winded===true && spent.cd>2.0, {winded:spent.winded, cd:spent.cd});
+
     ok('no page errors', errors.length===0, errors);
     await browser.close();
   } finally { server.kill(); }

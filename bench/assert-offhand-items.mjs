@@ -104,7 +104,11 @@ function ok(label, cond, got){ checks++; if(!cond)fails++; console.log('  '+(con
     console.log('');
     for(const r of rows){
       ok(r.id+': on screen in the offhand', r.onScreen===true && r.frac>0.0004 && r.inScene===true, {onScreen:r.onScreen, frac:r.frac, inScene:r.inScene, magenta:r.px});
-      ok(r.id+': the hand is shown with it', r.arm===true, r.arm);
+      // A GUN IS THE EXCEPTION NOW (Ben 08-04: "guns should not show the off hand hand when in the off hand"). The forearm exists
+      // to carry a shield or a torch; a gun is drawn with its own grip, so the bare fist beside it read as a third limb. Every
+      // other item still has to show the hand, which is what this check was written for.
+      const _gun=/ar15|rifle|shotgun|minigun|revolver|python/i.test(r.id);
+      ok(r.id+': the hand is '+(_gun?'HIDDEN for a gun':'shown with it'), _gun ? r.arm===false : r.arm===true, {arm:r.arm, gun:_gun});
     }
     ok('no page errors', errs.length===0, errs.length);
     console.log('\n'+checks+' checks, '+fails+' failed');
