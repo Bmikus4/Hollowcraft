@@ -41,6 +41,18 @@ function rows(file, bands=28){
     out.push(+(s/n).toFixed(1)); }
   return out;
 }
+// THE SAME PROFILE, BUT PER-ROW MEDIAN. Needed the moment stars were extended below the horizon: they are sparse bright
+// outliers, so they lift a row's MEAN without changing the gradient, and the flat-slab test started failing on a sky that had
+// simply acquired stars. A median ignores a few hundred bright pixels in a band of thousands.
+function rowsMed(file, bands=28){
+  const P=decodePNG(fs.readFileSync(file));
+  const x0=(P.w*0.34)|0, x1=(P.w*0.66)|0, out=[];
+  for(let b=0;b<bands;b++){
+    const y0=((P.h*b)/bands)|0, y1=((P.h*(b+1))/bands)|0, v=[];
+    for(let y=y0;y<y1;y++) for(let x=x0;x<x1;x++) v.push(lum(P.data,(y*P.w+x)*P.ch));
+    v.sort((a,b2)=>a-b2); out.push(+v[v.length>>1].toFixed(1)); }
+  return out;
+}
 // THE BIGGEST DOWNWARD STEP between adjacent bands, and where it is.
 function step(prof, from, to){ let best=0, at=-1;
   for(let i=Math.max(1,from);i<Math.min(prof.length,to);i++){ const d=prof[i-1]-prof[i]; if(d>best){ best=d; at=i; } }
@@ -156,10 +168,30 @@ function warmPct(file, crop){
     // A FLAT SLAB IS A RUN OF IDENTICAL ROWS. Below dir.y = -0.1 the dome's gradient used to clamp, and five consecutive row
     // bands read exactly 78.4 — that constant is the artefact, and it is what "does not extend down to infinity" looks like as
     // a number. The sky below the horizon has to keep changing.
+    const pDm=rowsMed(fDown);
+    console.log('  NIGHT looking down, per-row MEDIAN: '+pDm.join(' '));
     let run=1, worst=1;
-    for(let i=1;i<12;i++){ if(Math.abs(pD[i]-pD[i-1])<0.35){ run++; if(run>worst) worst=run; } else run=1; }
+    for(let i=1;i<12;i++){ if(Math.abs(pDm[i]-pDm[i-1])<0.35){ run++; if(run>worst) worst=run; } else run=1; }
     check('the sky below the horizon keeps changing instead of holding one colour', worst<3,
       `longest run of row bands within 0.35 luminance of each other: ${worst} (it was 5 at exactly 78.4)`);
+    // AND IT HAS STARS IN IT (Ben 08-04: "night sky is not below horizon still, (stars etc)"). Extending the gradient was only
+    // half — everything in the shader's `add` accumulator is gated on dir.y, so below the horizon the sky was starless, which
+    // reads as the sky having stopped. Stars are small and bright against a dark field, so they are counted as local peaks: a
+    // pixel more than 25 luminance above the mean of its row band. Counted ABOVE the horizon as the control and BELOW it as the
+    // claim, on the same frame.
+    const starCount=(file, y0f, y1f)=>{
+      const P=decodePNG(fs.readFileSync(file));
+      const x0=(P.w*0.34)|0, x1=(P.w*0.66)|0, y0=(P.h*y0f)|0, y1=(P.h*y1f)|0;
+      let s2=0,n=0; for(let y=y0;y<y1;y++) for(let x=x0;x<x1;x++){ s2+=lum(P.data,(y*P.w+x)*P.ch); n++; }
+      const mean=s2/Math.max(1,n); let hits=0;
+      for(let y=y0;y<y1;y++) for(let x=x0;x<x1;x++) if(lum(P.data,(y*P.w+x)*P.ch) > mean+25) hits++;
+      return { mean:+mean.toFixed(1), hits }; };
+    // The looking-down night frame: rows 0..0.30 of it are above the horizon, 0.32..0.40 below it (the waterline sat at row
+    // band 11 of 28, i.e. 0.39 of the frame height).
+    const above=starCount(fDown,0.02,0.28), below=starCount(fDown,0.30,0.385);
+    console.log(`  NIGHT stars: above the horizon ${above.hits} px over mean ${above.mean};  below it ${below.hits} px over mean ${below.mean}`);
+    check('and it has stars in it below the horizon', below.hits>0 && below.hits > above.hits*0.4,
+      `${below.hits} star pixels below the horizon against ${above.hits} above — the gate was step(0.02,dir.y), which ended the sky at the horizon`);
     await page.evaluate(`__hc.tpAt(${S.sx}+0.5, ${gy+9}, ${S.sz}+0.5); __hc.cam({yaw:${bestYaw}, pitch:-0.16});`);
     await sleep(900);
 
@@ -198,6 +230,35 @@ function warmPct(file, crop){
     // and the shallow chunk water beside it takes its own column, and the difference is the step.
     check('the step where the far sea meets chunk water is under a block and a half', cv.ledgeAtWall.shelf3<1.5,
       `ledge at the wall against a 3-deep shelf ${cv.ledgeAtWall.shelf3} blocks (was 55.3 at the old 58-block cap), against 6-deep ${cv.ledgeAtWall.shelf6}, deep water ${cv.ledgeAtWall.deep20}`);
+    // ---- 4. THE PAINTED OCEAN IS NOT INLAND (Ben 08-04: "the ocean still appears below a certain level inland") ---------
+    // The disc is centred on the camera at sea level and, since it became a full disc, covers the ground you are standing on.
+    // Toggling it is the measurement: inland the two frames must be identical, and at the shore they must not be, or the fix
+    // has simply deleted the far sea.
+    const discPair=async(tag)=>{
+      await page.evaluate(`__hc.farSeaOn(true)`);  await sleep(300); const on =await shot(0.20,`horizon-disc-${tag}-on.png`);
+      await page.evaluate(`__hc.farSeaOn(false)`); await sleep(300); const off=await shot(0.20,`horizon-disc-${tag}-off.png`);
+      await page.evaluate(`__hc.farSeaOn(true)`);
+      const A=rows(on), B=rows(off);
+      let d=0; for(let i=0;i<A.length;i++) d+=Math.abs(A[i]-B[i]);
+      return +d.toFixed(1); };
+    // Deep inland: the island's centre, well inside the core, low enough that a sea-level plane would be in frame.
+    const isle=await page.evaluate(`__hc.farSeaOn()`);
+    const icy=await page.evaluate(`__hc.groundY(${isle.isle[0]},${isle.isle[1]})`);
+    await page.evaluate(`__hc.tpAt(${isle.isle[0]}+0.5, ${icy+6}, ${isle.isle[1]}+0.5); __hc.cam({yaw:0.9, pitch:-0.28});`);
+    for(let i=0;i<30;i++){ const f=await page.evaluate(`__hc.fill()`); if(f&&f.meshed>=f.want) break; await sleep(500); }
+    await sleep(2000);
+    const inland=await discPair('inland');
+    const where=await page.evaluate(`__hc.farSeaOn()`);
+    console.log(`  inland at the island centre (${where.distFromIsle} from centre, core is ${where.isleCore}): toggling the far-sea disc moves the frame by ${inland} total luminance`);
+    check('the painted ocean does not draw inland', inland < 6, `${inland} total luminance of difference across 28 row bands with the disc toggled at the island centre`);
+    // And back out to the water, where it MUST still draw.
+    await page.evaluate(`__hc.tpAt(${S.sx}+0.5, ${gy+9}, ${S.sz}+0.5); __hc.cam({yaw:${bestYaw}, pitch:-0.16});`);
+    for(let i=0;i<30;i++){ const f=await page.evaluate(`__hc.fill()`); if(f&&f.meshed>=f.want) break; await sleep(500); }
+    await sleep(1800);
+    const shore=await discPair('shore');
+    console.log(`  at the shore: toggling it moves the frame by ${shore} total luminance`);
+    check('and it still draws where the sea is', shore > 12, `${shore} total luminance at the shore against ${inland} inland — if this is small the fix deleted the far sea instead of confining it`);
+
     check('no page errors', errs.length===0, errs.slice(0,2).join(' | '));
     console.log('  frames: bench/results/horizon-*.png');
     console.log(`\n${checks-fails}/${checks} checks pass`);
