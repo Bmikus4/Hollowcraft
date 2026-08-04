@@ -3714,6 +3714,52 @@ let composer, bloomPass;
 // GOD RAYS — screen-space crepuscular scatter from the sun's screen position. Radially marches toward the sun,
 // accumulating bright (sky) pixels; where the canopy/terrain occludes the sky, the shaft breaks → light rays through
 // the trees. Passthrough-safe: when the sun is off-screen / at night, uActive=0 and the image is untouched.
+// ---- CONTACT OCCLUSION (Ben 08-04, the realism pass) ----
+// There was no ambient occlusion of any kind, and the per-vertex AO voxel games normally use is not available here: this
+// mesher is GREEDY, so one quad spans many blocks and per-corner AO would force the merge to break at every change in it,
+// paying triangles on the path that is the frame rate. Screen space costs GPU instead of geometry, which is the trade that
+// fits: the depth buffer is already there for the motion-blur pass.
+//
+// DEPTH DIFFERENCE, NOT A HEMISPHERE OF NORMALS. Standard SSAO reconstructs a normal per pixel and samples an oriented
+// hemisphere. This world is axis-aligned boxes, so the only thing a normal buffer would buy is precision on the few
+// non-axis surfaces (water, models) — while a plain "is my neighbour nearer than me" test in a screen-space disc darkens
+// exactly the creases, inside corners and contact lines that voxel geometry never gets from a per-cell light volume. Eight
+// taps on a rotating disc, radius scaled by 1/depth so the world-space size is constant, and the whole thing multiplies the
+// colour: no blur pass, because the taps are already spread over the disc and the noise reads as the grain that follows.
+const SSAOShader={
+  uniforms:{ tDiffuse:{value:null}, tDepth:{value:null}, uResolution:{value:new THREE.Vector2(1,1)},
+             uNear:{value:0.1}, uFar:{value:1000}, uStrength:{value:0.55}, uRadius:{value:26.0}, uBias:{value:0.035} },
+  vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
+  fragmentShader:`varying vec2 vUv; uniform sampler2D tDiffuse, tDepth; uniform vec2 uResolution;
+    uniform float uNear, uFar, uStrength, uRadius, uBias;
+    float lin(float d){ return (2.0*uNear*uFar)/(uFar+uNear-(2.0*d-1.0)*(uFar-uNear)); }   // window depth -> metres from the eye
+    void main(){
+      vec4 col = texture2D(tDiffuse, vUv);
+      float dc = texture2D(tDepth, vUv).x;
+      // the sky is at the far plane and has no geometry to occlude: leaving it out also stops a dark rim forming along
+      // every silhouette against it, which is the classic screen-space AO tell.
+      if(dc >= 0.9999){ gl_FragColor = col; return; }
+      float zc = lin(dc);
+      // Radius in PIXELS, from a world-space radius over the distance: near geometry gets a wide disc, far geometry a tight
+      // one, so a crease is the same size in the world at every distance instead of swelling as you walk away from it.
+      float rad = clamp(uRadius / zc, 1.5, 42.0);
+      // one rotation per pixel breaks the eight directions into noise rather than an eight-armed star on every corner
+      float ang = fract(sin(dot(vUv*uResolution, vec2(12.9898,78.233)))*43758.5453)*6.2831853;
+      float occ = 0.0;
+      for(int i=0;i<8;i++){
+        float a = ang + float(i)*0.7853982;
+        vec2 off = vec2(cos(a), sin(a)) * rad * (0.35 + 0.65*float((i%3)+1)/3.0) / uResolution;   // three rings, not one circle
+        float zs = lin(texture2D(tDepth, vUv+off).x);
+        float diff = zc - zs;                                     // positive: the neighbour is NEARER, so it can occlude me
+        // uBias ignores the depth slope of a flat surface seen at an angle (which would shade every floor), and the range
+        // limit ignores anything so much nearer that it is a different object entirely (a tree in front of a hill).
+        float rangeOK = step(diff, zc*0.25);
+        occ += rangeOK * smoothstep(uBias, uBias + 0.6, diff);
+      }
+      occ /= 8.0;
+      gl_FragColor = vec4(col.rgb * (1.0 - uStrength*occ), col.a);
+    }`
+};
 const GodrayShader={
   uniforms:{ tDiffuse:{value:null}, uSun:{value:new THREE.Vector2(0.5,0.5)}, uActive:{value:0}, uStrength:{value:0.5}, uTint:{value:new THREE.Color(1.0,0.86,0.58)} },
   vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
@@ -3734,7 +3780,10 @@ const GodrayShader={
 };
 // final grade: vivid saturation + contrast + film grain + vignette (runs in sRGB after OutputPass)
 const GradeShader={
-  uniforms:{ tDiffuse:{value:null}, uTime:{value:0}, uSat:{value:1.3}, uGrain:{value:0.06}, uDark:{value:0}, uResolution:{value:new THREE.Vector2(innerWidth,innerHeight)}, uFXAA:{value:CFG.quality==='Low'?0:1}, uWhiteVoid:{value:0} },   // grain +20% (Ben 07-21): 0.05→0.06; uWhiteVoid = stage-3 pure-white glow override
+  uniforms:{ tDiffuse:{value:null}, uTime:{value:0}, uSat:{value:1.06}, uGrain:{value:0.06}, uDark:{value:0}, uResolution:{value:new THREE.Vector2(innerWidth,innerHeight)}, uFXAA:{value:CFG.quality==='Low'?0:1}, uWhiteVoid:{value:0} },   // grain +20% (Ben 07-21): 0.05→0.06; uWhiteVoid = stage-3 pure-white glow override
+  // uSat 1.3 -> 1.06 (Ben 08-04, the realism pass). AgX already has a strong toe, and multiplying saturation by 1.3 on top of
+  // it is the largest remaining departure from photographic colour: it is what makes grass read as poster-green and sand as
+  // orange. 1.0 is neutral; 1.06 keeps a trace of lift so the world does not go flat under fog, which desaturates on its own.
   vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
   fragmentShader:`varying vec2 vUv; uniform sampler2D tDiffuse; uniform float uTime,uSat,uGrain,uDark,uFXAA,uWhiteVoid; uniform vec2 uResolution;
     float h21(vec2 p){ return fract(sin(dot(p,vec2(12.9898,78.233)))*43758.5453); }
@@ -3809,7 +3858,7 @@ const MotionBlurShader={
       gl_FragColor=vec4(col/float(N),1.0);
     }`
 };
-let gradePass, godrayPass=null, motionPass=null, _sceneRT=null, _mbMode=false;
+let gradePass, ssaoPass=null, godrayPass=null, motionPass=null, _sceneRT=null, _mbMode=false;
 let _mbOn=(()=>{ try{ return localStorage.getItem('hollowcraft_mb')!=='0'; }catch(e){ return true; } })();   // POSTFX setting (Ben 07-21): hyper-real depth-reprojection motion blur, ON by default, disableable in Settings
 // Motion-blur render path: the scene renders into OUR target (_sceneRT, universally-supported RGBA8 + a depth
 // texture), and motionPass is the first composer pass reading it (does the reprojection blur AND bridges the
@@ -3836,6 +3885,17 @@ function buildComposer(){
     composer.addPass(new RenderPass(scene, camera));                          // classic, proven path (no motion blur)
     motionPass=null;
   }
+  // AO BEFORE the god rays and the bloom, so a darkened crease neither blooms nor gets a shaft drawn over it. It needs the
+  // scene's DEPTH, which only exists as a texture on the motion-blur path's own render target — without that path there is
+  // no depth attachment to sample, so the pass is simply absent rather than wrong. ?nossao disables it.
+  if(_mbMode && _sceneRT && _sceneRT.depthTexture && !Q.get('nossao') && CFG.quality!=='Low'){
+    ssaoPass = new ShaderPass(SSAOShader);
+    ssaoPass.material.depthTest=false; ssaoPass.material.depthWrite=false;
+    ssaoPass.uniforms.tDepth.value=_sceneRT.depthTexture;
+    ssaoPass.uniforms.uNear.value=camera.near; ssaoPass.uniforms.uFar.value=camera.far;
+    ssaoPass.uniforms.uResolution.value.set(innerWidth, innerHeight);
+    composer.addPass(ssaoPass);
+  } else ssaoPass=null;
   // god rays BEFORE bloom → the shafts pick up a soft bloom glow. Gated to High/Ultra; ?norays disables.
   if (CFG.quality!=='Low' && CFG.quality!=='Medium' && !Q.get('norays')){ godrayPass = new ShaderPass(GodrayShader); composer.addPass(godrayPass); }
   else godrayPass=null;
@@ -20786,6 +20846,17 @@ window.__hc={
                px:+player.pos.x.toFixed(2), pz:+player.pos.z.toFixed(2), eye:+(player.pos.y+EYE).toFixed(2), pitch:+player.pitch.toFixed(3) }; }
     catch(e){ return {err:String(e.message||e)}; } },
   wretchHp(){ try{ return wretch.hp==null?null:wretch.hp; }catch(e){ return null; } },
+  // QA/bench: the contact-occlusion pass, switchable in one page so its cost is a PAIRED measurement rather than two runs
+  // compared across a reboot — the one thing PERF_PLAN rules out. Also exposes the dials, because strength and radius are
+  // the two numbers anyone will want to argue with, and arguing with them should not need an edit.
+  ssao(on,o){ try{ if(!ssaoPass) return {err:'no ssao pass (needs the motion-blur depth target; ?nossao or Low quality disables it)'};
+      if(on!=null) ssaoPass.enabled=!!on;
+      if(o){ if(o.strength!=null) ssaoPass.uniforms.uStrength.value=+o.strength;
+             if(o.radius!=null) ssaoPass.uniforms.uRadius.value=+o.radius;
+             if(o.bias!=null) ssaoPass.uniforms.uBias.value=+o.bias; }
+      return { on:!!ssaoPass.enabled, strength:+ssaoPass.uniforms.uStrength.value.toFixed(3),
+               radius:+ssaoPass.uniforms.uRadius.value.toFixed(2), bias:+ssaoPass.uniforms.uBias.value.toFixed(3) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: break the grab and put the creature back on its feet, without the escape's despawn. A harness that measures
   // navigation after a successful hunt has no way back otherwise: the capture is a 120-second cutscene that drives the
   // body, and every sample taken during it is a sample of the ritual rather than of the walk.
