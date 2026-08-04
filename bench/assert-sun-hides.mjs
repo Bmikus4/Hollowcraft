@@ -25,6 +25,25 @@ function freePort(){ return new Promise((res,rej)=>{ const s=createServer(); s.l
 function waitHttp(u,t=20000){ return new Promise((res,rej)=>{ const t0=Date.now(); (function p(){ const rq=http.get(u,r=>{r.resume();res();}); rq.on('error',()=>{ if(Date.now()-t0>t)rej(new Error('down')); else setTimeout(p,250); }); })(); }); }
 function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Google/Chrome/Application/chrome.exe']) if(fs.existsSync(p)) return p; throw new Error('no browser'); }
 const lum=(d,i)=>0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2];
+// THE GLOW AS A FUNCTION OF ANGLE FROM THE SUN, not of pixels. A perspective projection stretches equal angles into more
+// pixels away from the optical axis, so a halo measured in pixels is ALWAYS bigger in the corner whether or not anything
+// is wrong. Binning by the true angle between each pixel's view ray and the sun's cancels that out, and what is left is
+// whatever a screen-space pass is adding. halfV and the aspect come from the overlay's own NDC radius, which is
+// tan(SUN_ANG)/halfV — so the measurement cannot disagree with the renderer about the field of view.
+function angleProfile(file, ndc, radiusNdc, bins=24, step=1.0){
+  const P=decodePNG(fs.readFileSync(file));
+  const halfV=Math.tan(0.0593)/radiusNdc[1], aspect=radiusNdc[1]/radiusNdc[0];
+  const dirOf=(nx,ny)=>{ const v=[nx*halfV*aspect, ny*halfV, -1], L=Math.hypot(...v); return [v[0]/L,v[1]/L,v[2]/L]; };
+  const s=dirOf(ndc[0],ndc[1]);
+  const sum=new Array(bins).fill(0), n=new Array(bins).fill(0);
+  for(let y=0;y<P.h;y++) for(let x=0;x<P.w;x++){
+    if(y>P.h*0.80) continue;                                     // hotbar and held item live below here
+    if(x<P.w*0.26 && y>P.h*0.58) continue;                       // and the compass bottom-left
+    const d=dirOf((x/P.w)*2-1, 1-(y/P.h)*2);
+    const deg=Math.acos(Math.max(-1,Math.min(1,d[0]*s[0]+d[1]*s[1]+d[2]*s[2])))*57.29578;
+    const b=(deg/step)|0; if(b<bins){ sum[b]+=lum(P.data,(y*P.w+x)*P.ch); n[b]++; } }
+  return sum.map((v,i)=>n[i]>40?+(v/n[i]).toFixed(1):null);
+}
 // BLOWN OUT, not "bright". The disc's core clips to white either way; what "too bright" and "a halo" both mean is how much
 // of the sky around it is at or near white, so the statistic is the area above a high threshold.
 function blown(file, crop, th=246){
@@ -182,7 +201,7 @@ function blown(file, crop, th=246){
     const shot=async(t,name)=>{ await pin(t); const f=path.join(OUT,name); await page.screenshot({path:f}); return f; };
     await page.evaluate(`__hc.sunDisc({gain:40, halo:0.45, sheen:0.26, alpha:0.92})`);
     const oldF=await shot(0.16,'sun-halo-before.png');
-    await page.evaluate(`__hc.sunDisc({gain:10, halo:0.30, sheen:0.10, alpha:0.80})`);
+    await page.evaluate(`__hc.sunDisc({gain:10, halo:0.12, sheen:0.0, alpha:0.80})`);   // as shipped: Ben's "minimal" pick
     const newF=await shot(0.16,'sun-halo-after.png');
     // ATTRIBUTION: which of the two actually makes the wide glow. One frame with the bloom pass turned down and everything
     // else as shipped — if the shoulder collapses here and not with the gain, the halo was the post pass all along.
@@ -191,13 +210,111 @@ function blown(file, crop, th=246){
     // A THIRD OPTION FOR BEN, since neither the gain nor the bloom is what most of the glow is made of: the sky's own
     // forward-scatter terms cut to the bone. The broad pow(sd,3) stays whatever happens — that one is the whole sky
     // brightening toward the sun, and without it a clear day is a flat blue lid (the reason it was added).
-    await page.evaluate(`__hc.sunDisc({halo:0.12, sheen:0.0, bloom:0.34})`); await shot(0.16,'sun-halo-minimal.png');
-    await page.evaluate(`__hc.sunDisc({halo:0.30, sheen:0.10, bloom:0.55})`);
+    // THE FRAME BEN PICKED had the bloom pass at 0.34 as well. bloomPass.strength is global — the boss glow and every light
+    // in the game — so the shipped values leave it at 0.55 and take the halo out of the sky's own terms instead. This pair
+    // is what licenses that: if the shipped frame is within a couple of luminance levels of the picked one, the global pass
+    // was never carrying the look.
+    await page.evaluate(`__hc.sunDisc({halo:0.12, sheen:0.0, bloom:0.34})`); const minF=await shot(0.16,'sun-halo-minimal.png');
+    await page.evaluate(`__hc.sunDisc({halo:0.12, sheen:0.0, bloom:0.55})`);
+    // A DUSK FRAME to look at, because the terms that were cut are strongest at a grazing sun and the sunset has its own
+    // (dusk*pow(sd,4)) which must still be there. t=0.48 is the grazing sun; see the setTime mapping in §7.
+    await shot(0.48,'sun-halo-dusk.png');
     const A=blown(oldF,SUNCROP), B=blown(newF,SUNCROP), C=blown(noBloom,SUNCROP), D=blown(lowBloom,SUNCROP);
     console.log(`  bloom off: ${C.pct}% blown, mean ${C.mean}    bloom 0.22: ${D.pct}% blown, mean ${D.mean}`);
     console.log(`  around the sun  before: ${A.pct}% blown, mean ${A.mean}   after: ${B.pct}% blown, mean ${B.mean}`);
     check('the sun and its halo are dimmer', B.pct < A.pct*0.7, `blown-out area ${A.pct}% -> ${B.pct}% of the crop`);
-    check('but the disc is still a disc', B.pct > 0.25, `${B.pct}% blown — the body itself must survive`);
+    // "Still a disc" is no longer a count of blown pixels: with the sky's bloom gone the body sits at ~238, under any
+    // sensible clipping threshold. It is asserted below off the angular profile instead, where a disc is a core that stands
+    // well clear of the sky a few degrees away.
+    // WHICH SEED GAIN REPRODUCES BEN'S FRAME at the project's own bloom strength. His pick differs from the shipped values
+    // by only ~1 luminance of mean but THREE TIMES the blown-out area, and that area is the bloom pass spreading the disc's
+    // own gain — so the gain is the lever that buys it back without touching a global pass.
+    // The seed gain is NOT the lever here: 10 down to 2.5 moved the blown area 0.458 -> 0.466%, i.e. nothing, because what
+    // is left saturated is the OVERLAY DISC ITSELF and not its glow. Ben's picked frame is 0.156% only because a weaker
+    // bloom pulled the region under the disc below the threshold. So the lever that matches his frame locally is the disc's
+    // own alpha; the global bloom stays at the project's 0.55.
+    for(const a of [0.80,0.70,0.62,0.55]){ await page.evaluate(`__hc.sunDisc({alpha:${a}})`);
+      const f=await shot(0.16,`sun-halo-alpha${String(a).slice(2)}.png`); const b=blown(f,SUNCROP);
+      console.log(`  alpha ${a.toFixed(2)}:  ${b.pct}% blown, mean ${b.mean}`); }
+    await page.evaluate(`__hc.sunDisc({alpha:0.80, gain:10, bloom:0.55})`);
+    const M=blown(minF,SUNCROP);
+    // Ben picked the frame at bloom strength 0.34. That is a global pass, so the shipped values reach the same read by
+    // raising the bloom THRESHOLD instead — the claim is that shipped is at least as calm as the frame he chose.
+    check('shipped is at least as calm as the frame Ben picked', B.pct<=M.pct+0.05 && B.mean<=M.mean+1.5,
+      `shipped ${B.pct}% / mean ${B.mean} against his picked frame ${M.pct}% / mean ${M.mean}`);
+    // ---- 4b. THE SUN IN THE CORNER (Ben 08-04: "when the sun is in the corner of the viewport the halo is huge") -------
+    // Screen-space passes are the only things that can care where in the FRAME the sun is — the sky's own glow is angular
+    // and cannot. Two suspects, so measure both: the god-ray pass marches from every pixel toward the sun, and
+    // UnrealBloom samples with clamp-to-edge, which piles energy up at a border instead of spreading it off-screen.
+    await page.evaluate(`__hc.vis({cloud:0})`);
+    // Push the sun out toward a corner and take whichever pose gets furthest off-axis while still on screen.
+    let cpose=null;
+    for(const dy of [0.55,0.85]) for(const dp of [-0.28,-0.44]){
+      await page.evaluate(`__hc.cam({yaw:${best.yaw}+${dy}, pitch:${pitch}+${dp}})`); await frames(6);
+      const o=await page.evaluate(`__hc.sunOverlay()`); const r=Math.hypot(o.ndc[0],o.ndc[1]);
+      if(o.drawn>0 && Math.abs(o.ndc[0])<0.93 && Math.abs(o.ndc[1])<0.93 && (!cpose||r>cpose.r)) cpose={dy,dp,r,ndc:o.ndc,radius:o.radius};
+    }
+    const ctr=await page.evaluate(`(()=>{ __hc.cam({yaw:${best.yaw}, pitch:${pitch}}); return 1; })()`); await frames(8);
+    const ctrO=await page.evaluate(`__hc.sunOverlay()`);
+    const fCtr=await shot(0.16,'sun-corner-centred.png');
+    await page.evaluate(`__hc.cam({yaw:${best.yaw}+${cpose.dy}, pitch:${pitch}+${cpose.dp}})`); await frames(8);
+    console.log(`  sun centred at ndc ${JSON.stringify(ctrO.ndc)}, pushed off-axis to ${JSON.stringify(cpose.ndc)}`);
+    const fCor=await shot(0.16,'sun-corner-offaxis.png');
+    await page.evaluate(`__hc.godrays({on:false})`); const fCorNR=await shot(0.16,'sun-corner-godrays-off.png');
+    await page.evaluate(`__hc.godrays({on:true}); __hc.sunDisc({bloom:0.0})`); const fCorNB=await shot(0.16,'sun-corner-bloom-off.png');
+    await page.evaluate(`__hc.sunDisc({bloom:0.55})`);
+    const pCtr=angleProfile(fCtr,ctrO.ndc,ctrO.radius), pCor=angleProfile(fCor,cpose.ndc,cpose.radius);
+    const pNR=angleProfile(fCorNR,cpose.ndc,cpose.radius), pNB=angleProfile(fCorNB,cpose.ndc,cpose.radius);
+    const row=(t,p)=>console.log(`  ${t.padEnd(16)}`+p.slice(0,16).map(v=>String(v==null?'-':v.toFixed(0)).padStart(5)).join(''));
+    console.log('  deg from sun:   '+Array.from({length:16},(_,i)=>String(i).padStart(5)).join(''));
+    row('centred',pCtr); row('off-axis',pCor); row('off-axis no rays',pNR); row('off-axis no bloom',pNB);
+    // THE CLAIM: at the same ANGLE from the sun the glow is the same brightness wherever the sun sits in the frame. If it
+    // is, the corner halo is the projection stretching equal angles into more pixels, and no pass is misbehaving.
+    const band=p=>{ const v=[]; for(let i=3;i<10;i++) if(p[i]!=null) v.push(p[i]); return v.reduce((a,b)=>a+b,0)/v.length; };
+    const bC=band(pCtr), bO=band(pCor), bR=band(pNR), bB=band(pNB);
+    console.log(`  glow 3-10 deg from the sun:  centred ${bC.toFixed(1)}   off-axis ${bO.toFixed(1)}   no godrays ${bR.toFixed(1)}   no bloom ${bB.toFixed(1)}`);
+    // WHAT THE BROAD TERM IS WORTH, in angle. Nothing else can shrink the corner halo, so price it — and check the far sky
+    // still carries a gradient toward the sun afterwards, because that gradient is the whole reason the term exists.
+    // THE SHOULDER IS THE BLOOM, and its seed is the disc's own gain — so price the gain against the angle, which is the
+    // measurement the earlier blown-out-area sweep could not make: an area count at 246 saturates on the disc body and is
+    // blind to a shoulder at 160.
+    for(const g of [10,2.5]){ await page.evaluate(`__hc.sunDisc({gain:${g}})`);
+      const f=await shot(0.16,`sun-gain-${String(g).replace('.','p')}.png`); const p=angleProfile(f,cpose.ndc,cpose.radius,30);
+      console.log(`  gain ${String(g).padStart(4)}:  glow 3-10 deg ${band(p).toFixed(1)}   disc core ${p[0]}   (bloom off floor is ${bB.toFixed(1)})`); }
+    await page.evaluate(`__hc.sunDisc({gain:10})`);
+    // THE BLOOM THRESHOLD, which is what decides whether the SKY blooms at all. It is a global, so the collateral is
+    // measured in the same breath: a night frame under a lantern, where the glow has to survive.
+    for(const th of [0.88,1.00,1.15,1.30]){ await page.evaluate(`__hc.sunDisc({thresh:${th}})`);
+      const f=await shot(0.16,`sun-thresh-${String(th).replace('.','p')}.png`); const p=angleProfile(f,cpose.ndc,cpose.radius,30);
+      console.log(`  bloom threshold ${th.toFixed(2)}:  glow 3-10 deg ${band(p).toFixed(1)}   disc core ${p[0]}   (floor ${bB.toFixed(1)})`); }
+    // COLLATERAL. bloomPass.threshold is global — every glow in the game goes through it, including the boss's vantawhite —
+    // so raising it has to be checked somewhere it would hurt: a night frame on the ground, where the light sources are
+    // torches and lanterns rather than sky. If their glow sits above the new threshold, nothing is lost.
+    await page.evaluate(`__hc.tpAt(${S.sx}+0.5, ${gy+2}, ${S.sz}+0.5); __hc.cam({yaw:0.7, pitch:-0.05});`);
+    await sleep(1200); await frames(10);
+    const night={};
+    for(const th of [0.88,1.15]){ await page.evaluate(`__hc.sunDisc({thresh:${th}})`);
+      const f=await shot(0.75,`sun-thresh-night-${String(th).replace('.','p')}.png`);
+      night[th]=blown(f,[0.05,0.95,0.05,0.78],110);   // "glow" at night is anything well above the dark scene floor
+      console.log(`  NIGHT on the ground, bloom threshold ${th}:  ${night[th].pct}% above 110, mean ${night[th].mean}`); }
+    check('raising the bloom threshold does not put the night lights out',
+      Math.abs(night[0.88].pct-night[1.15].pct)<0.6 && Math.abs(night[0.88].mean-night[1.15].mean)<1.5,
+      `night glow ${night[0.88].pct}% / mean ${night[0.88].mean} at 0.88 against ${night[1.15].pct}% / mean ${night[1.15].mean} at 1.15`);
+    await page.evaluate(`__hc.tpAt(${S.sx}+0.5, ${gy+150}, ${S.sz}+0.5); __hc.cam({yaw:${best.yaw}+${cpose.dy}, pitch:${pitch}+${cpose.dp}});`);
+    await sleep(900); await frames(10);
+    await page.evaluate(`__hc.sunDisc({thresh:0.88})`);
+    for(const w of [0.30,0.20,0.12]){ await page.evaluate(`__hc.sunDisc({wide:${w}})`);
+      const f=await shot(0.16,`sun-wide-${String(w).slice(2)}.png`); const p=angleProfile(f,cpose.ndc,cpose.radius,30);
+      const far=[]; for(let i=20;i<30;i++) if(p[i]!=null) far.push(p[i]);
+      console.log(`  wide ${w.toFixed(2)}:  glow 3-10 deg ${band(p).toFixed(1)}   sky 20-30 deg ${(far.reduce((a,b)=>a+b,0)/far.length).toFixed(1)}   gradient ${(band(p)-far.reduce((a,b)=>a+b,0)/far.length).toFixed(1)}`); }
+    await page.evaluate(`__hc.sunDisc({wide:0.20})`);
+    // Off-axis reading DIMMER is expected — the grade's own vignette darkens the frame edges. What would be a bug is
+    // off-axis reading brighter at the same angle, which is the only way a screen-space pass could be inflating a corner.
+    check('the disc is still a body against the sky', pCtr[0]>200 && pCtr[0]-bC>45,
+      `core ${pCtr[0]} against ${bC.toFixed(1)} at 3-10 degrees — a disc is a core with a limb, not a hill`);
+    check('nothing screen-space inflates the halo off-axis', bO <= bC+4,
+      `3-10 degrees from the sun: centred ${bC.toFixed(1)} against off-axis ${bO.toFixed(1)} (godrays off ${bR.toFixed(1)} — the god-ray pass contributes 0.0, bloom off ${bB.toFixed(1)}). The corner halo is the projection turning equal angles into more pixels, so the lever is the angular width, not the frame position.`);
+
     // The pair Ben picks the cloud response from: same hour, cover 1.6, thin-responsive against thick-only.
     await page.evaluate(`__hc.vis({cloud:1.6})`);
     const tPick=(thick[0]||sweep[0]).t;

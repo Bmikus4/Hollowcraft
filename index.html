@@ -4256,7 +4256,15 @@ function buildComposer(){
   // region to smear and the result was an ellipse with no edge anywhere. At 0.88 only the sun's clipped core and genuinely
   // hot things (the vantawhite boss glow, flames, lanterns, all at or near 1.0) pass the gate, and the tighter radius keeps
   // the glow hugging whatever it came from. Strength is unchanged, so nothing that still blooms blooms any less.
-  bloomPass = new UnrealBloomPass(new THREE.Vector2(innerWidth/2,innerHeight/2), 0.55, 0.34, 0.88);   // HALF-RES bloom — the mip-blur chain is the heaviest post pass; half-res is visually identical for a soft glow and ~halves its cost
+  // THRESHOLD 0.88 -> 1.15 IS THE HALO FIX (Ben 08-04: "I see a halo around the sun clouds or not", "when the sun is in the
+  // corner of the viewport the halo is huge"). Binning luminance by the true ANGLE from the sun: the glow 3-10 degrees out
+  // reads 166.7 and falls to 153.3 with the bloom pass neutered, while the sun disc's own HDR gain moves it 0.6 from 10 all
+  // the way down to 1.2. So what was blooming was the bright SKY around the sun, which sits between 1.00 and 1.15 in HDR —
+  // at 1.15 the shoulder lands exactly on the no-bloom floor and the disc keeps its own glow (core 243 -> 238).
+  // Bloom is for LIGHTS, not for sky. Collateral measured, not assumed: a night frame on the ground reads 1.303% of pixels
+  // above 110 at 0.88 and 1.306% at 1.15, mean 28.26 against 28.24 — the torches and lanterns are well above both, so
+  // nothing that is supposed to glow lost anything. bench/assert-sun-hides.mjs asserts that pair.
+  bloomPass = new UnrealBloomPass(new THREE.Vector2(innerWidth/2,innerHeight/2), 0.55, 0.34, 1.15);   // HALF-RES bloom — the mip-blur chain is the heaviest post pass; half-res is visually identical for a soft glow and ~halves its cost
   if (CFG.quality!=='Low') composer.addPass(bloomPass);
   composer.addPass(new OutputPass());
   gradePass = new ShaderPass(GradeShader);
@@ -5670,7 +5678,8 @@ function drainUnloads(){ let n=0;
 const HW=0.3, PH=1.8, EYE=1.62, STEP=0.6;
 const player={ pos:new THREE.Vector3(), vel:new THREE.Vector3(), yaw:0, pitch:0,
   onGround:false, fly:false, sneak:false, sprint:false, inWater:false,
-  health:20, hunger:20, water:20, sat:5, creative:false, bob:0, fov:74, dead:false };
+  health:20, hunger:20, water:20, sat:5, creative:false, bob:0, fov:74, dead:false,
+  stam:100, stamMax:100, _stamCd:0, _stamOut:false };   // STAMINA (Ben 08-04): sprinting and jumping spend it, standing still buys it back — see the block in physics
 let spawnX=8, spawnZ=8;
 (function spawn(){ for(let r=0;r<400;r++){ const h=surfaceH(8+r,8); if(h>CFG.SEA+2){ spawnX=8+r; break; } } const h=surfaceH(spawnX,spawnZ); player.pos.set(spawnX+0.5, h+2, spawnZ+0.5); })();
 
@@ -5750,7 +5759,9 @@ function physics(dt){
   const fwd=_noInput?0:((K.KeyW?1:0)-(K.KeyS?1:0)), str=_noInput?0:((K.KeyD?1:0)-(K.KeyA?1:0));
   let mag=Math.hypot(fwd,str); if(mag>0){}
   const sy=Math.sin(p.yaw), cy=Math.cos(p.yaw);
-  p.sprint = (K.ShiftLeft||K.ShiftRight) && !p.fly && fwd>0;
+  // SPRINTING COSTS SOMETHING NOW. The gate is hysteretic on purpose: at zero you are winded and cannot sprint again until a
+  // quarter of the bar is back, or holding shift at empty would stutter between walk and run every frame.
+  p.sprint = (K.ShiftLeft||K.ShiftRight) && !p.fly && fwd>0 && !p._stamOut && p.stam>0.5;
   p.sneak = (K.ControlLeft||K.ControlRight||K.KeyX) && !p.fly;   // X crouches too (Ben 07-27) — Ctrl is awkward to hold while running
   const _spdBuf = (!p.fly && (p.speedT||0)>0) ? (p.speedMul||1.4) : 1;   // stim/adrenaline SPEED buff (Ben 07-21): quickens walk+sprint on foot while the window holds
   const base = (p.fly?(cineMode?cineSpeed:18) : (p.sprint?7.2:(p.sneak?1.9:4.6)) * (p.inWater?(p.sprint?0.26:0.18):(p.wading?0.55:1))) * _spdBuf;   // water DRASTICALLY slows you (Ben 07-20): swim crawls at 0.18× (0.26× sprint), even wading halves you — the sea is not a shortcut; cinematic flight uses the scroll-set speed
@@ -5810,6 +5821,7 @@ function physics(dt){
     p._jumpCd = Math.max(0,(p._jumpCd||0)-dt);
     if(p._jumpBuf>0 && p._jumpCd<=0 && (p.onGround || p._coyote>0)){
       p.vel.y=8.4; p.onGround=false; p._coyote=0; p._jumpBuf=0; p._jumpCd=0.14;      // the cooldown is what stops a held Space auto-bouncing on landing
+      p.stam=Math.max(0,p.stam-9); p._stamCd=0.7;                                   // a jump is a real effort; it is charged but never REFUSED, which would read as an input being eaten
       if(typeof emitNoise==='function')emitNoise(p.pos.x,p.pos.y,p.pos.z,0.4); } }
   if(cineMode && p.fly){ p.pos.x+=p.vel.x*dt; p.pos.y+=p.vel.y*dt; p.pos.z+=p.vel.z*dt; p.onGround=false; return; }   // CINEMATIC: noclip — the free camera glides straight through terrain, no collision resolve
   if(typeof VOID!=='undefined' && VOID.on && VOID.floored){   // STAGE III: the real tiles are GONE — the player stands on a single flat, clear surface held up above the white nothing (no voxel collision, free to roam)
@@ -5853,6 +5865,17 @@ function physics(dt){
     if(rs!==null && p.pos.y < rs+0.02 && p.pos.y > rs-0.8){ p.pos.y=rs; if(p.vel.y<0)p.vel.y=0; p.onGround=true; p._impactVy=0; } }
   // FALL DAMAGE: based on IMPACT VELOCITY (momentum), not distance — water clamps fall velocity to ~-4, so a splash-landing is harmless
   const landed = p.onGround && !p._wasGround;
+  // STAMINA. Sprinting and swimming spend it, everything else pays it back after a moment's pause — the pause is what stops
+  // tapping shift from being free. Hunger halves the recovery: a starving body does not get its wind back. Creative flight is
+  // exempt entirely, because it is a camera.
+  if(!p.fly && !p.dead){
+    let drain=0;
+    if(p.sprint && mag>0) drain+=14;
+    if(p.inWater && mag>0) drain+=6;
+    if(drain>0){ p.stam=Math.max(0,p.stam-drain*dt); p._stamCd=0.7; }
+    else { p._stamCd=Math.max(0,(p._stamCd||0)-dt);
+      if(p._stamCd<=0) p.stam=Math.min(p.stamMax, p.stam + (p.hunger<6?8:16)*dt); }
+    if(p.stam<=0){ p.stam=0; p._stamOut=true; } else if(p.stam>p.stamMax*0.25) p._stamOut=false; }
   p.landT=Math.max(0,(p.landT||0)-dt*3.0);   // decays BEFORE this frame's landing can set it, or the impact would be eaten on arrival
   if(p._landCorr) p._landCorr = (p._landCorr>0.0015) ? p._landCorr*Math.exp(-dt*13) : 0;   // the eye catches up with the body in ~0.1 s
   // THE EYE IS ON A SPRING, NOT A SCRIPTED DIP (Ben 08-04: "when i land on the ground I snap upward"). The first version set a
@@ -8176,10 +8199,12 @@ function updateMinimap(dt){ if(!_mm){ buildMinimap(); }
   // entirely when nothing changed. (Opacity/shake above still update live every frame — they're cheap.)
   { const U=updateMinimap; U._acc=(U._acc||0)+dt;
     const moved=Math.abs(player.pos.x-(U._x||0))+Math.abs(player.pos.z-(U._z||0))>0.35 || Math.abs(player.yaw-(U._yaw||0))>0.02;
-    const vitals=player.health!==U._hp||player.hunger!==U._hu||player.water!==U._wa;
+    const vitals=player.health!==U._hp||player.hunger!==U._hu||player.water!==U._wa
+      || Math.abs((player.stam||0)-(U._st||0))>0.5 || (typeof armorPoints==='function'?armorPoints():0)!==U._ap;   // the two new gauges are part of "changed", or they would only repaint when something else moved
     const changed=moved||vitals||_mmHurt>0.01;
     if(U._drawn && U._acc<(changed?0.066:0.4)) return;
-    U._acc=0; U._x=player.pos.x; U._z=player.pos.z; U._yaw=player.yaw; U._hp=player.health; U._hu=player.hunger; U._wa=player.water; U._drawn=true; }
+    U._acc=0; U._x=player.pos.x; U._z=player.pos.z; U._yaw=player.yaw; U._hp=player.health; U._hu=player.hunger; U._wa=player.water;
+    U._st=player.stam||0; U._ap=(typeof armorPoints==='function'?armorPoints():0); U._drawn=true; }
   g.clearRect(0,0,S,S);
   const yaw=player.yaw, cyw=Math.cos(yaw), syw=Math.sin(yaw), scale=1.08, Rmap=130;   // smaller disc → room for 3 stat rings
   const toMap=(wx,wz)=>{ const dx=wx-player.pos.x, dz=wz-player.pos.z; return [cx+(dx*cyw-dz*syw)*scale, cy-(-dx*syw-dz*cyw)*scale]; };
@@ -8204,6 +8229,31 @@ function updateMinimap(dt){ if(!_mm){ buildMinimap(); }
   _mmArc(g,cx,cy,Rmap+34,A0,A1,'rgba(30,8,8,.55)',11);                                                       // HEALTH (outer, blood)
   const hcol=_mmHurt>0?'#ff5a4a':(hp<0.25?((Math.sin(clock.elapsedTime*4)*0.5+0.5)>0.5?'#ff3a3a':'#7a1010'):'#c22a2a');
   _mmArc(g,cx,cy,Rmap+34,A0,A0+sw*hp,hcol,11);
+  // ---- STAMINA, on the OUTSIDE of the three (Ben 08-04) ----
+  // Thinner than health and further out, because it is the one gauge that moves constantly and a heavy ring that never sits still
+  // pulls the eye off the three that matter. It only goes red once you are winded, which is the moment it is telling you anything.
+  { const st=clamp((player.stam||0)/(player.stamMax||100),0,1);
+    _mmArc(g,cx,cy,Rmap+45,A0,A1,'rgba(10,26,14,.5)',6);
+    _mmArc(g,cx,cy,Rmap+45,A0,A0+sw*st, player._stamOut?'#b8532a':(st<0.3?'#c8a23a':'#79b45c'), 6); }
+  // ---- ARMOUR: THREE SHIELDS AT THE RING'S BOTTOM LEFT, four points each, filling bottom-up ----
+  // They sit in the gap the gauges leave (the arcs stop at 0.72PI), so nothing is drawn over. The fill is proportional and the
+  // three tick marks per shield are the tiers: one armour point is a quarter of a shield, twelve points fills all three.
+  { const pts=(typeof armorPoints==='function')?armorPoints():0, R=Rmap+22;
+    for(let i=0;i<3;i++){
+      const a=Math.PI*(0.72-i*0.105), sx=cx+Math.cos(a)*R, sy=cy+Math.sin(a)*R;
+      const f=clamp((pts-i*4)/4,0,1);
+      g.save(); g.translate(sx,sy);
+      const W=11, H=13;                                                   // a small heater shield: square shoulders down to a point
+      const path=()=>{ g.beginPath(); g.moveTo(-W,-H); g.lineTo(W,-H); g.lineTo(W,H*0.25);
+        g.quadraticCurveTo(W*0.85,H*0.8, 0,H); g.quadraticCurveTo(-W*0.85,H*0.8, -W,H*0.25); g.closePath(); };
+      path(); g.fillStyle='rgba(8,10,12,.62)'; g.fill();                  // the empty shield is still a shield, just dark
+      if(f>0){ g.save(); path(); g.clip();
+        g.fillStyle = f>=1 ? '#cfd6de' : '#8f9aa6';                       // a full shield brightens, so "three full" reads at a glance
+        g.fillRect(-W, H-(2*H)*f, W*2, 2*H); g.restore(); }               // bottom-up
+      for(let t=1;t<4;t++){ const ty=H-(2*H)*(t/4);                       // the four tiers, one per armour point
+        g.strokeStyle='rgba(0,0,0,.45)'; g.lineWidth=1; g.beginPath(); g.moveTo(-W,ty); g.lineTo(W,ty); g.stroke(); }
+      path(); g.strokeStyle='rgba(214,199,159,.75)'; g.lineWidth=1.6; g.stroke();
+      g.restore(); } }
 }
 // THE WRETCH boss bar — appears the first time you wound it (wretch.everHurt), horror styling to match the struggle bar.
 // CERAPHIM (Ben 07-20): THREE healthbars — 1500 → 3000 → 3750. Draining one REGENERATES the next (the bar floods
@@ -12168,6 +12218,23 @@ function updateArmorView(){ if(_pv)applyWorn(_pv.P); if(_tpsBody)applyWorn(_tpsB
 function renderPView(dt){ if(!_pv){ initPView(); if(!_pv)return; } _pv.t+=dt;
   if(_pv.lockYaw==null) _pv.P.group.rotation.y=Math.sin(_pv.t*0.6)*0.7;   // bench locks the yaw so front/back/side shots are comparable
   _pv.rn.render(_pv.sc,_pv.cam); }
+// =====================================================================
+//  ARMOUR POINTS (Ben 08-04) — twelve is a full set, and the HUD shows them as three shields of four
+// =====================================================================
+// Separate from `def`, which is the damage maths and is tuned; this is the READOUT, and the two want different shapes. Twelve is
+// reachable exactly: iron head-to-toe (2+4+3+2 = 11), a shield in the offhand (0.75) and a worn pack (0.25). Leather is about half
+// of iron, the hazmat sits between them, and the three trinkets Ben named — goggles, straw hat, backpack — are a quarter point
+// each, which is a sixteenth of a shield: visible as a sliver, worth nothing in a fight.
+// A quarter point is the smallest step, so the whole scale is quarters and the display is continuous with twelve tick marks.
+const ARMOR_PTS={
+  iron_helmet:2, iron_chestplate:4, iron_leggings:3, iron_boots:2,          // 11 — a full iron set
+  leather_helmet:1, leather_chestplate:2, leather_leggings:1.5, leather_boots:1,
+  hazmat_suit:2.5, angel_wings:1,
+  shield:0.75, backpack:0.25, nvg:0.25, straw_hat:0.25 };
+const ARMOR_PTS_MAX=12;
+function armorPoints(){ let p=0;
+  for(let i=0;i<armor.length;i++){ const a=armor[i]; if(a && ARMOR_PTS[a.id]!=null) p+=ARMOR_PTS[a.id]; }
+  return Math.min(ARMOR_PTS_MAX, p); }
 function armorDefense(){ let d=0; for(let i=0;i<EQ_ARMOR;i++){ const a=armor[i]; if(a&&ITEMS[a.id]&&ITEMS[a.id].armor) d+=ITEMS[a.id].armor.def; } return d; }   // 0..3 ONLY — the offhand and pack slots hold whatever you like and must never pay out defence
 function openInventory(size){ if(player.grabbed)return; if(!uiBuilt)buildContainers(); craftSize=size; for(let i=0;i<9;i++)craftGrid[i]=null; buildCraftGrid(size); updateCraftOut(); openUI='inv'; invuiEl.style.display='flex'; renderInvUI(); updateArmorView(); document.exitPointerLock&&document.exitPointerLock(); }
 function openChest(x,y,z){ if(!uiBuilt)buildContainers(); curChestKey=x+','+y+','+z; if(!chests[curChestKey])chests[curChestKey]=new Array(27).fill(null); curChest=chests[curChestKey];
@@ -22389,6 +22456,17 @@ window.__hc={
       delete keys.Space; locked=wasL; openUI=wasUI;
       return { hold, rise:+(peak-y0).toFixed(3), y0:+y0.toFixed(2), peak:+peak.toFixed(2) }; }
     catch(e){ delete keys.Space; return {err:String(e.message||e)}; } },
+  // The two new gauges: what the ring is showing and what it is showing it FROM.
+  vitalRing(){ try{ return { stam:+(player.stam||0).toFixed(1), stamMax:player.stamMax, winded:!!player._stamOut,
+      sprint:!!player.sprint, armorPts:armorPoints(), armorMax:ARMOR_PTS_MAX,
+      shields:[0,1,2].map(i=>+Math.min(1,Math.max(0,(armorPoints()-i*4)/4)).toFixed(3)),
+      worn:armor.map(a=>a?a.id:null) }; }catch(e){ return {err:String(e.message||e)}; } },
+  stamSet(v){ try{ player.stam=Math.max(0,Math.min(player.stamMax,+v||0)); if(player.stam>player.stamMax*0.25)player._stamOut=false; return this.vitalRing(); }catch(e){ return {err:String(e.message||e)}; } },
+  stamRun(sec){ try{ const wasL=locked, wasUI=openUI; locked=true; openUI=null;
+      keys.KeyW=true; keys.ShiftLeft=true;
+      for(let i=0;i<Math.round((+sec||1)*60);i++) physics(1/60);
+      delete keys.KeyW; delete keys.ShiftLeft; locked=wasL; openUI=wasUI;
+      return this.vitalRing(); }catch(e){ delete keys.KeyW; delete keys.ShiftLeft; return {err:String(e.message||e)}; } },
   tpsShoulder(s){ try{ if(s!=null)_tpsShoulder=(s|0); return this.tpsCam(); }catch(e){ return {err:String(e.message||e)}; } },
   // The ring's live size, and the cone a shot may actually land in. spreadDeg is what "less accurate when jumping" has to move.
   xhProbe(){ try{ const el=document.getElementById('xh'), cs=el?getComputedStyle(el):null;
