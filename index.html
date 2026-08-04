@@ -2043,6 +2043,28 @@ function decorate(c){
     // SULFUR NODES — yellow-grey blobs on the surface: common along the dry beach band, rare inland. Mine for sulfur powder (→ gunpowder → ammo). Placed BEFORE the tree setback so they populate the beach the trees skip.
     { const near=h-CFG.SEA, sr=tileRng((wx*40503^wz*13007)>>>0)();
       if(trailDist(wx,wz)>2 && ((near>=0&&near<=3&&sr<0.0036) || (near>3&&near<90&&sr<0.00088)) && groundSeat(wx,h,wz)) placeSet(c, wx, h+1, wz, BID.sulfur_ore, true); }   // yellow-grey nodes: uncommon on the beach, rare inland (cut 60% then a further 50% by request, 2026-07-19)
+    // LEAF LITTER — scattered over the whole world in PATCHES (Ben 08-04: "leaf piles of various types should spawn all over
+    // the ground, 1.2x as common as sulfur, preferrably in groups"). Groups, not a uniform sprinkle, and the difference is one
+    // decision: an 8x8 cell either is a drift or it is not, and only the cells that are place anything. A per-tile probability
+    // at this density would put single leaves sixty blocks apart, which reads as litter dropped by the generator; a 0.35%
+    // chance of a cell being a drift with a third of its tiles filled gives the same total count as about twenty piles in one
+    // place, which reads as a drift under a tree.
+    // The rate is set against MEASURED sulfur, not against its declared 0.00088: both are filtered by groundSeat and the trail
+    // corridor, and sulfur loses far more of its roll than these do, so matching the declared numbers put four leaves on the
+    // ground for every sulfur node. Counted over a 181x181 sample around spawn, 0.0021 x 0.15 lands on 1.2x what sulfur
+    // actually places. Smaller, more numerous drifts than the first attempt for the same total, because "all over the ground"
+    // and "in groups" pull against each other and ten scattered drifts read as both where two large ones read as neither.
+    // The type is chosen per CELL, so a drift is mostly one age of leaf with a few of the next mixed through it, rather than a
+    // three-colour confetti. These are not tracked in _leafPiles: worldgen litter is scenery and does not rot away on a timer.
+    { const cxq=wx>>3, czq=wz>>3, cr=tileRng((cxq*92837^czq*68909)>>>0);
+      if(cr()<0.0021){
+        const kind=cr(), tr=tileRng((wx*15731^wz*789221)>>>0), t=tr();
+        if(t<0.15 && h>CFG.SEA && h<WH-30 && trailDist(wx,wz)>2 && !inCabin(wx,wz) && groundSeat(wx,h,wz)){
+          const mix=tr();
+          const id = kind<0.34 ? (mix<0.75?BID.leaf_pile:BID.leaf_pile_decay)
+                   : kind<0.70 ? (mix<0.75?BID.leaf_pile_decay:BID.leaf_pile_dead)
+                               : (mix<0.75?BID.leaf_pile_dead:BID.leaf_pile_decay);
+          placeSet(c, wx, h+1, wz, id, true); } } }
     // PEBBLE CLUSTERS — RARE, and only on the forest floor (Ben 07-20 rev2: woods only, nowhere else); pick for flint
     { const pr=tileRng((wx*68899^wz*24499)>>>0)();
       if(pr<0.0009 && h>CFG.SEA+4 && h<=CFG.SEA+38 && trailDist(wx,wz)>2 && groundSeat(wx,h,wz)) placeSet(c, wx, h+1, wz, BID.pebbles, true); }
@@ -2926,6 +2948,20 @@ const skyMat = new THREE.ShaderMaterial({
       // and bluer (0.64,0.76,0.89 -> 0.58,0.73,0.92): the greyness, not the brightness, is what read as haze.
       // NOT the dark-horizon experiment, which Ben rejected -- the gradient still runs pale at the bottom, just less of it.
       vec3 col=mix(hor,zen,pow(up,0.35));
+      // AND IT KEEPS GOING DOWN (Ben 08-04: "night sky still doesnt extend down to infinity"). NO BACKTICKS IN HERE — this
+      // shader is a JS template literal and one in a comment ends it: the first version of this note quoted the variable name
+      // in backticks and the whole file stopped parsing with "Unexpected identifier 'up'", which is the trap written two
+      // screens above. The variable up clamps at 0 for
+      // dir.y < -0.1, so everything below that held ONE constant colour — measured from 150 blocks up looking down at
+      // midnight, five consecutive row bands of the frame read exactly 78.4: a flat pale slab, which is the same artefact as
+      // the ocean band that was removed this morning, only this time it is the sky dome's own floor.
+      // The gradient is EXTENDED, not remapped. Remapping that variable to span pole to pole was tried before and is wrong for a reason
+      // recorded above — at the horizon it puts up at 0.5 instead of 0.09 and rewrites the whole approved sky. This term is
+      // exactly zero at dir.y = -0.1 and grows downward, so every ray above the horizon is bit-identical to before, and below
+      // it the sky carries on darkening instead of stopping. 0.55 keeps it recognisably the same sky rather than fading to
+      // black, which would put a second edge under the first.
+      float dn = clamp((-0.1 - dir.y)/0.9, 0.0, 1.0);
+      col = mix(col, hor*0.55, pow(dn, 0.7));
       // (the dark below-horizon band that used to be mixed in here is gone — see the note on the gradient above)
       // ---- FORWARD SCATTER (Ben 07-28, "a beautiful in-game sky") ----
       // The sky is BRIGHTER toward the sun and dimmest at 90 degrees from it. The dome had none of this, which is the main
@@ -8570,8 +8606,10 @@ function updateBars(){ const op=(player.grabbed||player.tied||(typeof intro!=='u
 // =====================================================================
 let _mm=null, _dungeonSeen=false, _mmHurt=0, _mmLastHP=20, _mmStam=1;
 function buildMinimap(){ const wrap=document.createElement('div'); wrap.id='minimap';
-  wrap.style.cssText='position:fixed;left:calc(50% - 470px);bottom:14px;width:198px;height:198px;z-index:6;pointer-events:none;opacity:0;transition:opacity .3s;filter:drop-shadow(0 6px 18px rgba(0,0,0,.7))';   // to the LEFT of the hotbar, 10% bigger
-  const cvs=document.createElement('canvas'); cvs.width=cvs.height=360; cvs.style.cssText='width:198px;height:198px;display:block';
+  // 420x360, not 360 square: the extra 60 is a left margin for the armour shields, which sit outside the outermost gauge.
+  // left is 470+33 because 60 canvas px at the map's 198/360 scale is 33 css px — the ring's centre stays exactly where it was.
+  wrap.style.cssText='position:fixed;left:calc(50% - 503px);bottom:14px;width:231px;height:198px;z-index:6;pointer-events:none;opacity:0;transition:opacity .3s;filter:drop-shadow(0 6px 18px rgba(0,0,0,.7))';   // to the LEFT of the hotbar, 10% bigger
+  const cvs=document.createElement('canvas'); cvs.width=420; cvs.height=360; cvs.style.cssText='width:231px;height:198px;display:block';
   wrap.appendChild(cvs); document.body.appendChild(wrap);
   const b=document.getElementById('bars'); if(b)b.style.display='none';   // retire the old pip rows — health/hunger live in the ring now
   _mm={wrap,cvs,ctx:cvs.getContext('2d')}; }
@@ -8597,7 +8635,7 @@ function _mmIcon(g,x,y,t){ g.save(); g.translate(x,y);
 function updateMinimap(dt){ if(!_mm){ buildMinimap(); }
   if(typeof BR!=='undefined' && BR.inside){ try{ brMinimapStatic(dt); }catch(e){} return; }   // THE BACKROOMS: the map is dead — animated static (Ben 07-24); guarded so it can never halt the loop
   if(!started || (typeof intro!=='undefined' && intro.active)){ _mm.wrap.style.opacity='0'; return; }
-  const g=_mm.ctx, S=360, cx=180, cy=180;
+  const g=_mm.ctx, S=360, SW=420, cx=210, cy=180;   // SW is the canvas WIDTH; the ring is still 360 tall and centred on cy
   if(player.health<_mmLastHP) _mmHurt=1; _mmLastHP=player.health; _mmHurt=Math.max(0,_mmHurt-dt*2.2);
   _mm.wrap.style.opacity=(player.grabbed||player.tied)?'0':(_mmHurt>0?'1':'0.9');
   const sh=_mmHurt>0.3?(Math.random()-0.5)*_mmHurt*5:0; _mm.wrap.style.transform='translate('+sh.toFixed(1)+'px,'+sh.toFixed(1)+'px)';
@@ -8613,15 +8651,15 @@ function updateMinimap(dt){ if(!_mm){ buildMinimap(); }
     updateMinimap._dtAcc=U._acc;   // how long since the last repaint — the stamina arc eases by THIS, not by the frame's dt
     U._acc=0; U._x=player.pos.x; U._z=player.pos.z; U._yaw=player.yaw; U._hp=player.health; U._hu=player.hunger; U._wa=player.water;
     U._st=player.stam||0; U._ap=(typeof armorPoints==='function'?armorPoints():0); U._drawn=true; }
-  g.clearRect(0,0,S,S);
+  g.clearRect(0,0,SW,S);
   const yaw=player.yaw, cyw=Math.cos(yaw), syw=Math.sin(yaw), scale=1.08, Rmap=130;   // smaller disc → room for 3 stat rings
   const toMap=(wx,wz)=>{ const dx=wx-player.pos.x, dz=wz-player.pos.z; return [cx+(dx*cyw-dz*syw)*scale, cy-(-dx*syw-dz*cyw)*scale]; };
   g.save(); g.beginPath(); g.arc(cx,cy,Rmap,0,7); g.clip();
-  g.fillStyle='#0c1e28'; g.fillRect(0,0,S,S);                                                    // sea
+  g.fillStyle='#0c1e28'; g.fillRect(0,0,SW,S);                                                   // sea
   const ISX=(typeof ISLE_X!=='undefined'?ISLE_X:500), ISZ=(typeof ISLE_Z!=='undefined'?ISLE_Z:0), ISR=(typeof ISLE_R!=='undefined'?ISLE_R:470);
   const im=toMap(ISX,ISZ); g.beginPath(); g.arc(im[0],im[1],ISR*scale,0,7); g.fillStyle='#16220f'; g.fill();   // island landmass
   g.lineWidth=3; g.strokeStyle='rgba(120,150,90,.18)'; g.stroke();
-  const rg=g.createRadialGradient(cx,cy,4,cx,cy,Rmap); rg.addColorStop(0,'rgba(150,173,132,.10)'); rg.addColorStop(1,'rgba(0,0,0,0)'); g.fillStyle=rg; g.fillRect(0,0,S,S);
+  const rg=g.createRadialGradient(cx,cy,4,cx,cy,Rmap); rg.addColorStop(0,'rgba(150,173,132,.10)'); rg.addColorStop(1,'rgba(0,0,0,0)'); g.fillStyle=rg; g.fillRect(0,0,SW,S);
   for(const L of mmLandmarks()){ let [mx,my]=toMap(L.x,L.z); const dx=mx-cx,dy=my-cy,d=Math.hypot(dx,dy); if(d>Rmap-14){ const k=(Rmap-14)/d; mx=cx+dx*k; my=cy+dy*k; } _mmIcon(g,mx,my,L.t); }
   g.restore();
   const vg=g.createRadialGradient(cx,cy,Rmap*0.55,cx,cy,Rmap); vg.addColorStop(0,'rgba(0,0,0,0)'); vg.addColorStop(1,'rgba(3,5,4,.72)'); g.fillStyle=vg; g.beginPath(); g.arc(cx,cy,Rmap,0,7); g.fill();   // scope-glass vignette
@@ -8651,15 +8689,17 @@ function updateMinimap(dt){ if(!_mm){ buildMinimap(); }
     const col='hsl('+hue.toFixed(0)+','+(player._stamOut?'78%':'62%')+','+(player._stamOut?'42%':'50%')+')';
     _mmArc(g,cx,cy,Rmap+45,A0,A1,'rgba(10,26,14,.5)',6);
     _mmArc(g,cx,cy,Rmap+45,A0,A0+sw*shown, col, 6); }
-  // ---- ARMOUR: THREE SHIELDS AT THE RING'S BOTTOM LEFT, four points each, filling bottom-up ----
-  // They sit in the gap the gauges leave (the arcs stop at 0.72PI), so nothing is drawn over. The fill is proportional and the
-  // three tick marks per shield are the tiers: one armour point is a quarter of a shield, twelve points fills all three.
-  // Radius and angles chosen off the frame, not by arithmetic: at Rmap+22 the first shield grazed the water gauge's end cap, and
-  // at 0.72PI it sat exactly where the arcs begin. Rmap+34 with the run starting at 0.66PI puts all three inside the gap the
-  // gauges leave at the bottom, clear of every arc, reading left-to-right along the ring's lower-left shoulder.
-  { const pts=(typeof armorPoints==='function')?armorPoints():0, R=Rmap+34;
+  // ---- ARMOUR: THREE SHIELDS IN A COLUMN OFF THE RING'S LEFT SHOULDER, four points each, filling bottom-up ----
+  // Ben 08-04: "the three armor indicators should sit to the left on the outside of the stamina ring." They used to lie along
+  // the ring's lower-left shoulder, INSIDE the arc run's gap, which read as a fourth gauge; outside the stamina ring and stacked
+  // they read as what they are — a separate thing that is either there or not.
+  // Rmap+62 clears the stamina ring's outer edge (Rmap+45 with a 6-wide stroke) by fourteen pixels. The three angles are a
+  // sixteenth of PI apart, so the column follows the ring's curve rather than being a straight line beside it, and at that radius
+  // that is a 36 px pitch for a 30 px shield. The fill is proportional and the three ticks are the tiers: one armour point is a
+  // quarter of a shield, twelve points fills all three.
+  { const pts=(typeof armorPoints==='function')?armorPoints():0, R=Rmap+62;
     for(let i=0;i<3;i++){
-      const a=Math.PI*(0.66-i*0.098), sx=cx+Math.cos(a)*R, sy=cy+Math.sin(a)*R;
+      const a=Math.PI*(1.06-i*0.06), sx=cx+Math.cos(a)*R, sy=cy+Math.sin(a)*R;
       const f=clamp((pts-i*4)/4,0,1);
       g.save(); g.translate(sx,sy);
       const W=12.5, H=15;                                                 // a small heater shield: square shoulders down to a point
@@ -17112,7 +17152,7 @@ function brForceLeaveOnDeath(){ brStopAudio(); brResumeMusic(); brRestoreAtmo();
 let _brNoise=null;
 function brMinimapStatic(dt){ if(!_mm){ if(typeof buildMinimap==='function')buildMinimap(); if(!_mm)return; }
   if((player.grabbed||player.tied)){ _mm.wrap.style.opacity='0'; return; } _mm.wrap.style.opacity='0.9'; _mm.wrap.style.transform='';
-  const g=_mm.ctx,S=360,cx=180,cy=180,R=130, N=100;
+  const g=_mm.ctx,S=360,cx=210,cy=180,R=130, N=100;   // cx follows the widened canvas (see buildMinimap) or the static would sit 30px off the ring
   if(!_brNoise){ _brNoise=document.createElement('canvas'); _brNoise.width=_brNoise.height=N; _brNoise._c=_brNoise.getContext('2d'); _brNoise._im=_brNoise._c.createImageData(N,N); }
   const dat=_brNoise._im.data;                                                                 // REAL TV static: fresh white-noise every frame (not a scrolled image)
   for(let i=0;i<N*N;i++){ const v=(Math.random()*255)|0; dat[i<<2]=v; dat[(i<<2)+1]=v; dat[(i<<2)+2]=v; dat[(i<<2)+3]=255; }
@@ -22886,6 +22926,7 @@ window.__hc={
   loadNow(){ try{ const s=readSave(); if(!s)return 'no save'; applySave(s); return 'loaded '+Object.keys(s.edits).length+' edits'; }catch(e){ return e.message; } },
   // (an earlier `editCount` was declared here and was dead: a later duplicate key in this same object literal shadowed it)
   blockAt(x,y,z){ try{ return getBlock(x,y,z); }catch(e){ return e.message; } },
+  bid(name){ try{ return BID[name]; }catch(e){ return null; } },   // QA: block ids are module scope, so a bench comparing blockAt() to a named block has no way to name it
   // QA/bench: the TERRAIN surface at (x,z) — surfaceH, which is what worldgen and buildCabin site structures on. Neither of
   // the obvious alternatives answers this question: scanning down from the sky for the first solid block stops at the tree
   // CANOPY, and groundYAt with no reference height starts from opaqueTop, which is the same canopy. assert-cabin used the
@@ -22960,6 +23001,10 @@ window.__hc={
   // drift, and adaptive quality moves the internal resolution when fps dips. Measured consequence: the same probe on the
   // same commit produced baseline chroma of 93.7, 104.9 and 77.6 on three consecutive runs — a 27-point spread around a
   // 7-point effect. Call this before any pixel measurement, and re-read it afterwards to confirm nothing drifted back.
+  // QA/bench: zero the film grain. It is animated off uTime, so it changes every pixel every frame by a level or two — which makes
+  // any frame-to-frame pixel diff read as motion. A z-fighting check built on such a diff measured 45,000 changed pixels on a
+  // perfectly stable door, all of it grain.
+  grainSet(v){ try{ if(gradePass) gradePass.uniforms.uGrain.value=Math.max(0,+v||0); return { grain:gradePass?+gradePass.uniforms.uGrain.value.toFixed(3):null }; }catch(e){ return {err:String(e.message||e)}; } },
   pinScene(){ try{
       weather.raining=false; weather.rain=0; weather.rainTgt=0; weather.rainHold=1e9; weather.rainNext=1e9;
       weather.fog=0; weather.fogTgt=0; weather.fogHold=1e9; weather.fogNext=1e9; weather.overcast=0;
@@ -24328,6 +24373,7 @@ window.__hc={
                dropAt:{ 40:+at(40).toFixed(2), 96:+at(96).toFixed(2), 182:+at(182).toFixed(2),
                         300:+at(300).toFixed(2), 1000:+at(1000).toFixed(2), 2048:+at(2048).toFixed(2) },
                wall:CFG.RENDER_DIST*CK, discRim:16*CFG.RENDER_DIST*CK, camFar:+camera.far.toFixed(1),
+               dropAtWall:+at(CFG.RENDER_DIST*CK).toFixed(3),
                // WHERE THE SEA ACTUALLY ENDS ON SCREEN. The disc's rim is 16 render walls out, but the far PLANE clips long
                // before that, so the visible horizon is the clip — and any curve beyond it is geometry nobody ever sees.
                dropAtFar:+at(camera.far).toFixed(2),
