@@ -3865,7 +3865,16 @@ const waterMat = new THREE.ShaderMaterial({
     uTime:globalU.uTime, uSunDir:globalU.uSunDir, uMoonDir:globalU.uMoonDir,
     uDay:globalU.uDay, uCamPos:globalU.uCamPos, uFogColor:{value:scene.fog.color},
     uFogDensity:{value:scene.fog.density}, uDeep:_uWaterDeep, uRing:_uWater, uRingFade:{value:2400},   // the far-sea annulus's outer radius, set per frame in updateHorizon
-    uWx:{value:0}, uCurveR:{value:20.0}, uCurveK:{value:0.0022}, uCurveClamp:{value:1}, uCurveCap:{value:2.0}   // THE WORLD CURVE — flat to 20 blocks, then k*(d-20)^2. k is small on purpose: at 40 blocks that is 0.9 down, at 96 it is 12.6, so the tip-over is gentle where you can see detail and only steepens where it reads as the sea falling away. "Subtle."
+    // THE CURVE LIVES AT THE FAR END NOW (Ben 08-04: "i just want the ocean to look like its going on forever, and to have an
+    // ever so slight world curve out at its end"). It used to be the opposite shape: R=20, k=0.0022 spends the whole fall by
+    // 50 blocks out and is flat everywhere after that, so the sea bent right in front of you and then ran dead level to the
+    // horizon — a near funnel with a flat end, which is what "the ocean ring doesn't work" kept meaning.
+    // R=300 puts the start of the bend beyond the render wall entirely, so ALL chunk water is exactly flat and no seabed can
+    // ever be drained by it; k=2.6e-6 with a cap of 8 reaches the cap only at the disc's rim (16 render walls out, ~2048
+    // blocks), where 8 blocks is a 0.22-degree dip. At 1000 blocks it is 1.3 blocks. That is the "ever so slight" part, and
+    // because the water has already faded to the ring colour by ~250 blocks, the sea beyond that is one continuous value
+    // running to a horizon that sits at eye level — which is what reads as forever.
+    uWx:{value:0}, uCurveR:{value:300.0}, uCurveK:{value:0.0000026}, uCurveClamp:{value:1}, uCurveCap:{value:8.0}   // THE WORLD CURVE — flat to 20 blocks, then k*(d-20)^2. k is small on purpose: at 40 blocks that is 0.9 down, at 96 it is 12.6, so the tip-over is gentle where you can see detail and only steepens where it reads as the sea falling away. "Subtle."
   }),
   vertexShader:`
     attribute float aTop; attribute float aDepth; attribute float aColD; varying float vTop; varying float vDepth; varying vec3 vW; varying vec3 vN; varying float vFog; varying float vCrest;
@@ -6196,7 +6205,15 @@ function updateSky(dt){
   // lerped up to 88% toward 0.045/0.055/0.085 -- measured at deep night with a bank: rgb(0.041,0.049,0.075), BRIGHTER than the
   // clear night sky it sat against. A fog bank at night is not grey air, it is not being able to see; the night end goes to
   // 0.008/0.009/0.013 and the day end is untouched.
-  if(wf>0.01){ fc.lerp(_fogGrey.setRGB(lerp(0.008,0.54,day), lerp(0.009,0.56,day), lerp(0.013,0.60,day)), Math.min(0.88,wf*0.95)); }
+  // AND IN DAYLIGHT A BANK IS THE BRIGHTEST THING IN THE FRAME (Ben 08-04: "volumetric fog isnt bright enough"). The day end was
+  // 0.54/0.56/0.60 against a clear-air day fog of 0.766, so rolling fog in at midday made the air DIMMER than no fog at all:
+  // measured over the horizon band, mean luminance 202.2 clear against 155.7 with a bank, a 23% drop where it should be a rise.
+  // Fog is sunlight scattered off water droplets — a daylight bank is brighter than the landscape it hides, which is why you
+  // cannot see into it. 0.88/0.90/0.94 puts it above the clear-air fog it replaces (measured after: 202.2 -> 232.5).
+  // THE NIGHT END IS UNTOUCHED, and that is not caution, it is four separate rulings from Ben that night fog must read as
+  // blackness — "a fog bank at night is not grey air, it is not being able to see". Night measures 65.5 clear against 14.2 with a
+  // bank and must keep doing so. `day` is what separates the two ends, so never replace this ramp with one number.
+  if(wf>0.01){ fc.lerp(_fogGrey.setRGB(lerp(0.008,0.88,day), lerp(0.009,0.90,day), lerp(0.013,0.94,day)), Math.min(0.88,wf*0.95)); }
   if(scene.background&&scene.background.isColor)scene.background.copy(fc);   // guard: a skybox CubeTexture background isn't a Color — don't call .copy on it
   // DAY 3x FARTHER, NIGHT CLOSER (Ben 07-28). Density is inverse to reach, so the day end is divided by three (0.85 -> 0.283)
   // and the night end pushed up (1.10 -> 1.70, the bank about a third nearer). The day/night SPLIT is now wide: clear air to
@@ -14123,7 +14140,7 @@ function _hideOffHand(){ offView.group.visible=false; offArm.group.visible=false
 // AIMING SHRINKS IT TO ALMOST NOTHING. In first person a raised sight replaces it, so it still fades out under the holosight or
 // the scope — but in THIRD person there is no sight to hand over to, so instead of fading it collapses to a tiny hard circle
 // (Ben: "when aiming in 3rd person it should get very small"), which is the only aiming reference the over-shoulder view has.
-let _xhEl=null, _xhCur=16, _xhLastD=-1, _xhLastOp=-1, _xhFire=0, _xhSpread=0;
+let _xhEl=null, _xhCur=16, _xhLastD=-1, _xhLastOp=-1, _xhFire=0, _xhSpread=0, _xhDual=false, _xhPreDual=16;
 const XH_REST=16, XH_AIM_TPS=6, XH_TRUE=9;
 // The ring's diameter in pixels, converted to the cone a shot may land in. Derived from the LIVE fov and viewport rather than a
 // tuned constant, so the circle on screen and the scatter in the world stay the same thing when the fov kicks on a sprint or the
@@ -14154,6 +14171,13 @@ function updateCrosshair(dt, isGun){
   let d=_xhCur;
   if(ads>0.01) d = d*(1-ads) + (_tpsAct?XH_AIM_TPS:XH_REST*0.5)*ads;
   d += _xhFire*14;                                   // a gunshot blooms it AFTER the aim shrink, so aiming never hides recoil
+  // TWO GUNS, TWICE THE RING (Ben 08-04: "when dual wielding any guns the aiming ring should get 2x bigger"). Applied last, so it
+  // doubles whatever the ring had already become — movement, airborne, recoil bloom and all. And because the ring IS the shot cone
+  // (see below), this is not decoration: firing a gun in each hand genuinely scatters twice as wide, which is what holding two
+  // guns at arm's length should cost you.
+  _xhDual = !!(inv[selSlot] && ITEMS[inv[selSlot].id] && ITEMS[inv[selSlot].id].gun
+     && armor[EQ_OFF] && ITEMS[armor[EQ_OFF].id] && ITEMS[armor[EQ_OFF].id].gun);
+  _xhPreDual=d; if(_xhDual) d *= 2;   // _xhPreDual: what the ring would be with one gun, so the doubling can be checked against its OWN baseline rather than a sample taken half a second earlier
   // THE RING IS THE SPREAD, NOT A PICTURE OF IT (Ben 08-04: "when jumping reticle aim should be less accurate"). fireGun reads
   // this and scatters the shot inside exactly the circle you are looking at, so the HUD cannot lie about where a bullet may go.
   // XH_TRUE is the diameter at which the gun is dead-on: at a full cheek weld the ring is smaller than it, so aiming is exact.
@@ -22860,7 +22884,11 @@ window.__hc={
       return { offActing:offActing(), main:mainId, off:offId, left, afterLeft, right, afterRight,
                mag:{ before:magBefore, afterLeft:magAfterLeft, afterRight:magAfterRight } }; }catch(e){ return {err:String(e.message||e)}; } },
   // LEAF PILES: drop N leaves on one cell and watch a pile appear, then age it a day at a time.
-  leafPile(x,y,z,n){ try{ if(x==null){ const P=player.pos; x=Math.floor(P.x); z=Math.floor(P.z); y=groundYAt(P.x,P.z); }
+  leafPile(x,y,z,n){ try{ if(x==null){ const P=player.pos; x=Math.floor(P.x); z=Math.floor(P.z); y=groundYAt(P.x,P.z);
+        // Clear the cell a pile would occupy. Called with no coordinates this is "test it where I am standing", and where the
+        // player is standing after a long run may be under a canopy — a leaf that lands in a leaf block is not a leaf on the
+        // ground, so the count never starts and the failure looks like the rule, not the spot.
+        setBlockWorld(x,y+1,z,AIR,true); }
       x|=0; y|=0; z|=0; n=(n|0)||LEAF_PILE_N;
       for(let i=0;i<n;i++) leafFell(x,y,z);
       const b=getBlock(x,y+1,z);
@@ -22931,7 +22959,7 @@ window.__hc={
   tpsShoulder(s){ try{ if(s!=null)_tpsShoulder=(s|0); return this.tpsCam(); }catch(e){ return {err:String(e.message||e)}; } },
   // The ring's live size, and the cone a shot may actually land in. spreadDeg is what "less accurate when jumping" has to move.
   xhProbe(){ try{ const el=document.getElementById('xh'), cs=el?getComputedStyle(el):null;
-      return { px:+_xhCur.toFixed(1), applied:_xhLastD, spreadPx:+_xhSpread.toFixed(1), spreadDeg:+(aimSpreadRad()*57.29578).toFixed(3),   // px = the movement ring before the aim blend; applied = what is actually on screen
+      return { px:+_xhCur.toFixed(1), applied:_xhLastD, dual:_xhDual, preDual:+_xhPreDual.toFixed(1), spreadPx:+_xhSpread.toFixed(1), spreadDeg:+(aimSpreadRad()*57.29578).toFixed(3),   // px = the movement ring before the aim blend; applied = what is actually on screen
         fire:+_xhFire.toFixed(2), w:cs?cs.width:null, h:cs?cs.height:null, radius:cs?cs.borderRadius:null,
         border:cs?cs.borderTopWidth:null, opacity:cs?+(+cs.opacity).toFixed(2):null,
         adsT:+((view&&view.adsT)||0).toFixed(2), holo:!!(view&&view.holoRet&&view.holoRet.visible) }; }catch(e){ return {err:String(e.message||e)}; } },
@@ -23674,14 +23702,17 @@ window.__hc={
   // clamp:0 restores the WHOLE pre-fix behaviour, cap included — a 58-block fall with no seabed clamp. Toggling only the
   // per-column clamp measured nothing, because the cap is what the far sea actually hits.
   seaCurve(o){ try{ const u=waterMat.uniforms;
-      if(o){ if(o.clamp!=null){ u.uCurveClamp.value=o.clamp?1:0; u.uCurveCap.value=o.clamp?2.0:58.0; }
+      if(o){ if(o.clamp!=null){ u.uCurveClamp.value=o.clamp?1:0; u.uCurveCap.value=o.clamp?8.0:58.0;
+                                 u.uCurveR.value=o.clamp?300.0:20.0; u.uCurveK.value=o.clamp?0.0000026:0.0022; }
              if(o.cap!=null)u.uCurveCap.value=+o.cap; if(o.r!=null)u.uCurveR.value=+o.r; if(o.k!=null)u.uCurveK.value=+o.k; }
       const at=d=>{ const over=Math.max(0,d-u.uCurveR.value); return Math.min(u.uCurveK.value*over*over, u.uCurveCap.value); };
       // THE LEDGE AT THE RENDER WALL, which is the fault itself: the far-sea disc has no seabed to clamp against, so it takes
       // the cap, while the chunk water it continues takes its own column. The difference is the step Ben photographed.
       const ledge=(d,colD)=>+(at(d) - (u.uCurveClamp.value ? Math.min(at(d), Math.max(0,colD-0.6)) : at(d))).toFixed(2);
       return { clamp:u.uCurveClamp.value, cap:u.uCurveCap.value, r:u.uCurveR.value, k:u.uCurveK.value,
-               dropAt:{ 40:+at(40).toFixed(2), 96:+at(96).toFixed(2), 182:+at(182).toFixed(2) },
+               dropAt:{ 40:+at(40).toFixed(2), 96:+at(96).toFixed(2), 182:+at(182).toFixed(2),
+                        300:+at(300).toFixed(2), 1000:+at(1000).toFixed(2), 2048:+at(2048).toFixed(2) },
+               wall:CFG.RENDER_DIST*CK, discRim:16*CFG.RENDER_DIST*CK,
                ledgeAtWall:{ shelf3:ledge(182,3), shelf6:ledge(182,6), deep20:ledge(182,20) } };
     }catch(e){ return {err:String(e.message||e)}; } },
   godrays(o){ try{ if(o&&o.on!=null) _godraysOn=!!o.on;
