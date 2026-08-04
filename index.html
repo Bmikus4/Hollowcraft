@@ -1829,6 +1829,11 @@ function inCabin(wx,wz){ const dx=wx-(spawnX+22), dz=wz-(spawnZ-14); return dx*d
 function inTower(wx,wz){ for(let i=0;i<TOWER_SPOTS.length;i++){ const t=TOWER_SPOTS[i], dx=wx-t.x, dz=wz-t.z; if(dx*dx+dz*dz<=25) return true; } return false; }   // ~5-block tree-free clearing around each lookout tower
 // DETERMINISTIC grass-surface test (no getBlock → works for out-of-chunk columns so border trees still straddle) — mirrors the surface pick in genColumn
 function isGrassSurface(wx,wz){ const h=surfaceH(wx,wz); if(h<=CFG.SEA+4 || h>CFG.SEA+38) return false; if(trailDist(wx,wz)<1.6 || nearOpening(wx,wz) || inTower(wx,wz)) return false; return true; }   // lower bound raised to SEA+4 → pines (the only caller) keep off the beach/coast fringe
+// GROUND SEAT for surface decoration placed at surfaceH+1. surfaceH is the analytic column height, but genColumn can carve a
+// cave mouth through y===h and drowns everything under CFG.SEA — so h+1 is not automatically "on the ground in open air", and a
+// sulfur node over a breached cave floats a block up with a hole under it. Ask the finished column instead of trusting the field.
+function groundSeat(wx,h,wz){ const u=getBlock(wx,h,wz); if(!u||!isSolid[u]||blockCat[u]==='cross') return false;
+  return getBlock(wx,h+1,wz)===AIR; }   // AIR, not just "not solid": water counts as occupied, or nodes generate submerged
 function placeSet(c, wx, wy, wz, b, force){
   if (wy<0||wy>=WH) return;
   const cx=wx>>4, cz=wz>>4;
@@ -1968,10 +1973,10 @@ function decorate(c){
     const h=surfaceH(wx,wz);
     // SULFUR NODES — yellow-grey blobs on the surface: common along the dry beach band, rare inland. Mine for sulfur powder (→ gunpowder → ammo). Placed BEFORE the tree setback so they populate the beach the trees skip.
     { const near=h-CFG.SEA, sr=tileRng((wx*40503^wz*13007)>>>0)();
-      if(trailDist(wx,wz)>2 && ((near>=0&&near<=3&&sr<0.0036) || (near>3&&near<90&&sr<0.00088))) placeSet(c, wx, h+1, wz, BID.sulfur_ore, true); }   // yellow-grey nodes: uncommon on the beach, rare inland (cut 60% then a further 50% by request, 2026-07-19)
+      if(trailDist(wx,wz)>2 && ((near>=0&&near<=3&&sr<0.0036) || (near>3&&near<90&&sr<0.00088)) && groundSeat(wx,h,wz)) placeSet(c, wx, h+1, wz, BID.sulfur_ore, true); }   // yellow-grey nodes: uncommon on the beach, rare inland (cut 60% then a further 50% by request, 2026-07-19)
     // PEBBLE CLUSTERS — RARE, and only on the forest floor (Ben 07-20 rev2: woods only, nowhere else); pick for flint
     { const pr=tileRng((wx*68899^wz*24499)>>>0)();
-      if(pr<0.0009 && h>CFG.SEA+4 && h<=CFG.SEA+38 && trailDist(wx,wz)>2) placeSet(c, wx, h+1, wz, BID.pebbles, true); }
+      if(pr<0.0009 && h>CFG.SEA+4 && h<=CFG.SEA+38 && trailDist(wx,wz)>2 && groundSeat(wx,h,wz)) placeSet(c, wx, h+1, wz, BID.pebbles, true); }
     if (h<=CFG.SEA+4 || h>=WH-28) continue;   // COASTAL SETBACK: trees start ≥4 blocks above sea (was +1), so the treeline pulls back off the beach/shore instead of crowding the waterline. Raise this number to push it further inland.
     if (trailDist(wx,wz)<2.6 || inCabin(wx,wz) || nearOpening(wx,wz)) continue;   // keep the dirt trail corridor + cabin footprint + trailhead clearings free of tree bases
     if (!isGrassSurface(wx,wz)) continue;   // pines only on grass → natural treeline; bare rock/snow/ice/beach stay clear (deterministic so border trees still straddle)
@@ -3382,6 +3387,10 @@ const pineUnderLayer=new THREE.Mesh(_horizGeo, pineUnderMat); pineUnderLayer.fru
 // Chosen from the actual heightfield rather than a hard-coded compass bearing — a literal angle lands on open sea for half
 // of all islands, and the mask would then discard the pines there and the feature would silently not exist.
 let _ENT_PT=null;
+// QA OVERRIDE for the mouth's strength. The only confound-free way to measure what the entranceway contributes to a frame is
+// to toggle it with everything else held — the treeline's own column-to-column variation is ~20 levels, the same order as the
+// mouth, so a crop statistic cannot separate them (it reported the mouth as still present after it had been faded to zero).
+let _entOnForce=null;
 function entrancePoint(){ if(_ENT_PT) return _ENT_PT;
   const IC=islandStats(); let bestA=0, bestS=-1;
   for(let a=0;a<64;a++){ const th=a/64*6.2831853, dx=Math.cos(th), dz=Math.sin(th); let s=0;
@@ -3472,7 +3481,14 @@ function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.p
       const overWater=_sh<=CFG.SEA;
       const outward=overWater?Math.max(0, d-R):0;                                                       // 0 anywhere inside the coast, and 0 anywhere on land
       pineMat.uniforms.uPushD.value = 1 + outward/Math.max(1, CFG.RENDER_DIST*CK);                      // at the shore exactly 1.0; one wall-distance out at sea, twice the range → half the angular height
-      pineMat.uniforms.uHide.value  = clamp((d-R*0.45)/(R*0.40), 0, 1); }                               // 0 by 0.45R (deep inland), full by 0.85R, so the shore and everything seaward is untouched
+      pineMat.uniforms.uHide.value  = clamp((d-R*0.45)/(R*0.40), 0, 1);                                 // 0 by 0.45R (deep inland), full by 0.85R, so the shore and everything seaward is untouched
+      // THE MOUTH CLOSES AS IT STOPS BEING RESOLVABLE. An opening reads as an opening because of its jambs and its lintel;
+      // those are a fixed number of DEGREES of the band, and uPushD halves the band's angular height every wall-distance out
+      // to sea. So from far enough offshore the structure goes sub-pixel and all that survives is the near-black fill with the
+      // haze held off it — a soft dark smear pinned to one bearing, which is the "dark blob on the treeline" Ben photographed
+      // from 900 blocks out in three separate frames. Derived from uPushD rather than given its own distance constant, because
+      // uPushD IS the thing that makes the mouth unresolvable: full at the shore, gone by 1.5 wall-distances out.
+      pineMat.uniforms.uEntOn.value = _entOnForce!=null ? _entOnForce : clamp((2.5 - pineMat.uniforms.uPushD.value)/1.5, 0, 1); }
     { const EP=entrancePoint();   // the mouth's live bearing — atan2(z,x) to match the shader's atan(vPos.z,vPos.x) exactly
       pineMat.uniforms.uEntAz.value=Math.atan2(EP.z-camera.position.z, EP.x-camera.position.x); }
     // THE DARK WOODY BAND rides on exactly the same per-frame state as the pines — same fog amount, same weather, same
@@ -4436,7 +4452,8 @@ MODEL_ITEM_BUILDERS.hanging_light=(bd)=>{ const g=new THREE.Group(); g.userData.
   return g; };
 // THE VAULT LEAF, two cells wide and two tall from its origin cell. The group is placed at the origin cell's centre-floor, so the
 // body is offset half a cell along its span axis and one cell up: that is what makes one block's model cover four cells.
-function _vaultLeaf(bd, open){ const g=new THREE.Group();
+const _VAULT_SWING=1.75, _VAULT_SPIN=0.85, _VAULT_OPEN=1.05;   // radians of swing, seconds of wheel spin, seconds of swing (see updateVaultDoors)
+function _vaultLeaf(bd, open){ const g=new THREE.Group(); g.userData.vaultModel=1;
   const steel=new THREE.MeshPhongMaterial({color:0x8a9099,shininess:80,specular:0x6f757d});
   const dark =new THREE.MeshPhongMaterial({color:0x4e535a,shininess:40,specular:0x3a3f45});
   const gold =new THREE.MeshPhongMaterial({color:0xd4af37,shininess:140,specular:0xfff0b0});   // ONLY the centre bolt — the brass ring this door used to wear is gone at Ben's request
@@ -4444,9 +4461,13 @@ function _vaultLeaf(bd, open){ const g=new THREE.Group();
   const hinge=new THREE.Group(); g.add(hinge);
   // The hinge is the outer edge of the origin cell, so an open leaf swings OUT of the doorway instead of through the wall.
   hinge.position.set(alongX?-0.5:0, 0, alongX?0:-0.5);
-  if(open) hinge.rotation.y = alongX ? -1.75 : 1.75;                                                 // 100 degrees — clear of the opening, still obviously a door and not gone
-  const W=1.88, T=0.26;
-  const body=new THREE.Mesh(alongX?box(W,1.88,T):box(T,1.88,W), steel);
+  if(open) hinge.rotation.y = _VAULT_SWING*(alongX?-1:1);                                            // 100 degrees — clear of the opening, still obviously a door and not gone
+  // FILLS THE 2x2 (Ben 08-04: "span a whole 2x2"). W was 1.88, which left a 6 cm daylight gap down each side of a doorway the
+  // door is supposed to seal. 1.99 is deliberate and must stay under 2: at exactly 2.0 the leaf's edges are COPLANAR with the
+  // faces of the wall blocks it sits between, and two coplanar surfaces at the same depth is the flickering seam Ben called
+  // overlapping textures. 5 mm of clearance is invisible at any range and is what keeps the depth test decisive.
+  const W=1.99, T=0.26, H=1.99;
+  const body=new THREE.Mesh(alongX?box(W,H,T):box(T,H,W), steel);
   body.position.set(alongX?1.0:0, 1.0, alongX?0:1.0);                                                // centre of the two spanned cells, in hinge space
   hinge.add(body);
   // Raised frame bands and rivets: the pack's material family is riveted steel and the door has to belong to it.
@@ -4464,14 +4485,25 @@ function _vaultLeaf(bd, open){ const g=new THREE.Group();
   //
   // The wheel is its own Group and sits on the hinge, so when the slow spinning open lands it has a single node to turn: rotate
   // this group about its own normal and every spoke and knob follows. Nothing here should be flattened into the leaf.
-  const wheel=new THREE.Group(); wheel.position.set(alongX?1.0:T*0.6, 1.0, alongX?T*0.6:1.0); hinge.add(wheel);
+  const wheel=new THREE.Group(); wheel.position.set(alongX?1.0:T*0.78, 1.0, alongX?T*0.78:1.0); hinge.add(wheel);
+  g.userData.vaultWheel=wheel; g.userData.vaultHinge=hinge; g.userData.vaultAlongX=alongX;            // the animator turns these two nodes and nothing else
   const RIM=0.34, REACH=0.46;                                                                        // rim radius, and how far the handles stand out past it
   const face=(o)=>{ o.rotation.x=Math.PI/2; if(!alongX) o.rotation.z=Math.PI/2; return o; };          // lay a disc flat against the door face
   wheel.add(face(new THREE.Mesh(cyl(RIM,RIM,0.05,20),steel)));                                       // the rim, steel
-  wheel.add(face(new THREE.Mesh(cyl(RIM-0.06,RIM-0.06,0.055,20),dark)));                             // recessed inner face, so the rim reads as a rim
-  for(let i=0;i<4;i++){ const a=i/4*Math.PI;                                                          // 4 bars => 8 arms
-    const sp=new THREE.Mesh(box(REACH*2,0.055,0.055),steel);
-    sp.rotation.set(0,0,a); if(!alongX) sp.rotation.set(a,Math.PI/2,0); wheel.add(sp); }
+  // GENUINELY RECESSED. This disc was 0.055 thick inside a 0.05 rim, so the "recess" stood 2.5 mm PROUD of the rim on both
+  // sides and its edge shared the rim's plane — the second seam. Thinner, and pushed back behind the rim's front face.
+  const inner=face(new THREE.Mesh(cyl(RIM-0.06,RIM-0.06,0.03,20),dark)); inner.position.set(alongX?0:-0.012,0,alongX?-0.012:0); wheel.add(inner);
+  // EIGHT SEPARATE ARMS, NOT FOUR CROSSING BARS. Four bars through the hub overlap each other across the middle with their
+  // front faces at the SAME depth, and coplanar faces at equal depth is precisely the z-fighting flicker on the wheel. Each
+  // arm now starts outside the hub and runs outward, so no two of them share any volume.
+  const ARM0=0.10, ARM=REACH-ARM0, _AX=new THREE.Vector3(1,0,0);
+  for(let i=0;i<8;i++){ const a=i/8*Math.PI*2, mid=ARM0+ARM/2;
+    const sp=new THREE.Mesh(box(ARM,0.055,0.055),steel);
+    // Aim the bar with a quaternion rather than Euler angles: which axis an Euler triple ends up sweeping depends on the
+    // rotation order, and the pair of facings made that easy to get silently wrong (the old bars did).
+    const dir=new THREE.Vector3(alongX?Math.cos(a):0, Math.sin(a), alongX?0:Math.cos(a)).normalize();
+    sp.quaternion.setFromUnitVectors(_AX, dir); sp.position.copy(dir).multiplyScalar(mid);
+    wheel.add(sp); }
   for(let i=0;i<8;i++){ const a=i/8*Math.PI*2, kx=Math.cos(a)*REACH, ky=Math.sin(a)*REACH;            // 8 turned handle knobs
     const kn=new THREE.Mesh(cyl(0.055,0.04,0.13,10),steel);
     if(alongX){ kn.position.set(kx,ky,0); kn.rotation.set(Math.PI/2,0,0); }
@@ -12456,6 +12488,13 @@ function updateWings(dt){ if(typeof camera==='undefined')return;
 // ---- CAMERA RECOIL — two-stage spring shared by every gun: the kick ramps in over ~50ms (never a one-frame snap),
 //      then a critically-damped recovery returns MOST of the climb, so sustained fire walks the aim up realistically.
 const OFFHAND_SWAY=1.20;   // gun sway multiplier while the offhand slot holds anything (Ben: 20% less accurate)
+let _swayPin=null;         // QA only (__hc.swayPin) — see the pin site in updateView
+// HOW HARD AN AIMED POSE ANSWERS THE SWAY (Ben 08-04: "the left/right sway of the scoped hunting rifle we added for
+// realism needs added to all guns all sights"). ONE set of numbers for EVERY sight. They used to live inline in each
+// sight branch, and the scope was the only branch on 1.0 — the holosight, the Python's notch and the AR's A2 irons
+// were all written at 0.4, so the same breath moved the hunting rifle two and a half times as far and only the rifle
+// read as a held object. Tune here and every sight moves together; put a number back inline and they diverge again.
+const SWAY_POS=1.00, SWAY_ROT=0.60;
 const RECOIL={tp:0,ty:0};   // pending impulse (rad). NO auto-recovery (Ben 07-20): the muzzle climbs and STAYS — pulling it back down is the shooter's job
 function kickRecoil(up,side){ const adsm=1-0.25*((typeof view!=='undefined'&&view.adsT)||0);   // cheek weld soaks ~25% — hip-fire bucks hardest
   RECOIL.tp+=up*adsm*(0.85+Math.random()*0.3); RECOIL.ty+=side*adsm*(Math.random()<0.5?-1:1)*(0.5+Math.random()); }
@@ -12596,10 +12635,14 @@ function updateView(dt){ updateRecoil(dt);                                      
     // the offhand -- shield, torch, spear -- and the gun is no longer properly supported, so every sway source grows 20%.
     // Applied to the SUM, not per source: 20% of the drift the player actually sees, rather than 20% compounded four times.
     if(armor[EQ_OFF]){ swx*=OFFHAND_SWAY; swy*=OFFHAND_SWAY; }
+    // QA ONLY (__hc.swayPin), null in play: FREEZE the drift at a known value. The four sources above are already shared by
+    // every gun, so __hc.swayMag reads the same number for all of them and CANNOT see a sight whose pose under-responds to
+    // that drift — which is exactly the bug this pin was added to measure. Pinning lets a probe read the POSE's response.
+    if(_swayPin){ swx=_swayPin.x; swy=_swayPin.y; }
     view.swayX=swx; view.swayY=swy;   // the final drift, published for __hc.swayMag — a probe that recomputed it would be testing its own arithmetic
     // ---- POSE BLEND: hip(ready) ↔ scope(aimed), a REAL interpolation by smoothstep(adsT) — no hard flip ----
-    const sPx=swx + lat*0.010, sPy=-0.10 + b*0.3 + swy + bend*0.05, sPz=-0.38 + bend*0.16;                 // scope (cheek-weld) pose — flipped + tamed strafe lean
-    const sRx=view.swing*0.4 + swy*0.6 + bend*0.35, sRy=swx*0.6 + lat*0.022, sRz=-lat*0.028;
+    const sPx=swx*SWAY_POS + lat*0.010, sPy=-0.10 + b*0.3 + swy*SWAY_POS + bend*0.05, sPz=-0.38 + bend*0.16;   // scope (cheek-weld) pose — flipped + tamed strafe lean
+    const sRx=view.swing*0.4 + swy*SWAY_ROT + bend*0.35, sRy=swx*SWAY_ROT + lat*0.022, sRz=-lat*0.028;
     const hPx=0.17 + lat*0.024, hPy=-0.20+b + bend*0.06, hPz=-0.5 + bend*0.26;                             // hip (ready) pose — flipped + tamed strafe lean
     const hRx=view.swing*0.55 + bend*0.6, hRy=0.05 + lat*0.05, hRz=-lat*0.055;
     const e=adsT*adsT*(3-2*adsT);                                                                          // smoothstep so the raise starts & lands gently
@@ -20311,7 +20354,11 @@ window.__hc={
   treelineAnchor(){ try{ const s=islandStats(), d=Math.hypot(camera.position.x-s.x, camera.position.z-s.z);
       return { d:Math.round(d), R:Math.round(s.R), pastCoast:Math.round(d-s.R),
                push:+pineMat.uniforms.uPushD.value.toFixed(4), hide:+pineMat.uniforms.uHide.value.toFixed(4),
-               bandPush:+pineUnderMat.uniforms.uPushD.value.toFixed(4), bandHide:+pineUnderMat.uniforms.uHide.value.toFixed(4) };
+               bandPush:+pineUnderMat.uniforms.uPushD.value.toFixed(4), bandHide:+pineUnderMat.uniforms.uHide.value.toFixed(4),
+               entAz:+pineMat.uniforms.uEntAz.value.toFixed(4), entOn:+pineMat.uniforms.uEntOn.value.toFixed(4),
+               entPt:(()=>{ const p=entrancePoint(); return {x:Math.round(p.x), z:Math.round(p.z)}; })() };   // the mouth's live bearing + strength: a harness has to be able to AIM at it, and it moves with the camera (the point is 6R out)
+    }catch(e){ return {err:String(e.message||e)}; } },
+  entMouth(v){ try{ _entOnForce = (v==null?null:Math.max(0,Math.min(1,+v))); return {force:_entOnForce, live:+pineMat.uniforms.uEntOn.value.toFixed(4)};   // QA: pin the entranceway's strength (null = back to the distance fade)
     }catch(e){ return {err:String(e.message||e)}; } },
   // QA: the woody band's fog exposure against the canopy's, and the dial that sets it. pineFog is what the pines breathe at this
   // instant, bandFog what the band actually resolves to at its base — the pair of numbers Ben's "not affected by fog" is about.
@@ -21358,6 +21405,17 @@ window.__hc={
   swayMag(){ try{ return { offhand:armor[EQ_OFF]?armor[EQ_OFF].id:null, mult:OFFHAND_SWAY,
       x:+(view.swayX||0).toFixed(6), y:+(view.swayY||0).toFixed(6),
       mag:+Math.hypot(view.swayX||0,view.swayY||0).toFixed(6) }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: pin the sway to a fixed value (null clears). Pass two numbers to hold the drift still while the pose is read.
+  swayPin(x,y){ try{ _swayPin=(x==null)?null:{x:+x||0,y:+y||0}; return _swayPin; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: the viewmodel's ACTUAL pose. Sway parity has to be measured here and not from swayMag: every gun is fed the
+  // same drift, and the fault was each sight branch applying its own fraction of it, which only the pose can show.
+  viewPose(){ try{ const p=view.group.position, r=view.group.rotation, it=ITEMS[view.id]||{};
+      const gk=it.gun, dot=!!it.dot;
+      const sight = gk==='bolt' ? (dot?'holo':'scope') : dot ? 'holo' : gk==='revolver' ? 'irons_rev' : 'irons';
+      return { id:view.id, gun:gk===true?'ar':gk, sight, ads:!!view.ads, adsT:+(view.adsT||0).toFixed(3),
+        px:+p.x.toFixed(6), py:+p.y.toFixed(6), pz:+p.z.toFixed(6),
+        rx:+r.x.toFixed(6), ry:+r.y.toFixed(6), rz:+r.z.toFixed(6),
+        pin:_swayPin?{x:_swayPin.x,y:_swayPin.y}:null }; }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: freeze the held-item swing at a chosen phase so a swing can be photographed at fixed points rather than
   // caught by luck. updateView decays view.swing every frame, so it is re-applied after the tick.
   // QA/bench: stand a peer avatar in front of the camera and drive it with a real 'p' payload, so the RECEIVE path and
