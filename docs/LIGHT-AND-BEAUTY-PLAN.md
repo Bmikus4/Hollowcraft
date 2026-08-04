@@ -197,10 +197,17 @@ judges the whole look at once instead of five times.
    - The sun's occlusion is now a CPU port of the field (`cloudCoverAt`) checked against the GPU's own value by
      `__hc.cloudProbe()` through a `uCloudDbg` readout on a 1×1 target. `h13` is chaotic, so the port cannot be
      bit-exact — it is averaged over the disc's five rays so an isolated divergence cannot put the sun out.
-   - **What is left of the halo is the sky's forward scatter, not the bloom.** Radial profiles: bloom off moves
-     the shoulder at 40–100 px by four luminance levels; the seed gain 40→10 cut the blown-out core threefold.
-     The next cut comes out of `pow(sd,34)` (`uSunSheen`) and `pow(sd,3)`, and `pow(sd,3)` is the reason a clear
-     day is not a flat blue lid. `bench/results/sun-halo-{before,after,minimal}.png` is Ben's call to make.
+   - **The halo was the bloom THRESHOLD, and the sky was what was blooming.** Ben: "when the sun is in the
+     corner of the viewport the halo is huge." Measure the glow against the true ANGLE from the sun, never a
+     pixel radius — a perspective projection turns equal angles into more pixels off-axis, so every halo is
+     "huge in the corner" whether or not anything is wrong (`angleProfile()` in `bench/assert-sun-hides.mjs`).
+     The 3-10° band: 182.7 centred, 166.7 at 45° off-axis (dimmer), god-ray pass 0.0. Levers priced against
+     that band — disc gain 10→1.2 is worth **0.6**, the broad `pow(sd,3)` is worth 3.5 and costs the whole
+     sun-side sky the same, bloom neutered is worth **13.4**. The near-sun sky sits between 1.00 and 1.15 in
+     HDR, so `bloomPass` threshold 0.88 → **1.15**: bloom is for lights, not for sky. Night ground frame is
+     unchanged (1.486% vs 1.487% above 110) and the harness asserts it — do not lower it without that pair.
+     Bloom STRENGTH stays 0.55; it is the boss glow and every light in the game.
+   - Ben's picks, shipped: `uSunHalo` 0.12, `uSunSheen` 0, cloud exponent k 0.8, disc alpha 0.70.
 7. **Storm cloud value/colour ramp off `oc`**, and rain streaks taking the sky's value (note 6).
 8. **Directional skylight.** `vSky` is a per-face SCALAR, so a canopy floor and a canopy wall are lit
    identically and shade has no direction. Three bands (up/horizontal/down) is a mesher attribute plus a
