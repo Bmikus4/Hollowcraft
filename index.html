@@ -13916,7 +13916,26 @@ function brSpawnDoor(x,y,z,yaw){ brClearDoor();
   if(!BR.inside){ BR.seed = BR_SEED_FIXED!=null ? BR_SEED_FIXED : (Math.random()*4294967296)>>>0; BR.rooms=[]; }
   const grp=new THREE.Group(); grp.position.set(x,y+1.0,z); grp.rotation.y=yaw;
   const quad=new THREE.Mesh(new THREE.PlaneGeometry(1.0,2.0), new THREE.MeshBasicMaterial({color:0x000000,side:THREE.DoubleSide,fog:false,toneMapped:false})); grp.add(quad);   // NO border/frame (Ben 07-27) — just the see-through window painted by the portal RT
-  grp.userData={quad}; grp.renderOrder=6; scene.add(grp); BR.door={grp,x,y,z,yaw,t:0}; brSubBassTear(); brVHS(); }
+  grp.userData={quad}; grp.renderOrder=6; scene.add(grp); BR.door={grp,x,y,z,yaw,t:0}; brSubBassTear(); brVHS();
+  if(!BR.inside) BR._warmDue=true; }   // the region behind this door has to exist before the portal can show it — see brPortalWarm
+// THE PORTAL LAG (Ben: "portal lag"). Measured: the first frame the player turned to face a Void Door was 363.97 ms, and the
+// frame after it 1.11 ms. Only ONE shader program compiled on that frame, so it was never the compile storm it looked like —
+// brRenderPortal opened with `if(!BR.rooms.length){ brxGenerate(); brBuildEnvAll(); }` and generated the entire region and built
+// every environment mesh in it, synchronously, inside the render call. Nine chunks of roughly 500 meshes each, on the frame the
+// camera happened to sweep past the door.
+//
+// Two changes, and the second is the one that makes it a rule rather than a patch. The work is kicked off when the DOOR IS
+// CREATED, an event that already carries its own flash, sub-bass and message, instead of on a camera turn. And brRenderPortal
+// will no longer do it AT ALL: if the region is not ready it skips its render, so nothing in the render path can ever eat a
+// build again. The door paints flat black for the frame or two before the warm lands, which is what it already looks like.
+//
+// This MOVES the stall, it does not remove it. Removing it needs the region build sliced across frames the way streamChunks
+// slices the overworld, which is a bigger change than this one.
+function brPortalWarm(){ if(!BR._warmDue || BR.inside) return false;
+  BR._warmDue=false;
+  const t0=performance.now();
+  try{ if(!BR.rooms||!BR.rooms.length){ brxGenerate(); brBuildEnvAll(); } BR._warmMs=+(performance.now()-t0).toFixed(1); BR._warmN=(BR._warmN|0)+1; return true; }
+  catch(e){ BR._warmErr=String(e&&e.message||e); return false; } }
 function brClearDoor(){ if(BR.door&&BR.door.grp){ scene.remove(BR.door.grp); BR.door.grp.traverse(o=>{ if(o.geometry)o.geometry.dispose(); if(o.material)o.material.dispose(); }); } BR.door=null; }
 function brSpawnDoorNearPlayer(){ const yaw=player.yaw, dx=-Math.sin(yaw), dz=-Math.cos(yaw);
   let x=player.pos.x+dx*14, z=player.pos.z+dz*14, gy;
@@ -15727,8 +15746,10 @@ function brPortalDue(){
 function _brPortalSnap(){ const p=camera.position, q=camera.quaternion, P=_brPortalPrev;
   P.x=p.x; P.y=p.y; P.z=p.z; P.qx=q.x; P.qy=q.y; P.qz=q.z; P.qw=q.w; }
 function brRenderPortal(){ if(typeof renderer==='undefined'||!renderer||!BR.door||typeof camera==='undefined')return;
+  // The skip is counted BEFORE _portalFrames, and does not increment it: a frame that rendered nothing is not a portal render,
+  // and counting it would make __hcPERF.portalRate report a healthy Hz while the door was painting flat black.
+  if(!BR.rooms||!BR.rooms.length){ BR._warmDue=true; BR._portalSkips=(BR._portalSkips|0)+1; return; }   // NEVER build from inside the render — that was the 364 ms frame. brPortalWarm does it, off this path.
   BR._portalFrames=(BR._portalFrames|0)+1;                                   // QA: proves the gate below did not switch the portal off for good
-  if(!BR.rooms||!BR.rooms.length){ brxGenerate(); brBuildEnvAll(); }
   renderer.getDrawingBufferSize(_bSize); const rw=Math.max(2,_bSize.x|0), rh=Math.max(2,_bSize.y|0);
   if(!_brPortalRT){ _brPortalRT=new THREE.WebGLRenderTarget(rw,rh,{depthBuffer:true}); _brPortalCam=new THREE.PerspectiveCamera(); }
   else if(_brPortalRT.width!==rw||_brPortalRT.height!==rh)_brPortalRT.setSize(rw,rh);
@@ -16198,6 +16219,7 @@ function updateBackrooms(dt){
     // ORDER MATTERS: the on-screen test comes before brPortalDue(), because due() stamps its cadence timer and
     // snapshots the camera as a side effect. Stamping it while the door is behind you would make the first
     // frame you turn back around look "not due" and show a stale room.
+    brPortalWarm();   // build the region the door looks into HERE, once, on the frame after the door appeared — never inside brRenderPortal (see brPortalWarm: that was a 364 ms frame on a camera turn)
     if(brPortalWanted(Math.hypot(d.x-player.pos.x, d.z-player.pos.z)) && brPortalOnScreen() && brPortalDue()){ T.begin(TID.brPortal); brRenderPortal(); T.end(TID.brPortal); }
     if(Math.hypot(player.pos.x-d.x,player.pos.z-d.z)<1.1&&Math.abs(player.pos.y-d.y)<2.2)brEnter(); }
   // A PALE LOOSE IN THE OVERWORLD still has to be ticked. Its update lived behind this return, so an egg that put one out
@@ -16265,7 +16287,11 @@ if(typeof window!=='undefined'){ window.__hcBRX={          // the chunk substrat
     if(where==='facing'){ player.pos.set(d.x-Math.sin(d.yaw)*7, d.y, d.z-Math.cos(d.yaw)*7); player.yaw=Math.atan2(-(d.x-player.pos.x),-(d.z-player.pos.z)); player.pitch=0; if(typeof camera!=='undefined'&&camera){ camera.position.copy(player.pos); camera.rotation.set(0,player.yaw,0); camera.updateMatrixWorld(true); } }
     else if(where==='behind'){ player.pos.set(d.x-Math.sin(d.yaw)*7, d.y, d.z-Math.cos(d.yaw)*7); player.yaw=Math.atan2(-(d.x-player.pos.x),-(d.z-player.pos.z))+Math.PI; player.pitch=0; if(typeof camera!=='undefined'&&camera){ camera.position.copy(player.pos); camera.rotation.set(0,player.yaw,0); camera.updateMatrixWorld(true); } }
     else if(where==='far'){ player.pos.set(d.x+90, d.y, d.z+90); }
-    return { frames:BR._portalFrames|0, inside:!!BR.inside, hasDoor:!!BR.door, x:+player.pos.x.toFixed(1), z:+player.pos.z.toFixed(1) }; },
+    return { frames:BR._portalFrames|0, inside:!!BR.inside, hasDoor:!!BR.door, x:+player.pos.x.toFixed(1), z:+player.pos.z.toFixed(1),
+             // THE PORTAL LAG, instrumented. warms/warmMs say when the region build actually ran and what it cost; skips says how
+             // many frames the door painted flat black waiting for it. Without these the 364 ms frame is only ever a rumour.
+             warms:BR._warmN|0, warmMs:BR._warmMs!=null?BR._warmMs:null, warmDue:!!BR._warmDue, warmErr:BR._warmErr||null,
+             skips:BR._portalSkips|0, rooms:(BR.rooms||[]).length }; },
   // QA: a DETERMINISTIC draw-call count. Sampling renderer.info between frames catches whatever partial frame is in flight
   // and reported 19 while the scene held 1320 meshes, which cannot be true. Force one render and read the counter it just set.
   drawProbe:()=>{ renderer.info.reset(); renderer.render(scene,camera);
