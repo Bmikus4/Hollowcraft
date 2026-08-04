@@ -250,6 +250,25 @@ const ok=(name,cond,got)=>{ if(!cond)fails++; console.log(`  ${cond?'ok  ':'FAIL
     const d3 = await page.evaluate(`__hc.leafDay(1)`);
     ok('and the third clears it away', d3.tracked===0, {tracked:d3.tracked, piles:d3.piles});
 
+    console.log('\n[15] stamina, and armour as three shields of four');
+    const v0 = await page.evaluate(`__hc.stamSet(100)`);
+    ok('stamina starts full', v0.stam===100, {stam:v0.stam, max:v0.stamMax});
+    const ran = await page.evaluate(`__hc.stamRun(3)`);
+    ok('sprinting spends it', ran.stam<v0.stam-20, {before:v0.stam, after:ran.stam});
+    const winded = await page.evaluate(`(()=>{ __hc.stamSet(0); return __hc.stamRun(0.5); })()`);
+    ok('at zero you are winded and cannot sprint', winded.winded===true && winded.sprint===false, {winded:winded.winded, sprint:winded.sprint});
+    const back = await page.evaluate(`(()=>{ __hc.stamSet(0); const wasL=1; return __hc.vitalRing(); })()`);
+    ok('and it is a bar, not a boolean', back.stamMax===100, back.stamMax);
+    const arm = await page.evaluate(`(()=>{ __hc.eqPut(0,'iron_helmet'); __hc.eqPut(1,'iron_chestplate'); __hc.eqPut(2,'iron_leggings');
+      __hc.eqPut(3,'iron_boots'); __hc.eqPut(4,'shield'); __hc.eqPut(5,'backpack'); return __hc.vitalRing(); })()`);
+    console.log('   ', JSON.stringify(arm));
+    ok('a full loadout is exactly twelve points', arm.armorPts===12 && arm.armorMax===12, {pts:arm.armorPts, max:arm.armorMax});
+    ok('which fills all three shields', arm.shields.every(f=>f===1), arm.shields);
+    const trinkets = await page.evaluate(`(()=>{ for(let i=0;i<6;i++) __hc.eqPut(i,null);
+      __hc.eqPut(0,'nvg'); __hc.eqPut(5,'backpack'); return __hc.vitalRing(); })()`);
+    ok('goggles and a pack are a quarter point each', Math.abs(trinkets.armorPts-0.5)<1e-6, trinkets.armorPts);
+    ok('…which is a sixteenth of the first shield', Math.abs(trinkets.shields[0]-0.125)<1e-3, trinkets.shields);
+
     ok('no page errors', errors.length===0, errors);
     await browser.close();
   } finally { server.kill(); }
