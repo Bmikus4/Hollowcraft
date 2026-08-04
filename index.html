@@ -1261,17 +1261,60 @@ paintTile('gold_block',(x,y,r)=>{ const edge=(x<1||y<1||x>14||y>14); const v=jit
 paintTile('netherrack',(x,y,r)=>{ if(r()<0.32){ const v=jit(r,0,24); return [56+v,20+v*0.4,20+v*0.4]; } const v=jit(r,0,36); return [112+v*0.6,42+v*0.4,38+v*0.4]; });   // MC-style: red-brown mottled nether stone
 paintTile('mossy',     (x,y,r)=>{ const moss=r()<0.4; const v=jit(r,0,22); return moss?[52+v,78+v,44+v]:[92+v,94+v,99+v]; });
 paintTile('sand',      (x,y,r)=>{ const v=jit(r,0,18); return [170+v,158+v,122+v]; });
-// GROUND VARIANTS (Ben 08-04). Three of each, and each one has to read as the SAME ground in a different state — a lawn that
-// dries out in patches, a hollow that stays mossy, the litter under a tree — or the world turns into a patchwork quilt. So the
-// hue moves and the value barely does: a grass_dry at the grass's own brightness is a patch of grass, and one two stops lighter
-// is a hole in the terrain. The pattern differs too, not only the colour, because at this tile size a pure tint change is
-// invisible from standing height.
-paintTile('grass_dry',  (x,y,r)=>{ const v=jit(r,0,26), st=(r()<0.22)?16:0; return [86+v*0.8+st, 96+v+st*0.6, 52+v*0.6]; });        // sun-bleached: yellower, with dry stalks flecked through it
-paintTile('grass_moss', (x,y,r)=>{ const cl=((x*7+y*3)%11<3)||r()<0.18; const v=jit(r,0,20); return cl?[40+v*0.7,84+v,40+v*0.5]:[50+v*0.7,88+v,44+v*0.6]; });   // damp and darker, with clumps of deeper moss
-paintTile('grass_leaf', (x,y,r)=>{ const lf=r()<0.30; const v=jit(r,0,24); return lf?[104+v*0.8,80+v*0.7,38+v*0.5]:[56+v*0.7,92+v,46+v*0.6]; });   // grass under a tree: fallen leaf litter trodden into it — what the old leaf_pile drifts were for
-paintTile('sand_pale',  (x,y,r)=>{ const sh=r()<0.10; const v=jit(r,0,16); return sh?[214+v*0.5,208+v*0.5,190+v*0.5]:[186+v,176+v,142+v]; });      // shell sand, bleached, with broken shell flecks
-paintTile('sand_dark',  (x,y,r)=>{ const v=jit(r,0,16); return [138+v,124+v,96+v]; });                                                              // wet or iron-rich, the band the tide has been over
-paintTile('sand_peb',   (x,y,r)=>{ const pb=(((x>>1)+(y>>1))%3===0) && r()<0.5; const v=jit(r,0,18); return pb?[122+v,118+v,110+v]:[172+v,160+v,124+v]; });   // coarse, pebbles worked through it
+// GROUND COVER: DRAWN LEAVES, IN THREE STAGES, ON BOTH GROUNDS (Ben 08-04: "they should be 3 stages of leaves decaying, and
+// real drawn leaves, not just brown texels, and it should be for both sand and dirt").
+//
+// The first attempt tinted and speckled the base tile, which at 16 px is indistinguishable from noise — a browner patch of
+// grass, not leaves on grass. A leaf has to be a SHAPE. So each tile places a handful of rotated ellipses and shades each one
+// as a leaf: darker at the rim so it reads as a separate object lying on the ground rather than as a stain in it, a lighter
+// midrib down its long axis, and a stem off one end. Five leaves at about 6x3 px cover roughly a third of the tile, which is
+// what leaves a floor looking like ground with leaves on it instead of a floor made of leaves.
+//
+// Positions are a fixed table and not r(), because r() runs in scan order — it is a different value at every pixel and cannot
+// describe a shape that spans several of them. The table is offset per tile so the three stages are not one stamp recoloured.
+const _LEAF_SPOTS=[ {x:3.4,y:3.8,a:0.62,rx:3.2,ry:1.45}, {x:11.2,y:2.9,a:-0.85,rx:2.9,ry:1.35},
+                    {x:6.6,y:10.4,a:2.25,rx:3.3,ry:1.55}, {x:12.6,y:11.6,a:0.18,rx:2.6,ry:1.25},
+                    {x:1.6,y:12.4,a:1.42,rx:2.4,ry:1.15} ];
+// Which leaf covers this pixel, and where in it: u is along the leaf (0 at the middle, 1 at either tip), v is across it. Wraps
+// at the tile edge so a leaf that runs off one side comes back on the other and the ground tiles without a seam through it.
+function _leafPx(x,y,off){
+  for(let i=0;i<_LEAF_SPOTS.length;i++){ const L=_LEAF_SPOTS[i];
+    const cx=(L.x+off*3.7+i*0.9)%16, cy=(L.y+off*5.3)%16, a=L.a+off*0.7;
+    let dx=x+0.5-cx, dy=y+0.5-cy;
+    if(dx>8)dx-=16; else if(dx<-8)dx+=16;                       // shortest way round the wrap, so the tile has no seam
+    if(dy>8)dy-=16; else if(dy<-8)dy+=16;
+    const c=Math.cos(a), sn=Math.sin(a);
+    const u=(dx*c+dy*sn)/L.rx, v=(-dx*sn+dy*c)/L.ry;
+    if(u*u+v*v<=1.0) return {u:Math.abs(u), v:Math.abs(v), d:u*u+v*v, i};
+    // the stem: a one-pixel tail off the leaf's blunt end
+    if(Math.abs(v)<0.42 && u>1.0 && u<1.55) return {stem:true, i};
+  }
+  return null; }
+// The three stages, as the colour a leaf actually goes: green with the sap still in it, then the orange-brown of a leaf that
+// has dried on the ground, then the grey-brown of one that has been rained on for a week. Same three the leaf_pile model used,
+// so a drift on the ground and a pile you kicked up are the same wood.
+const _LEAF_STAGE=[ [111,143,58], [169,117,44], [107,83,52] ];
+// One painter for all six tiles: the ground underneath is the only thing that differs, and having grass and sand share this
+// means a leaf cannot end up drawn one way on a lawn and another on a beach.
+function _leafGround(stage, off, baseFn){
+  const L=_LEAF_STAGE[stage];
+  return (x,y,r)=>{
+    const p=_leafPx(x,y,off);
+    if(!p) return baseFn(x,y,r);
+    const v=jit(r,0,18);
+    if(p.stem) return [L[0]*0.62+v*0.4, L[1]*0.62+v*0.4, L[2]*0.62+v*0.4];
+    const rim=p.d>0.74 ? 0.70 : 1.0;                            // the edge is in its own shadow — this is what makes it an object lying on the ground
+    const rib=(p.v<0.20 && p.u<0.86) ? 1.22 : 1.0;              // the midrib catches the light
+    const k=rim*rib;
+    return [L[0]*k+v, L[1]*k+v, L[2]*k+v*0.8]; }; }
+const _grassBase=(x,y,r)=>{ const v=jit(r,0,26); return [56+v*0.7, 92+v, 46+v*0.6]; };   // the same grass_top and sand the world is already made of: a
+const _sandBase =(x,y,r)=>{ const v=jit(r,0,18); return [170+v,158+v,122+v]; };          // leaf-strewn patch must be the SAME ground, only strewn
+paintTile('grass_leaf1', _leafGround(0, 0.0, _grassBase));   // fresh fall, still green
+paintTile('grass_leaf2', _leafGround(1, 1.0, _grassBase));   // dried out, gone over to brown
+paintTile('grass_leaf3', _leafGround(2, 2.0, _grassBase));   // dead litter, grey-brown, nearly soil again
+paintTile('sand_leaf1',  _leafGround(0, 0.5, _sandBase));
+paintTile('sand_leaf2',  _leafGround(1, 1.5, _sandBase));
+paintTile('sand_leaf3',  _leafGround(2, 2.5, _sandBase));
 paintTile('gold',      (x,y,r)=>{ const v=jit(r,0,24), sh=((x+y)%5===0)?26:0; return [214+v+sh,178+v,66+v*0.5]; });                          // shrine gold block
 paintTile('netherite', (x,y,r)=>{ const v=jit(r,0,14), sp=r()<0.16; return [ (sp?66:44)+v, (sp?52:40)+v, (sp?62:48)+v ]; });               // dark netherite, faint purple speckle
 paintTile('netherrack',(x,y,r)=>{ const v=jit(r,0,22), b=r()<0.35; return b?[70+v,20+v*0.4,22+v*0.4]:[106+v,34+v*0.5,32+v*0.5]; });         // maroon netherrack
@@ -1700,12 +1743,12 @@ block('icbm',{cat:'model', opaque:false, solid:true, hard:6.0, tool:'pickaxe', m
 // nothing downstream has to learn a new id. Their SIDE face is the ordinary grass side on purpose: a patch of dry grass seen
 // from the side of a cliff is still a grass edge, and giving each variant its own side tile would have tripled the atlas cost
 // for something you can only see when the ground is already broken.
-block('grass_dry',  { cat:'solid', t:['grass_dry','grass_side','dirt'],  hard:0.6, tool:'shovel', drop:'dirt' });
-block('grass_moss', { cat:'solid', t:['grass_moss','grass_side','dirt'], hard:0.6, tool:'shovel', drop:'dirt' });
-block('grass_leaf', { cat:'solid', t:['grass_leaf','grass_side','dirt'], hard:0.6, tool:'shovel', drop:'dirt' });
-block('sand_pale',  { cat:'solid', t:['sand_pale','sand_pale','sand_pale'], hard:0.5, tool:'shovel', gravity:true, drop:'sand' });
-block('sand_dark',  { cat:'solid', t:['sand_dark','sand_dark','sand_dark'], hard:0.5, tool:'shovel', gravity:true, drop:'sand' });
-block('sand_peb',   { cat:'solid', t:['sand_peb','sand_peb','sand_peb'],   hard:0.5, tool:'shovel', gravity:true, drop:'sand' });
+block('grass_leaf1', { cat:'solid', t:['grass_leaf1','grass_side','dirt'], hard:0.6, tool:'shovel', drop:'dirt' });
+block('grass_leaf2', { cat:'solid', t:['grass_leaf2','grass_side','dirt'], hard:0.6, tool:'shovel', drop:'dirt' });
+block('grass_leaf3', { cat:'solid', t:['grass_leaf3','grass_side','dirt'], hard:0.6, tool:'shovel', drop:'dirt' });
+block('sand_leaf1',  { cat:'solid', t:['sand_leaf1','sand','sand'], hard:0.5, tool:'shovel', gravity:true, drop:'sand' });
+block('sand_leaf2',  { cat:'solid', t:['sand_leaf2','sand','sand'], hard:0.5, tool:'shovel', gravity:true, drop:'sand' });
+block('sand_leaf3',  { cat:'solid', t:['sand_leaf3','sand','sand'], hard:0.5, tool:'shovel', gravity:true, drop:'sand' });
 
 // defaults + fast lookup arrays
 const N_BLOCKS = _bid;
@@ -2075,21 +2118,18 @@ function decorate(c){
     // spawn them randomly in groups"). The same drift arithmetic the leaf litter used, moved down one block: an 8x8 cell either
     // is a patch or it is not, and only patch cells retexture anything. Groups, not a sprinkle, because a per-tile probability
     // at this density scatters single odd blocks and reads as noise in the terrain rather than as a place that is different.
-    // The variant is chosen per CELL, so a patch is one kind of ground with a few of a second worked through it — a lawn does
-    // not go dry in three colours at once. Which FAMILY it is comes from what is already there: grass gets grass, sand gets
-    // sand, and anything else — stone, gravel, snow, a path someone laid — is left alone rather than being turned into a lawn.
+    // The STAGE is chosen per CELL and the whole drift shares it, because leaves in one place fell at one time — a patch that
+    // is fresh green, brown and grey at once is three autumns on one square. A few of the next stage are worked through it,
+    // which is what an edge looks like. Which GROUND it lands on comes from what is already there: grass keeps grass under its
+    // leaves, sand keeps sand, and anything else — stone, gravel, a path someone laid — is left alone.
     { const cxq=wx>>3, czq=wz>>3, cr=tileRng((cxq*92837^czq*68909)>>>0);
       if(cr()<0.055){
         const kind=cr(), tr=tileRng((wx*15731^wz*789221)>>>0), t=tr();
         if(t<0.32 && h>=CFG.SEA && h<WH-30 && trailDist(wx,wz)>2 && !inCabin(wx,wz)){
           const cur=getBlock(wx,h,wz), mix=tr();
-          let id=0;
-          if(cur===BID.grass) id = kind<0.34 ? (mix<0.78?BID.grass_dry:BID.grass_moss)
-                                 : kind<0.70 ? (mix<0.78?BID.grass_moss:BID.grass_leaf)
-                                             : (mix<0.78?BID.grass_leaf:BID.grass_dry);
-          else if(cur===BID.sand) id = kind<0.34 ? (mix<0.78?BID.sand_pale:BID.sand_peb)
-                                     : kind<0.70 ? (mix<0.78?BID.sand_dark:BID.sand_pale)
-                                                 : (mix<0.78?BID.sand_peb:BID.sand_dark);
+          const st0 = kind<0.34?0 : kind<0.70?1 : 2, st = (mix<0.80)?st0:((st0+1)%3);
+          const G=[BID.grass_leaf1,BID.grass_leaf2,BID.grass_leaf3], S=[BID.sand_leaf1,BID.sand_leaf2,BID.sand_leaf3];
+          const id = (cur===BID.grass) ? G[st] : (cur===BID.sand) ? S[st] : 0;
           if(id) placeSet(c, wx, h, wz, id, true); } } }
     // PEBBLE CLUSTERS — RARE, and only on the forest floor (Ben 07-20 rev2: woods only, nowhere else); pick for flint
     { const pr=tileRng((wx*68899^wz*24499)>>>0)();
@@ -2683,6 +2723,13 @@ const globalU = {
   uCloudShadow:{ value:1 },
   uCloudScroll:{ value:new THREE.Vector2(0,0) },
   uWhiteTile:{ value:(typeof TILEIDX!=='undefined'&&TILEIDX.vantawhite!=null)?TILEIDX.vantawhite:-1 },   // SHARED vantawhite-glow uniform (Ben 07-21): one reference every chunk material + clone points at, so the unlit-white override can never go stale across recompiles / composer rebuilds / VFX-setting toggles
+  // SCOTOPIC WASHOUT — see injectAtlas. Shared refs so every per-chunk material clone moves at once; uScotAmt 0 is the A/B off.
+  uScotAmt:{ value:1 },
+  uScotLo: { value:0.02 },
+  // 0.20, not 0.35: colour has to be fully back by the time a torch's own falloff reaches a face, or a torch-lit cellar goes
+  // grey where it should read amber. At 0.35 the measured night chroma is lower still (sat 0.155 vs 0.234) and the interior
+  // pays for it.
+  uScotHi: { value:0.20 },
   uTime:   { value:0 },
   uSunDir: { value:new THREE.Vector3(0.3,0.9,0.2) },
   uMoonDir:{ value:new THREE.Vector3(-0.3,-0.9,-0.2) },
@@ -2718,6 +2765,7 @@ function injectAtlas(mat, opts={}){
     // cloud shadows and the measurement is of nothing.
     sh.uniforms.uCloudTex = globalU.uCloudTex; sh.uniforms.uCloudShadow = globalU.uCloudShadow;
     sh.uniforms.uCloudScroll = globalU.uCloudScroll; sh.uniforms.uSunDirC = globalU.uSunDir;
+    sh.uniforms.uScotDay = globalU.uDay; sh.uniforms.uScotAmt = globalU.uScotAmt; sh.uniforms.uScotLo = globalU.uScotLo; sh.uniforms.uScotHi = globalU.uScotHi;   // SHARED refs, same reason as uWhiteTile
     sh.uniforms.uWhiteTile = globalU.uWhiteTile;   // SHARED ref → the vantawhite glow survives every material clone / recompile / composer rebuild / VFX toggle (was a fresh per-material uniform that a pre-tile-index recompile could latch at -1)
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>',
@@ -2731,7 +2779,7 @@ function injectAtlas(mat, opts={}){
         (opts.wind?'\nfloat wsw = sin(uTime*1.6 + transformed.x*0.6 + transformed.z*0.5)*0.10*aWind; transformed.x += wsw; transformed.z += cos(uTime*1.3 + transformed.x*0.4)*0.07*aWind;':''));
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>',
-        '#include <common>\nprecision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
+        '#include <common>\nprecision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform float uScotAmt;\nuniform float uScotLo;\nuniform float uScotHi;\nuniform float uScotDay;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
       // ---- NIGHT VOLUMETRIC DARKNESS ON REAL FOLIAGE (Ben 07-29) ----
       // "volumetric darkness at night is applied to horizon pines, but not to forest trees." Correct, and the two fade to
       // different targets. The horizon backdrop fades to _uPineFog, which is scene.fog.color pulled toward storm blue and
@@ -2785,8 +2833,30 @@ function injectAtlas(mat, opts={}){
         '  float _clight = texture2D(uCloudTex, _cuv).r;\n'+
         '  float _camt = uCloudShadow*smoothstep(0.10,0.55,vSky);\n'+
         '  reflectedLight.directDiffuse *= mix(1.0, 0.20+0.80*_clight, _camt); }');   // the SUN can't reach where the sky can't: kills direct light leaking into interiors/caves (and beyond the 46-block shadow radius), so enclosed spaces read genuinely dark. Floor 0.12→0.17 and the knee pulled in (Ben 07-27) so a canopy gap still lets a little sun onto the forest floor.
+    // ---- SCOTOPIC WASHOUT: a barely-lit surface loses its COLOUR, it does not keep it and lose its value ----
+    // Ben's "black voxeling": at night the ground reads as a mosaic of saturated RED and GREEN cubes. It is not the texture
+    // and it is not black texels (assert-night-crush found none). MEASURED, classifying the pixels off ?albedo and reading the
+    // same set out of the graded frames: dirt albedo rgb (82,52,28) sat 0.66 → night (22.7,3.5,1.0) sat 0.94, grass →
+    // (11.6,15.5,1.7). The channel RATIO expands as the light falls, because AgX's log-domain toe drops the two lower channels
+    // to zero while the top one survives — so every block lands on its most saturated hue and a patchwork of dirt and grass
+    // becomes a red/green hash. Value was never the problem; chroma was.
+    // Fixed by washing the colour out toward its own luminance as the surface goes dark, which is what dark adaptation actually
+    // does. LUMINANCE-PRESERVING by construction (mix toward the 709 luma of the same pixel), so night does not get brighter —
+    // Ben has asked four times for night to be genuinely black and assert-night-crush guards it.
+    // ON THE ATLAS MATERIALS ONLY, deliberately, NOT in the grade pass: the night sky and its stars sit at the same luminance as
+    // this ground (sky median 17.7 vs grass 13.7 on screen) so nothing in a post pass can separate them, and a grey night sky
+    // would be a worse bug than the one being fixed. A lit surface is what adapts; the sky is the light.
+    // GATED ON THE LIGHT REACHING THE FACE, NOT ON THE PIXEL'S OWN LUMINANCE. Gating on output luminance was tried first and is
+    // wrong: it is albedo-weighted, so at the same midnight the dirt washed out (0.94 sat -> 0.35) while the beach sand stayed
+    // salmon-pink, purely because sand is a brighter texture. Sand and dirt receive the SAME moonlight. `_bl` and `vSky` are the
+    // two light terms already sampled above, so this costs one max and one smoothstep and needs no extra fetch.
     sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>',
-      '#include <dithering_fragment>\nif(uWhiteTile>=0.0 && abs(vTile-uWhiteTile)<0.5){ gl_FragColor=vec4(1.0,1.0,1.0,gl_FragColor.a); }');   // VANTAWHITE: overwrite the FINAL pixel to pure white AFTER lighting/tonemap/fog → genuinely unlit, no shadow/AO/surface-detail, a hole of pure white (Ben 07-21)
+      '#include <dithering_fragment>\n'+
+      '{ float _slit=max(_bl, vSky*uScotDay);\n'+
+      '  float _sk=uScotAmt*(1.0-smoothstep(uScotLo,uScotHi,_slit));\n'+
+      '  float _sl=dot(gl_FragColor.rgb,vec3(0.2126,0.7152,0.0722));\n'+
+      '  gl_FragColor.rgb=mix(gl_FragColor.rgb, vec3(_sl), _sk); }\n'+
+      'if(uWhiteTile>=0.0 && abs(vTile-uWhiteTile)<0.5){ gl_FragColor=vec4(1.0,1.0,1.0,gl_FragColor.a); }');   // VANTAWHITE: overwrite the FINAL pixel to pure white AFTER lighting/tonemap/fog → genuinely unlit, no shadow/AO/surface-detail, a hole of pure white (Ben 07-21)
     if(Q.get('albedo')) sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\ngl_FragColor=vec4(_tex.rgb,1.0);');   // DIAGNOSTIC ?albedo: flat raw texture, NO lighting
     if(Q.get('dbg')==='sky') sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\ngl_FragColor=vec4(vSky,vSky,vSky,1.0);');   // DBG: per-face baked skylight (black=0 sky-occluded, white=1 open)
     if(Q.get('dbg')==='nrm') sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\ngl_FragColor=vec4(abs(normalize(vObjN)),1.0);');   // DBG: face normal (black pixel = zero/degenerate normal → normalize NaN)
@@ -24928,6 +24998,14 @@ window.__hc={
                nearCut: inside?5200:3600, farCut: inside?2600:1500,
                wired: !!convGunNear }; }
     catch(e){ return {err:String(e.message||e)}; } },
+  // QA: one atlas tile, magnified, as a data URL. A 16 px tile is four pixels on a bench screenshot of the world, so "does this
+  // read as a leaf" cannot be answered from a frame — it has to be answered from the art.
+  tileDump(names,scale){ try{ scale=scale||16; names=[].concat(names);
+      const cv=document.createElement('canvas'); cv.width=TILE*scale*names.length; cv.height=TILE*scale;
+      const g=cv.getContext('2d'); g.imageSmoothingEnabled=false;
+      names.forEach((n,i)=>{ const idx=TILEIDX[n]; if(idx==null) return;
+        g.drawImage(atlasCanvas,(idx%ATLAS_TILES)*TILE,((idx/ATLAS_TILES)|0)*TILE,TILE,TILE, i*TILE*scale,0,TILE*scale,TILE*scale); });
+      return cv.toDataURL('image/png'); }catch(e){ return {err:String(e.message||e)}; } },
   trigger(btn,on){ try{ locked=true; if(btn===2)rmbHeld=!!on; else lmbHeld=!!on; return {lmb:lmbHeld,rmb:rmbHeld}; }catch(e){ return e.message; } },
   shoot(){ try{ locked=true; return !!fireGun(); }catch(e){ return e.message; } },             // QA: pull the trigger once
   // QA/bench: the direction the LAST round actually took, in world space, plus the camera's own forward at the moment it is read.
@@ -25169,6 +25247,12 @@ window.__hc={
   // item 4 assumes radius is a lever, so which filter is live has to be readable before that assumption is spent.
   // QA/bench: the god-ray pass's live state. `on` also forces it off, which is what prices a full-screen pass — the composer
   // skips a disabled pass entirely, so enabled/disabled is a real A/B rather than a uniform set to zero that still pays.
+  // QA/bench: the scotopic chroma washout on the atlas materials. amt 0 is the A/B off; lo/hi are on the FACE'S LIGHT LEVEL,
+  // max(blockLight, bakedSky*day), 0..1 — not on the pixel, which is albedo-weighted and left bright sand coloured at midnight.
+  scot(o){ try{ if(o&&o.amt!=null) globalU.uScotAmt.value=+o.amt; if(o&&o.lo!=null) globalU.uScotLo.value=+o.lo; if(o&&o.hi!=null) globalU.uScotHi.value=+o.hi;
+      if(o&&o.on!=null) globalU.uScotAmt.value=o.on?1:0;
+      return { amt:+globalU.uScotAmt.value.toFixed(3), lo:+globalU.uScotLo.value.toFixed(5), hi:+globalU.uScotHi.value.toFixed(5) };
+    }catch(e){ return {err:String(e.message||e)}; } },
   cloudShadow(o){ try{ if(o&&o.on!=null) _cloudShadowOn=!!o.on;
       return { on:_cloudShadowOn, amt:+globalU.uCloudShadow.value.toFixed(4), scroll:[+globalU.uCloudScroll.value.x.toFixed(3),+globalU.uCloudScroll.value.y.toFixed(3)],
                cover:+(typeof _uCloud!=='undefined'?_uCloud.value:-1).toFixed(2), sunY:+globalU.uSunDir.value.y.toFixed(4),
