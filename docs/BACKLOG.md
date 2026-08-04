@@ -1,7 +1,6 @@
 # Backlog — light, sky, water, horizon, atmosphere
 
 ## Open
-- Directional skylight (vSky per-face scalar)
 - Coloured block light
 - Water close up: shoreline foam
 - Entity contact shadows
@@ -16,6 +15,7 @@
 - `shore` at 7.70 ms, 805 draw calls, unattributed
 
 ## Awaiting Ben's eye (shipped)
+- Directional skylight: a floor, a wall and a soffit in shade are no longer the same brightness
 - Emitters visible from farther away: a lamp you have seen keeps burning after its chunk unloads
 - Voxel hash lighting: unlit ground washes out to grey at night instead of collapsing onto red/green
 - Storm clouds: deck value/colour off overcast
