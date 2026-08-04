@@ -2759,6 +2759,11 @@ const globalU = {
   uCloudShadow:{ value:1 },
   uCloudScroll:{ value:new THREE.Vector2(0,0) },
   uWhiteTile:{ value:(typeof TILEIDX!=='undefined'&&TILEIDX.vantawhite!=null)?TILEIDX.vantawhite:-1 },   // SHARED vantawhite-glow uniform (Ben 07-21): one reference every chunk material + clone points at, so the unlit-white override can never go stale across recompiles / composer rebuilds / VFX-setting toggles
+  // DIRECTIONAL SKYLIGHT — see injectAtlas. amt 0 is the A/B off; up/dn are the hemisphere fraction reaching a face pointing
+  // straight up and straight down, and a vertical face lands on their midpoint.
+  uSkyDirAmt:{ value:1 },
+  uSkyDirUp: { value:1.10 },
+  uSkyDirDn: { value:0.58 },
   // SCOTOPIC WASHOUT — see injectAtlas. Shared refs so every per-chunk material clone moves at once; uScotAmt 0 is the A/B off.
   uScotAmt:{ value:1 },
   uScotLo: { value:0.02 },
@@ -2801,6 +2806,7 @@ function injectAtlas(mat, opts={}){
     // cloud shadows and the measurement is of nothing.
     sh.uniforms.uCloudTex = globalU.uCloudTex; sh.uniforms.uCloudShadow = globalU.uCloudShadow;
     sh.uniforms.uCloudScroll = globalU.uCloudScroll; sh.uniforms.uSunDirC = globalU.uSunDir;
+    sh.uniforms.uSkyDirAmt = globalU.uSkyDirAmt; sh.uniforms.uSkyDirUp = globalU.uSkyDirUp; sh.uniforms.uSkyDirDn = globalU.uSkyDirDn;
     sh.uniforms.uScotDay = globalU.uDay; sh.uniforms.uScotAmt = globalU.uScotAmt; sh.uniforms.uScotLo = globalU.uScotLo; sh.uniforms.uScotHi = globalU.uScotHi;   // SHARED refs, same reason as uWhiteTile
     sh.uniforms.uWhiteTile = globalU.uWhiteTile;   // SHARED ref → the vantawhite glow survives every material clone / recompile / composer rebuild / VFX toggle (was a fresh per-material uniform that a pre-tile-index recompile could latch at -1)
     sh.vertexShader = sh.vertexShader
@@ -2815,7 +2821,7 @@ function injectAtlas(mat, opts={}){
         (opts.wind?'\nfloat wsw = sin(uTime*1.6 + transformed.x*0.6 + transformed.z*0.5)*0.10*aWind; transformed.x += wsw; transformed.z += cos(uTime*1.3 + transformed.x*0.4)*0.07*aWind;':''));
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>',
-        '#include <common>\nprecision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform float uScotAmt;\nuniform float uScotLo;\nuniform float uScotHi;\nuniform float uScotDay;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
+        '#include <common>\nprecision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform float uScotAmt;\nuniform float uScotLo;\nuniform float uScotHi;\nuniform float uScotDay;\nuniform float uSkyDirAmt;\nuniform float uSkyDirUp;\nuniform float uSkyDirDn;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
       // ---- NIGHT VOLUMETRIC DARKNESS ON REAL FOLIAGE (Ben 07-29) ----
       // "volumetric darkness at night is applied to horizon pines, but not to forest trees." Correct, and the two fade to
       // different targets. The horizon backdrop fades to _uPineFog, which is scene.fog.color pulled toward storm blue and
@@ -2848,6 +2854,22 @@ function injectAtlas(mat, opts={}){
         'diffuseColor.rgb *= _tex.rgb;')
       .replace('#include <lights_fragment_maps>',
         '#include <lights_fragment_maps>\n'+
+        // ---- DIRECTIONAL SKYLIGHT (plan §4 item 8) ----
+        // aSky is a per-face SCALAR: how much of the sky a face's own column can see. It says nothing about which WAY the face
+        // points, so under a canopy — or anywhere in shade — a floor, a wall and a soffit all take exactly the same skylight and
+        // the shade has no form. The sky is a hemisphere: an upward face sees all of it, a vertical face half, a downward face
+        // only what bounces. That is one dot product against a normal this shader already carries.
+        // NOT A MESHER CHANGE, which is what §4 budgeted for: `vObjN` was added for the block-light air-cell offset and chunk
+        // groups are translations only, so its y IS the world y. (Rotated model props read their own local y; the error is small
+        // and confined to props.)
+        // The hemisphere light is NOT the place for this. It has the same term built in, and its ground colour was deliberately
+        // lifted to 0x24282f (Ben 07-20) so that down and side faces in shadow stopped reading as near-black — pushing the
+        // direction back into it would undo that fix. This scales the SKY OCCLUSION term instead, so a lit face keeps its sun.
+        // uSkyDirUp is over 1 and uSkyDirDn under it on purpose: the pair is chosen so a daylight frame's mean luminance does not
+        // move (measured, bench/assert-directional-sky.mjs) — a version that only darkened made the whole world dimmer, which is
+        // the one thing Ben has asked against four times.
+        'float _sdir=mix(1.0, mix(uSkyDirDn, uSkyDirUp, 0.5+0.5*normalize(vObjN).y), uSkyDirAmt);\n'+
+        'irradiance *= _sdir;\n'+
         'irradiance *= (0.26 + 0.74*pow(vSky,1.15));\n'+   // skylight CONTRAST curve — floor 0.035→0.16 (Ben 07-20) →0.26 with a softer exponent (Ben 07-27, "black pixels everywhere"): under a canopy vSky≈0, and 16% of a 0.6 hemi is indistinguishable from black, so the forest floor and any dappled shade read as solid black holes. Caves/interiors still go dark (they also lose the direct term below) and torches still dominate.
         'vec3 _lpc = vLP + normalize(vObjN)*0.5;\n'+   // FACE→AIR offset (Ben 07-21): a face sits on the solid/air boundary; sampling there blended the solid cell (light 0) with the air cell → half-lit AND a per-cell checkerboard on lit surfaces. Push half a cell along the normal so we sample the LIT air cell at its texel centre.
         'float _bl = texture(uLight3D, vec3(_lpc.x/'+CK.toFixed(1)+', _lpc.y/'+WH.toFixed(1)+', _lpc.z/'+CK.toFixed(1)+')).r;\n'+   // baked block light 0..1, trilinear, 0 behind walls
@@ -14853,7 +14875,10 @@ offView.group.rotation.set(0.10,-0.10,0.16);
 // place because the shield is a board carried across the forearm and a torch is a thing you grip.
 // The hand pose is up and inboard of where it started (-0.31,-0.17): the COMPASS ROSE sits in the lower-left of the HUD,
 // exactly where a left-hand item lands, so a torch read as a floating flame with its stick hidden behind the dial.
-const OFF_POSE={ shield:{p:[-0.22,-0.10,-0.35], r:[0.10,-0.10,0.16]}, hand:{p:[-0.25,-0.10,-0.34], r:[0.16,0.34,-0.10]} };
+// hand: the mirror of the right hand's held-item rest, which is view.group.position.set(0.34,-0.30+b,-0.62) — see updateView.
+// shield: NOT mirrored from anything, because there is nothing on the right to mirror; a shield is carried on the forearm and
+// its pose is Ben's own, settled by eye.
+const OFF_POSE={ shield:{p:[-0.22,-0.10,-0.35], r:[0.10,-0.10,0.16]}, hand:{p:[-0.34,-0.30,-0.62], r:[0.16,-0.34,0.10]} };
 // How long a GUN is in the offhand fist, in world units along its longest axis. A dial rather than a literal so three
 // candidate sizes can be photographed in one run and Ben can pick, instead of shipping a guess and asking if he likes it.
 let _gunOffFit=0.34;
@@ -14926,8 +14951,10 @@ function setOffItem(id){ if(offView.id===id)return; offView.id=id;
       m.traverse(o=>{ if(o.isMesh&&o.material){ const L=Array.isArray(o.material)?o.material:[o.material]; for(const mm of L) mm.side=THREE.DoubleSide; } });
       if(typeof attachGunHand==='function') attachGunHand(m,-1);   // the left hand's gun is held by a hand too, mirrored with it
       const mir=new THREE.Group(); mir.scale.x=-1; mir.add(m);
-      offView.group.position.set(-0.34,-0.14,-0.62); offView.group.rotation.set(0,0,0);   // the fist branch of updateView, x negated and lifted twice (Ben: "a little too low", then "too low")
-      offView.baseX=-0.34; offView.baseY=-0.14; offView.baseZ=-0.62; offView.baseRX=0; offView.mesh=mir; offView.group.add(mir); applyViewFog(mir);
+      // The mirror of the right hand's HIP pose (hPx 0.17, hPy -0.20, hPz -0.5 in the gun branch of updateView). It used to sit
+      // at -0.34,-0.14,-0.62: twice as far out to the side, higher, and further forward than the gun in the other hand.
+      offView.group.position.set(-0.17,-0.20,-0.50); offView.group.rotation.set(0,0,0);
+      offView.baseX=-0.17; offView.baseY=-0.20; offView.baseZ=-0.50; offView.baseRX=0; offView.mesh=mir; offView.group.add(mir); applyViewFog(mir);
       return; }
     const _bd = ITEMS[id].block!=null ? B[ITEMS[id].block] : null;
     const _fit = ITEMS[id].gun ? _gunOffFit
@@ -15094,6 +15121,23 @@ let _swayPin=null;         // QA only (__hc.swayPin) — see the pin site in upd
 // were all written at 0.4, so the same breath moved the hunting rifle two and a half times as far and only the rifle
 // read as a held object. Tune here and every sight moves together; put a number back inline and they diverge again.
 const SWAY_POS=1.00, SWAY_ROT=0.60;
+// The direction a third-person shot actually goes: the look, plus the hand behind it. Returns the shared _tpsAimV, so callers
+// must consume it before calling again.
+const _tpsAimV=new THREE.Vector3();
+function tpsAimDir(){
+  const d=lookDir();
+  const sx=(view&&view.swayX)||0, sy=(view&&view.swayY)||0;
+  if(!sx && !sy) return _tpsAimV.copy(d);
+  // Yaw about world up and pitch about the look's own right vector, both at the scope pose's own SWAY_ROT — so the wobble the
+  // player sees over the shoulder is the same wobble, in the same units, as the one the iron sights show.
+  const yaw=sx*SWAY_ROT, pit=sy*SWAY_ROT;
+  const cy=Math.cos(yaw), sy2=Math.sin(yaw);
+  let x=d.x*cy - d.z*sy2, y=d.y, z=d.x*sy2 + d.z*cy;
+  const rl=Math.hypot(x,z)||1e-6;                                    // pitch: lift/drop the horizontal component into y
+  const cp=Math.cos(pit), sp=Math.sin(pit);
+  const hy=y*cp - rl*sp, hr=y*sp + rl*cp;
+  const k=hr/rl;
+  return _tpsAimV.set(x*k, hy, z*k).normalize(); }
 const RECOIL={tp:0,ty:0};   // pending impulse (rad). NO auto-recovery (Ben 07-20): the muzzle climbs and STAYS — pulling it back down is the shooter's job
 function kickRecoil(up,side){ const adsm=1-0.25*((typeof view!=='undefined'&&view.adsT)||0);   // cheek weld soaks ~25% — hip-fire bucks hardest
   RECOIL.tp+=up*adsm*(0.85+Math.random()*0.3); RECOIL.ty+=side*adsm*(Math.random()<0.5?-1:1)*(0.5+Math.random()); }
@@ -15220,7 +15264,7 @@ function updateCrosshair(dt, isGun){
       const hit=(typeof raycastVoxel==='function')?raycastVoxel():null;
       const ex=player.pos.x, ey=player.pos.y+EYE, ez=player.pos.z;
       const dist = hit ? Math.max(1.2, Math.hypot(hit.x+0.5-ex, hit.y+0.5-ey, hit.z+0.5-ez)) : 40;
-      const d=lookDir();
+      const d=tpsAimDir();   // the same swayed axis the round takes over the shoulder, so the ring cannot promise a steadier shot than you have
       const t=_xhT||(_xhT=new THREE.Vector3());
       t.set(ex+d.x*dist, ey+d.y*dist, ez+d.z*dist).project(camera);
       ox=t.x*innerWidth*0.5; oy=-t.y*innerHeight*0.5;
@@ -15714,7 +15758,7 @@ function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id
   // hand still owns the flash and the buck, which is about which model you see move; where the bullet goes is about what the
   // player was aiming with, and that is the ring.
   const _fireV = (_off && !view.aimCam) ? offView : view;
-  const d = ((!_tpsAct && aimWorld(_fireV, _aimA)) ? _aimA.clone() : lookDir());   // _tpsAct, not _tpsOn: indoors overrides the preference back to first person, and the shot must follow whichever view is actually up
+  const d = (!_tpsAct && aimWorld(_fireV, _aimA)) ? _aimA.clone() : (_tpsAct ? tpsAimDir().clone() : lookDir());   // _tpsAct, not _tpsOn: indoors overrides the preference back to first person, and the shot must follow whichever view is actually up
   const o={x:player.pos.x,y:player.pos.y+EYE,z:player.pos.z};
   // SCATTER THE SHOT INSIDE THE RING. Jittered in place, so every consumer downstream — the hit trace, the tracer, the impact
   // decal, the packet peers see — uses the direction the bullet ACTUALLY took. The aim itself (pitch/yaw) is untouched: your
@@ -25647,6 +25691,13 @@ window.__hc={
   // item 4 assumes radius is a lever, so which filter is live has to be readable before that assumption is spent.
   // QA/bench: the god-ray pass's live state. `on` also forces it off, which is what prices a full-screen pass — the composer
   // skips a disabled pass entirely, so enabled/disabled is a real A/B rather than a uniform set to zero that still pays.
+  // QA/bench: directional skylight. amt 0 is the A/B off. up/dn multiply the sky term at a face pointing straight up / straight
+  // down; a vertical face takes their midpoint, so up 1.10 / dn 0.58 puts a wall on 0.84.
+  skyDir(o){ try{ if(o&&o.amt!=null) globalU.uSkyDirAmt.value=+o.amt; if(o&&o.on!=null) globalU.uSkyDirAmt.value=o.on?1:0;
+      if(o&&o.up!=null) globalU.uSkyDirUp.value=+o.up; if(o&&o.dn!=null) globalU.uSkyDirDn.value=+o.dn;
+      return { amt:+globalU.uSkyDirAmt.value.toFixed(3), up:+globalU.uSkyDirUp.value.toFixed(3), dn:+globalU.uSkyDirDn.value.toFixed(3),
+               side:+((globalU.uSkyDirUp.value+globalU.uSkyDirDn.value)/2).toFixed(3) };
+    }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: the scotopic chroma washout on the atlas materials. amt 0 is the A/B off; lo/hi are on the FACE'S LIGHT LEVEL,
   // max(blockLight, bakedSky*day), 0..1 — not on the pixel, which is albedo-weighted and left bright sand coloured at midnight.
   scot(o){ try{ if(o&&o.amt!=null) globalU.uScotAmt.value=+o.amt; if(o&&o.lo!=null) globalU.uScotLo.value=+o.lo; if(o&&o.hi!=null) globalU.uScotHi.value=+o.hi;

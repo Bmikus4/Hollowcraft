@@ -104,12 +104,15 @@ const chk =(c,n,d)=> c?ok(n,d):bad(n,d);
     const shot=async(name)=>{ await sleep(450); const buf=await page.screenshot({ clip:CLIP });
       if(name) fs.writeFileSync(path.join(ROOT,'bench','results','toolkit-'+name+'.png'), buf); return decodePNG(buf); };
     const lum=(d,i)=>0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2];
+    // decodePNG returns {w,h,ch,data} and ch is 3 for an opaque screenshot — stepping by a hard 4 walks the
+    // channels out of phase and every luma after the first pixel is a mix of three different pixels.
+    const step=img=>img.ch;
     // ONLY THE TOOL'S OWN PIXELS. A plain max over the crop reads the SKY and returns the same number for every
     // tool — that check passed 214.8 for a pickaxe, an iron sword and a diamond sword before this diff was added.
     await page.evaluate('__hc.holdNone()'); const empty=await shot();
     const peak=async id=>{ await page.evaluate(`__hc.hold(${JSON.stringify(id)})`); const img=await shot(id);
       let mx=0, n=0;
-      for(let i=0;i<img.data.length;i+=4){ const a=lum(img.data,i), b=lum(empty.data,i);
+      for(let i=0;i<img.data.length;i+=step(img)){ const a=lum(img.data,i), b=lum(empty.data,i);
         if(Math.abs(a-b)<12) continue;                                   // unchanged = world, not the viewmodel
         n++; if(a>mx)mx=a; }
       await page.evaluate('__hc.holdNone()'); await sleep(120);
@@ -126,9 +129,11 @@ const chk =(c,n,d)=> c?ok(n,d):bad(n,d);
     // the blade is lit, not self-lit. setTime: uDay is 1 at t=0; night runs 0.63..0.94 and is darkest at 0.63.
     const meanOf=async(id,t)=>{ await page.evaluate('__hc.setTime('+t+')'); await page.evaluate('__hc.holdNone()'); const e=await shot();
       await page.evaluate(`__hc.hold(${JSON.stringify(id)})`); const img=await shot(id+(t>0.5?'-night':'-noon'));
-      let s=0,n=0; for(let i=0;i<img.data.length;i+=4){ const a=lum(img.data,i), b=lum(e.data,i);
-        if(Math.abs(a-b)<12) continue; s+=a; n++; }
-      return n?+(s/n).toFixed(1):null; };
+      // A LOWER threshold than the daylight check on purpose: at midnight the whole frame sits near luma 30, so a
+      // difference of 12 between held and empty is most of the available range and the mask comes back empty.
+      let s=0,n=0; for(let i=0;i<img.data.length;i+=step(img)){ const a=lum(img.data,i), b=lum(e.data,i);
+        if(Math.abs(a-b)<4) continue; s+=a; n++; }
+      return n>500?+(s/n).toFixed(1):null; };
     // Measured against the IRON sword rather than a constant: how far any blade darkens between noon and midnight
     // is a property of the whole lighting stack, so the only honest question is whether the diamond one darkens
     // LIKE IT DOES. A fixed threshold here would have to be re-tuned every time the sky changes.
@@ -136,6 +141,17 @@ const chk =(c,n,d)=> c?ok(n,d):bad(n,d);
     const iNoon=await meanOf('iron_sword',0.30),    iNight=await meanOf('iron_sword',0.63);
     const dR=dNight/dNoon, iR=iNight/iNoon;
     chk(dR <= iR*1.35, 'diamond blade darkens like iron does', 'diamond '+dNoon+'→'+dNight+' ('+dR.toFixed(2)+'x), iron '+iNoon+'→'+iNight+' ('+iR.toFixed(2)+'x)');
+
+    console.log('\n--- 8  you can see your own spear ---');
+    // A spear is built at its true 6.7 blocks, which is right everywhere except your own hands: at 1:1 the shaft
+    // ran through the camera — measured, four of the eight corners of its bounding box projected BEHIND the near
+    // plane — and the old 0.98 rad carry angle put what was left above the top of the frame. Every flag said drawn.
+    // So the check is geometric, not a flag: nothing behind the eye, and a real share of the screen covered.
+    for(const id of ['wooden_spear','rusty_spear','iron_pickaxe']){
+      await page.evaluate(`__hc.hold(${JSON.stringify(id)})`); await sleep(200);
+      const b=await page.evaluate('__hc.viewBounds()');
+      chk(b.cornersBehind==='0/8' && b.onScreen>0.05, id.padEnd(15)+' in front of the eye and on screen',
+        'behind '+b.cornersBehind+', covers '+b.onScreen); }
 
     console.log('\n'+pass+'/'+(pass+fail)+' passed');
     await browser.close();
