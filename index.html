@@ -2395,7 +2395,7 @@ function chunkEmitters(c){
   if(c._emit) return c._emit;
   const e=[], b=c.blocks;
   for(let ly=0;ly<WH;ly++)for(let lz=0;lz<CK;lz++)for(let lx=0;lx<CK;lx++){
-    const id=b[idx(lx,ly,lz)]; if(id!==AIR && blockLight[id]>0) e.push(lx,ly,lz,blockLight[id]); }
+    const id=b[idx(lx,ly,lz)]; if(id!==AIR && blockLight[id]>0) e.push(lx,ly,lz,blockLight[id],blockTint[id]); }   // stride 5: the tint index rides with the level so bakeLight can seed a colour without a second block lookup
   c._emit=e; return e;
 }
 function bakeLight(c){
@@ -2406,11 +2406,11 @@ function bakeLight(c){
     if(!nc||!nc.generated) continue;
     const e=chunkEmitters(nc); if(!e.length) continue;
     const nx0=(c.cx+dx)*CK, nz0=(c.cz+dz)*CK;
-    for(let i=0;i<e.length;i+=4){
-      const px=nx0+e[i]-cx0+LPAD, py=e[i+1], pz=nz0+e[i+2]-cz0+LPAD, lvl=e[i+3];
+    for(let i=0;i<e.length;i+=5){   // stride 5 since chunkEmitters carries the tint index — see LIGHT_PAL
+      const px=nx0+e[i]-cx0+LPAD, py=e[i+1], pz=nz0+e[i+2]-cz0+LPAD, lvl=e[i+3], tnt=e[i+4];
       if(px<0||px>=LPW||pz<0||pz>=LPW||py<0||py>=WH) continue;
       const pi=_lpi(px,py,pz);
-      if(_lv[pi]<lvl){ if(!_lvLit){ _lv.fill(0); _lvLit=true; } _lv[pi]=lvl; if(qn<Q.length) Q[qn++]=pi; }
+      if(_lv[pi]<lvl){ if(!_lvLit){ _lv.fill(0); _lvT.fill(0); _lvLit=true; } _lv[pi]=lvl; _lvT[pi]=tnt; if(qn<Q.length) Q[qn++]=pi; }
     }
   }
   if(!_lvLit) return false;
@@ -2426,7 +2426,7 @@ function bakeLight(c){
       const wx=nx-LPAD, wz=nz-LPAD;                        // local to the center chunk: -15..30
       const ch=NB[((wx>>4)+1)+((wz>>4)+1)*3];              // direct 3x3 ref (wx>>4 maps -15..-1 → -1, 0..15 → 0, 16..30 → 1)
       if(ch){ const b=ch.blocks[(wx&15)+(wz&15)*CK+ny*CK*CK]; if(b!==AIR && isOpaque[b]) continue; }   // missing chunk == AIR, matching getBlock
-      _lv[ni]=nl; if(nl>1 && qn<Q.length) Q[qn++]=ni;
+      _lv[ni]=nl; _lvT[ni]=_lvT[pi]; if(nl>1 && qn<Q.length) Q[qn++]=ni;   // the cell inherits the colour of whichever light reached it brightest
     }
   }
   return true;
@@ -2435,16 +2435,25 @@ function bakeLight(c){
 function buildLightTexture(c){
   const lit=bakeLight(c);
   if(!lit){ if(c.light3D){ c.light3D.dispose(); c.light3D=null; } return; }
-  let vol=c._lvData; if(!vol){ vol=c._lvData=new Uint8Array(CK*WH*CK); }
+  // RADIANCE, NOT INTENSITY. The volume used to be one channel and the shader multiplied it by a single hard-coded warm colour,
+  // so every light in the game was the same orange. It now holds the light's own colour premultiplied by its level, which is
+  // ALSO the only form that survives the trilinear filter: interpolating premultiplied radiance is a real average of two lights,
+  // whereas interpolating a palette INDEX between a crimson torch and a cold lamp would land on whatever entry sits between them.
+  // RGBA, NOT RGB: three r160 removed THREE.RGBFormat entirely, so `format = THREE.RGBFormat` set it to undefined, the texture
+  // never uploaded and every cell sampled 0 — a sealed cell with a lantern in it measured no block light at all. There is no RGB8
+  // path to go back to; four bytes a cell is the format that exists. 128 KB per chunk, so 37 MB of texture at rd 8 (289 chunks)
+  // against 9.5 MB when the volume was a single channel. Alpha is unused and written opaque.
+  let vol=c._lvData; if(!vol){ vol=c._lvData=new Uint8Array(CK*WH*CK*4); }
   for(let y=0;y<WH;y++)for(let z=0;z<CK;z++)for(let x=0;x<CK;x++){
-    vol[x + CK*(y + WH*z)] = _lv[_lpi(x+LPAD,y,z+LPAD)]*17;   // 0..15 → 0..255
+    const si=_lpi(x+LPAD,y,z+LPAD), lv=_lv[si]*17, p=LIGHT_PAL[_lvT[si]]||LIGHT_PAL[0], o=(x + CK*(y + WH*z))*4;
+    vol[o]=lv*p[0]; vol[o+1]=lv*p[1]; vol[o+2]=lv*p[2]; vol[o+3]=255;   // 0..15 → 0..255, times the emitter's own colour
   }
   if(!c.light3D){ const t=new THREE.Data3DTexture(vol, CK, WH, CK);
-    t.format=THREE.RedFormat; t.type=THREE.UnsignedByteType; t.minFilter=THREE.LinearFilter; t.magFilter=THREE.LinearFilter;
+    t.format=THREE.RGBAFormat; t.type=THREE.UnsignedByteType; t.minFilter=THREE.LinearFilter; t.magFilter=THREE.LinearFilter;
     t.wrapR=t.wrapS=t.wrapT=THREE.ClampToEdgeWrapping; t.unpackAlignment=1; c.light3D=t; }
   c.light3D.needsUpdate=true;
 }
-const _emptyLight3D = (()=>{ const t=new THREE.Data3DTexture(new Uint8Array(1), 1,1,1); t.format=THREE.RedFormat; t.type=THREE.UnsignedByteType; t.needsUpdate=true; return t; })();   // fallback sampled by chunks with no nearby light
+const _emptyLight3D = (()=>{ const t=new THREE.Data3DTexture(new Uint8Array(4), 1,1,1); t.format=THREE.RGBAFormat; t.type=THREE.UnsignedByteType; t.needsUpdate=true; return t; })();   // fallback sampled by chunks with no nearby light
 
 // =====================================================================
 //  GREEDY MESHER
@@ -2894,7 +2903,12 @@ function injectAtlas(mat, opts={}){
         'irradiance *= _sdir;\n'+
         'irradiance *= (0.26 + 0.74*pow(vSky,1.15));\n'+   // skylight CONTRAST curve — floor 0.035→0.16 (Ben 07-20) →0.26 with a softer exponent (Ben 07-27, "black pixels everywhere"): under a canopy vSky≈0, and 16% of a 0.6 hemi is indistinguishable from black, so the forest floor and any dappled shade read as solid black holes. Caves/interiors still go dark (they also lose the direct term below) and torches still dominate.
         'vec3 _lpc = vLP + normalize(vObjN)*0.5;\n'+   // FACE→AIR offset (Ben 07-21): a face sits on the solid/air boundary; sampling there blended the solid cell (light 0) with the air cell → half-lit AND a per-cell checkerboard on lit surfaces. Push half a cell along the normal so we sample the LIT air cell at its texel centre.
-        'float _bl = texture(uLight3D, vec3(_lpc.x/'+CK.toFixed(1)+', _lpc.y/'+WH.toFixed(1)+', _lpc.z/'+CK.toFixed(1)+')).r;\n'+   // baked block light 0..1, trilinear, 0 behind walls
+        // RADIANCE, three channels: the volume carries each light's own colour premultiplied by its level (see LIGHT_PAL and
+        // buildLightTexture), so a crimson shrine torch tints its alcove red and an industrial lamp reads cold, instead of every
+        // emitter in the game casting the same orange. `_bl` is the level again — the largest channel — because the falloff curve
+        // and every existing gate (?dbg=bl, the flicker, the scotopic gate) are written against a 0..1 intensity.
+        'vec3 _blc = texture(uLight3D, vec3(_lpc.x/'+CK.toFixed(1)+', _lpc.y/'+WH.toFixed(1)+', _lpc.z/'+CK.toFixed(1)+')).rgb;\n'+
+        'float _bl = max(_blc.r, max(_blc.g, _blc.b));\n'+   // baked block light 0..1, trilinear, 0 behind walls
         'float _fl = 0.90 + 0.10*sin(uTime*7.3 + vLP.x*1.7 + vLP.z*1.3);\n'+   // cheap warm flicker
         'irradiance += vec3(3.6,1.95,0.80) * pow(_bl,1.45) * _fl;')   // warm torch glow added to indirect — falloff SOFTENED from _bl² (Ben 07-20: in truly dark chunks the squared curve collapsed the glow to an invisible puddle; ^1.45 carries the light to its full flood radius) + peak brightened ~16%
       .replace('#include <aomap_fragment>',
@@ -16533,6 +16547,7 @@ function icbmFlash(x,gy,z){
 // The cloud grows for ~8s, stands for a while, then fades. Driven from the frame loop like every other effect here.
 function icbmUpdate(dt){
   icbmFireTick(dt);
+  icbmSmokeTick(dt);   // the exhaust column outlives the flight by half a minute, so it cannot be ticked from icbmFlight's flight-only path
   if(_nukeCloud){ _nukeT+=dt;
     const grow=Math.min(1, _nukeT/8);
     _nukeCloud.scale.setScalar(0.05+grow*0.95);
@@ -16636,9 +16651,15 @@ function buildSilo(){ if(_siloDone) return;
 // of flight. Lift, arc, descend — and the detonation is the same icbmDetonate the harness already drives, so the flight cannot
 // diverge from the thing it triggers.
 const ICBM={ state:'idle', t:0, tx:0, tz:0, mesh:null, from:null, dur:11, cool:0, silo:null };
-let _icbmTrail=0;   // the exhaust column's own emit clock — see icbmFlight   // silo = the cell the spent round came out of, so the cooldown can stand a fresh one back in it
+let _icbmTrail=0, _icbmSmokeT=0;   // the exhaust column's own emit clocks — see icbmFlight   // silo = the cell the spent round came out of, so the cooldown can stand a fresh one back in it
 function icbmRocket(){ const g=new THREE.Group();
-  const body=new THREE.MeshLambertMaterial({color:0x9aa0a6}), band=new THREE.MeshLambertMaterial({color:0x8a2b24}), fin=new THREE.MeshLambertMaterial({color:0x5c6167});
+  // WEATHER MUST NOT ERASE THE MISSILE (Ben 08-04: "the ICBM is nearly invisible in fog"). scene.fog is FogExp2 and weather
+  // multiplies its density by (1 + wf*wf*18), so in a storm density reaches ~0.027; FogExp2 SQUARES density*depth, so at the
+  // apex (y=190, ~240 blocks of slant range) the missile came out at exp(-40) of itself — not dim, gone. fog:false on every
+  // material is the whole fix: the one object in the game that is deliberately hundreds of blocks away is the one object that
+  // cannot be allowed to obey distance fog. The hull also darkens to 0x6f757c so it reads as a silhouette against a bright
+  // overcast rather than matching it; the red bands carry it against terrain and night sky.
+  const body=new THREE.MeshLambertMaterial({color:0x6f757c,fog:false}), band=new THREE.MeshLambertMaterial({color:0x9c2f26,fog:false}), fin=new THREE.MeshLambertMaterial({color:0x3d4147,fog:false});
   const hull=new THREE.Mesh(new THREE.CylinderGeometry(0.9,0.9,9,12), body); hull.position.y=4.5; g.add(hull);
   const nose=new THREE.Mesh(new THREE.ConeGeometry(0.9,2.6,12), band); nose.position.y=10.3; g.add(nose);
   for(const b of [2.2,6.4]){ const r=new THREE.Mesh(new THREE.CylinderGeometry(0.93,0.93,0.5,12), band); r.position.y=b; g.add(r); }
@@ -16647,6 +16668,50 @@ function icbmRocket(){ const g=new THREE.Group();
   const flame=new THREE.Mesh(new THREE.ConeGeometry(0.8,3.4,10), new THREE.MeshBasicMaterial({color:0xffb347,transparent:true,opacity:0.9,fog:false}));
   flame.position.y=-1.4; flame.rotation.x=Math.PI; g.add(flame); g.userData.flame=flame;
   return g; }
+// THE EXHAUST COLUMN, IN ITS OWN SYSTEM. The trail was spawnParticles, which is the block-break puff system: 0.09-block cubes
+// with a 0.5-0.9 s life. At the apex one of those is a fraction of a pixel and it expires before the next tick emits, so the
+// "column that hangs where the missile has been" could never exist anywhere but at the pad. These puffs are metres across,
+// live 34 s, grow the way smoke spreads, and carry fog:false for the same reason the rocket does.
+//   ONE InstancedMesh, 192 slots, one draw call, no per-frame allocation — same discipline as the particle system it replaces.
+// Opacity is shared (per-instance alpha would cost a custom shader), so a puff instead dissipates by SHRINKING through the last
+// fifth of its life; that is what stops the tail popping out of existence a puff at a time.
+const ICBM_SMOKE_MAX=192, ICBM_SMOKE_LIFE=34, ICBM_SMOKE_R0=1.3, ICBM_SMOKE_R1=5.2;
+const _icbmSmokeMesh=new THREE.InstancedMesh(new THREE.SphereGeometry(1,7,5),
+  new THREE.MeshBasicMaterial({color:0xeee9de,transparent:true,opacity:0.7,fog:false,depthWrite:false}), ICBM_SMOKE_MAX);
+_icbmSmokeMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); _icbmSmokeMesh.count=0;
+_icbmSmokeMesh.frustumCulled=false;   // instances are placed by matrix, so the geometry's own bounds at the origin would cull the whole column
+_icbmSmokeMesh.renderOrder=6; scene.add(_icbmSmokeMesh);
+const _icbmSmokePos=new Float32Array(ICBM_SMOKE_MAX*3), _icbmSmokeAge=new Float32Array(ICBM_SMOKE_MAX);
+let _icbmSmokeN=0, _icbmSmokeWrap=0;
+const _icbmSmokeM=new THREE.Matrix4();
+function icbmSmokePuff(x,y,z){
+  let s; if(_icbmSmokeN<ICBM_SMOKE_MAX){ s=_icbmSmokeN++; } else { s=_icbmSmokeWrap=(_icbmSmokeWrap+1)%ICBM_SMOKE_MAX; }   // full → recycle the oldest end of the ring
+  const s3=s*3; _icbmSmokePos[s3]=x; _icbmSmokePos[s3+1]=y; _icbmSmokePos[s3+2]=z; _icbmSmokeAge[s]=0; }
+// THE COLUMN TAKES ITS LUMA FROM THE SKY IT IS DRAWN ON. This game's daylight fog is deliberately BRIGHTER than the landscape
+// it hides and its night fog is black, so no fixed colour reads in both. Getting this wrong once is instructive: measured from
+// the pad, looking almost straight up the arc, the background was the dark zenith at 0.196 luma and near-white smoke looked
+// right — but from 200 blocks to the side, which is the only place a player ever watches a launch from, the column hangs
+// against the bright fog band at 0.803 and white smoke measured a 0.002 luma delta. Invisible. Stepping 0.34 to whichever side
+// of the background has room holds the contrast at every hour and in any weather. Do not replace this with a fixed grey.
+function icbmSmokeShade(){
+  const c=scene.fog.color, L=0.2126*c.r+0.7152*c.g+0.0722*c.b;
+  const t=(L>0.5)?Math.max(0.05,L-0.34):Math.min(0.97,L+0.34);
+  _icbmSmokeMesh.material.color.setRGB(t,t*0.99,t*0.96);   // a hair warm, so it is smoke and not a grey card
+  return +t.toFixed(3); }
+function icbmSmokeTick(dt){
+  if(!_icbmSmokeN){ _icbmSmokeMesh.count=0; return; }
+  icbmSmokeShade();
+  for(let i=_icbmSmokeN-1;i>=0;i--){
+    _icbmSmokeAge[i]+=dt;
+    if(_icbmSmokeAge[i]>=ICBM_SMOKE_LIFE){ const L=--_icbmSmokeN, L3=L*3, i3=i*3;                     // swap-remove, like the particle pool
+      if(i!==L){ _icbmSmokePos[i3]=_icbmSmokePos[L3]; _icbmSmokePos[i3+1]=_icbmSmokePos[L3+1]; _icbmSmokePos[i3+2]=_icbmSmokePos[L3+2]; _icbmSmokeAge[i]=_icbmSmokeAge[L]; }
+      continue; }
+    const i3=i*3, a=_icbmSmokeAge[i]/ICBM_SMOKE_LIFE;
+    let r=ICBM_SMOKE_R0+(ICBM_SMOKE_R1-ICBM_SMOKE_R0)*Math.min(1,a/0.55);
+    if(a>0.8) r*=(1-a)/0.2;                                                                          // the last fifth shrinks away instead of vanishing whole
+    _icbmSmokeM.makeScale(r,r,r); _icbmSmokeM.setPosition(_icbmSmokePos[i3],_icbmSmokePos[i3+1],_icbmSmokePos[i3+2]);
+    _icbmSmokeMesh.setMatrixAt(i,_icbmSmokeM); }
+  _icbmSmokeMesh.count=_icbmSmokeN; _icbmSmokeMesh.instanceMatrix.needsUpdate=true; }
 // FINDING THE LOADED MISSILE. A launch now spends a real object rather than conjuring one, so the console has to look for one: the
 // silo's own shaft floor first, then a short scan of the shaft column, because a player who has mined the worldgen missile out and
 // stood their own somewhere in the shaft should still be able to fire it.
@@ -16705,11 +16770,18 @@ function icbmFlight(dt){
   // arc so the column hangs where the missile has been rather than travelling with it. Rate-limited on its own clock: the
   // flight is eleven seconds and the particle pool is a ring buffer, so a puff every frame would recycle the head of the trail
   // before the tail of it had faded and the column would never grow longer than a second or so.
+  //   The particle puffs are kept for the view FROM THE PAD, where 9 cm cubes at ten metres are exactly right; they are not what
+  // the column is made of any more. icbmSmokePuff is, on a slower clock — 192 slots over an 11 s flight is one puff every 0.09 s,
+  // which lands them ~4 blocks apart along the arc, closer than their own 1.3-block starting radius, so the column is continuous
+  // from the first frame and stays that way as they grow.
   _icbmTrail-=dt;
-  if(_icbmTrail<=0 && typeof spawnParticles==='function'){ _icbmTrail=0.045;
+  if(_icbmTrail<=0){ _icbmTrail=0.045;
     const ex=x+0.5, ez=z+0.5;
-    spawnParticles(ex, y-1.2, ez, (u<0.10)?0xffb347:0xb9b2a8, 3, 1.1, 0.5);   // still lit by the motor on the way off the pad
-    spawnParticles(ex, y-2.4, ez, 0x8d8880, 2, 1.6, 0.2); }
+    if(typeof spawnParticles==='function'){
+      spawnParticles(ex, y-1.2, ez, (u<0.10)?0xffb347:0xb9b2a8, 3, 1.1, 0.5);   // still lit by the motor on the way off the pad
+      spawnParticles(ex, y-2.4, ez, 0x8d8880, 2, 1.6, 0.2); } }
+  _icbmSmokeT-=dt;
+  if(_icbmSmokeT<=0){ _icbmSmokeT=0.09; icbmSmokePuff(x+0.5, y-2.0, z+0.5); }
   if(ICBM.mesh){ ICBM.mesh.position.set(x+0.5,y,z+0.5);
     const dy=4*apex*(1-2*u), dh=Math.hypot(ICBM.tx-f.x, ICBM.tz-f.z);
     ICBM.mesh.rotation.set(0, Math.atan2(ICBM.tx-f.x, ICBM.tz-f.z), 0);
@@ -19875,6 +19947,9 @@ function brBuildEnvAll(){
   brxUpdateLights(player.pos.x,player.pos.z); }
 // DYING-TUBE FLICKER — returns 1 (on) or 0 (fully OFF), never a dim. A slow per-fixture envelope decides when a tube is
 // "sick"; inside that window it strobes hard, and there are separate dead-out beats. Ben 07-27: they must blink OFF, not dim.
+// 0 = lit, 1 = trying to strike (strobing), 2 = dead. brFlick returns a per-FRAME on/off and cannot answer
+// "what is this tube doing"; the sound needs the state, not the sample.
+function brFlickRegime(ph,t){ const s=Math.sin(t*1.7+ph)*Math.sin(t*0.63+ph*1.7); return s>0.55?1:(s<-0.88?2:0); }
 function brFlick(ph,t){ const s=Math.sin(t*1.7+ph)*Math.sin(t*0.63+ph*1.7);
   if(s>0.55) return Math.sin(t*41+ph*5)>0 ? 1 : 0;      // strobe burst
   if(s<-0.88) return 0;                                  // a long dead beat
@@ -19903,8 +19978,20 @@ function brxUpdateLights(px,pz){ if(!BR.lightPool||!BR.fixtures)return; const F=
     const on = f.flick ? brFlick(f.ph||0,t) : 1;
     L.intensity = on*12.0;                              // brighter than the old 7.5 — it is now the ONLY real light in here
     if(L.castShadow) L.shadow.autoUpdate = on>0;        // a blinked-off tube skips its 6-face shadow pass entirely
-    if(f.flick && L._on!==undefined && L._on!==on && i<4 && typeof playSample==='function'){                      // REAL tube sound (Ben 07-27): the recorded-quality strike/dropout from sounds/gen-fluor.js, spatialized at the fixture — was a bare square-wave blip
-      const d=Math.sqrt(near[i].d); if(d<26) playSample(on?'fluor':'fluorout', {x:f.x,y:y,z:f.z}, (on?0.55:0.42)*Math.max(0.15,1-d/26)); }
+    // THE SOUND FOLLOWS THE TUBE'S STATE, NOT ITS STROBE. See brFlickRegime: inside a burst brFlick toggles ~6.5 times a
+    // second, so binding a sample to that transition fires ~13 a second from ONE tube. Measured before this: 4 distinct
+    // fixtures, 81 triggers in 40s, a single tube accounting for 38 of them at 6 blocks. A real fluorescent strikes once
+    // when it tries to light and clicks once when it gives up. The 2.5s per-fixture cooldown is the second belt, so one
+    // dying tube next to you cannot own the soundscape even if its regime oscillates.
+    if(f.flick && i<4 && typeof playSample==='function'){
+      const reg = (BR._sndFix===false) ? (on?0:1) : brFlickRegime(f.ph||0,t);
+      const edge = (BR._sndFix===false) ? (L._on!==undefined && L._on!==on) : (f._reg!==undefined && f._reg!==reg);
+      if(edge){ const d=Math.sqrt(near[i].d);
+        if(d<26 && (BR._sndFix===false || !(f._sndT>0) || (t-f._sndT)>2.5)){ f._sndT=t;
+          if(_brFluorLog)_brFluorLog.push({k:Math.round(f.x)+','+Math.round(f.z), d:+d.toFixed(1), on:on?1:0});
+          const strike = (BR._sndFix===false) ? !!on : (reg!==2);
+          playSample(strike?'fluor':'fluorout', {x:f.x,y:y,z:f.z}, (strike?0.55:0.42)*Math.max(0.15,1-d/26)); } }
+      f._reg=reg; }
     L._on=on;
     if(on){ litNear++; if(near[i].d<nearest)nearest=near[i].d; } }
     // P3 · A LIGHT THAT GOES INVISIBLE CHANGES THE SHADER. three.js bakes the light COUNT into every program's
@@ -20926,6 +21013,41 @@ if(typeof window!=='undefined'){ window.__hcBR={
         if(best && !biggest) break; }
       return best||{err:'no room in district '+zone}; }catch(e){ return {err:String(e.message||e)}; } },
   door:()=>brSpawnDoorNearPlayer(), enter:()=>brEnter(), exit:()=>brExit(), key:()=>brGiveKey(),
+  // QA probes added by the Backrooms recompile (3016). Named stat2, NOT state: __hcBR already defines state: further down the
+  // same object literal, and a duplicate key is silently overridden by the LAST one — the first version of this probe returned
+  // the old shape and every loaded/rooms field a harness read off it was undefined.
+  // (orch point 3) Is the portal a SECOND FULL RENDER PASS? renderer is module-scoped, so nothing could read this.
+  // Sample with the door in view and out of view: if calls roughly double, the diagnosis is closed.
+  draws:()=>{ try{ const r=renderer.info.render; return { calls:r.calls, tris:r.triangles, programs:renderer.info.programs?renderer.info.programs.length:null }; }catch(e){ return {err:String(e.message||e)}; } },
+  // (orch point 5) doorFrames and useDoor disagree on the SAME predicate. Report which container each number came from
+  // and the per-storey split — BRX puts every chunk on its own base Y, so "all doors" and "the doors on this storey" are
+  // different populations and one of them is what each caller is really counting.
+  doorPop:()=>{ try{ const D=BR.doors||[]; const byY={}; let piv=0, cas=0;
+      for(const d of D){ const k=Math.round(d.y!=null?d.y:(d.fy!=null?d.fy:-999)); byY[k]=(byY[k]||0)+1;
+        if(d.pivots&&d.pivots.length)piv++; if(d._casing)cas++; }
+      const rec=(BR.loaded||[]).reduce((s2,r)=>s2+((r.doors||[]).length),0);
+      return { inBRdoors:D.length, withPivots:piv, withCasing:cas, byStoreyY:byY, sumOverLoadedChunkRecords:rec,
+               loadedChunks:(BR.loaded||[]).length }; }catch(e){ return {err:String(e.message||e)}; } },
+  // (orch point 4) how many DISTINCT tubes are making that noise, and how far away.
+  sndFix:(on)=>{ BR._sndFix=(on!==false); return BR._sndFix; },
+  fluorLog:(on)=>{ if(on===false){ const L=_brFluorLog; _brFluorLog=null; return L; } _brFluorLog=[]; return true; },
+  fluorCensus:()=>{ const L=_brFluorLog||[]; const byF={}; for(const e of L){ byF[e.k]=(byF[e.k]||0)+1; }
+    const ds=L.map(e=>e.d).sort((a,b)=>a-b);
+    return { events:L.length, distinctFixtures:Object.keys(byF).length, perFixtureMax:L.length?Math.max(...Object.values(byF)):0,
+             distMedian:ds.length?+ds[ds.length>>1].toFixed(1):null, distMax:ds.length?+ds[ds.length-1].toFixed(1):null }; },
+  stat2:()=>{ try{ return { inside:!!BR.inside, seed:BR.seed>>>0, rooms:(BR.rooms||[]).length, doors:(BR.doors||[]).length,
+      fixtures:(BR.fixtures||[]).length, loaded:(BR.loaded||[]).length, pool:(BR.lightPool||[]).length, litNear:BR._litNear|0,
+      x:+player.pos.x.toFixed(1), y:+player.pos.y.toFixed(1), z:+player.pos.z.toFixed(1) }; }catch(e){ return {err:String(e.message||e)}; } },
+  wretchState:()=>{ try{ return { active:!!wretch.active, visible:!!(wretch.group&&wretch.group.visible),
+      state:String(wretch.state||''), dist:+(wretch.dist||0).toFixed(1),
+      extras:(typeof wretchExtra!=='undefined')?wretchExtra.length:null,
+      grabbed:!!player.grabbed, dragging:!!wretch.dragging,
+      pale:(BR.pale?{state:String(BR.pale.state||''),vis:!!(BR.pale.mesh&&BR.pale.mesh.visible)}:null) }; }catch(e){ return {err:String(e.message||e)}; } },
+  // WALK, do not teleport. __hcBR.tp jumps a chunk per call and forces six streamChunks — a storm no player performs.
+  walk:(on,sprint)=>{ try{ if(on===false){ delete keys.KeyW; delete keys.ShiftLeft; return {walking:false}; }
+      keys.KeyW=true; if(sprint)keys.ShiftLeft=true; else delete keys.ShiftLeft;
+      return { walking:true }; }catch(e){ return {err:String(e.message||e)}; } },
+  face:(yaw)=>{ try{ player.yaw=+yaw||0; return +player.yaw.toFixed(3); }catch(e){ return {err:String(e.message||e)}; } },
   // QA: where did the portal actually land, and where WOULD the old code have put it? Every field here is read from the
   // VOXELS or from the player, none from BR.seed -- brSpawnDoor re-seeds the maze as it spawns, so any seed-derived
   // "storey floor" describes a layout that no longer exists and reports a floor the player is not standing on.
@@ -23205,7 +23327,7 @@ function brAudioBlocked(base){ return (typeof BR!=='undefined' && BR.inside) && 
 // comment is not evidence: that comment claimed enforcement "in playSample/tone/burst" via brAudioBlocked, and in fact tone and
 // burst seal by ROUTE (dest!==_brBus) while playSample seals by NAME — two different rules, and a census is the only thing that
 // tells you which one a given sound met. Off by default and costs one property write per emitted sound when armed.
-let _brAudLog=null;
+let _brAudLog=null, _brFluorLog=null;
 function brAudTap(kind,name,blocked){ if(!_brAudLog)return;
   const k=kind+':'+name+(blocked?' BLOCKED':' PLAYED');
   _brAudLog[k]=(_brAudLog[k]||0)+1; }
@@ -24622,7 +24744,21 @@ window.__hc={
   //      matters is that firing one adds no block edits at all.
   icbm(){ try{ return { craters:craters.map(c=>({x:c.x,z:c.z,r:c.r,d:c.d})), rads:+RADS.level.toFixed(3),
       edits:Object.keys(edits).length, cloud:!!_nukeCloud, nukeR:NUKE_R, nukeDepth:NUKE_DEPTH,
-      sick:+(player.sick||0).toFixed(0) }; }catch(e){ return {err:String(e.message||e)}; } },
+      sick:+(player.sick||0).toFixed(0),
+      // THE FLIGHT, so "can you see it" is a question with numbers behind it. A missile at the apex is 190 blocks up and the
+      // fog term that hid it is exp(-(density*depth)^2) — both belong in the same report as the mesh's position.
+      state:ICBM.state, t:+ICBM.t.toFixed(2), dur:ICBM.dur, cool:Math.round(ICBM.cool),
+      pos:ICBM.mesh?[+ICBM.mesh.position.x.toFixed(1),+ICBM.mesh.position.y.toFixed(1),+ICBM.mesh.position.z.toFixed(1)]:null,
+      meshFog:ICBM.mesh?!!(ICBM.mesh.children[0]&&ICBM.mesh.children[0].material.fog):null,
+      smoke:_icbmSmokeN, smokeFog:!!_icbmSmokeMesh.material.fog, smokeDrawn:_icbmSmokeMesh.count,
+      smokeLuma:icbmSmokeShade(), skyLuma:+(0.2126*scene.fog.color.r+0.7152*scene.fog.color.g+0.0722*scene.fog.color.b).toFixed(3),
+      // A PUFF'S REAL POSITION. The column follows the ballistic arc, so "55 blocks under the nose" is empty sky and a bench
+      // that sampled there measured the weather and called it the smoke.
+      smokeMid:(()=>{ if(!_icbmSmokeN) return null; const i=(_icbmSmokeN>>1)*3; return [+_icbmSmokePos[i].toFixed(1),+_icbmSmokePos[i+1].toFixed(1),+_icbmSmokePos[i+2].toFixed(1)]; })(),
+      fogDensity:+scene.fog.density.toFixed(5),
+      // what the fog leaves of a thing at that slant range: 1 = untouched, 0 = erased
+      transmit:(()=>{ if(!ICBM.mesh) return null; const d=camera.position.distanceTo(ICBM.mesh.position), k=scene.fog.density*d; return +Math.exp(-k*k).toFixed(4); })() }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   icbmFire(dx,dz,r,depth){ try{ const x=Math.round(player.pos.x)+(dx|0), z=Math.round(player.pos.z)+(dz|0);
       const before=Object.keys(edits).length;
       const res=icbmDetonate(x,z,r,depth);
