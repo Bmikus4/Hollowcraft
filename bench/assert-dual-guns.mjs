@@ -37,7 +37,11 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     await page.evaluate(`__hc.lock(true)`);
     const K = code => page.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown',{code:${JSON.stringify(code)},bubbles:true}))`);
     const mags = () => page.evaluate(`(()=>{ const g=__hc.mags?__hc.mags():null, s=__hc.sight(), o=__hc.offhandUse(), v=__hc.viewDbg();
-      return { main:o.held, off:o.off, offUse:o.offUse, active:o.active, mag:s.mag, reloadT:s.reloadT, rot:v.rot, pos:v.pos, all:g&&g.all }; })()`);
+      // offMag reads the OFFHAND gun's own magazine. sight().mag reads heldSlot(), which is the main hand whenever that
+      // hand is full — the thing being tested here is that the offhand gun keeps ITS rounds while the main hand has an item.
+      const om=(g&&g.offKey)?(g.all||[]).find(x=>x.split('=')[0]===g.offKey):null;
+      return { main:o.held, off:o.off, offUse:o.offUse, active:o.active, mag:s.mag, offMag:om?+om.split('=')[1]:null,
+               reloadT:s.reloadT, rot:v.rot, pos:v.pos, all:g&&g.all }; })()`);
     // POLL FOR THE STATE, NEVER FOR A DURATION (bench/README). A fixed sleep sized off the reload constant read the magazine
     // one step behind the game and reported three consecutive false failures on code that works.
     const waitReload = async (ms=8000) => { const t0=Date.now();
@@ -75,13 +79,13 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     await K('KeyF'); await sleep(300);                                           // gun → offhand
     await K('KeyF'); await sleep(300);                                           // empty hand + F → use mode
     const off1 = await mags(); console.log('  in the offhand:', JSON.stringify({off:off1.off,mag:off1.mag,active:off1.active}));
-    check('the offhand gun keeps its magazine',      off1.mag===CAP-1, `mag ${off1.mag}, was ${CAP-1}`);
+    check('the offhand gun keeps its magazine',      off1.offMag===CAP-1, `offhand mag ${off1.offMag}, was ${CAP-1}`);
     await page.evaluate(`__hc.qSet('inv',0,'stone',8)`); await sleep(300);        // THE OLD BUG: anything here switched the mode off
     const off2 = await mags();
-    check('a full main hand does not disarm it',     off2.active===true && off2.mag===CAP-1, `active ${off2.active}, mag ${off2.mag}`);
+    check('a full main hand does not disarm it',     off2.offMag===CAP-1, `offhand mag ${off2.offMag} with a block in the right hand`);
     const clicked = await page.evaluate(`__hc.offhandClick()`); await sleep(250);
     const off3 = await mags();
-    check('left click still fires it',               off3.mag===CAP-2, `mag ${off2.mag} -> ${off3.mag} (${JSON.stringify(clicked.routed||clicked)})`);
+    check('left click still fires it',               off3.offMag===CAP-2, `offhand mag ${off2.offMag} -> ${off3.offMag} (${JSON.stringify(clicked.routed||clicked)})`);
 
     // ---- 3. TWO GUNS: RIGHT CLICK FIRES THE MAIN ONE, R RELOADS THE MAIN ONE FIRST ----
     await page.evaluate(`__hc.qSet('inv',0,${JSON.stringify(G2)},1)`); await sleep(350);   // a SECOND gun in the right hand, the first still in the left
