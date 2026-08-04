@@ -21,10 +21,13 @@ const fb=()=>['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Progra
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Microsoft/Edge/Application/msedge.exe'].find(p=>fs.existsSync(p));
 
 // Aim at a world point by projection feedback — the only aiming that cannot go stale when a thing's height changes.
+// THE PITCH LIST HAS TO COVER LOOKING DOWN. It ran [-0.25 .. 0.6], so once the clear-line search correctly put the camera 20
+// blocks ABOVE the pad at 33.7 degrees of elevation — needing about -0.59 rad — the closest pitch it could offer was -0.25 and
+// the best offset it could reach was 188px. The search was right and the aimer could not follow it.
 const AIM = (x,y,z)=>`(async()=>{ const f=()=>new Promise(r=>requestAnimationFrame(()=>r()));
   let best=null;
   for(let i=0;i<64;i++){ const yaw=i/64*Math.PI*2;
-    for(const pit of [-0.25,-0.1,0.05,0.2,0.4,0.6]){ __hcBR.look(yaw,pit); await f(); await f();
+    for(const pit of [-0.95,-0.8,-0.65,-0.5,-0.35,-0.25,-0.12,0,0.12,0.25,0.4,0.6]){ __hcBR.look(yaw,pit); await f(); await f();
       const s=__hc.screenOf(${x},${y},${z});
       if(s.onScreen){ const off=Math.hypot(s.px-s.w/2,s.py-s.h/2); if(!best||off<best.off) best={yaw,pit,off}; } } }
   if(best){ __hcBR.look(best.yaw,best.pit); await f(); await f(); }
@@ -63,16 +66,37 @@ const AIM = (x,y,z)=>`(async()=>{ const f=()=>new Promise(r=>requestAnimationFra
     if(!s || !s.pad){ console.log('  SILO NEVER STREAMED — no shot'); }
     else {
       const p=s.pad;
-      // WIDE FRAMING IS UNSOLVED, and this is the version that at least shows something. Two attempts failed:
-      //   __hc.tp 34 blocks back ground-snaps, and the site is a PLATEAU, so the camera lands in the hollow BELOW the apron --
-      //     the aim came out at pitch +0.6, steeply up, and the pad was never in frame. The lit posts were visible only by luck.
-      //   __hc.tpExact at p.y+26 puts the camera inside the TREE CANOPY over the plateau: a black frame with leaves overhead and
-      //     a 170px aim offset because the pad was occluded.
-      // A site in a wooded hollow leaves no easy vantage: below the pad you see sky, above it you see leaves. What this wants is
-      // either a clear-line search (sample candidate camera positions and keep the one with an unobstructed ray to the pad) or a
-      // temporary canopy cull. Neither is written. tpExact takes (x, z, y), NOT (x, y, z) -- a documented trap here.
-      await pg.evaluate(`__hc.tp(${p.x}, ${p.z+34})`); await sleep(9000);
-      console.log('  aim gantry: '+JSON.stringify(await pg.evaluate(AIM(p.x+0.5, p.y+7, p.z+0.5))));
+      // CLEAR-LINE SEARCH. Two blind attempts failed for opposite reasons: __hc.tp 34 back ground-snaps and the site is a PLATEAU,
+      // so the camera landed in the hollow BELOW the apron and aimed steeply up at sky; __hc.tpExact at pad+26 landed inside the
+      // TREE CANOPY over the plateau, a black frame with a 170px aim offset because projection feedback cannot centre what it
+      // cannot see. A site in a wooded hollow has no vantage you can guess: below it you see sky, above it you see leaves.
+      //
+      // So the vantage is MEASURED instead of chosen. Ray-march from each candidate to the pad and count what is in the way; keep
+      // a candidate with a genuinely unobstructed line, preferring an elevation near 25 degrees because that is what shows an
+      // apron as a disc rather than edge-on. The march runs IN THE PAGE -- one evaluate, not one round trip per block.
+      //   The first and last few blocks of each ray are skipped: the camera can sit just inside foliage that does not occlude the
+      // view, and the pad's own posts and gantry sit at the target end and would otherwise veto every candidate.
+      const vantage = await pg.evaluate(`(()=>{
+        const tx=${p.x}+0.5, ty=${p.y}+2, tz=${p.z}+0.5;
+        const solid=(x,y,z)=>{ const b=__hc.blockAt(Math.floor(x),Math.floor(y),Math.floor(z)); return b!==0; };
+        let best=null;
+        for(let i=0;i<24;i++){ const th=i/24*Math.PI*2;
+          for(const dist of [30,40,52,64]) for(const up of [6,12,20,30,42]){
+            const cx=tx+Math.cos(th)*dist, cz=tz+Math.sin(th)*dist, cy=ty+up;
+            if(__hc.blockAt(Math.floor(cx),Math.floor(cy),Math.floor(cz))!==0) continue;   // camera itself buried
+            const dx=tx-cx, dy=ty-cy, dz=tz-cz, len=Math.hypot(dx,dy,dz), steps=Math.ceil(len);
+            let blocked=0;
+            for(let k=3;k<steps-4;k++){ const t=k/steps;
+              if(solid(cx+dx*t, cy+dy*t, cz+dz*t)) blocked++; }
+            if(blocked>0) continue;
+            const elev=Math.atan2(up, dist)*180/Math.PI;
+            const score=-Math.abs(elev-25)*2 - Math.abs(dist-44)*0.15;      // near 25 degrees, comfortably back
+            if(!best||score>best.score) best={cx,cy,cz,dist,up,elev:+elev.toFixed(1),score}; } }
+        return best; })()`);
+      console.log('  vantage: '+JSON.stringify(vantage && {dist:vantage.dist, up:vantage.up, elev:vantage.elev}));
+      if(vantage){ await pg.evaluate(`__hc.tpExact(${vantage.cx}, ${vantage.cz}, ${vantage.cy})`); await sleep(9000); }
+      else { console.log('  NO CLEAR LINE FOUND — falling back to a ground stand'); await pg.evaluate(`__hc.tp(${p.x}, ${p.z+34})`); await sleep(9000); }
+      console.log('  aim pad: '+JSON.stringify(await pg.evaluate(AIM(p.x+0.5, p.y+2, p.z+0.5))));
       await sleep(1600); await pg.screenshot({path:path.join(OUT,'icbm-silo-wide.png')});
       // …and closer, on the blockhouse and console.
       await pg.evaluate(`__hc.tp(${p.x}, ${p.z-15})`); await sleep(7000);
