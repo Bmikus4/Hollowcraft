@@ -2935,7 +2935,11 @@ const skyMat = new THREE.ShaderMaterial({
     uSunGain:{value:10.0}, uSunHalo:{value:0.12}, uSunSheen:{value:0.0}, uSunWide:{value:0.20},
     // How much of the sea's anchor colour the lowest sky is allowed to take. ZERO — see the note at the mix itself. It is a
     // uniform rather than a deleted line so the old behaviour can be put back in one call for an A/B: __hc.skyToSea(1).
-    uSkyToSea:{value:0.0}
+    uSkyToSea:{value:0.0},
+    // THE STORM (Ben's note 6: "dark/overcast clouds on thunderstorms"). updateSky already dims the sun, the hemi and the
+    // ambient by this and greys the sun's colour, so the SCENE goes dark in rain — but the clouds' own value never saw it, so a
+    // thunderstorm read as a dim world under a cheerful white sky. Set per frame from weather.overcast.
+    uOvercast:{value:0.0}
   },
   vertexShader:`
     varying vec3 vDir;
@@ -2945,7 +2949,7 @@ const skyMat = new THREE.ShaderMaterial({
     varying vec3 vDir;
     uniform vec3 uSunDir, uMoonDir; uniform float uDay, uTime, uHasMoon; uniform vec3 uFogCol, uHorizonBlend; uniform float uSkyDark, uCloud, uStars; uniform float uCamYaw;
     uniform sampler2D uMoonTex;
-    uniform float uCloudDbg, uSunGain, uSunHalo, uSunSheen, uSunWide, uSkyToSea;
+    uniform float uCloudDbg, uSunGain, uSunHalo, uSunSheen, uSunWide, uSkyToSea, uOvercast;
     // hash noise
     float h13(vec3 p){ p=fract(p*0.3183099+0.1); p*=17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
     float n3(vec3 x){ vec3 i=floor(x),f=fract(x); f=f*f*(3.0-2.0*f);
@@ -3133,6 +3137,14 @@ const skyMat = new THREE.ShaderMaterial({
         d = smoothstep(0.38,0.62,d) * smoothstep(0.02,0.25,dir.y) * uCloud;
         vec3 lit  = mix(vec3(0.06,0.08,0.12), vec3(0.94,0.94,0.97), uDay);            // lit from the sun/moon side
         vec3 base = mix(vec3(0.02,0.03,0.05), vec3(0.46,0.49,0.56), uDay);            // and dark underneath
+        // A STORM CLOUD IS DARK, AND IT IS DARK UNEVENLY. The lit crown loses far more than the shadowed base — that is what
+        // makes an overcast sky read as weight rather than as a grey wash — so the crown takes 0.62 of the overcast and the base
+        // 0.30. Both also lose their remaining colour toward a flat slate, because a storm deck is achromatic.
+        // This is the CLOUD only. The sky gradient behind it is deliberately untouched: dimming both would be a brightness
+        // slider, and the thing that reads as a storm is the cloud going darker than the air it sits in.
+        { float oc=uOvercast;
+          lit  = mix(lit,  vec3(dot(lit, vec3(0.299,0.587,0.114))),  oc*0.75) * (1.0 - 0.62*oc);
+          base = mix(base, vec3(dot(base,vec3(0.299,0.587,0.114))),  oc*0.75) * (1.0 - 0.30*oc); }
         cloudCol = mix(base, lit, 0.35+0.65*rim);
         // SELF-SHADOW, the thing that makes a cloud read as a body rather than a stain: sample the same field again a short
         // way TOWARD the light and darken where that sample is denser, i.e. where there is cloud above this point. One extra
@@ -6561,6 +6573,7 @@ function updateSky(dt){
   // chunks to 8, which pays for itself. History: lerp(2.2,1.7) originally, halved to lerp(1.10,0.85) for fix-list #7.
   scene.fog.density=lerp(1.70,0.283,day)/(CFG.RENDER_DIST*CK) * (1+wf*wf*18) * CFG.fogMul;   // CFG.fogMul = the Settings > VISUALS Fog dial (1.0 = shipped)
   waterMat.uniforms.uFogDensity.value=scene.fog.density;
+  if(skyMat.uniforms.uOvercast) skyMat.uniforms.uOvercast.value=(typeof weather!=='undefined'?(weather.overcast||0):0);   // the clouds' own value follows the storm — see uOvercast
   if(waterMat.uniforms.uWx) waterMat.uniforms.uWx.value=(typeof weather!=='undefined'?(weather.fog||0):0);   // weather fog reaches the water now — see the fogTo blend in its fragment
   // hide the SKY behind the fog (and fade it back gradually as the bank clears)
   fogShell.position.copy(camera.position); fogShell.material.color.copy(fc);
@@ -22083,6 +22096,7 @@ const RAIN_N=440, rainOff=[]; for(let i=0;i<RAIN_N;i++) rainOff.push({x:(Math.ra
 const rainPos=new Float32Array(RAIN_N*6);
 const rainGeo=new THREE.BufferGeometry(); rainGeo.setAttribute('position',new THREE.BufferAttribute(rainPos,3));
 const rainMesh=new THREE.LineSegments(rainGeo,new THREE.LineBasicMaterial({color:0x9fb0c4,transparent:true,opacity:0.0})); rainMesh.frustumCulled=false; rainMesh.visible=false; rainMesh.renderOrder=2; scene.add(rainMesh);
+const _rainTint=new THREE.Color(0x9fb0c4);   // the streaks' old fixed colour, now only a hue the live air is nudged toward
 const weather={raining:false,t:60+Math.random()*90,flash:0,strikeT:10,thunderT:0, fog:0,fogTgt:0,fogHold:0,fogNext:400+Math.random()*600, rain:0,rainTgt:0,rainHold:0,rainNext:120+Math.random()*160, overcast:0};
 function thunder(){ if(!AC)return; if(playSample('thunder',null,0.85))return; burst(master,0.7,1.5,85,0.4,38); burst(master,0.35,0.5,300,0.6,90); }   // real sample if present, else low crack + tail
 function caveDrip(){ const ang=Math.random()*6.283, r=Math.random()*5, x=player.pos.x+Math.cos(ang)*r, z=player.pos.z+Math.sin(ang)*r;
@@ -22111,6 +22125,13 @@ function updateWeather(dt){
       const len=0.9+o.s*(1+weather.rain);
       rainPos[k]=ax; rainPos[k+1]=ay; rainPos[k+2]=az; rainPos[k+3]=ax+0.14; rainPos[k+4]=ay-len; rainPos[k+5]=az; }
     rainGeo.attributes.position.needsUpdate=true;
+    // THE STREAKS TAKE THE SKY'S VALUE (Ben's note 6, second half: the rain drew near-white over a dark sky). The material's
+    // colour was a fixed 0x9fb0c4 — rgb(159,176,196) — at every hour, so at night, under a storm, falling water was the
+    // brightest thing in the frame. A raindrop is not a light source: it is a lens showing whatever the sky is. scene.fog.color
+    // IS the air's live value at this hour and in this weather, so the streaks are that, kept a little cooler and a little
+    // brighter than the air so they still read as water and not as haze.
+    { const _rc=rainMesh.material.color;
+      _rc.copy(scene.fog.color).lerp(_rainTint, 0.30).multiplyScalar(1.25); }
     weather.strikeT-=dt; if(weather.strikeT<=0 && weather.rain>0.5){ weather.strikeT=12+Math.random()*26; weather.flash=1; weather.thunderT=0.8+Math.random()*3.6; }   // lightning in heavier rain
     if(AC && !weather._rainNode){ try{ const rb=SFX['rain']&&SFX['rain'][0]; const n=AC.createBufferSource(); const g=AC.createGain(); g.gain.value=0;
         if(rb){ n.buffer=rb; n.loop=true; n.connect(g); weather._rainVol=0.62; }                                              // REAL CC0 rain loop
@@ -24838,6 +24859,11 @@ window.__hc={
       return { band:oceanMat.visible, layerVisible:oceanLayer.visible, farSea:!!(farSea&&farSea.visible),
                seaBow:+_uSeaBow.value.toFixed(3), skyToSea:skyMat.uniforms.uSkyToSea.value,
                anchor:[+_uHorizonBlend.value.r.toFixed(3),+_uHorizonBlend.value.g.toFixed(3),+_uHorizonBlend.value.b.toFixed(3)] };
+    }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: force the storm's overcast, which drives the cloud darkening (and, through updateSky, the scene's own dimming).
+  overcast(v){ try{ if(v!=null){ weather.overcast=+v; if(skyMat.uniforms.uOvercast) skyMat.uniforms.uOvercast.value=+v; }
+      return { overcast:+weather.overcast.toFixed(3), uOvercast:skyMat.uniforms.uOvercast?+skyMat.uniforms.uOvercast.value.toFixed(3):null,
+               rain:+weather.rain.toFixed(3), rainColor:'#'+rainMesh.material.color.getHexString(), fogColor:'#'+scene.fog.color.getHexString() };
     }catch(e){ return {err:String(e.message||e)}; } },
   skyToSea(v){ try{ if(v!=null) skyMat.uniforms.uSkyToSea.value=+v; return skyMat.uniforms.uSkyToSea.value; }catch(e){ return {err:String(e.message||e)}; } },
   // The sea's fake world curve, and the clamp that stops it sinking under the terrain. clamp:0 is the pre-fix behaviour.
