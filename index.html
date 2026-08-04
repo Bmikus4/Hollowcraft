@@ -2389,6 +2389,13 @@ function greedyMesh(c, pass){
 }
 
 // water surface + sides (own shader)
+// HOW FAR BELOW A CELL'S TOP THE WATER SURFACE SITS. A water block is not full: its top face is drawn 0.12 down, which is
+// what makes a shore read as water lapping rather than as a solid blue cube. Anything else that has to line up with the sea —
+// the far-sea plane in updateHorizon is the only other thing — must use THIS number, because the two surfaces meeting at a
+// different height is a visible ledge across the water. The far plane sat at CFG.SEA-0.03 while the real surface is at
+// CFG.SEA+0.88: a 0.91-block step wherever chunk water ended (Ben 08-04, who guessed it from the frame: "it is at a block
+// height, when it should really be in between").
+const WATER_SURF_DROP=0.12;
 function waterMesh(c){
   const P=[], NM=[], TOPF=[], DEP=[];
   const g=_sg;   // padded-snapshot reads (see snapshotChunk)
@@ -2396,13 +2403,13 @@ function waterMesh(c){
     for(let t=0;t<6;t++){const vv=quad[o[t]];P.push(vv[0],vv[1],vv[2]);NM.push(nx,ny,nz);TOPF.push(top);DEP.push(depth);} };
   for (let ly=0;ly<WH;ly++) for (let lz=0;lz<CK;lz++) for (let lx=0;lx<CK;lx++){
     if (g(lx,ly,lz)!==WATER) continue;
-    if (g(lx,ly+1,lz)!==WATER){ const y=ly+1-0.12;                    // water-column depth below this surface cell
+    if (g(lx,ly+1,lz)!==WATER){ const y=ly+1-WATER_SURF_DROP;         // water-column depth below this surface cell
       let depth=1; for(let dy=ly-1; dy>=0 && g(lx,dy,lz)===WATER; dy--) depth++;
       push([lx,y,lz],[lx+1,y,lz],[lx+1,y,lz+1],[lx,y,lz+1],0,1,0,1,depth); }
     // sides only against air (not against solids/other water)
     const nb=[[1,0],[-1,0],[0,1],[0,-1]];
     let sTop=ly; while(g(lx,sTop+1,lz)===WATER) sTop++; const sd=sTop-ly+1;   // depth of this side cell below the surface
-    for(const [ox,oz] of nb){ const nId=g(lx+ox,ly,lz+oz); if(nId===AIR){ const y0=ly,y1=ly+1-0.12;
+    for(const [ox,oz] of nb){ const nId=g(lx+ox,ly,lz+oz); if(nId===AIR){ const y0=ly,y1=ly+1-WATER_SURF_DROP;
       if(ox===1) push([lx+1,y0,lz],[lx+1,y0,lz+1],[lx+1,y1,lz+1],[lx+1,y1,lz],1,0,0,0,sd);
       else if(ox===-1) push([lx,y0,lz+1],[lx,y0,lz],[lx,y1,lz],[lx,y1,lz+1],-1,0,0,0,sd);
       else if(oz===1) push([lx+1,y0,lz+1],[lx,y0,lz+1],[lx,y1,lz+1],[lx+1,y1,lz+1],0,0,1,0,sd);
@@ -3121,7 +3128,14 @@ const oceanLayer=new THREE.Mesh(_horizGeo, oceanMat); oceanLayer.frustumCulled=f
 // Ben's own suggestion was to make this an OVAL, wide across the player's view -- deliberately not done, because to be wide
 // "left to right for the player" an ellipse has to follow the camera's yaw, and then the sea's outer edge slides every time
 // he turns his head. A bigger circle buys the same width with nothing moving.
-const _farSeaGeo=(()=>{ const g=new THREE.RingGeometry(0.55, 16.0, 128, 44);   // radii as fractions of the render wall; scaled each frame
+// A DISC, NOT A RING (Ben 08-04: "our little water-horizon trick doesnt work on all parts of the map, just make that ocean
+// plane"). The inner radius was 0.55 of the render wall — a hole around the camera that real chunk water was assumed to fill.
+// It does not fill it everywhere: the hole scales with the render distance while the water that covers it is whatever has
+// streamed, so on a low render distance, on a slow stream, or anywhere the sea is not chunk-loaded to that radius, the gap is
+// visible as a ring of sky-coloured nothing between the real water's edge and the annulus rim. A disc has no hole to leave
+// uncovered, at the cost of a few hundred triangles under water that is already there; it is 3cm below sea level (see
+// updateHorizon), so wherever real water exists it wins the depth test outright.
+const _farSeaGeo=(()=>{ const g=new THREE.RingGeometry(0.0005, 16.0, 128, 44);   // radii as fractions of the render wall; scaled each frame
   g.rotateX(-Math.PI/2);                                               // RingGeometry is built in XY; the sea is a horizontal plane
   const n=g.attributes.position.count;
   g.setAttribute('aTop', new THREE.BufferAttribute(new Float32Array(n).fill(1), 1));    // every vertex is a top face: this is a surface, never a side
@@ -3374,9 +3388,13 @@ function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.p
   // Scaled from the live render wall outward, so it begins exactly where chunk water stops and never leaves a gap or
   // double-draws over real water -- and it moves with the render-distance slider instead of being pinned to one setting.
   if(!farSea){ farSea=new THREE.Mesh(_farSeaGeo, waterMat); farSea.frustumCulled=false; farSea.renderOrder=-5.5; oceanLayer.add(farSea); }
-  // Nudged 3cm below sea level so that in the overlap band real chunk water wins outright. Both surfaces carry the same
-  // curve, so without the offset they are coplanar over that whole ring and z-fight into a shimmering mess.
-  { const wall=CFG.RENDER_DIST*CK; farSea.scale.set(wall, 1, wall); farSea.position.set(0, CFG.SEA-0.03-camera.position.y, 0);
+  // AT THE HEIGHT REAL WATER IS ACTUALLY DRAWN AT — CFG.SEA is the topmost water CELL and its top face sits
+  // WATER_SURF_DROP below that cell's ceiling, so the surface is CFG.SEA+0.88, not CFG.SEA. This plane was at CFG.SEA-0.03,
+  // 0.91 of a block under the sea it was continuing, which is a ledge across the water wherever the two meet.
+  // The 3cm nudge stays: it is what makes real chunk water win the depth test outright in the overlap band, since both
+  // surfaces carry the same fake curve and would otherwise be coplanar over the whole disc and z-fight into a shimmer.
+  { const wall=CFG.RENDER_DIST*CK; farSea.scale.set(wall, 1, wall);
+    farSea.position.set(0, (CFG.SEA + 1 - WATER_SURF_DROP) - 0.03 - camera.position.y, 0);
     waterMat.uniforms.uRingFade.value = wall*_ringFadeMul; }   // where the water has finished becoming the ring colour — see _ringFadeMul
   { // ---- THE HORIZON COLOUR: THE NIGHT SEA, AT EVERY HOUR ----
     // Ben 07-28: "much darker even during the day ... zero blending on this even during the day, just make sure it is colour
