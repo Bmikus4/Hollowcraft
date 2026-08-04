@@ -22,13 +22,15 @@ await sl(6000); await pg.evaluate('__hc.cmdRun("/gamemode creative")').catch(()=
 // One of each facing, side by side, on a concrete wall so the props read against a flat backdrop.
 // __hc.setBlock takes offsets RELATIVE to the player, not world coordinates -- passing absolutes silently builds it somewhere else.
 const built=await pg.evaluate(`(()=>{
-  for(let dx=-4;dx<=4;dx++) for(let dy=0;dy<4;dy++) __hc.setBlock(dx,dy,-7,'concrete');
-  __hc.setBlock(-3,1,-6,'camera_z'); __hc.setBlock(-1,1,-6,'camera_x');
-  __hc.setBlock(1,1,-6,'monitor_z');  __hc.setBlock(3,1,-6,'monitor_x');
+  // NO BACKING WALL. One built behind the door shadowed the wheel into a black starburst that could not be judged.
+  __hc.setBlock(0,1,-6,'vault_door_z');
   return __hc.probe(); })()`).catch(e=>({err:String(e.message||e)}));
 console.log('  placed at: '+JSON.stringify(built && {x:built.x,y:built.y,z:built.z}));
 await sl(4500);
-await pg.evaluate('__hcBR.look(0,-0.02)'); await sl(1800);
-await pg.screenshot({path:path.join(OUT,'cctv-props.png')});
+// Straight in front of the door face, 3 blocks off, at handle height. yaw 0 faces -z in the player's convention.
+await pg.evaluate(`(()=>{ __hc.tpExact(${built.x}, ${built.z}-3, ${built.y}+1); })()`);
+await sl(3000);
+await pg.evaluate('__hcBR.look(0,0)'); await sl(1800);
+await pg.screenshot({path:path.join(OUT,'vault-wheel.png')});
 console.log('  shot taken');
 await br.close();}finally{try{sv.kill();}catch(e){}}})().catch(e=>{console.error(e);process.exit(1);});
