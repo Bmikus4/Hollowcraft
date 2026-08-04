@@ -177,7 +177,19 @@ export const HELPERS = `
     at(cx, cz);                                            // stream the surface above it so the build fires
     const L2=H.lairInfo(), fy=(L2&&L2.fy!=null)?L2.fy:null;
     if(fy==null) return {err:'lair has no floor yet: '+JSON.stringify(L2)};
-    if(which==='lab') H.tpAt(cx+22, fy+1.8, cz-13); else H.tpAt(cx, fy+1.8, cz);
+    // STAND WHERE A PLAYER CAN STAND. cx+22/cz-13 was an arithmetic guess at "in the maze" and it lands in the 2-block rock
+    // shell between corridors; the un-suffocate push then lifts you to y=fy+10, inside a one-block pocket with rock above and
+    // below. Measurements taken from there are taken from inside a wall — it is what made the hunting Wretch look unable to
+    // reach the player's floor when the maze and the hall share one. __hc.lairNodes() is the creature's own waypoint graph.
+    if(which==='lab'){ const g=H.lairNodes ? H.lairNodes() : null;
+      const n=(g && g.nodes) ? g.nodes.filter(v=>!v.hall) : [];
+      // prefer a node whose column is genuinely open at the walkway height, and say so loudly if none is
+      let put=null;
+      for(const v of n){ const air=!H.blockAt(Math.floor(v.x), fy+1, Math.floor(v.z)) && !H.blockAt(Math.floor(v.x), fy+2, Math.floor(v.z));
+        if(air && H.blockAt(Math.floor(v.x), fy, Math.floor(v.z))){ put=v; break; } }
+      if(!put) return {err:'no open labyrinth node found: '+JSON.stringify(n.slice(0,4))};
+      H.tpAt(put.x+0.5, fy+1.6, put.z+0.5);
+    } else H.tpAt(cx, fy+1.8, cz);
     H.cam({yaw:0.7, pitch:0}); creative(); return {which, cx, cz, fy, built:L2.built};
   };
   window.goPortal = ()=>{ const d=P.spawnDoor(); if(!d || d.err) return {err:'no door: '+JSON.stringify(d)};

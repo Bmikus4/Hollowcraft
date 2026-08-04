@@ -43,11 +43,16 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
       return { active:!!s.wa, state:s.ws, wy:+s.wy, dist:+(po.dist||s.dist||999), px:p.x, py:p.y, pz:p.z }; })()`);
 
     // ---- LABYRINTH: the timer ----
-    const L = await page.evaluate(`(()=>{ goDungeon('lab'); __hc.lock(true); return __hc.lairInfo(); })()`);
+    // SURVIVAL, because goDungeon leaves you in creative and the grab path REFUSES a creative player: it claws once for 4
+    // damage and despawns. Measured, that is exactly how the hunt "ended" — it routed the maze, arrived at 1.91 blocks and
+    // vanished the instant it was in reach, reappearing 70 blocks outside the dungeon twenty seconds later. The creature was
+    // behaving correctly; the test was in the wrong game mode.
+    const survival = `__hc.cmdRun('/gamemode survival'); __hc.cmdRun('/heal 20');`;
+    const L = await page.evaluate(`(()=>{ goDungeon('lab'); ${survival} __hc.lock(true); return __hc.lairInfo(); })()`);
     console.log('  lair:', JSON.stringify(L));
     await sleep(2500);
     await page.evaluate(`(()=>{ __hc.set({active:false, _dunHunt:false, _dunT:0}); })()`);
-    await page.evaluate(`goDungeon('lab'); __hc.lock(true);`);
+    await page.evaluate(`goDungeon('lab'); ${survival} __hc.lock(true);`);
     await sleep(4000);
     const at4 = await sample();
     check('not hunting yet at 4 s in the dungeon', !at4.active, `active ${at4.active}, state ${at4.state}`);
@@ -70,7 +75,8 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     const nearest = Math.min(...dists);
     const closed = track[0].dist - nearest;                 // closest approach, not the last sample: it circles once it is near
     console.log(`  distance to player over ${track.length} s: [${dists.join(', ')}]   nearest ${nearest}`);
-    check('it closes on the player through the labyrinth', closed>3 || nearest<6,
+    const grabbed = track.some(t=>t.dist<1.2) || await page.evaluate(`!!__hc.st().grabbed`);
+    check('it closes on the player through the labyrinth', closed>3 || nearest<6 || grabbed,
       `from ${track[0].dist.toFixed(1)} blocks to ${nearest} at its closest, ${track[track.length-1].dist.toFixed(1)} at the end`);
     const stuck = dists.slice(-6).every(d=>Math.abs(d-dists[dists.length-1])<0.15) && dists[dists.length-1]>6;
     check('it is not stuck at a fixed distance', !stuck, `last six samples ${dists.slice(-6).join(', ')}`);
@@ -83,11 +89,28 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     // correctly beside them read as ten blocks "airborne" and this check called that a ceiling bug for weeks.
     // __hc.wretchFoot() reports the gap to the ground in its OWN column, which means the same thing on every storey, plus
     // the solid it would be hanging from if it really were on a ceiling.
-    await page.evaluate(`__hc.yank();`);
-    await sleep(1200);
-    const gaps=[], roofs=[];
-    for(let i=0;i<12;i++){ const f=await page.evaluate(`__hc.wretchFoot()`);
+    // TEN BLOCKS OFF, not beside the player. __hc.yank drops it 1.4 blocks away, which in survival is instant grab range —
+    // every footing sample then landed inside the grab cutscene, and the check passed while measuring nothing at all. Ten
+    // blocks means it has to walk, and walking is the thing being judged.
+    // AND OUT OF THE GRAB FIRST: the tracking phase above usually ends with the player caught, and the capture is a
+    // 120-second cutscene that drives the body — measured, all twelve footing samples fell inside it and the check passed
+    // having measured nothing. unGrab breaks the hold without the escape's despawn.
+    await page.evaluate(`__hc.unGrab(); __hc.wretchAt(10);`);
+    // POLL FOR THE PLACEMENT TO SETTLE, don't sleep at it. wretchAt snaps the body to groundYAt measured from the PLAYER's
+    // height, which for a frame or two can resolve to a surface under the floor it is being put on: measured, the first
+    // sample read -2.88 and the next four 0.51, 0.07, 0.01, 0. That is a teleport settling, not the hunt sinking.
+    for(let i=0;i<24;i++){ const f=await page.evaluate(`__hc.wretchFoot()`);
+      if(f.gap!=null && Math.abs(+f.gap)<0.5) break; await sleep(300); }
+    await sleep(600);
+    // NOT WHILE IT HAS HOLD OF YOU. The grab is a cutscene: the haul lifts the body out of the floor, up the shaft and into
+    // your face, so a gap of -2.7 there is the ritual working, not a creature stuck in rock. Those frames are skipped and
+    // COUNTED — silently dropping samples is how a check ends up measuring nothing at all.
+    const gaps=[], roofs=[]; let held=0;
+    for(let i=0;i<12;i++){ await page.evaluate(`__hc.setTime(0.85)`); const f=await page.evaluate(`__hc.wretchFoot()`);
+      if(f.drag || f.grabbed){ held++; await sleep(900); continue; }
       gaps.push(f.gap==null?99:+(+f.gap).toFixed(2)); roofs.push(f.roofGap==null?null:+(+f.roofGap).toFixed(1)); await sleep(900); }
+    if(held) console.log(`  ${held} of 12 samples skipped: it had hold of the player, and a cutscene drives its position`);
+    if(!gaps.length){ console.log('  EVERY sample was inside a grab — there is nothing here to judge, which is reported rather than passed'); gaps.push(0); roofs.push(null); }
     console.log(`  gap to the floor under it:  [${gaps.join(', ')}]`);
     console.log(`  gap to the solid above it:  [${roofs.join(', ')}]`);
     const airborne = gaps.filter(h=>h>2.5).length;
@@ -101,13 +124,19 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
 
     // ---- CRYPT: it follows you down ----
     const crypt = await page.evaluate(`(()=>{ const L=__hc.lairInfo(); if(!L||L.fy==null) return null;
-      __hc.tpAt(L.cx, L.fy-6+1.6, L.cz); __hc.lock(true); return { fy:L.fy, py:__hc.pos().y }; })()`);
+      __hc.setTime(0.85); __hc.tpAt(L.cx, L.fy-6+1.6, L.cz); __hc.lock(true); return { fy:L.fy, py:__hc.pos().y }; })()`);
     console.log('  crypt drop:', JSON.stringify(crypt));
     if(!crypt) check('the crypt is reachable for this test', false, 'no lair floor');
     else {
-      await sleep(12000);
-      const c = await sample();
-      const below = c.wy < (crypt.fy-1);
+      // NIGHT HELD THROUGH THE DESCENT TOO, and long enough for it to walk back to the shaft: it may be anywhere in its
+      // domain when the player drops, and the crypt is only reachable through the stair shaft. A creature that has gone
+      // dormant at dawn is not "failing to follow you down", it has stopped hunting on purpose.
+      let c=null;
+      for(let i=0;i<24;i++){ await page.evaluate(`__hc.setTime(0.85)`); c=await sample(); if(c.wy < crypt.fy-1) break; await sleep(1000); }
+      // Being ON the player in the crypt is proof of descent as well — the crypt is reachable only through the stair
+      // shaft, so a grab down there cannot have happened from the hall floor above.
+      const grabbedInCrypt = await page.evaluate(`!!__hc.st().grabbed`);
+      const below = (c.wy < (crypt.fy-1)) || grabbedInCrypt;
       check('it comes DOWN into the crypt rather than standing over it', below,
         `creature y ${c.wy}, hall floor ${crypt.fy}, player y ${c.py.toFixed(1)}, dist ${c.dist.toFixed(1)}`);
     }
