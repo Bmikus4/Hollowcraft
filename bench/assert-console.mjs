@@ -189,6 +189,34 @@ async function openGame(ctx, base, q, errs){
     console.log('  B inventory: '+bBefore.inv+' -> '+bAfter.inv+'   slot0='+bSlot);
     ok('/give @a reached the OTHER client', bAfter.inv>bBefore.inv && String(bSlot).indexOf('diamond')===0, {before:bBefore.inv, after:bAfter.inv, slot0:bSlot});
 
+    // ---- [5] /tp AND /kill OVER THE WIRE. Both were local-only: /tp had no target form at all, and /kill's `all` meant mobs, so
+    // @a killed the sender alone and said it had killed everyone. Read from B'S OWN probe, never from A's avatars map -- A's copy
+    // of where B is arrives on the position channel, so it would report a teleport that never happened on B's client.
+    console.log('\n[5] /tp and /kill over the wire');
+    const bPos0=await B.evaluate('__hc.probe()');
+    const TX=Math.round(bPos0.x)+34, TY=Math.round(bPos0.y)+6, TZ=Math.round(bPos0.z)-27;   // far enough that drift or a step cannot be mistaken for the teleport
+    const tp=await A.evaluate('__hc.cmdRun("/tp @a '+TX+' '+TY+' '+TZ+'")');
+    console.log('  A: /tp @a '+TX+' '+TY+' '+TZ+' -> '+JSON.stringify(tp.out));
+    await sleep(2500);
+    const bPos1=await B.evaluate('__hc.probe()');
+    console.log('  B position: '+[bPos0.x,bPos0.y,bPos0.z].map(v=>Math.round(v)).join(',')+' -> '+[bPos1.x,bPos1.y,bPos1.z].map(v=>Math.round(v)).join(','));
+    // Loose on y: the receiver sets the position and then the world does what it does with it -- gravity, a step up out of ground,
+    // a chunk that has not streamed yet. x and z are the claim; y only has to be in the neighbourhood of what was asked for.
+    ok('/tp @a moved the OTHER client', Math.abs(bPos1.x-TX)<2.5 && Math.abs(bPos1.z-TZ)<2.5, {want:[TX,TY,TZ], got:[+bPos1.x.toFixed(1),+bPos1.y.toFixed(1),+bPos1.z.toFixed(1)]});
+    console.log('  B console log: '+JSON.stringify(await B.evaluate('__hc.cmdLog(3)')));
+
+    // A dead B is the check, and B has to be ALIVE first or the result proves nothing.
+    await B.evaluate('__hc.cmdRun("/heal")'); await sleep(600);
+    const bAlive=await B.evaluate('__hc.st()');
+    ok('the other client is alive before the kill', bAlive && bAlive.dead===false, {dead:bAlive&&bAlive.dead, hp:bAlive&&bAlive.hp});
+    const kl=await A.evaluate('__hc.cmdRun("/kill @a")');
+    console.log('  A: /kill @a -> '+JSON.stringify(kl.out));
+    await sleep(2500);
+    const bDead=await B.evaluate('__hc.st()'), aDead=await A.evaluate('__hc.st()');
+    console.log('  after /kill @a:  B dead='+(bDead&&bDead.dead)+' hp='+(bDead&&bDead.hp)+'   A dead='+(aDead&&aDead.dead)+' hp='+(aDead&&aDead.hp));
+    ok('/kill @a killed the OTHER client', bDead && bDead.dead===true, {dead:bDead&&bDead.dead, hp:bDead&&bDead.hp});
+    ok('/kill @a killed the sender too', aDead && aDead.dead===true, {dead:aDead&&aDead.dead, hp:aDead&&aDead.hp});
+
     ok('no page errors', errs.length===0 && errB.length===0, {a:errs.slice(0,2), b:errB.slice(0,2)});
     console.log('\n'+checks+' checks, '+fails+' failed');
     console.log('RESULT: '+(fails?'FAIL':'PASS'));
