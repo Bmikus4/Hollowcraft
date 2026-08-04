@@ -4044,6 +4044,15 @@ const waterMat = new THREE.ShaderMaterial({
       //
       // World-space uv, not screen or view: the detail is nailed to the water, so walking along a shore does not make it crawl.
       // Faded by DISTANCE and not by depth, because this is about what the eye can resolve, not about what the water is.
+      // THE PAINTED OCEAN STOPS AT THE COAST (Ben 08-04: "the ocean still appears below a certain level inland"). This disc is
+      // centred on the CAMERA and lies at sea level out to sixteen render walls, and since 08-04 it is a full disc rather than
+      // an annulus — the hole was removed because chunk water did not reliably cover it. Inland that means an ocean-coloured
+      // plane sitting a metre under the valley floors: anywhere the ground drops toward sea level, or has not streamed yet, it
+      // shows through, and from below a certain height it is simply there.
+      // The island's centre and radius are fixed generator constants, the same ones the world curve already masks against, so
+      // this costs one length and no new uniform. Inside the core there is no sea for this thing to be, and real water — lakes,
+      // rivers, the bay — is chunk water, which carries aFar 0 and is untouched.
+      if(vFar>0.5 && length(vW.xz - vec2(${ISLE_X.toFixed(1)}, ${ISLE_Z.toFixed(1)})) < ${ISLE_CORE.toFixed(1)}) discard;
       float _dEye = length(uCamPos - vW);
       // TOP FACES ONLY. uv is vW.xz, which is CONSTANT down a vertical face, so any noise sampled from it streaks into
       // vertical bars on the side of a water column — visible at every shoreline and worse the finer the octave. The coarse
@@ -9616,9 +9625,14 @@ function loop(){ try{
   if(started && !locked && !player.dead && !intro.active) physics(dt);
   if(started && locked && !player.dead && !intro.active){ physics(dt); survivalTick(dt); achPoll(dt); objPoll(dt); checkLandmines(dt);   // landmines sit OUTSIDE survivalTick on purpose: that returns early in creative, and a mine you placed to test must still go off (damage() ignores a creative player by itself)        // intro cinematic owns the camera → no player control until you wake
     updateMining(dt);                                                       // left-hold = timed dig (see WORLD ENTITIES)
-    // FULL-AUTO, PER HAND. heldSlot() resolves to the offhand in offhand-use mode, so the left button already picked the right
-    // gun; what it did not do was TELL fireGun, which is how the wrong hand ended up showing the shot.
-    if(lmbHeld){ const _hg=heldSlot(), _gi=_hg&&ITEMS[_hg.id];
+    // FULL-AUTO, PER HAND. The left button is the OFFHAND's trigger while the mode is on, and this tick resolved its gun with
+    // heldSlot() -- which routes by offUseActive(), and that requires an EMPTY main hand. With a gun in each hand, which is the
+    // only way to hold the button down on an akimbo pair, it therefore picked the MAIN hand: the offhand's trigger emptied the
+    // right hand's magazine while the right hand's model flashed, bucked and swung. offhandLeftClick names the slot outright,
+    // which is why the first click of a burst looked correct and every repeat after it did not.
+    // It is also passed to fireGun now. fireGun routes the flash and the buck by the SLOT it is handed and this called it with
+    // no argument at all, so even once the right gun was picked the wrong model would have shown the shot.
+    if(lmbHeld){ const _hg=(offActing()?armor[EQ_OFF]:heldSlot()), _gi=_hg&&ITEMS[_hg.id];
       if(_gi&&_gi.gun&&_gi.auto&&performance.now()>=nextShot){
         const _isOff = !!(armor[EQ_OFF] && _hg===armor[EQ_OFF]);
         if(fireGun(_hg)){ if(_isOff) offView.swing=1.2; else view.swing=1.2; }
@@ -9641,7 +9655,7 @@ function loop(){ try{
   T.end(TID.input);
   applyWaterFog();
   T.begin(TID.entities); T.begin(TID.props);
-  updateDrops(dt); updateSpears(dt); updateStuckSpears(dt); updateParticles(dt); updateShells(dt); updateView(dt); if(typeof updateWings==='function')updateWings(dt); updateWatchers(dt); checkNotes(dt); updateSkyBirds(dt); updateLeaves(dt); if(typeof updateDungeonBugs==='function')updateDungeonBugs(dt);  // floating items, thrown/stuck spears, particles, ejected shell casings, held viewmodel, angel wings, watching-eyes, notes, sky birds, dungeon arachnids
+  updateDrops(dt); updateSpears(dt); updateStuckSpears(dt); updateParticles(dt); updateShells(dt); updateView(dt); if(typeof updateWings==='function')updateWings(dt); updateWatchers(dt); checkNotes(dt); updateSkyBirds(dt); updateFireflies(dt); updateLeaves(dt); if(typeof updateDungeonBugs==='function')updateDungeonBugs(dt);  // floating items, thrown/stuck spears, particles, ejected shell casings, held viewmodel, angel wings, watching-eyes, notes, sky birds, dungeon arachnids
   netUpdate(dt);                                                             // co-op: send my transform, interpolate peers, host broadcasts the Wretch/time
   T.end(TID.props); T.end(TID.entities);
   T.begin(TID.audio); updateAudio(dt); T.end(TID.audio);
@@ -20357,6 +20371,85 @@ function makeBird(){ const g=new THREE.Group(); const bm=_birdMat;
     w.geometry.translate(sx*0.31,0,0); w.position.x=sx*0.08; return w; };   // 0.035 thick was a sub-pixel edge at range — half of "black line"; 0.06 gives the wing a face to catch the sky
   const wl=wing(-1), wr=wing(1);
   g.add(wl); g.add(wr); g.userData={wl,wr}; return g; }
+// ---- FIREFLIES (Ben 08-04: "add fireflies") -------------------------------------------------------------------------------
+// ONE Points object, 128 sprites, one draw call and one buffer upload a frame. Not 128 lights: a PointLight takes no occlusion in
+// this renderer (Ben watched one leak through a hillside at radius 16), and 128 of them would end the frame budget on their own.
+// A firefly is a bright speck that BLINKS, and the blink is the whole read — each one carries its own period and phase, so the
+// swarm pulses out of step the way a real one does. They are additive, so what the eye gets is the glow, not a quad.
+//
+// WHERE THEY LIVE: over GRASS, under the canopy height, within 26 blocks of the player — the same forest-floor test the crickets
+// use, because the two belong to the same dusk. A firefly that wanders out of range is recycled rather than counted down, so the
+// swarm follows the player without ever allocating.
+//
+// WHEN: dusk into night, from uDay (measured: uDay reaches 0 across clock 0.63..0.94 — the hook's "0 = midnight" comment is
+// wrong). Gone by day, gone in rain, and thinned by worldHush(), so the same approach that takes the birds and the crickets away
+// takes the lights out of the trees. That last one is not decoration: the wood going dark and quiet together is the point of E2.
+const FF_MAX=128, FF_R=26;
+let _ffPts=null, _ffPos=null, _ffCol=null, _ffState=null, _ffLive=0;
+function _ffTex(){ return _starTex(); }   // the same round soft sprite the stars use — a firefly IS a pin-point glow
+function _ffSeat(i){
+  // A seat over the forest floor: grass ground, a tree within a couple of blocks, and a height in the low canopy where they hover.
+  for(let tries=0;tries<6;tries++){
+    const a=Math.random()*6.283, r=4+Math.random()*(FF_R-4);
+    const wx=Math.floor(player.pos.x+Math.cos(a)*r), wz=Math.floor(player.pos.z+Math.sin(a)*r);
+    const gy=groundYAt(wx,wz); if(gy<=CFG.SEA+1) continue;
+    const sb=getBlock(wx,gy-1,wz); if(!(B[sb] && B[sb].name==='grass')) continue;
+    const s=_ffState[i];
+    s.x=wx+Math.random(); s.z=wz+Math.random(); s.y=gy+0.35+Math.random()*2.1;
+    s.px=Math.random()*6.283; s.py=Math.random()*6.283;                 // wander phases
+    s.per=1.4+Math.random()*2.2; s.ph=Math.random()*s.per;              // its own blink period and where in it it starts
+    s.hue=0.72+Math.random()*0.28;                                      // green-yellow through to warm amber
+    return true;
+  }
+  return false;
+}
+function updateFireflies(dt){
+  // Sealed indoors, exactly like the leaves and the birds: a firefly inside the Backrooms would be a light in a place that has none.
+  if(typeof BR!=='undefined' && BR.inside){ if(_ffPts) _ffPts.visible=false; return; }
+  const day=globalU.uDay.value;
+  const night=1-clamp((day-0.02)/0.30,0,1);                             // full strength once uDay is under 0.02, gone by 0.32
+  const rain=(typeof weather!=='undefined')?clamp(weather.rain||0,0,1):0;
+  const hush=(typeof worldHush==='function')?worldHush():0;
+  const want=Math.round(FF_MAX*night*(1-0.85*rain)*(1-hush));
+  if(!want && !_ffPts) return;                                          // nothing on screen and nothing built: cost zero by day
+  if(!_ffPts){
+    _ffPos=new Float32Array(FF_MAX*3); _ffCol=new Float32Array(FF_MAX*3);
+    _ffState=new Array(FF_MAX); for(let i=0;i<FF_MAX;i++) _ffState[i]={x:0,y:-999,z:0,px:0,py:0,per:2,ph:0,hue:1};
+    const g=new THREE.BufferGeometry();
+    g.setAttribute('position',new THREE.BufferAttribute(_ffPos,3)); g.setAttribute('color',new THREE.BufferAttribute(_ffCol,3));
+    g.setDrawRange(0,0);
+    _ffPts=new THREE.Points(g,new THREE.PointsMaterial({size:0.26,map:_ffTex(),sizeAttenuation:true,vertexColors:true,
+      transparent:true,opacity:1,depthWrite:false,blending:THREE.AdditiveBlending,fog:false}));
+    // fog:false with a MANUAL distance fade below — additive sprites multiplied by fog turn grey rather than fading out, and a
+    // grey firefly reads as dirt on the screen.
+    _ffPts.frustumCulled=false; _ffPts.renderOrder=6; scene.add(_ffPts);
+  }
+  _ffPts.visible = want>0;
+  if(!want){ _ffPts.geometry.setDrawRange(0,0); _ffLive=0; return; }
+  const t=clock.elapsedTime;
+  let n=0;
+  for(let i=0;i<want;i++){
+    const s=_ffState[i];
+    if(s.y<-900 || Math.hypot(s.x-player.pos.x, s.z-player.pos.z)>FF_R+6){ if(!_ffSeat(i)) continue; }
+    // A DRIFT, not a path: two slow sines per axis at its own phase, which is what a hovering insect looks like from ten metres.
+    s.px+=dt*0.9; s.py+=dt*0.7;
+    s.x+=Math.sin(s.px)*dt*0.42; s.z+=Math.cos(s.px*0.83+1.1)*dt*0.42; s.y+=Math.sin(s.py)*dt*0.22;
+    // THE BLINK: mostly dark, with a short bright pulse. sin^8 is the cheap way to get a sharp flash out of a smooth curve, and
+    // a floor of 0.06 keeps a hint of the swarm between flashes so it does not read as random pixels appearing.
+    const u=((t+s.ph)%s.per)/s.per, k=Math.pow(Math.max(0,Math.sin(u*Math.PI)),8)*0.94+0.06;
+    const d=Math.hypot(s.x-player.pos.x, s.y-(player.pos.y+EYE), s.z-player.pos.z);
+    const fade=1-clamp((d-(FF_R-8))/8,0,1);                             // out of sight by the seat radius, so none pop as they recycle
+    const w=k*fade*night;
+    const o=n*3;
+    _ffPos[o]=s.x; _ffPos[o+1]=s.y; _ffPos[o+2]=s.z;
+    _ffCol[o]=w*0.85*s.hue; _ffCol[o+1]=w; _ffCol[o+2]=w*0.30*s.hue;    // green-gold: the g channel leads, the blue is nearly absent
+    n++;
+  }
+  _ffLive=n;
+  _ffPts.geometry.setDrawRange(0,n);
+  _ffPts.geometry.attributes.position.needsUpdate=true;
+  _ffPts.geometry.attributes.color.needsUpdate=true;
+}
 function updateSkyBirds(dt){
   // Same isolation rule as the leaves (Ben 07-28): outdoor ambience must not appear inside the Backrooms — birds were
   // free to fly through the ceiling of a sealed hall.
@@ -23044,6 +23137,13 @@ window.__hc={
   // any frame-to-frame pixel diff read as motion. A z-fighting check built on such a diff measured 45,000 changed pixels on a
   // perfectly stable door, all of it grain.
   grainSet(v){ try{ if(gradePass) gradePass.uniforms.uGrain.value=Math.max(0,+v||0); return { grain:gradePass?+gradePass.uniforms.uGrain.value.toFixed(3):null }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: the firefly swarm. Live count and the brightest sprite, because "are there fireflies" is answered by a draw range
+  // and "can you see them" is answered by how bright the brightest one currently is — a swarm mid-blink is legitimately dim.
+  fireflies(){ try{ if(!_ffPts) return { built:false, live:0, day:+globalU.uDay.value.toFixed(4) };
+      let mx=0, lit=0; for(let i=0;i<_ffLive;i++){ const g=_ffCol[i*3+1]; if(g>mx)mx=g; if(g>0.25)lit++; }
+      return { built:true, visible:!!_ffPts.visible, live:_ffLive, lit, maxBright:+mx.toFixed(3),
+        day:+globalU.uDay.value.toFixed(4), hush:(typeof worldHush==='function')?+worldHush().toFixed(3):null,
+        rain:(typeof weather!=='undefined')?+(weather.rain||0).toFixed(3):null }; }catch(e){ return {err:String(e.message||e)}; } },
   pinScene(){ try{
       weather.raining=false; weather.rain=0; weather.rainTgt=0; weather.rainHold=1e9; weather.rainNext=1e9;
       weather.fog=0; weather.fogTgt=0; weather.fogHold=1e9; weather.fogNext=1e9; weather.overcast=0;
@@ -24097,6 +24197,17 @@ window.__hc={
   entranceOn(v){ try{ _entMouthOn=!!v; pineMat.uniforms.uEntOn.value=v?1:0; return { on:_entMouthOn, live:pineMat.uniforms.uEntOn.value }; }catch(e){ return {err:e.message}; } },   // QA: A/B the mouth against the same frame with it off
   gun(id){ try{ invAdd(id,1); invAdd('rifle_ammo',64); for(let i=0;i<9;i++){ if(inv[i]&&inv[i].id===id){ selSlot=i; break; } } refreshHotbar(); return 'armed '+id; }catch(e){ return e.message; } },   // QA: give + select a gun with reserve ammo
   aim(on){ try{ locked=true; rmbHeld=!!on; return rmbHeld; }catch(e){ return e.message; } },   // QA: hold/release the aim intent (forces the locked flag for headless runs)
+  // QA: HOLD A MOUSE BUTTON DOWN. Pointer lock does not engage headless, so the real mousedown handler returns at its !locked
+  // guard and there is no way to test the repeat-fire tick — which is where the akimbo routing bug lived — through the mouse.
+  // QA: WHICH HAND SHOWED THE SHOT. Both viewmodels' fire state in one read, and a reset, because the whole akimbo routing
+  // question is "did the flash and the buck land on the model that fired" and neither view is reachable from page scope.
+  fireFx(reset){ try{ if(reset){ view.flashT=0; view.gunKick=0; view.swing=0; offView.flashT=0; offView.gunKick=0; offView.swing=0; }
+      return { vk:+(view.gunKick||0).toFixed(4), vf:+(view.flashT||0).toFixed(4), vs:+(view.swing||0).toFixed(4),
+               ok:+(offView.gunKick||0).toFixed(4), of:+(offView.flashT||0).toFixed(4), os:+(offView.swing||0).toFixed(4) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // QA: the offhand group's live transform, for the sway check — module scope again.
+  offPose(){ try{ const g=offView.group; return [+g.position.x.toFixed(5), +g.position.y.toFixed(5), +g.rotation.z.toFixed(5)]; }catch(e){ return null; } },
+  trigger(btn,on){ try{ locked=true; if(btn===2)rmbHeld=!!on; else lmbHeld=!!on; return {lmb:lmbHeld,rmb:rmbHeld}; }catch(e){ return e.message; } },
   shoot(){ try{ locked=true; return !!fireGun(); }catch(e){ return e.message; } },             // QA: pull the trigger once
   // QA/bench: the direction the LAST round actually took, in world space, plus the camera's own forward at the moment it is read.
   // "Guns fire where they point" is a claim about the bullet; every other reading in xhProbe is an input to it.
@@ -24384,6 +24495,13 @@ window.__hc={
   // QA/bench: THE HORIZON STACK, one call each. The painted ocean band under the horizon (off — Ben wants sky there), how
   // much of the sea's anchor colour the lowest sky takes (zero), and whether the sea's world curve is allowed to fall below
   // its own seabed (it is not). Every one of these is a flag rather than a deletion so the frame before can still be taken.
+  // QA/bench: the far-sea DISC on its own, so a frame with it and a frame without it can be differenced. Inland the two must
+  // be identical — that is Ben's "the ocean still appears below a certain level inland" as a number.
+  farSeaOn(v){ try{ if(v!=null && farSea) farSea.visible=!!v;
+      return { on:!!(farSea&&farSea.visible), isleCore:ISLE_CORE, isle:[ISLE_X,ISLE_Z],
+               distFromIsle:+Math.hypot(player.pos.x-ISLE_X, player.pos.z-ISLE_Z).toFixed(1),
+               inland:Math.hypot(player.pos.x-ISLE_X, player.pos.z-ISLE_Z) < ISLE_CORE };
+    }catch(e){ return {err:String(e.message||e)}; } },
   horizonBand(o){ try{ if(o&&o.on!=null) oceanMat.visible=!!o.on;
       return { band:oceanMat.visible, layerVisible:oceanLayer.visible, farSea:!!(farSea&&farSea.visible),
                seaBow:+_uSeaBow.value.toFixed(3), skyToSea:skyMat.uniforms.uSkyToSea.value,
@@ -25039,6 +25157,7 @@ window.__hc={
   // fire() shoots through fireGun, the real path, because a probe that decrements GUNMAG itself proves nothing.
   mags(){ try{ const h=heldSlot(), o=armor[EQ_OFF];
       return { all:Object.keys(GUNMAG).map(k=>k+'='+GUNMAG[k]),
+               mainMag:h?magGet(gunKey(h),ITEMS[h.id],h):null, offMag:o?magGet(gunKey(o),ITEMS[o.id],o):null,   // the counts themselves: "did this hand fire" should not need a key lookup
                heldKey:h?gunKey(h):null, heldUid:h?(h.uid==null?null:h.uid):null,
                offKey:o?gunKey(o):null, offUid:o?(o.uid==null?null:o.uid):null,
                held:h?h.id:null, off:o?o.id:null }; }catch(e){ return {err:String(e.message||e)}; } },
