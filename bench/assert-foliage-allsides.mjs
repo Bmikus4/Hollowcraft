@@ -87,16 +87,34 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     console.log(`  DoubleSide pixels per angle: [${dbl.join(', ')}]   min ${minD}`);
     const ratio = +(minD/Math.max(1,minF)).toFixed(2);
     check(`DoubleSide keeps the ${BLOCK} substantial from all ${STEPS} angles`, minD>2500, `weakest angle ${minD} px`);
-    // THE CONTROL IS THE SPREAD ACROSS ANGLES, not the single thinnest sample. Comparing the two minima put the whole
-    // control on ONE of twenty-four measurements, and which angle happens to catch the culled quad edge-on moves with the
-    // plant's wind phase: the same code measured 1.68x standalone and 1.46x in the suite, so a 1.5 threshold failed a
-    // feature that was working. What FrontSide actually does is make the silhouette depend on where you stand — max/min
-    // across the orbit is 4.5-5.0x with one quad culled and 1.7-1.8x with both drawn, and that gap is what this proves.
+    // NOT max/min, AND NOT A TRIMMED max/min. Both were tried here and both are wrong.
+    //
+    // max/min over twelve samples is decided by its two most extreme members. One run returned a single DoubleSide reading of
+    // 9245 against a typical 4900 -- something else caught in that one angle -- and the spread read 3.37x instead of 1.75x,
+    // failing working code. That flaked 1 in 5 standalone.
+    //
+    // Trimming the extremes then failed ALL EIGHT runs, because for FrontSide the extreme LOW sample IS the phenomenon: it is the
+    // angle where one crossed quad is culled edge-on. Trimming it threw away the evidence the check exists to find.
+    //
+    // And the bar was never sound anyway. On runs that passed, the separation measured 2.13x and 2.02x against a threshold of
+    // exactly 2.0 -- the threshold sat on top of the value, so which side of it a run landed on was a coin toss.
+    //
+    // Pinning globalU.uTime to freeze the sway was also tried, and is NOT the fix: 3 of 6 runs still failed, because the outlier
+    // is something else in frame rather than the plant's own pose. That change was reverted rather than shipped.
+    //
+    // So: how many angles fall well below that side's OWN median. FrontSide must have at least one (the culled angle); DoubleSide
+    // must have none. A median is unmoved by one high outlier, the comparison is per-side so a machine that renders more pixels
+    // overall cannot fool it, and it states the actual claim -- one side has angles where the plant nearly vanishes, the other
+    // does not. Checked against three recorded runs including the one that failed: FrontSide 1 thin angle, DoubleSide 0, on all.
+    const median = c => { const v=c.slice().sort((a,b)=>a-b); return (v[(v.length>>1)-1]+v[v.length>>1])/2; };
+    const thinCount = c => { const t=median(c)*0.55; return c.filter(v=>v<t).length; };
+    const thinF=thinCount(front), thinD=thinCount(dbl);
     const spread = c => +(Math.max(...c)/Math.max(1,Math.min(...c))).toFixed(2);
     const spF=spread(front), spD=spread(dbl);
-    console.log(`  angular spread (max/min): FrontSide ${spF}x, DoubleSide ${spD}x`);
-    check(`FrontSide's silhouette swings with the angle and DoubleSide's does not (proves the check works)`,
-      spF > spD*2, `FrontSide ${spF}x against DoubleSide ${spD}x across ${STEPS} angles`);
+    console.log(`  angular spread (max/min, reported only): FrontSide ${spF}x, DoubleSide ${spD}x`);
+    console.log(`  angles thinner than 55% of that side's own median: FrontSide ${thinF}, DoubleSide ${thinD}`);
+    check(`FrontSide has angles where the ${BLOCK} nearly vanishes and DoubleSide has none (proves the check works)`,
+      thinF>=1 && thinD===0, `FrontSide ${thinF} thin angle(s) against DoubleSide ${thinD}, over ${STEPS} angles`);
     check(`and at FrontSide's worst angle DoubleSide is fatter`, ratio>1.2,
       `worst angle ${minF} px vs ${minD} px, ${ratio}x — one of the two crossed quads is culled there`);
     console.log(`\n${checks-fails}/${checks} checks pass`);
