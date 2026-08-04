@@ -4232,9 +4232,17 @@ const SSAOShader={
     }`
 };
 const GodrayShader={
-  uniforms:{ tDiffuse:{value:null}, uSun:{value:new THREE.Vector2(0.5,0.5)}, uActive:{value:0}, uStrength:{value:0.5}, uTint:{value:new THREE.Color(1.0,0.86,0.58)} },
+  // uSeedMin is WHAT COUNTS AS THE SUN (Ben 08-04: "SOMETIMES NON-sun light sources also emit god rays"). This pass has no
+  // idea what it is looking at: it marches from every pixel toward the sun's screen position and accumulates any sample
+  // brighter than this, so a lantern, a muzzle flash or the boss's glow sitting on that line seeds shafts of its own. It only
+  // shows "sometimes" because the accumulation is also scaled by screen distance from the sun (the `edge` term), so it takes an
+  // emitter within about a third of the frame of the sun to be visible at all.
+  // 0.62 -> 2.2. The pass runs BEFORE the tonemapper, so these are linear HDR values: the sky near the sun sits at 0.6-1.1 and
+  // the sun's disc is drawn at uSunGain, which is 10. 2.2 is above everything the sky and any block emitter reach and far below
+  // the disc, so the only thing that can seed a shaft is the sun itself — which is what a god ray is.
+  uniforms:{ tDiffuse:{value:null}, uSun:{value:new THREE.Vector2(0.5,0.5)}, uActive:{value:0}, uStrength:{value:0.5}, uSeedMin:{value:2.2}, uTint:{value:new THREE.Color(1.0,0.86,0.58)} },
   vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
-  fragmentShader:`varying vec2 vUv; uniform sampler2D tDiffuse; uniform vec2 uSun; uniform float uActive,uStrength; uniform vec3 uTint;
+  fragmentShader:`varying vec2 vUv; uniform sampler2D tDiffuse; uniform vec2 uSun; uniform float uActive,uStrength,uSeedMin; uniform vec3 uTint;
     void main(){
       vec4 base=texture2D(tDiffuse,vUv);
       if(uActive<0.5){ gl_FragColor=base; return; }
@@ -4242,7 +4250,7 @@ const GodrayShader={
       vec2 delta=(uSun-vUv)*(0.92/float(N));
       vec2 uv=vUv; float decay=1.0, accum=0.0;
       for(int i=0;i<N;i++){ uv+=delta; if(uv.x<0.0||uv.x>1.0||uv.y<0.0||uv.y>1.0)break;
-        vec3 c=texture2D(tDiffuse,uv).rgb; float l=max(0.0, dot(c,vec3(0.299,0.587,0.114))-0.62);   // only genuinely bright (sky) pixels seed a shaft
+        vec3 c=texture2D(tDiffuse,uv).rgb; float l=max(0.0, dot(c,vec3(0.299,0.587,0.114))-uSeedMin);   // only the SUN seeds a shaft — see uSeedMin
         accum+=l*decay; decay*=0.95; }
       accum/=float(N);
       float edge=1.0-smoothstep(0.35,0.95,distance(vUv,uSun));   // rays strongest near the sun, fade with screen distance
@@ -13257,6 +13265,33 @@ const VIEW_NEAR_CLEAR=0.10;
 // guard, so it keeps the smaller pull — its items are short enough that the angle alone clears them (measured).
 const BLOCKOUT_IN=1.00, BLOCKOUT_OUT=1.22, BLOCKOUT_TILT=1.75, BLOCKOUT_PULL=0.34, BLOCKOUT_PULL_MAIN=0.50;
 const _vmM=new THREE.Matrix4(), _vmV=new THREE.Vector3();   // hoisted: this runs every frame a gun is held
+// THE GUN'S OWN AIM AXIS (Ben 08-04: "guns should always fire in the direction they are pointed… the HUD crosshair needs to stay
+// where it is, but the crosshair itself can sway, and should sway where the gun is aiming, think full last of us style").
+// Taken from the MODEL, front-of-bounds minus back-of-bounds, rather than assuming the group's -z: a model built facing another
+// way, or wearing a mesh rotation, still yields its real barrel line. view.group is a child of the camera, so this comes out in
+// CAMERA space — which is the space both consumers want (the reticle is camera-parented, and the shot only needs one rotation).
+// CAPTURED FROM THE POSE, BEFORE THE ANIMATION. gunKick rotates the viewmodel by up to 0.65 rad and the block-out by 1.75: if the
+// bullet and the reticle followed those, a shot would fly 37 degrees high and pressing against a wall would aim at the ceiling.
+// The pose — the four-source sway, the strafe lean, the cheek weld — is what "where the gun is aiming" means, so the axis is read
+// at the end of the pose and everything animated is applied after it.
+const _aimA=new THREE.Vector3(), _aimB=new THREE.Vector3(), _aimQ=new THREE.Quaternion();
+function captureAim(v){
+  const m=v.mesh; if(!m){ v.aimCam=null; return; }
+  let bb=m.userData._vbb; if(!bb){ bb=_viewLocalBox(m); m.userData._vbb=bb; }
+  v.group.updateMatrix(); m.updateMatrix();
+  const M=_vmM.multiplyMatrices(v.group.matrix, m.matrix);
+  const cx=(bb.min.x+bb.max.x)*0.5, cy=(bb.min.y+bb.max.y)*0.5;
+  _aimA.set(cx,cy,bb.min.z).applyMatrix4(M);      // the muzzle end of the bounds
+  _aimB.set(cx,cy,bb.max.z).applyMatrix4(M);      // …and the butt end
+  const d=(v.aimCam||(v.aimCam=new THREE.Vector3())).copy(_aimA).sub(_aimB);
+  if(d.lengthSq()<1e-9 || d.z>-0.05) v.aimCam=null; else d.normalize();   // z>=0 = pointing at or behind the eye; there is no sight picture to speak of
+}
+// …and the same axis in WORLD space, for the bullet. One rotation, because the axis is already relative to the eye.
+function aimWorld(v, out){
+  if(!v || !v.aimCam) return null;
+  camera.getWorldQuaternion(_aimQ);
+  return out.copy(v.aimCam).applyQuaternion(_aimQ);
+}
 // The viewmodel's bounds in ITS OWN local space. Box3.setFromObject returns WORLD space, which is useless here because the
 // group hangs off the camera and moves every frame; this walks the descendants relative to the root instead, once per item.
 function _viewLocalBox(root){ const box=new THREE.Box3(), v=new THREE.Vector3(), m=new THREE.Matrix4();
@@ -14217,6 +14252,8 @@ function _hideOffHand(){ offView.group.visible=false; offArm.group.visible=false
 // the scope — but in THIRD person there is no sight to hand over to, so instead of fading it collapses to a tiny hard circle
 // (Ben: "when aiming in 3rd person it should get very small"), which is the only aiming reference the over-shoulder view has.
 let _xhEl=null, _xhCur=16, _xhLastD=-1, _xhLastOp=-1, _xhFire=0, _xhSpread=0, _xhDual=false, _xhPreDual=16;
+let _xhOX=0, _xhOY=0;   // the ring's drift off screen-centre, in px: the gun's aim axis projected (see updateCrosshair)
+let _lastShot=null;     // the direction the last round took, for __hc.lastShot — the bullet is the claim, not the wiring
 const XH_REST=16, XH_AIM_TPS=6, XH_TRUE=9;
 // The ring's diameter in pixels, converted to the cone a shot may land in. Derived from the LIVE fov and viewport rather than a
 // tuned constant, so the circle on screen and the scatter in the world stay the same thing when the fov kicks on a sprint or the
@@ -14260,6 +14297,24 @@ function updateCrosshair(dt, isGun){
   _xhSpread=Math.max(0, d - XH_TRUE);
   const px=Math.round(d);
   if(px!==_xhLastD){ _xhLastD=px; xh.style.width=px+'px'; xh.style.height=px+'px'; }
+  // THE RING DRIFTS WITH THE GUN (Ben 08-04: "the HUD crosshair needs to stay where it is, but the crosshair itself can sway, and
+  // should sway where the gun is aiming, think full last of us style mechanics here"). It keeps its place in the HUD — same
+  // element, same anchor, same size logic — and is TRANSLATED onto the barrel's own axis, which is the same axis fireGun sends the
+  // bullet down. So the ring is no longer a promise about the centre of the screen; it is where the round is going, and the sway
+  // that used to cost only the sight picture now costs the shot as well.
+  // Projected, not approximated: a camera-space direction divided by its own depth is the tangent of its angle off-axis, and the
+  // frustum's half-height at unit depth is tan(fov/2). That makes this correct at every FOV, which matters because aiming zooms.
+  { const av=(isGun && !_tpsAct) ? view.aimCam : null;
+    let ox=0, oy=0;
+    if(av && av.z<-0.05){ const H=innerHeight, th=Math.tan(camera.fov*0.5*Math.PI/180);
+      ox=(av.x/-av.z)/(th*(innerWidth/innerHeight))*(innerWidth*0.5);
+      oy=-(av.y/-av.z)/th*(H*0.5);
+      // CLAMPED TO THE FRAME. The pose can point the gun a long way off-axis (a hip-carried rifle sits degrees to the right), and
+      // a reticle parked outside the window is worse than one that stops at the edge — it reads as a bug, not as a gun.
+      const lim=Math.min(innerWidth,innerHeight)*0.42;
+      const m=Math.hypot(ox,oy); if(m>lim){ ox=ox/m*lim; oy=oy/m*lim; } }
+    if(Math.abs(ox-(_xhOX||0))>0.4 || Math.abs(oy-(_xhOY||0))>0.4){ _xhOX=ox; _xhOY=oy;
+      xh.style.transform='translate(-50%,-50%) translate('+ox.toFixed(1)+'px,'+oy.toFixed(1)+'px)'; } }
   // Third person keeps its ring at full strength however far the sight is raised; first person hands over to the optic.
   const op = _tpsAct ? 0.85 : 0.85*(1-clamp((ads-0.3)/0.4,0,1));
   if(Math.abs(op-_xhLastOp)>0.01){ _xhLastOp=op; xh.style.opacity=op.toFixed(2); }
@@ -14419,6 +14474,7 @@ function updateView(dt){ updateRecoil(dt);                                      
       aPx=swx*SWAY_POS; aPy=-dy + swy*SWAY_POS + b*0.12; aPz=(UD.adsZ!=null?UD.adsZ:optic.z); aRx=swy*SWAY_ROT; aRy=swx*SWAY_ROT; aRz=0; }   // adsZ: a per-model length of pull, so a long stock is not driven through the near plane
     view.group.position.set(hPx+(aPx-hPx)*e, hPy+(aPy-hPy)*e, hPz+(aPz-hPz)*e);
     view.group.rotation.set(hRx+(aRx-hRx)*e, hRy+(aRy-hRy)*e, hRz+(aRz-hRz)*e);
+    captureAim(view);   // the pose IS the aim (see captureAim) — read before the buck, the reload dip and the block-out below
     if(view.gunKick){ view.group.position.z+=view.gunKick*0.09; view.group.rotation.x-=view.gunKick*0.5; }   // viewmodel bucks: rearward shove + muzzle rise, springs back independent of the camera (the glass climbing off the camera-locked reticle is what carries the dot out of the glass — the reticle is now clipped to the aperture so it VANISHES at the rim, see holoRet below)
     // ---- RELOAD ANIMATION (minimal realism): gun drops toward the chest + tilts inward while the hands work the action ----
     if(view.reloadT>0 && view.reloadDur && !view._rlOff){ const u=clamp(1-view.reloadT/view.reloadDur,0,1), ez=Math.sin(u*Math.PI);
@@ -14484,7 +14540,12 @@ function updateView(dt){ updateRecoil(dt);                                      
   //      the gun/window wobble AROUND it, and recoil moves reticle+aim together). Fades in as the eye comes on-axis. ----
   if(!view.holoRet){ const D=0.5, S=2*D*Math.tan(0.0098902)*(128/100);                     // ring subtends a TRUE 68 MOA diameter (radius 34 MOA); texture ring radius = 100px of 128
     const m=new THREE.Mesh(new THREE.PlaneGeometry(S,S), new THREE.MeshBasicMaterial({map:_holoReticleTex(),transparent:true,opacity:0,depthTest:false,depthWrite:false,blending:THREE.AdditiveBlending}));
-    m.position.set(0,0,-D); m.renderOrder=14; m.visible=false; camera.add(m); view.holoRet=m; }
+    m.position.set(0,0,-D); m.renderOrder=14; m.visible=false; camera.add(m); view.holoRet=m; view.holoD=D; }
+  // AND THE HOLOGRAM SITS ON THE SAME AXIS AS THE BULLET. Its comment calls it "exactly the point of impact", which was true while
+  // the bullet went down the camera centre and became a lie the moment the shot started following the barrel. Pinning it to
+  // view.aimCam at its own distance keeps that claim: the dot, the HUD ring and the round now all read the one number.
+  if(view.holoRet && view.aimCam && view.holoD) view.holoRet.position.copy(view.aimCam).multiplyScalar(view.holoD);
+  else if(view.holoRet && view.holoD) view.holoRet.position.set(0,0,-view.holoD);
   // NOT IN THIRD PERSON (Ben 08-04: "holosights still show in the center of the screen when in 3rd person"). The reticle is
   // parented to the CAMERA on the aim axis, which is the whole point of it in first person — and exactly why it survived third
   // person as a hologram floating in the middle of the screen with no sight anywhere near it. The gun is on the body's shoulder
@@ -14548,8 +14609,12 @@ function updateView(dt){ updateRecoil(dt);                                      
   offView.swing=Math.max(0,(offView.swing||0)-dt*9);                             // …and swings on the same curve the right one does
   { const oswArc=offView.swing?offView.swing*Math.sin(offView.swing*Math.PI):0;
     const bz=(offView.baseZ!=null?offView.baseZ:offView.group.position.z), brx=(offView.baseRX!=null?offView.baseRX:0);
-    offView.group.position.z = bz + offView.gunKick*0.09;
-    offView.group.rotation.x = brx - offView.gunKick*0.5 - oswArc*1.2;
+    // The left hand's aim is read from its RESTING pose for the same reason the right hand's is: its own buck would otherwise
+    // throw its shots high. Base first, capture, then the animation.
+    offView.group.position.z = bz; offView.group.rotation.x = brx - oswArc*1.2;
+    captureAim(offView);
+    offView.group.position.z += offView.gunKick*0.09;
+    offView.group.rotation.x -= offView.gunKick*0.5;
     // .x IS NOW REBASED TOO, for the same reason the paragraph above rebases z: the block-out pivot correction below adds an
     // offset on all three axes (the group carries yaw and roll, so a tilt about its x axis does not stay in the yz plane), and
     // x was the one component nothing else assigned. baseX is captured wherever setOffItem lays a pose down.
@@ -14656,7 +14721,17 @@ function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id
   if(_off) offView.gunKick=Math.min(1.3,(offView.gunKick||0)+_kick);
   else view.gunKick=Math.min(1.3,(view.gunKick||0)+_kick);                       // viewmodel buck against the shoulder
   crosshairFireKick(bolt?0.9 : rev?0.7 : it.gun==='auto'?0.28 : it.gun==='shotgun'?1.0 : 0.5);   // the ring blooms by what the gun actually kicks — the 12 gauge widest, the AR least per round
-  const d=lookDir(), o={x:player.pos.x,y:player.pos.y+EYE,z:player.pos.z};
+  // THE BULLET GOES WHERE THE GUN POINTS (Ben 08-04: "guns should always fire in the direction they are pointed"). This was
+  // lookDir() — the camera centre — and the code said so in a comment above the offhand sway penalty: the drift cost you the
+  // sight picture but never the shot, so sway was decoration. Now the firing hand's own barrel axis is the shot's direction, and
+  // updateCrosshair moves the reticle onto that same axis, so the HUD cannot disagree with the ballistics: ONE number, two
+  // consumers. Sway, the strafe lean and the cheek weld all move the point of impact from here on.
+  // THIRD PERSON KEEPS THE CAMERA AXIS, and that is not laziness: over there the viewmodel is hidden and the gun is on the body's
+  // shoulder, metres from the eye, so its barrel line has nothing to do with the ring the player is aiming with (see the
+  // crosshair's own third-person branch). lookDir is also the fallback whenever a hand has no measurable axis.
+  const _fireV = _off ? offView : view;
+  const d = ((!_tpsAct && aimWorld(_fireV, _aimA)) ? _aimA.clone() : lookDir());   // _tpsAct, not _tpsOn: indoors overrides the preference back to first person, and the shot must follow whichever view is actually up
+  const o={x:player.pos.x,y:player.pos.y+EYE,z:player.pos.z};
   // SCATTER THE SHOT INSIDE THE RING. Jittered in place, so every consumer downstream — the hit trace, the tracer, the impact
   // decal, the packet peers see — uses the direction the bullet ACTUALLY took. The aim itself (pitch/yaw) is untouched: your
   // point of aim is still where you pointed, and the difference between that and where the round went is the inaccuracy.
@@ -14666,6 +14741,10 @@ function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id
       const vx=-uz*d.y, vy=uz*d.x-ux*d.z, vz=ux*d.y;                            // and up' = right x dir
       const s=Math.sin(r), c=Math.cos(r), ca=Math.cos(a), sa=Math.sin(a);
       d.set(d.x*c+(ux*ca+vx*sa)*s, d.y*c+(vy*sa)*s, d.z*c+(uz*ca+vz*sa)*s).normalize(); } }
+  // THE DIRECTION THE ROUND ACTUALLY TOOK, recorded after the scatter. Everything else about this change is inspectable — the
+  // axis, the ring, the reticle — but the claim is about the BULLET, and a probe that reads the inputs proves the wiring rather
+  // than the shot. Stored, not logged: it is one object per trigger pull.
+  _lastShot={ dx:+d.x.toFixed(5), dy:+d.y.toFixed(5), dz:+d.z.toFixed(5), off:_off, id:held?held.id:null, n:(_lastShot?_lastShot.n:0)+1 };
   if(_off) offView.flashT=0.06; else view.flashT=0.06;                                          // trigger the muzzle-flash sprite + light (see updateView)
   scareAnimals(o.x, o.z, sup?24:46);                                                              // the GUNSHOT panics wild animals nearby (independent of the Wretch's earshot); a suppressor scares a smaller radius
   if(NET.on && typeof netSend==='function')netSend({t:'shot',x:+o.x.toFixed(2),y:+o.y.toFixed(2),z:+o.z.toFixed(2),dx:+d.x.toFixed(3),dy:+d.y.toFixed(3),dz:+d.z.toFixed(3),g:bolt?'r':(rev?'v':'a')});   // peers see the tracer + hear the shot
@@ -23090,6 +23169,19 @@ window.__hc={
   // The ring's live size, and the cone a shot may actually land in. spreadDeg is what "less accurate when jumping" has to move.
   xhProbe(){ try{ const el=document.getElementById('xh'), cs=el?getComputedStyle(el):null;
       return { px:+_xhCur.toFixed(1), applied:_xhLastD, dual:_xhDual, preDual:+_xhPreDual.toFixed(1), spreadPx:+_xhSpread.toFixed(1), spreadDeg:+(aimSpreadRad()*57.29578).toFixed(3),   // px = the movement ring before the aim blend; applied = what is actually on screen
+        // WHERE THE RING IS AND WHERE THE BULLET GOES, together, because the whole point of the change is that they are the same
+        // number. offAxisDeg is the angle between the gun's axis and the camera centre — 0 would mean the sway never reached the
+        // shot, which is exactly the state this replaced.
+        offX:+(_xhOX||0).toFixed(1), offY:+(_xhOY||0).toFixed(1),
+        aimCam:view.aimCam?[+view.aimCam.x.toFixed(4),+view.aimCam.y.toFixed(4),+view.aimCam.z.toFixed(4)]:null,
+        offAxisDeg:view.aimCam?+(Math.acos(Math.max(-1,Math.min(1,-view.aimCam.z)))*57.29578).toFixed(3):null,
+        // holoPos, NOT holo: this object already ends with `holo` as a VISIBILITY boolean and with its own `adsT`, and later keys
+        // win — my duplicates were silently overwritten and the harness read `holo true` where it expected a position.
+        holoPos:view.holoRet?[+view.holoRet.position.x.toFixed(4),+view.holoRet.position.y.toFixed(4),+view.holoRet.position.z.toFixed(4)]:null,
+        tpsAct:!!_tpsAct,
+        // The projection's own inputs, so a probe can check the offset instead of trusting it. `camera` is module scope and not
+        // reachable from a page.evaluate, which is the only reason these are here.
+        fov:+camera.fov.toFixed(3), vw:innerWidth, vh:innerHeight,
         fire:+_xhFire.toFixed(2), w:cs?cs.width:null, h:cs?cs.height:null, radius:cs?cs.borderRadius:null,
         border:cs?cs.borderTopWidth:null, opacity:cs?+(+cs.opacity).toFixed(2):null,
         adsT:+((view&&view.adsT)||0).toFixed(2), holo:!!(view&&view.holoRet&&view.holoRet.visible) }; }catch(e){ return {err:String(e.message||e)}; } },
@@ -23549,6 +23641,14 @@ window.__hc={
   gun(id){ try{ invAdd(id,1); invAdd('rifle_ammo',64); for(let i=0;i<9;i++){ if(inv[i]&&inv[i].id===id){ selSlot=i; break; } } refreshHotbar(); return 'armed '+id; }catch(e){ return e.message; } },   // QA: give + select a gun with reserve ammo
   aim(on){ try{ locked=true; rmbHeld=!!on; return rmbHeld; }catch(e){ return e.message; } },   // QA: hold/release the aim intent (forces the locked flag for headless runs)
   shoot(){ try{ locked=true; return !!fireGun(); }catch(e){ return e.message; } },             // QA: pull the trigger once
+  // QA/bench: the direction the LAST round actually took, in world space, plus the camera's own forward at the moment it is read.
+  // "Guns fire where they point" is a claim about the bullet; every other reading in xhProbe is an input to it.
+  lastShot(){ try{ const f=new THREE.Vector3(0,0,-1).applyQuaternion(camera.getWorldQuaternion(new THREE.Quaternion()));
+      const a=view.aimCam?new THREE.Vector3().copy(view.aimCam).applyQuaternion(camera.getWorldQuaternion(new THREE.Quaternion())):null;
+      const ang=(u,v)=>(!u||!v)?null:+(Math.acos(Math.max(-1,Math.min(1,u.x*v.x+u.y*v.y+u.z*v.z)))*57.29578).toFixed(3);
+      const s=_lastShot?new THREE.Vector3(_lastShot.dx,_lastShot.dy,_lastShot.dz):null;
+      return { shot:_lastShot, camFwd:[+f.x.toFixed(5),+f.y.toFixed(5),+f.z.toFixed(5)],
+        degFromCam:ang(s,f), degFromGunAxis:ang(s,a), spreadDeg:+(aimSpreadRad()*57.29578).toFixed(3) }; }catch(e){ return {err:String(e.message||e)}; } },
   reload(){ try{ const s=heldSlot(), it=s&&ITEMS[s.id]; if(it&&it.gun)startReload(s); return +(view.reloadT||0).toFixed(2); }catch(e){ return e.message; } },
   sight(){ try{ const xh=document.getElementById('xh'); let lens=false; view.mesh&&view.mesh.traverse(o=>{ if(o.userData&&o.userData.scopeLens)lens=true; });
     return { id:view.id, ads:!!view.ads, adsT:+((view.adsT||0)).toFixed(3), xhOp:xh?+(xh.style.opacity===''?0.85:xh.style.opacity):null,
@@ -23862,11 +23962,13 @@ window.__hc={
                ledgeAtWall:{ shelf3:ledge(182,3), shelf6:ledge(182,6), deep20:ledge(182,20) } };
     }catch(e){ return {err:String(e.message||e)}; } },
   godrays(o){ try{ if(o&&o.on!=null) _godraysOn=!!o.on;
+      if(o&&o.seedMin!=null&&godrayPass) godrayPass.uniforms.uSeedMin.value=+o.seedMin;   // 0.62 is the pre-08-04 value, where any bright emitter seeded shafts
       // THE THREE TERMS OF _grActive, each on its own, because "enabled:false" does not say which one said no.
       return { pass:!!godrayPass, on:_godraysOn, enabled:!!(godrayPass&&godrayPass.enabled),
                front:_sunProj.z<1.0, sunProjZ:+_sunProj.z.toFixed(3),
                sunProjXY:[+_sunProj.x.toFixed(3),+_sunProj.y.toFixed(3)], camFar:camera.far, dayGate:globalU.uDay.value>0.15,
                strength:godrayPass?+godrayPass.uniforms.uStrength.value.toFixed(4):null,
+               seedMin:godrayPass?godrayPass.uniforms.uSeedMin.value:null,
                sunY:+globalU.uSunDir.value.y.toFixed(4), elevDeg:+(Math.asin(Math.max(-1,Math.min(1,globalU.uSunDir.value.y)))*57.29578).toFixed(2),
                day:+globalU.uDay.value.toFixed(3), quality:CFG.quality };
     }catch(e){ return {err:String(e.message||e)}; } },
