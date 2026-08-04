@@ -87,7 +87,17 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     console.log(`  DoubleSide pixels per angle: [${dbl.join(', ')}]   min ${minD}`);
     const ratio = +(minD/Math.max(1,minF)).toFixed(2);
     check(`DoubleSide keeps the ${BLOCK} substantial from all ${STEPS} angles`, minD>2500, `weakest angle ${minD} px`);
-    check(`FrontSide's worst angle really is much thinner (proves the check works)`, ratio>1.5,
+    // THE CONTROL IS THE SPREAD ACROSS ANGLES, not the single thinnest sample. Comparing the two minima put the whole
+    // control on ONE of twenty-four measurements, and which angle happens to catch the culled quad edge-on moves with the
+    // plant's wind phase: the same code measured 1.68x standalone and 1.46x in the suite, so a 1.5 threshold failed a
+    // feature that was working. What FrontSide actually does is make the silhouette depend on where you stand — max/min
+    // across the orbit is 4.5-5.0x with one quad culled and 1.7-1.8x with both drawn, and that gap is what this proves.
+    const spread = c => +(Math.max(...c)/Math.max(1,Math.min(...c))).toFixed(2);
+    const spF=spread(front), spD=spread(dbl);
+    console.log(`  angular spread (max/min): FrontSide ${spF}x, DoubleSide ${spD}x`);
+    check(`FrontSide's silhouette swings with the angle and DoubleSide's does not (proves the check works)`,
+      spF > spD*2, `FrontSide ${spF}x against DoubleSide ${spD}x across ${STEPS} angles`);
+    check(`and at FrontSide's worst angle DoubleSide is fatter`, ratio>1.2,
       `worst angle ${minF} px vs ${minD} px, ${ratio}x — one of the two crossed quads is culled there`);
     console.log(`\n${checks-fails}/${checks} checks pass`);
   } finally { try{ if(browser) await browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }
