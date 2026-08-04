@@ -130,6 +130,39 @@ function warmPct(file, crop){
     console.log('  state: '+JSON.stringify(st));
     check('the far-sea disc is still drawing', st.farSea===true && st.layerVisible===true && st.band===false, JSON.stringify(st));
 
+    // ---- 2b. AND AT NIGHT (Ben 08-04: "night sky still doesnt extend down to infinity") ------------------------------
+    // Same measurement, midnight. The daytime case is fixed and asserted above, so if the night reads differently it is a
+    // night-specific layer and not the band — and the profile says WHICH row it starts at, which is what names the layer.
+    const fNight=await shot(0.75,'horizon-night.png');
+    const pN=rows(fNight);
+    console.log('  NIGHT rows: '+pN.join(' '));
+    const sN=step(pN,3,20);
+    // NOT a plateau test at night. The whole night sky lives between 18 and 82 luminance, so a band that catches "values
+    // between sky and sea" catches the gradient itself — it flagged six rows that are a smooth 23.7 -> 82.2 ramp toward the
+    // horizon, which is the Rayleigh gradient plus airglow and is what the sky is supposed to do. What can be asserted is that
+    // the ramp is SMOOTH and RISES all the way to the waterline: a sky that stops short shows up as a step or a reversal.
+    const nSkyStep=step(pN,3,Math.max(4,sN.at-1));
+    let mono=true; for(let i=4;i<sN.at-1;i++) if(pN[i] < pN[i-1]-1.5) mono=false;
+    console.log(`  NIGHT biggest step ${sN.drop} at row ${sN.at} (the waterline);  sky's own biggest step ${nSkyStep.drop};  rises monotonically ${mono}`);
+    check('the night sky runs down to the waterline without a shelf', nSkyStep.drop<6 && mono,
+      `biggest step within the night sky ${nSkyStep.drop} levels over row bands 3..${sN.at-2}, rising to ${pN[sN.at-1]} at the waterline from ${pN[3]} at the top of the crop`);
+    // AND FROM HIGH UP, LOOKING STEEPLY DOWN, which is where "it does not extend down" would show: past the far plane the sea
+    // is clipped, and whatever fills the frame under that edge is either sky or a hole. Reported, with the frame to look at.
+    await page.evaluate(`__hc.tpAt(${S.sx}+0.5, ${gy+150}, ${S.sz}+0.5); __hc.cam({yaw:${bestYaw}, pitch:-0.62});`);
+    await sleep(1200);
+    const fDown=await shot(0.75,'horizon-night-down.png');
+    const pD=rows(fDown);
+    console.log('  NIGHT looking down, rows: '+pD.join(' '));
+    // A FLAT SLAB IS A RUN OF IDENTICAL ROWS. Below dir.y = -0.1 the dome's gradient used to clamp, and five consecutive row
+    // bands read exactly 78.4 — that constant is the artefact, and it is what "does not extend down to infinity" looks like as
+    // a number. The sky below the horizon has to keep changing.
+    let run=1, worst=1;
+    for(let i=1;i<12;i++){ if(Math.abs(pD[i]-pD[i-1])<0.35){ run++; if(run>worst) worst=run; } else run=1; }
+    check('the sky below the horizon keeps changing instead of holding one colour', worst<3,
+      `longest run of row bands within 0.35 luminance of each other: ${worst} (it was 5 at exactly 78.4)`);
+    await page.evaluate(`__hc.tpAt(${S.sx}+0.5, ${gy+9}, ${S.sz}+0.5); __hc.cam({yaw:${bestYaw}, pitch:-0.16});`);
+    await sleep(900);
+
     // ---- 3. THE SHORE --------------------------------------------------------------------------------------------------
     // Same frame, clamp off then on. Less land in the far-water band is the whole claim.
     const curve=await page.evaluate(`__hc.seaCurve()`);
@@ -152,10 +185,15 @@ function warmPct(file, crop){
     // world curve out at its end"). Two halves, and the first one is what makes the shore safe by construction rather than by
     // a clamp: the bend does not begin until beyond the render wall, so NO chunk water is curved at all.
     check('and the clamp is what is live', cv.clamp===1);
-    check('nothing inside the render wall curves at all', cv.dropAt[cv.wall<=182?182:182]===0 && cv.r>cv.wall,
-      `drop at the wall (${cv.wall} blocks) is ${cv.dropAt[182]}, and the bend starts at ${cv.r}`);
-    check('and the far end curves, ever so slightly', cv.dropAt[2048]>3 && cv.dropAt[2048]<14 && cv.dropAt[1000]<3,
-      `${cv.dropAt[1000]} blocks down at 1000, ${cv.dropAt[2048]} at the disc rim (${cv.discRim}) — 8 blocks over 2048 is a 0.22-degree dip`);
+    // AT THE WALL, read from the hook rather than at a hardcoded 182 blocks — the wall is 128 at rd=8, and 182 is past the
+    // start of the bend, so the old form of this check measured 0.01 blocks of curve and called it a failure.
+    check('nothing inside the render wall curves at all', cv.dropAtWall===0 && cv.r>cv.wall,
+      `drop at the wall (${cv.wall} blocks) is ${cv.dropAtWall}, and the bend starts at ${cv.r}`);
+    // AND THE CLAIM IS ABOUT THE VISIBLE RANGE, not the disc's geometric rim: the far plane clips at camera.far, so anything
+    // past it is geometry nobody sees. The cap binds well before 1000 blocks now and that is fine — what matters is the dip
+    // across the sea you can actually look at.
+    check('and the far end curves, ever so slightly', cv.dropAtFar>1.2 && cv.dropAtFar<5,
+      `${cv.dropAtFar} blocks down at the far plane (${cv.camFar}), from flat at the wall — about 0.44 degrees of dip across the last 150 blocks of visible sea`);
     // THE LEDGE, geometrically, so this does not depend on a vantage being lucky: at the render wall the disc takes the cap
     // and the shallow chunk water beside it takes its own column, and the difference is the step.
     check('the step where the far sea meets chunk water is under a block and a half', cv.ledgeAtWall.shelf3<1.5,

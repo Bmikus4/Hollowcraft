@@ -7225,7 +7225,7 @@ function craftMatch(cells,size){
 
 function flashName(t){ const e=document.getElementById('name'); e.textContent=t; e.style.opacity=1; clearTimeout(flashName._t); flashName._t=setTimeout(()=>e.style.opacity=0,1200); }
 function flashDmg(){ const d=document.getElementById('dmg'); d.style.opacity=0.9; clearTimeout(flashDmg._t); flashDmg._t=setTimeout(()=>d.style.opacity=0,120); }
-let locked=false, started=false, lmbHeld=false, rmbHeld=false, nextAct=0, nextShot=0;   // INDEPENDENT button state — firing (LMB) can never clobber the aim intent (RMB)
+let locked=false, started=false, lmbHeld=false, rmbHeld=false, nextAct=0, nextShot=0, nextShotMain=0;   // INDEPENDENT button state — firing (LMB) can never clobber the aim intent (RMB)
 // SPEAR throw charge (bow-style hold-to-power). spearPower clamps to a floor so even a quick flick throws.
 const spearCharge={active:false,t:0}; const SPEAR_CHARGE_MAX=0.85;
 function spearPower(){ return clamp(spearCharge.t/SPEAR_CHARGE_MAX,0.15,1); }
@@ -7810,7 +7810,9 @@ function _onMouseDown(e){ if(!locked)return;
     // BOTH HANDS FULL IN OFFHAND-USE MODE: the right button belongs to the MAIN hand, for every kind of item and not just a gun.
     // It used to catch only guns, so a torch or a block in the right hand fell through to the shared path below and acted with
     // whichever slot the MODE resolved to -- the offhand's -- which is the other half of "it interacts with the main hand, or both".
-    if(offActing() && inv[selSlot]){ mainHandRightClick(); rmbHeld=true; nextAct=performance.now()+180; return; }
+    if(offActing() && inv[selSlot]){ mainHandRightClick(); rmbHeld=true;
+      nextAct=performance.now()+180; nextShotMain=performance.now()+((ITEMS[inv[selSlot].id]&&ITEMS[inv[selSlot].id].rof)||60);   // the click IS the first round; the tick owns the rest
+      return; }
     const hs=mainSlot();
     // SHIFT + right-click WEARS what you are holding (Ben): armour to its own slot, a backpack to the pack slot, a shield
     // to the offhand. eqTarget already encodes exactly that routing for shift-click in the inventory, so this reuses it
@@ -9614,8 +9616,19 @@ function loop(){ try{
   if(started && !locked && !player.dead && !intro.active) physics(dt);
   if(started && locked && !player.dead && !intro.active){ physics(dt); survivalTick(dt); achPoll(dt); objPoll(dt); checkLandmines(dt);   // landmines sit OUTSIDE survivalTick on purpose: that returns early in creative, and a mine you placed to test must still go off (damage() ignores a creative player by itself)        // intro cinematic owns the camera → no player control until you wake
     updateMining(dt);                                                       // left-hold = timed dig (see WORLD ENTITIES)
-    if(lmbHeld){ const _hg=heldSlot(), _gi=_hg&&ITEMS[_hg.id]; if(_gi&&_gi.gun&&_gi.auto&&performance.now()>=nextShot){ if(fireGun())view.swing=1.2; nextShot=performance.now()+(_gi.rof||60); } }   // FULL-AUTO: hold left-click → repeat-fire at the gun's rate
-    if(rmbHeld && performance.now()>=nextAct){ doPlace(); nextAct=performance.now()+240; } }   // right-hold = repeat place
+    // FULL-AUTO, PER HAND. heldSlot() resolves to the offhand in offhand-use mode, so the left button already picked the right
+    // gun; what it did not do was TELL fireGun, which is how the wrong hand ended up showing the shot.
+    if(lmbHeld){ const _hg=heldSlot(), _gi=_hg&&ITEMS[_hg.id];
+      if(_gi&&_gi.gun&&_gi.auto&&performance.now()>=nextShot){
+        const _isOff = !!(armor[EQ_OFF] && _hg===armor[EQ_OFF]);
+        if(fireGun(_hg)){ if(_isOff) offView.swing=1.2; else view.swing=1.2; }
+        nextShot=performance.now()+(_gi.rof||60); } }
+    // The right button is the MAIN hand's trigger while the mode is on (the ruling recorded at the mousedown handler), and a
+    // full-auto held down there must run at its rate like any other. Its own clock: the two hands can hold different guns.
+    if(rmbHeld && offActing() && inv[selSlot] && ITEMS[inv[selSlot].id] && ITEMS[inv[selSlot].id].gun){
+      const _mi=ITEMS[inv[selSlot].id];
+      if(_mi.auto && performance.now()>=nextShotMain){ if(fireGun(inv[selSlot])) view.swing=1.2; nextShotMain=performance.now()+(_mi.rof||60); } }
+    else if(rmbHeld && performance.now()>=nextAct){ doPlace(); nextAct=performance.now()+240; } }   // right-hold = repeat place
   T.end(TID.sim);
   T.begin(TID.entities);
   if(started && !player.dead && !intro.active && !(typeof BR!=='undefined'&&BR.inside)){ wretch=wretchPrime; T.begin(TID.brain); if(!NET.on||NET.host)updateBrain(dt); T.end(TID.brain); T.begin(TID.wretch); updateWretch(dt); if(wretchExtra.length){ updateWretchExtras(dt); hwBindGrabber(); } T.end(TID.wretch); if(typeof heartbeatProximity==='function')heartbeatProximity(dt); T.begin(TID.animals); if(NET.on&&!NET.host)netAnimalsTick(); else updateAnimals(dt); T.end(TID.animals); if(typeof updateHerobrine==='function'){ if(NET.on && herobrine.haunting && herobrine.owner!=null && herobrine.owner!==NET.id) hbMirrorTick(dt); else updateHerobrine(dt); } }   // co-op: director + animals run on the host; the HAUNT runs on its interactor, others mirror. THE BACKROOMS suspends ALL overworld-entity sim — the Wretch can never follow you in or grab you there (Ben 07-27)
@@ -14949,6 +14962,22 @@ function updateView(dt){ updateRecoil(dt);                                      
   offView.gunKick=Math.max(0,(offView.gunKick||0)-dt*5.5);                        // the left hand bucks and settles on its own clock
   offView.swing=Math.max(0,(offView.swing||0)-dt*9);                             // …and swings on the same curve the right one does
   { const oswArc=offView.swing?offView.swing*Math.sin(offView.swing*Math.PI):0;
+    const _oIsGun = !!(armor[EQ_OFF] && ITEMS[armor[EQ_OFF].id] && ITEMS[armor[EQ_OFF].id].gun);
+    let osx=0, osy=0;
+    if(_oIsGun){
+      const et=clock.elapsedTime;
+      const omv=clamp(Math.hypot(player.vel.x,player.vel.z)/5.5,0,1);
+      // (a) breathing, (b) movement + a MIRRORED strafe lean, (c) the optic trailing the look and settling back
+      const olatV=player.vel.x*Math.cos(player.yaw)+player.vel.z*(-Math.sin(player.yaw));
+      offView.gunLat=(offView.gunLat||0)+((clamp(olatV,-6,6)/6)-(offView.gunLat||0))*Math.min(1,dt*5);
+      const olat=offView.gunLat;
+      osx = Math.sin(et*0.9)*0.0034 + Math.sin(et*0.53)*0.0020 + Math.sin(et*1.7)*omv*0.011 - olat*0.014;
+      osy = Math.cos(et*0.8)*0.0030 + Math.sin(et*1.27)*0.0016 + Math.cos(et*2.1)*omv*0.010;
+      const odY=player.yaw-(offView.prevYaw==null?player.yaw:offView.prevYaw), odP=player.pitch-(offView.prevPitch==null?player.pitch:offView.prevPitch);
+      offView.prevYaw=player.yaw; offView.prevPitch=player.pitch;
+      offView.lagX=(offView.lagX||0)+((clamp(odY*2.4,-0.06,0.06))-(offView.lagX||0))*Math.min(1,dt*9);
+      offView.lagY=(offView.lagY||0)+((clamp(-odP*2.4,-0.06,0.06))-(offView.lagY||0))*Math.min(1,dt*9);
+      osx += offView.lagX; osy += offView.lagY; }
     const bz=(offView.baseZ!=null?offView.baseZ:offView.group.position.z), brx=(offView.baseRX!=null?offView.baseRX:0);
     // The left hand's aim is read from its RESTING pose for the same reason the right hand's is: its own buck would otherwise
     // throw its shots high. Base first, capture, then the animation.
@@ -14960,6 +14989,9 @@ function updateView(dt){ updateRecoil(dt);                                      
     // offset on all three axes (the group carries yaw and roll, so a tilt about its x axis does not stay in the yz plane), and
     // x was the one component nothing else assigned. baseX is captured wherever setOffItem lays a pose down.
     if(offView.baseX!=null) offView.group.position.x = offView.baseX;
+    // The sway lands on the rebased pose, after the buck and before the block-out, which is the order the right hand uses.
+    if(_oIsGun){ offView.group.position.x += osx*0.9; offView.group.position.y += osy*0.9;
+      offView.group.rotation.y += osx*1.6; offView.group.rotation.z += -osx*1.9; }
     // THE LEFT HAND BENDS TOO (Ben 08-04: "for offhand items"). Same probed signal as the right, same pivot arithmetic, at full
     // strength: the offhand never aims, so there is no cheek-weld to relax the tilt toward.
     blockOutHand(offView, view.gunBend||0, BLOCKOUT_TILT, BLOCKOUT_PULL); }
