@@ -1560,12 +1560,12 @@ block('stone',  { cat:'solid', t:['stone','stone','stone'], hard:1.5, tool:'pick
 block('cobble', { cat:'solid', t:['cobble','cobble','cobble'], hard:2.0, tool:'pickaxe' });
 block('gold_block',{cat:'solid', t:['gold_block','gold_block','gold_block'], hard:3.0, tool:'pickaxe' });   // shrine block
 block('netherrack',{cat:'solid', t:['netherrack','netherrack','netherrack'], hard:0.4, tool:'pickaxe' });   // shrine block
-block('red_torch',{cat:'model', tile:'torch', model:'torch', opaque:false, solid:false, light:12, needFloor:true, drop:'red_torch' });   // shrine torch — red flame (flame push checks the id)
+block('red_torch',{cat:'model', tile:'torch', model:'torch', opaque:false, solid:false, light:12, tint:1, needFloor:true, drop:'red_torch' });   // shrine torch — red flame (flame push checks the id)
 block('mossy',  { cat:'solid', t:['mossy','mossy','mossy'], hard:2.0, tool:'pickaxe' });
 block('gold_block',{ cat:'solid', t:['gold','gold','gold'], hard:3.0, tool:'pickaxe' });                       // Herobrine-shrine gold
 block('netherite_block',{ cat:'solid', t:['netherite','netherite','netherite'], hard:5.0, tool:'pickaxe' });   // shrine core
 block('netherrack',{ cat:'solid', t:['netherrack','netherrack','netherrack'], hard:1.0, tool:'pickaxe', shrine:true });   // light it with flint & steel at the shrine
-block('red_torch',{ cat:'model', tile:'red_torch', model:'torch', opaque:false, solid:false, light:11, needFloor:true });   // crimson shrine torch
+block('red_torch',{ cat:'model', tile:'red_torch', model:'torch', opaque:false, solid:false, light:11, tint:1, needFloor:true });   // crimson shrine torch
 block('sand',   { cat:'solid', t:['sand','sand','sand'], hard:0.5, tool:'shovel', gravity:true });
 block('gravel', { cat:'solid', t:['gravel','gravel','gravel'], hard:0.6, tool:'shovel', gravity:true });
 block('bedrock',{ cat:'solid', t:['bedrock','bedrock','bedrock'], hard:-1 });
@@ -1703,7 +1703,7 @@ block('fuse_box',        {cat:'solid', t:['ind_panel','ind_panel','ind_panel'], 
 // still uses model:'bars' and is deliberately untouched — assert-chainlink keeps it as the control.
 block('chainlink',       {cat:'model', opaque:false, solid:true, hard:1.2, tool:'pickaxe', model:'chainlink', tile:'chainlink_mesh', connect:true, col:0x8f949c});   // diamond-weave fabric on a top rail, posts at intervals
 block('metal_bench',     {h:0.9, cat:'model', opaque:false, solid:true, hard:3.0, tool:'pickaxe', model:'metal_bench', use:'table'});                            // 1x3 steel workbench: placement lays three cells, each of them a crafting surface
-block('hanging_light',   {cat:'model', opaque:false, solid:false, hard:0.8, tool:'pickaxe', model:'hanging_light', light:14, chime:true});                       // chime:true is the physics, not a decoration — see updateChimes
+block('hanging_light',   {cat:'model', opaque:false, solid:false, hard:0.8, tool:'pickaxe', model:'hanging_light', light:14, tint:2, chime:true});                       // chime:true is the physics, not a decoration — see updateChimes
 // THE 2x2 VAULT DOOR. Four cells, and which four depends on how you were standing, so the leaf has an axis in its id: _x spans
 // along x, _z along z. The origin cell carries the whole model and the other three are invisible fillers that exist to be solid
 // and to be found — every one of them answers use:'vault' and breaking any of them takes all four. Open swaps all four to the
@@ -1775,6 +1775,18 @@ const isHalf   = new Uint8Array(N_BLOCKS);   // slabs/stairs — solid only in t
 // from measuring the in-world model builders, not from memory (see __hc.modelBounds and blockHeights below).
 const blockH   = new Float32Array(N_BLOCKS);
 const blockLight = new Uint8Array(N_BLOCKS);
+// WHAT COLOUR A LIGHT IS. The block-light volume carried INTENSITY only, so every emitter in the game lit its surroundings with
+// one hard-coded warm constant: a lantern could not make a cellar amber and the shrine's crimson torch tinted nothing at all —
+// its own flame was red and the light it cast was the same orange as a kitchen candle. An index per block, resolved to radiance
+// in buildLightTexture, so the flood stays one byte per cell and the interpolation happens on real RGB (see LIGHT_PAL).
+// `tint:` on a block def names the entry; anything without one is the warm default, which is bit-identical to what shipped.
+const LIGHT_PAL = [
+  [1.000, 0.5417, 0.2222],   // 0 warm — EXACTLY the old vec3(3.6,1.95,0.80)/3.6, so every torch, lantern, candle and campfire
+                             //   lands on the value it had before this existed. Do not "tidy" these decimals.
+  [1.000, 0.1600, 0.1000],   // 1 crimson — the shrine torch. Deep red, not pink: it has to read as the same fire as its flame.
+  [0.820, 0.9000, 1.0000],   // 2 cold white — industrial hanging lights and the launch console's own lamps.
+];
+const blockTint = new Uint8Array(N_BLOCKS);
 const blockCat = [];
 for (let i=0;i<N_BLOCKS;i++){
   const d=B[i];
@@ -1783,6 +1795,7 @@ for (let i=0;i<N_BLOCKS;i++){
   isHalf[i]   = d.half?1:0;
   blockH[i]   = d.h!=null ? d.h : (d.half?0.5:1);
   blockLight[i]= d.light||0;
+  blockTint[i] = d.tint||0;
   blockCat[i] = d.cat;
 }
 const AIR=BID.air, WATER=BID.water;
@@ -2369,6 +2382,11 @@ function skyExposure(wx,wy,wz){
 const LPAD = 15;                                  // torch reach; pad so a torch up to 15 blocks into a NEIGHBOUR chunk lights across the seam
 const LPW  = CK + LPAD*2;                          // padded frame width (46)
 const _lv  = new Uint8Array(LPW*LPW*WH);           // reusable padded flood scratch; idx = px + pz*LPW + py*LPW*LPW
+// WHICH LIGHT a cell's level came from, as a LIGHT_PAL index. Carried on the same flood rather than flooded separately: the BFS
+// already knows which cell it is stepping out of, so inheriting its tint is one byte written where the level is written, and
+// nothing about the traversal changes. Where two lights meet, the brighter one owns the cell, because that is the only cell the
+// level test lets it write.
+const _lvT = new Uint8Array(LPW*LPW*WH);
 let _lvLit = false;
 const _lpi = (px,py,pz)=> px + pz*LPW + py*(LPW*LPW);
 const _bfsQ = new Int32Array(LPW*LPW*WH);   // sized to the FULL padded flood volume — the old 65k cap silently dropped propagation in emitter-dense areas (villages/shrines), leaving ground/chunk patches unlit
@@ -4556,22 +4574,35 @@ const GodrayShader={
   // brighter than this, so a lantern, a muzzle flash or the boss's glow sitting on that line seeds shafts of its own. It only
   // shows "sometimes" because the accumulation is also scaled by screen distance from the sun (the `edge` term), so it takes an
   // emitter within about a third of the frame of the sun to be visible at all.
-  // 0.62 -> 2.2. The pass runs BEFORE the tonemapper, so these are linear HDR values: the sky near the sun sits at 0.6-1.1 and
-  // the sun's disc is drawn at uSunGain, which is 10. 2.2 is above everything the sky and any block emitter reach and far below
-  // the disc, so the only thing that can seed a shaft is the sun itself — which is what a god ray is.
-  uniforms:{ tDiffuse:{value:null}, uSun:{value:new THREE.Vector2(0.5,0.5)}, uActive:{value:0}, uStrength:{value:0.5}, uSeedMin:{value:2.2}, uTint:{value:new THREE.Color(1.0,0.86,0.58)} },
+  // A BRIGHTNESS THRESHOLD CANNOT TELL A LANTERN FROM THE SUN, and trying cost this pass its rays. 0.62 -> 2.2 was the previous
+  // attempt at Ben's report, on the arithmetic that the disc is drawn at uSunGain 10: but `drawSunOverlay` paints the disc AFTER
+  // the whole post chain, so the disc is not in this pass's input at all. What is in it is the bright SKY near the sun, which
+  // tops out at 1.15 in linear HDR — under 2.2. So 2.2 muted the real rays and left the lamps, which sit at 3.6 (the block-light
+  // gain times a lantern's own near-white tile): Ben reported "lanterns and other lights STILL giving god rays" after it.
+  // WHAT SEPARATES THEM IS DEPTH, not brightness. A god ray is sunlight coming through a gap, so only pixels with NOTHING in
+  // them — sky at the far plane — may seed one. A lantern is geometry and can never qualify, however bright it gets. The gate is
+  // exact rather than tuned, and uSeedMin goes back to sorting bright sky (>0.85) from the rest of the dome.
+  // The depth texture only exists on the motion-blur render path (_sceneRT's own attachment, the same one SSAO needs). Without
+  // it the pass is DISABLED rather than run blind: no rays is honest, rays out of every lamp is not.
+  uniforms:{ tDiffuse:{value:null}, tDepth:{value:null}, uHasDepth:{value:0}, uSun:{value:new THREE.Vector2(0.5,0.5)}, uActive:{value:0}, uStrength:{value:0.5}, uSeedMin:{value:0.16}, uTint:{value:new THREE.Color(1.0,0.86,0.58)} },
   vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
-  fragmentShader:`varying vec2 vUv; uniform sampler2D tDiffuse; uniform vec2 uSun; uniform float uActive,uStrength,uSeedMin; uniform vec3 uTint;
+  fragmentShader:`varying vec2 vUv; uniform sampler2D tDiffuse, tDepth; uniform vec2 uSun; uniform float uActive,uStrength,uSeedMin,uHasDepth; uniform vec3 uTint;
     void main(){
       vec4 base=texture2D(tDiffuse,vUv);
       if(uActive<0.5){ gl_FragColor=base; return; }
       const int N=16;
       vec2 delta=(uSun-vUv)*(0.92/float(N));
-      vec2 uv=vUv; float decay=1.0, accum=0.0;
+      vec2 uv=vUv; float decay=1.0, accum=0.0, wsum=0.0;
       for(int i=0;i<N;i++){ uv+=delta; if(uv.x<0.0||uv.x>1.0||uv.y<0.0||uv.y>1.0)break;
-        vec3 c=texture2D(tDiffuse,uv).rgb; float l=max(0.0, dot(c,vec3(0.299,0.587,0.114))-uSeedMin);   // only the SUN seeds a shaft — see uSeedMin
-        accum+=l*decay; decay*=0.95; }
-      accum/=float(N);
+        // THE SEED IS VISIBILITY, NOT BRIGHTNESS. Sampling the frame's own luminance is what made lamps into suns, and it could
+        // never have made the sun into one: the disc is painted after the post chain, and the sky beside it reaches 1.15 in linear
+        // HDR against a seed floor of 0.85, so a scene with no emitters in it accumulated almost nothing. What a shaft actually is
+        // is the sun's light reaching the air along this line — so what is integrated is how much of the line to the sun is EMPTY
+        // (depth at the far plane), and the sun's own brightness is uStrength, which already follows its elevation.
+        float sky=step(0.999999, texture2D(tDepth,uv).x);
+        accum+=sky*decay; wsum+=decay; decay*=0.95; }
+      accum = (wsum>0.0)? accum/wsum : 0.0;   // a FRACTION of the line, so the result does not depend on how many samples ran
+      accum *= uSeedMin;   // uSeedMin is the gain now, not a threshold: how bright a fully unoccluded line to the sun gets
       float edge=1.0-smoothstep(0.35,0.95,distance(vUv,uSun));   // rays strongest near the sun, fade with screen distance
       gl_FragColor=vec4(base.rgb + uTint*accum*uStrength*edge, base.a);
     }`
@@ -4715,7 +4746,12 @@ function buildComposer(){
     composer.addPass(ssaoPass);
   } else ssaoPass=null;
   // god rays BEFORE bloom → the shafts pick up a soft bloom glow. Gated to High/Ultra; ?norays disables.
-  if (CFG.quality!=='Low' && CFG.quality!=='Medium' && !Q.get('norays')){ godrayPass = new ShaderPass(GodrayShader); composer.addPass(godrayPass); }
+  // NO DEPTH ATTACHMENT, NO RAYS. The seed test is "is this pixel empty sky", which needs _sceneRT's depth texture — the same
+  // one SSAO is gated on. Running the pass without it means seeding off brightness alone, which is the bug Ben reported twice.
+  if (CFG.quality!=='Low' && CFG.quality!=='Medium' && !Q.get('norays') && _mbMode && _sceneRT && _sceneRT.depthTexture){
+    godrayPass = new ShaderPass(GodrayShader);
+    godrayPass.uniforms.tDepth.value=_sceneRT.depthTexture; godrayPass.uniforms.uHasDepth.value=1;
+    composer.addPass(godrayPass); }
   else godrayPass=null;
   // THRESHOLD 0.74 -> 0.88, RADIUS 0.5 -> 0.34 (Ben: make the sun read as a disc). At 0.74 the bright SKY around the sun --
   // forward scatter and halo, both well over that -- was blooming as hard as the sun itself, so the pass had a wide soft
@@ -4990,7 +5026,7 @@ function cyl(rt,rb,h,seg){ return new THREE.CylinderGeometry(rt,rb,h,seg||6); }
 // The flame quad is built TALLER than the flame it draws, so the embers rising off the top have somewhere to live
 // without a second mesh, a second draw or a single extra vertex. The shader divides the quad at y=1.0: below is fire,
 // above is sparks. Change this and both halves move — the body's y is vUv.y scaled by it.
-const FLAME_QUAD_EXT=1.55;
+const FLAME_QUAD_EXT=1.35;
 const flameMat=new THREE.ShaderMaterial({
   transparent:true, depthWrite:false, side:THREE.DoubleSide, blending:THREE.AdditiveBlending, fog:false,
   uniforms:{ uTime:globalU.uTime },
@@ -5019,8 +5055,8 @@ const flameMat=new THREE.ShaderMaterial({
       if(y<=1.0){
         float rise=fbm(vec2(x*3.4, y*2.4 - t*1.85) + vSeed*9.0);            // the field the flame is made of, moving UP through it
         x -= (rise-0.5)*0.30*(0.22+y);                                      // lean and curl, strongest at the tip
-        float wide=(vType>2.5&&vType<3.5)?0.62:0.46;                        // a campfire is a column, not a candle
-        float w=(1.0-y)*wide*(0.84+0.16*sin(t*2.6+ph));
+        float wide=(vType>2.5&&vType<3.5)?0.68:0.54;                        // a campfire is a column, not a candle
+        float w=pow(max(0.0,1.0-y),0.72)*wide*(0.84+0.16*sin(t*2.6+ph));   // pow, not linear: a torch is FULL low down and only tapers near the tip — straight (1-y) is a needle
         float body=smoothstep(w, w*0.22, abs(x))*smoothstep(0.0,0.10,y);
         // THE TIP BREAKS. The threshold climbs with height and the noise field cuts into it, so the top tears into
         // separate cooler wisps instead of tapering to a clean point. This is the single biggest part of the look.
@@ -5031,29 +5067,29 @@ const flameMat=new THREE.ShaderMaterial({
         // seeds never land in step even when they are the same kind of light.
         body*=0.74+0.16*sin(t*13.0+ph)+0.10*sin(t*8.3+ph*1.7)+0.14*nz(vec2(t*3.4,vSeed));
         if(body<0.03) discard;
-        float core=smoothstep(w*0.50,0.0,abs(x))*(1.0-y*1.15);
+        float core=smoothstep(w*0.42,0.0,abs(x))*max(0.0,1.0-y*1.9);        // the white is only near the BASE — carried up the whole flame it reads as a blowtorch
         vec3 col=mix(vec3(0.42,0.04,0.0), vec3(1.0,0.30,0.02), smoothstep(0.0,0.45,body));  // soot-red edge → orange
         col=mix(col, vec3(1.0,0.70,0.16), smoothstep(0.22,0.72,1.0-y));                     // hot lower body
-        col=mix(col, vec3(1.0,0.97,0.80), clamp(core,0.0,1.0)*0.92);                        // white-hot core
+        col=mix(col, vec3(1.0,0.96,0.78), clamp(core,0.0,1.0)*0.72);                        // white-hot core
         if(vType>3.5){ col=mix(vec3(0.9,0.02,0.0), vec3(1.0,0.18,0.10), smoothstep(0.0,0.5,body)); col=mix(col, vec3(1.0,0.55,0.45), core*0.9); }   // type 4 = BRIGHT RED shrine-torch flame
-        gl_FragColor=vec4(col*body*1.75, body);
+        gl_FragColor=vec4(col*body*1.42, body);
         return;
       }
       // EMBERS — three sparks per flame, each with its own speed and phase off the seed, rising and cooling. They
       // live in the part of the quad above the flame, so they cost no extra geometry and no extra draw.
       float e=0.0, warm=0.0;
-      for(int i=0;i<3;i++){ float fi=float(i);
+      for(int i=0;i<2;i++){ float fi=float(i);
         float sp=0.30+0.34*h(vec2(vSeed*13.0+fi, 3.0));
         float a=fract(t*sp + h(vec2(vSeed*7.0+fi, 1.0)));                   // 0..1 life, restarting
         float ey=1.0+a*(${FLAME_QUAD_EXT.toFixed(2)}-1.0);
         float ex=(h(vec2(vSeed*5.0+fi,4.0))-0.5)*0.34*a + (nz(vec2(t*1.1+fi, vSeed))-0.5)*0.10;
         float d=length(vec2((x-ex)*1.0, (y-ey)*0.42));
-        float s=smoothstep(0.055,0.0,d)*(1.0-a)*(1.0-a);                    // shrinks and dims as it cools
+        float s=smoothstep(0.085,0.0,d)*(1.0-a);                            // dims as it cools
         e+=s; warm+=s*(1.0-a); }
       if(e<0.02) discard;
       vec3 col=mix(vec3(0.85,0.16,0.02), vec3(1.0,0.78,0.34), clamp(warm*2.2,0.0,1.0));
       if(vType>3.5) col=mix(vec3(0.9,0.05,0.03), vec3(1.0,0.35,0.28), clamp(warm*2.2,0.0,1.0));
-      gl_FragColor=vec4(col*e*2.0, e);
+      gl_FragColor=vec4(col*e*2.6, e);
     }`
 });
 flameMat.customProgramCacheKey=()=>'flame';
@@ -14732,7 +14768,7 @@ function buildAR15(dot,suppressed){ const g=new THREE.Group();
     for(const sx of [-1,1]){ const ear=new THREE.Mesh(new THREE.BoxGeometry(0.007,0.03,0.02),blk); ear.position.set(sx*0.011,0.103,0.075); g.add(ear); }          // ears span 0.088..0.118 — rooted in the base; aperture gap (inner edges ±0.0075) frames the 0.005 post dead-centre at the shared sight line
     g.userData.dotY=0.112; }   // the ADS pose centers THIS height on the eye: post tip sits exactly in the rear aperture, same discipline as the Python
   { const mag=box(0.03,0.12,0.044,poly, 0,-0.092,0.03, -0.16); g.userData.mag=mag; g.userData.magY=mag.position.y; g.userData.magRx=mag.rotation.x; }   // curved STANAG magazine — animated on reload
-  box(0.032,0.088,0.04,poly,0,-0.07,0.115, 0.42);      // A2 pistol grip
+  box(0.032,0.088,0.04,poly,0,-0.07,0.115, -0.42);     // A2 pistol grip — NEGATIVE rx rakes the butt of the grip rearward (+z, toward the eye). Positive points it at the muzzle, which is what read as a backwards grip.
   tube(0.018,0.14,gm,       0,0.02,0.185);             // buffer tube
   box(0.046,0.07,0.10,poly, 0,0.01,0.235);             // collapsible stock
   { const tg=new THREE.Mesh(new THREE.TorusGeometry(0.026,0.005,6,14,Math.PI*1.3),gm); tg.rotation.y=Math.PI/2; tg.position.set(0,-0.05,0.075); g.add(tg); }   // trigger guard
@@ -14809,8 +14845,8 @@ function buildRevolver(suppressed){ const g=new THREE.Group();
   box(0.018,0.026,0.02,blk, 0,0.058,0.10, -0.5);       // spur hammer (cocked-back at the rear)
   box(0.01,0.03,0.014,blu,  0,-0.028,0.055);           // trigger
   { const tg=new THREE.Mesh(new THREE.TorusGeometry(0.026,0.006,6,16,Math.PI*1.25),blu); tg.rotation.y=Math.PI/2; tg.rotation.z=0.3; tg.position.set(0,-0.05,0.055); g.add(tg); }   // trigger guard
-  box(0.03,0.11,0.06,wood,  0,-0.088,0.11, 0.42);      // full walnut target grip (raked back)
-  box(0.026,0.07,0.03,blu,  0,-0.05,0.10, 0.42);       // backstrap/grip frame tying grip to receiver
+  box(0.03,0.11,0.06,wood,  0,-0.088,0.11, -0.42);     // full walnut target grip — raked back means NEGATIVE rx: the muzzle is -z, so +rx swung the grip's butt toward it
+  box(0.026,0.07,0.03,blu,  0,-0.05,0.10, -0.42);      // backstrap/grip frame tying grip to receiver — same rake, or it shears off the grip
   const flash=buildMuzzleFlash(); flash.renderOrder=8; flash.userData.base=0.75;
   flash.position.set(0,0.028,-0.32); flash.scale.setScalar(0.75); flash.visible=false; g.add(flash); g.userData.flash=flash;   // muzzle flash at the bore
   return g; }
@@ -25597,6 +25633,20 @@ window.__hc={
                nearCut: inside?5200:3600, farCut: inside?2600:1500,
                wired: !!convGunNear }; }
     catch(e){ return {err:String(e.message||e)}; } },
+  // QA: which way every raked box on a gun leans. The muzzle is -z and the eye is +z, so a grip's BOTTOM end must sit at a
+  // greater z than its top; a 120 px viewmodel cannot answer "is this grip backwards" but two numbers can.
+  gripRake(){ try{
+      const guns={revolver:buildRevolver(false),ar15:buildAR15(false,false),shotgun:buildShotgun(false),bolt:buildBoltRifle(false,false)};
+      const out=[];
+      for(const name in guns){ const g=guns[name];
+        for(const c of g.children){ if(!c.isMesh||!c.geometry||c.geometry.type!=='BoxGeometry') continue;
+          const rx=c.rotation.x||0; if(Math.abs(rx)<0.05) continue;   // only the deliberately angled parts
+          const h=c.geometry.parameters.height/2;
+          const top=new THREE.Vector3(0,h,0).applyEuler(c.rotation).add(c.position), bot=new THREE.Vector3(0,-h,0).applyEuler(c.rotation).add(c.position);
+          out.push({gun:name,size:[c.geometry.parameters.width,c.geometry.parameters.height,c.geometry.parameters.depth].map(v=>+v.toFixed(3)).join('x'),
+                    rx:+rx.toFixed(2),topZ:+top.z.toFixed(4),botZ:+bot.z.toFixed(4),rake:bot.z>top.z?'REARWARD':'FORWARD'}); } }
+      return out; }
+    catch(e){ return {err:String(e.message||e)}; } },
   // QA: one atlas tile, magnified, as a data URL. A 16 px tile is four pixels on a bench screenshot of the world, so "does this
   // read as a leaf" cannot be answered from a frame — it has to be answered from the art.
   tileDump(names,scale){ try{ scale=scale||16; names=[].concat(names);
@@ -25972,6 +26022,7 @@ window.__hc={
                sunProjXY:[+_sunProj.x.toFixed(3),+_sunProj.y.toFixed(3)], camFar:camera.far, dayGate:globalU.uDay.value>0.15,
                strength:godrayPass?+godrayPass.uniforms.uStrength.value.toFixed(4):null,
                seedMin:godrayPass?godrayPass.uniforms.uSeedMin.value:null,
+               hasDepth:godrayPass?godrayPass.uniforms.uHasDepth.value:null, mbMode:_mbMode,   // no depth attachment => no pass at all: the seed test is 'is this pixel empty sky'
                sunY:+globalU.uSunDir.value.y.toFixed(4), elevDeg:+(Math.asin(Math.max(-1,Math.min(1,globalU.uSunDir.value.y)))*57.29578).toFixed(2),
                day:+globalU.uDay.value.toFixed(3), quality:CFG.quality };
     }catch(e){ return {err:String(e.message||e)}; } },
