@@ -219,6 +219,11 @@ const ok=(name,cond,got)=>{ if(!cond)fails++; console.log(`  ${cond?'ok  ':'FAIL
     ok('…and does not move the main hand', hands.afterLeft.mainSwing===0 && hands.afterLeft.mainKick===0 && hands.afterLeft.mainFlash===0, hands.afterLeft);
     ok('…the buck and flash land on the offhand', hands.afterLeft.offKick>0 && hands.afterLeft.offFlash>0, hands.afterLeft);
     ok('right click acts with the MAIN item, block and all', hands.right && hands.right.id==='planks', hands.right);
+    // TWO GUNS, TWO TRIGGERS (Ben 08-04, superseding the both-guns-on-one-click ruling from earlier the same day).
+    const two = await page.evaluate(`__hc.handSplit('ar15','shotgun')`);
+    console.log('    two guns:', JSON.stringify(two.mag));
+    ok('left click fires ONLY the offhand gun', two.mag.afterLeft.off < two.mag.before.off && two.mag.afterLeft.main === two.mag.before.main, two.mag);
+    ok('right click fires ONLY the main hand gun', two.mag.afterRight.main < two.mag.afterLeft.main && two.mag.afterRight.off === two.mag.afterLeft.off, two.mag);
     ok('…and does not move the offhand', hands.afterRight.offSwing===0 && hands.afterRight.offKick===0, hands.afterRight);
 
     console.log('\n[13] the boom does not judder when it is driven into the ground');
