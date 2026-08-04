@@ -63,7 +63,14 @@ const AIM = (x,y,z)=>`(async()=>{ const f=()=>new Promise(r=>requestAnimationFra
     if(!s || !s.pad){ console.log('  SILO NEVER STREAMED — no shot'); }
     else {
       const p=s.pad;
-      // Stand well back and above, so the pad, the gantry and the blockhouse are all in frame at once.
+      // WIDE FRAMING IS UNSOLVED, and this is the version that at least shows something. Two attempts failed:
+      //   __hc.tp 34 blocks back ground-snaps, and the site is a PLATEAU, so the camera lands in the hollow BELOW the apron --
+      //     the aim came out at pitch +0.6, steeply up, and the pad was never in frame. The lit posts were visible only by luck.
+      //   __hc.tpExact at p.y+26 puts the camera inside the TREE CANOPY over the plateau: a black frame with leaves overhead and
+      //     a 170px aim offset because the pad was occluded.
+      // A site in a wooded hollow leaves no easy vantage: below the pad you see sky, above it you see leaves. What this wants is
+      // either a clear-line search (sample candidate camera positions and keep the one with an unobstructed ray to the pad) or a
+      // temporary canopy cull. Neither is written. tpExact takes (x, z, y), NOT (x, y, z) -- a documented trap here.
       await pg.evaluate(`__hc.tp(${p.x}, ${p.z+34})`); await sleep(9000);
       console.log('  aim gantry: '+JSON.stringify(await pg.evaluate(AIM(p.x+0.5, p.y+7, p.z+0.5))));
       await sleep(1600); await pg.screenshot({path:path.join(OUT,'icbm-silo-wide.png')});
