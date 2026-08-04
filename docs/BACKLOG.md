@@ -1,13 +1,11 @@
 # Backlog — light, sky, water, horizon, atmosphere
 
 ## Open
-- Ocean appears below a certain level inland
 - Voxel hash lighting
 - Emitters visible from farther away
-- Storm cloud value/colour off overcast; rain streaks take the sky's value
 - Directional skylight (vSky per-face scalar)
 - Coloured block light
-- Water close up: shallow alpha floor, absorption curve, shoreline foam
+- Water close up: shoreline foam
 - Entity contact shadows
 - Shadow distance / cascades
 - Planar or screen-space water reflection
@@ -20,6 +18,12 @@
 - `shore` at 7.70 ms, 805 draw calls, unattributed
 
 ## Awaiting Ben's eye (shipped)
+- Storm clouds: deck value/colour off overcast
+- Rain streaks take the air's value
+- Ocean not drawn from under the ground inland
+- Stars and Milky Way below the horizon
+- Shallow water see-through
+- Fresnel cap: depth colour survives a grazing angle
 - Halo minimal
 - Cloud k 0.8
 - Darker sea anchor
@@ -28,9 +32,9 @@
 - Phantom coast pulled in
 - Pine colour 81%
 - Glades x3 to the horizon
-- Night sky below the horizon
 - God-ray seed threshold
 
 ## Unresolved measurements
+- Grazing-angle water layers (needs a shelf placed at known depths)
 - God-ray seeded-shaft isolation
 - Woody band downward extent (bounded by occlusion)
