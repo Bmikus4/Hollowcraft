@@ -49,9 +49,15 @@ const ok=(n,c,d)=>{ checks++; if(!c){fails++; console.log('  FAIL  '+n+'   '+JSO
     await page.evaluate('__hc.setTime(0.5)');
 
     console.log('[1] the props exist and are reachable');
-    const info=await page.evaluate('__hc.packInfo(["camera_x","camera_z","monitor_x","monitor_z"])');
+    const info=await page.evaluate('__hc.packInfo(["camera_x","camera_z","monitor_x","monitor_z","camera","monitor"])');
     for(const n of ['camera_x','camera_z','monitor_x','monitor_z']){
       ok(n+' is a block with an item', info[n] && info[n].bid!=null && !!info[n].name, info[n]&&{bid:info[n].bid,name:info[n].name}); }
+    // ONE item each in the menu, not one per axis. The per-axis blocks remain -- the mesher needs them to know which way to turn
+    // the geometry -- but they are hidden, so the creative menu stops offering "Camera X" and "Camera Z" as separate props.
+    ok('there is a single Camera item', info.camera && info.camera.inCreative===true && info.camera.name==='Camera', info.camera);
+    ok('and a single Monitor item', info.monitor && info.monitor.inCreative===true && info.monitor.name==='Monitor', info.monitor);
+    const shown=['camera_x','camera_z','monitor_x','monitor_z'].filter(k=>info[k] && info[k].inCreative);
+    ok('the per-axis variants are hidden from the menu', shown.length===0, shown);
     ok('a camera is walk-through and a monitor is not', info.camera_x.solid===false && info.monitor_x.solid===true,
       {cam:info.camera_x.solid, mon:info.monitor_x.solid});
 
