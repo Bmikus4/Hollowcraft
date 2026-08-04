@@ -62,10 +62,20 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     check('and the rail runs the whole length (2 spokes per block, joined)',
       three && three.spokes===6, `spokes ${three&&three.spokes} across 3 blocks`);
 
-    // ---- THE SAME ALONG Z, because the run axis is decided per block ----
+    // ---- THE TOPS MUST ACTUALLY MEET, ON BOTH AXES ----
+    // Ben: "workbenches dont connect up, they only looked like it from one rotation." The top is 1.0 along its length and
+    // 0.86 across, so an unrotated bench meets its neighbour along X and leaves a 0.14 seam at every block along Z.
+    // Counting legs cannot see that; the worst gap between consecutive tops can.
+    check('an X run is one continuous top, no seams', three && three.maxGap<=0.001 && three.span===3,
+      `maxGap ${three&&three.maxGap}, span ${three&&three.span} over 3 blocks`);
+    check('and it wears ONE vice, not one per block', three && three.vices===1, `vices ${three&&three.vices}`);
+
     const threeZ = await run(page, base0.x+8, base0.y, base0.z, 3, 'z');
     check('a 3-long run along Z also stands on four legs',
       threeZ && threeZ.benches===3 && threeZ.legs===4, `legs ${threeZ&&threeZ.legs}, benches ${threeZ&&threeZ.benches}`);
+    check('a Z run is ALSO one continuous top — the rotation the fault hid behind',
+      threeZ && threeZ.maxGap<=0.001 && threeZ.span===3, `maxGap ${threeZ&&threeZ.maxGap}, span ${threeZ&&threeZ.span} over 3 blocks`);
+    check('and the Z run wears one vice too', threeZ && threeZ.vices===1, `vices ${threeZ&&threeZ.vices}`);
 
     // ---- A FIVE-LONG RUN IS STILL FOUR: the middle carries none ----
     const five = await run(page, base0.x, base0.y, base0.z+12, 5, 'x');
