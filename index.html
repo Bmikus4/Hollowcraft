@@ -3853,7 +3853,7 @@ const waterMat = new THREE.ShaderMaterial({
     uTime:globalU.uTime, uSunDir:globalU.uSunDir, uMoonDir:globalU.uMoonDir,
     uDay:globalU.uDay, uCamPos:globalU.uCamPos, uFogColor:{value:scene.fog.color},
     uFogDensity:{value:scene.fog.density}, uDeep:_uWaterDeep, uRing:_uWater, uRingFade:{value:2400},   // the far-sea annulus's outer radius, set per frame in updateHorizon
-    uWx:{value:0}, uCurveR:{value:20.0}, uCurveK:{value:0.0022}, uCurveClamp:{value:1}, uCurveCap:{value:6.0}   // THE WORLD CURVE — flat to 20 blocks, then k*(d-20)^2. k is small on purpose: at 40 blocks that is 0.9 down, at 96 it is 12.6, so the tip-over is gentle where you can see detail and only steepens where it reads as the sea falling away. "Subtle."
+    uWx:{value:0}, uCurveR:{value:20.0}, uCurveK:{value:0.0022}, uCurveClamp:{value:1}, uCurveCap:{value:2.0}   // THE WORLD CURVE — flat to 20 blocks, then k*(d-20)^2. k is small on purpose: at 40 blocks that is 0.9 down, at 96 it is 12.6, so the tip-over is gentle where you can see detail and only steepens where it reads as the sea falling away. "Subtle."
   }),
   vertexShader:`
     attribute float aTop; attribute float aDepth; attribute float aColD; varying float vTop; varying float vDepth; varying vec3 vW; varying vec3 vN; varying float vFog; varying float vCrest;
@@ -3893,8 +3893,12 @@ const waterMat = new THREE.ShaderMaterial({
       // the sea is for most of the shelf, so past about 90 blocks the surface was BELOW the seabed and the ground came up
       // through it — and at the render wall, where the far-sea disc meets chunk water, the disc had fallen tens of blocks
       // below the water it is supposed to continue, which is the ledge in his screenshot. A sea may curve away by no more
-      // than the sea is deep. Six blocks still bends the far surface enough to read as a curve at a grazing angle and lands
-      // the horizon where the sky now runs down to meet it.
+      // than the sea is deep. TWO blocks, not six: the cap is also the worst-case LEDGE at the render wall, because the
+      // far-sea disc has no seabed to clamp against and takes the cap while the chunk water it meets there takes its own
+      // shallow column. At 58 that ledge was tens of blocks; at 2 it is under a block and a half, and nothing shallower than
+      // two blocks of water can be drained by the curve. What is lost is most of the curve past about fifty blocks — and the
+      // curve was invented to hide a flat far sea line against a mismatched sky, which is a problem that no longer exists
+      // now the painted band is gone and the sky runs down to the waterline on its own.
       drop = min(drop, uCurveCap);
       // ...AND THE SEA MAY NEVER SINK BELOW ITS OWN SEABED (Ben 08-04: "the ocean shore is broken, and its falling under the
       // ground far out... we could fix this by making water get deeper quicker, or by actually fixing the ocean itself").
@@ -8812,7 +8816,8 @@ function updateTpsCamera(dt, p){
 // It only ever RESTORES what it itself hid. Forcing the three groups visible on the way back to first person would put an empty
 // fist on screen in cinematic mode and un-hide the offhand arm of a player holding nothing -- both states the viewmodel owns.
 function _tpsHideHands(hide){
-  for(const v of [ (typeof view!=='undefined')?view:null, (typeof offView!=='undefined')?offView:null, (typeof offArm!=='undefined')?offArm:null ]){
+  for(const v of [ (typeof view!=='undefined')?view:null, (typeof offView!=='undefined')?offView:null,
+                   (typeof offArm!=='undefined')?offArm:null, (typeof mainArm!=='undefined')?mainArm:null ]){
     if(!v||!v.group) continue; const g=v.group;
     if(hide){ if(g.visible){ g.visible=false; g.userData._tpsHid=1; } }
     else if(g.userData._tpsHid){ g.visible=true; g.userData._tpsHid=0; } } }
@@ -13879,6 +13884,7 @@ function setOffItem(id){ if(offView.id===id)return; offView.id=id;
     // setting this instance's to DoubleSide affects nothing else in the game — the main hand's copy keeps its own.
     if(ITEMS[id].gun){
       m.traverse(o=>{ if(o.isMesh&&o.material){ const L=Array.isArray(o.material)?o.material:[o.material]; for(const mm of L) mm.side=THREE.DoubleSide; } });
+      if(typeof attachGunHand==='function') attachGunHand(m,-1);   // the left hand's gun is held by a hand too, mirrored with it
       const mir=new THREE.Group(); mir.scale.x=-1; mir.add(m);
       offView.group.position.set(-0.34,-0.14,-0.62); offView.group.rotation.set(0,0,0);   // the fist branch of updateView, x negated and lifted twice (Ben: "a little too low", then "too low")
       offView.baseX=-0.34; offView.baseY=-0.14; offView.baseZ=-0.62; offView.baseRX=0; offView.mesh=mir; offView.group.add(mir); applyViewFog(mir);
@@ -13914,6 +13920,42 @@ offArm.group.rotation.set(0.06,0,0);
 function updateOffArm(){ const want=!!offView.mesh;                                                              // an arm with nothing in it is not a viewmodel, it is a floating limb
   if(want && !offArm.mesh){ offArm.mesh=buildFist(); offArm.group.add(offArm.mesh); applyViewFog(offArm.mesh); }
   offArm.group.visible=want; }
+// =====================================================================
+//  BOTH HANDS HAVE AN ARM, AND A GUN IS HELD BY ONE (Ben 08-04, with frames: "the main hand still doesnt have an arm for most
+//  items, it should and it should match on both sides" / "guns in both hands should always be held by a hand and should also
+//  look the same for all guns")
+// =====================================================================
+// The offhand has had a forearm since the shield went in; the main hand only ever had one when it was EMPTY, because the fist
+// doubled as the punch model. So a block, a tool or a torch floated in mid-air on the right while the left had an arm under it.
+// mainArm is offArm mirrored — same builder, same rest pose with x negated, same walk bob — so "matching on both sides" is
+// structural rather than two sets of numbers that have to be kept equal by hand.
+//
+// A GUN IS DIFFERENT, and it is the reason this is one pass rather than two. Its hand cannot sit at a fixed place on the camera:
+// the weapon tilts, kicks, bends away from walls and comes up to the eye, and a hand pinned to the camera would slide off the
+// grip the moment any of that happened. So the gun's hand is parented to the GUN, at one offset that every gun shares — they are
+// all authored in the same viewmodel space with the grip under the receiver — which is also what makes them "look the same for
+// all guns" rather than each needing its own placement.
+const mainArm={ group:new THREE.Group(), mesh:null };
+camera.add(mainArm.group);
+mainArm.group.position.set(0.32,OFF_ARM_Y,0.12);      // offArm's pose with x negated
+mainArm.group.rotation.set(0.06,0,0);
+mainArm.group.visible=false;
+function updateMainArm(){
+  const it=view.id!=null?ITEMS[view.id]:null;
+  // Empty hand: the fist IS the viewmodel, so a second arm would be two right arms. A gun: the hand rides the weapon (below).
+  const want=!!(view.mesh && it && !it.gun);
+  if(want && !mainArm.mesh){ mainArm.mesh=buildFist(); mainArm.group.add(mainArm.mesh); applyViewFog(mainArm.mesh); }
+  if(mainArm.group.visible!==want) mainArm.group.visible=want; }
+// One hand on the grip of any gun, in either hand. side: +1 main, -1 offhand (the offhand's model is mirrored, so its hand is
+// mirrored with it and the two read as a matched pair rather than as two right hands).
+function attachGunHand(mesh, side){
+  if(!mesh) return null;
+  if(mesh.userData._gunHand) return mesh.userData._gunHand;
+  const f=buildFist(); f.scale.setScalar(0.55);
+  f.position.set(0.015*side, -0.055, 0.30);           // behind and under the receiver: the grip, in every gun's own space
+  f.rotation.set(1.05, 0, 0.06*side);                 // the forearm comes UP from the shoulder to meet it
+  mesh.add(f); mesh.userData._gunHand=f; applyViewFog(f);
+  return f; }
 function setViewItem(id){ if(view.id===id)return; view.id=id;
   if(view.mesh){ view.group.remove(view.mesh); _disposeView(view.mesh); view.mesh=null; }
   if(!id||!ITEMS[id]){ view.mesh=buildFist(); view.group.add(view.mesh); applyViewFog(view.mesh); return; }   // empty hand → a real fist you punch with
@@ -14033,7 +14075,7 @@ function finishReload(){ const key=view.reloadKey, it=view.reloadDef; view.reloa
 // Every path that hides the main hand must hide the LEFT hand too. It did not: the offhand group was added to the camera
 // and never touched again, so the shield rode through the menu flythrough, the wake-up cinematic, the Wretch's grab and
 // the hide-HUD setting — the one viewmodel that ignored all four.
-function _hideOffHand(){ offView.group.visible=false; offArm.group.visible=false; }
+function _hideOffHand(){ offView.group.visible=false; offArm.group.visible=false; if(typeof mainArm!=='undefined') mainArm.group.visible=false; }
 // =====================================================================
 //  THE CROSSHAIR IS A DYNAMIC RING (Ben 08-04: "crosshair should be a circle, not a plus, and it should show the
 //  expanding/contracting aim ring with movement")
@@ -14112,6 +14154,9 @@ function updateView(dt){ updateRecoil(dt);                                      
   // offView.baseY, not the constant: the group's rest height is now per-POSE, because a shield carried on the forearm and a
   // torch gripped in the fist do not sit at the same height. Reading the constant here pinned every non-shield item to the
   // shield's height and undid the pose that setOffItem had just applied.
+  if(typeof updateMainArm==='function') updateMainArm();
+  if(view.mesh && view.id!=null && ITEMS[view.id] && ITEMS[view.id].gun && typeof attachGunHand==='function') attachGunHand(view.mesh, 1);
+  mainArm.group.position.y=OFF_ARM_Y+b;   // the right arm rides the same walk bob as the left, or the two drift apart
   offView.group.position.y=(offView.baseY!=null?offView.baseY:OFF_VIEW_Y)+b; offArm.group.position.y=OFF_ARM_Y+b;   // the left hand rides the same walk bob; a pinned shield beside a bobbing tool reads as a HUD sprite
   // THE HAND THAT IS RELOADING IS THE HAND THAT MOVES. The reload animation lives on the main viewmodel, so reloading the
   // offhand's gun waggled whatever the RIGHT hand happened to be holding. Only position.y is touched here, and only because
@@ -19559,12 +19604,19 @@ function updateLeafPiles(){
 const MARK_FOOT=96, MARK_BLOOD=72, MARK_RANGE=34;
 function _markTex(kind){ const S=64, cv=document.createElement('canvas'); cv.width=cv.height=S; const g=cv.getContext('2d');
   g.clearRect(0,0,S,S); g.fillStyle='#fff';
-  if(kind==='foot'){                                                   // a boot: sole and heel, the shape a person leaves
-    g.beginPath(); g.ellipse(32,26,13,18,0,0,7); g.fill();
-    g.beginPath(); g.ellipse(32,50,10,9,0,0,7); g.fill(); }
-  else if(kind==='paw'){                                               // an animal: pad and four toes
-    g.beginPath(); g.ellipse(32,38,13,11,0,0,7); g.fill();
-    for(const c of [[18,20],[28,14],[38,14],[48,20]]){ g.beginPath(); g.ellipse(c[0],c[1],6,7,0,0,7); g.fill(); } }
+  // A SUNKEN SQUARE, NOT A BOOT (Ben 08-04: "Player footsteps should be sunken transparent grey squares, not actual footsteps" /
+  // "most other mobs should be the same"). A drawn boot print is a picture of a foot laid on the ground; what a step actually
+  // leaves in this world's blocky ground is a scuffed, pressed-in patch. Soft edges and a darker core read as depth without any
+  // shape to be wrong about, and being square means it cannot look wrongly ROTATED however you were walking.
+  if(kind==='foot' || kind==='paw'){
+    const grd=g.createRadialGradient(32,32,4,32,32,30);
+    grd.addColorStop(0,'rgba(255,255,255,0.95)');                     // the pressed centre
+    grd.addColorStop(0.62,'rgba(255,255,255,0.62)');
+    grd.addColorStop(1,'rgba(255,255,255,0)');                        // and a soft rim, so no hard outline to catch the eye
+    g.fillStyle=grd;
+    const r=9, x0=8, y0=8, w=48;                                      // a rounded square: the patch a foot presses, not a foot
+    g.beginPath(); g.moveTo(x0+r,y0); g.arcTo(x0+w,y0,x0+w,y0+w,r); g.arcTo(x0+w,y0+w,x0,y0+w,r);
+    g.arcTo(x0,y0+w,x0,y0,r); g.arcTo(x0,y0,x0+w,y0,r); g.closePath(); g.fill(); }
   else if(kind==='claw'){                                              // the Wretch: long splayed digits, barely a pad
     for(const c of [[14,26,5],[26,16,5.5],[38,16,5.5],[50,26,5]]){ g.beginPath(); g.ellipse(c[0],c[1],c[2],10,0,0,7); g.fill(); }
     g.beginPath(); g.ellipse(32,46,12,9,0,0,7); g.fill(); }
@@ -19573,8 +19625,11 @@ function _markTex(kind){ const S=64, cv=document.createElement('canvas'); cv.wid
     for(const c of [[12,20,4],[52,24,5],[22,52,3.5],[46,50,4.5],[32,10,3]]){ g.beginPath(); g.arc(c[0],c[1],c[2],0,7); g.fill(); } }
   const t=new THREE.CanvasTexture(cv); t.colorSpace=THREE.SRGBColorSpace; return t; }
 function _markPool(kind,cap,base){
-  const mat=new THREE.MeshLambertMaterial({ map:_markTex(kind), transparent:true, alphaTest:0.34, depthWrite:false,
-    polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2 });   // a decal lying ON a block face z-fights without the offset
+  // BLENDED, not alpha-tested: the soft rim above is the whole point of the mark and a 0.34 cutoff would turn it back into a hard
+  // square. depthWrite off + a polygon offset keeps a decal lying flat ON a block face from z-fighting with it.
+  const soft=(kind==='foot'||kind==='paw');
+  const mat=new THREE.MeshLambertMaterial({ map:_markTex(kind), transparent:true, opacity:soft?0.42:1,
+    alphaTest:soft?0:0.34, depthWrite:false, polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2 });
   const im=new THREE.InstancedMesh(new THREE.PlaneGeometry(1,1), mat, cap);
   im.instanceMatrix.setUsage(THREE.DynamicDrawUsage); im.frustumCulled=false; im.renderOrder=2;
   im.setColorAt(0,new THREE.Color(1,1,1)); im.instanceColor.setUsage(THREE.DynamicDrawUsage);
@@ -19583,8 +19638,8 @@ function _markPool(kind,cap,base){
 let _markFoot=null, _markPaw=null, _markClaw=null, _markBlood=null;
 const _markDummy=new THREE.Object3D(), _markCol=new THREE.Color();
 function _marksInit(){ if(_markFoot) return;
-  _markFoot =_markPool('foot', MARK_FOOT, 0x2b2119);
-  _markPaw  =_markPool('paw',  MARK_FOOT, 0x2f2418);
+  _markFoot =_markPool('foot', MARK_FOOT, 0x3a3a3c);   // grey: a scuff, not mud
+  _markPaw  =_markPool('paw',  MARK_FOOT, 0x3a3a3c);
   _markClaw =_markPool('claw', 48,        0x1d1512);
   _markBlood=_markPool('blood',MARK_BLOOD,0x6d0d0d); }
 // Put one mark on the ground under (x,y,z). Returns false when there was nowhere to put it, so a caller in a bad spot simply
@@ -19593,10 +19648,12 @@ function addMark(pool, x, y, z, yaw, size, life){
   if(!pool) return false;
   const dx=x-camera.position.x, dz=z-camera.position.z;
   if(dx*dx+dz*dz > MARK_RANGE*MARK_RANGE) return false;
-  let gy=Math.floor(y+0.1), found=false;
-  for(let k=0;k<3;k++){ const b=getBlock(Math.floor(x),gy-1,Math.floor(z));
-    if(b!==AIR && b!==WATER && isSolid[b]){ found=true; break; } gy--; }
-  if(!found) return false;
+  // THE BLOCK DIRECTLY UNDER THE FOOT, and no other (Ben: "they appear on blocks below even overhanging"). Searching downward for
+  // the first solid put prints on the ground floor when you walked along a ledge, several blocks under your feet, which is worse
+  // than no print at all. If there is nothing immediately below, there is nothing to press.
+  const gy=Math.floor(y+0.1);
+  { const b=getBlock(Math.floor(x),gy-1,Math.floor(z));
+    if(b===AIR || b===WATER || !isSolid[b]) return false; }
   if(getBlock(Math.floor(x),gy,Math.floor(z))===WATER) return false;    // a print under water is a print nobody sees
   const i=pool.next; pool.next=(pool.next+1)%pool.marks.length;
   pool.marks[i]={x, y:gy+0.021, z, yaw, size, life, age:0};
@@ -19619,6 +19676,11 @@ function updateMarks(dt){ if(!_markFoot) return;
       live++;
       const u=m.age/m.life, fade=u<0.66?1:1-(u-0.66)/0.34;
       _markDummy.position.set(m.x,m.y,m.z);
+      // YXZ, not the default XYZ (Ben: "footsteps are landing sideways or at an angle and only appear when walking in certain
+      // directions"). With XYZ the yaw is applied BEFORE the plane is laid flat, so it tips the quad out of the ground plane
+      // instead of spinning it in the ground plane — edge-on at some headings, which is also why they seemed to appear only when
+      // walking certain ways. YXZ turns first and then lays it flat, which is the order those two operations have to happen in.
+      _markDummy.rotation.order='YXZ';
       _markDummy.rotation.set(-Math.PI/2, m.yaw, 0);
       _markDummy.scale.setScalar(m.size*(0.72+0.28*fade));
       _markDummy.updateMatrix(); pool.im.setMatrixAt(i,_markDummy.matrix);
@@ -22761,6 +22823,12 @@ window.__hc={
       updateMarks(0.016);
       return { made:ok, state:this.marksProbe() }; }catch(e){ return {err:String(e.message||e)}; } },
   markAge(sec){ try{ updateMarks(+sec||1); return this.marksProbe(); }catch(e){ return {err:String(e.message||e)}; } },
+  // BOTH HANDS AT ONCE: which arms exist, which are drawn, and whether each gun has a hand ON it.
+  handsProbe(){ try{ const gh=(v)=>!!(v && v.mesh && (v.mesh.userData._gunHand || (v.mesh.children||[]).some(c=>c.userData&&c.userData._gunHand)));
+      const gunHandOf=(m)=>{ if(!m) return false; let f=!!m.userData._gunHand; if(!f) m.traverse(o=>{ if(o.userData&&o.userData._gunHand) f=true; }); return f; };
+      return { main:{ id:view.id, mesh:!!view.mesh, drawn:!!view.group.visible, arm:!!(mainArm.mesh&&mainArm.group.visible), gunHand:gunHandOf(view.mesh) },
+               off:{ id:offView.id, mesh:!!offView.mesh, drawn:!!offView.group.visible, arm:!!(offArm.mesh&&offArm.group.visible), gunHand:gunHandOf(offView.mesh) },
+               armX:{ main:+mainArm.group.position.x.toFixed(2), off:+offArm.group.position.x.toFixed(2) } }; }catch(e){ return {err:String(e.message||e)}; } },
   tpsShoulder(s){ try{ if(s!=null)_tpsShoulder=(s|0); return this.tpsCam(); }catch(e){ return {err:String(e.message||e)}; } },
   // The ring's live size, and the cone a shot may actually land in. spreadDeg is what "less accurate when jumping" has to move.
   xhProbe(){ try{ const el=document.getElementById('xh'), cs=el?getComputedStyle(el):null;
@@ -23481,11 +23549,15 @@ window.__hc={
   // clamp:0 restores the WHOLE pre-fix behaviour, cap included — a 58-block fall with no seabed clamp. Toggling only the
   // per-column clamp measured nothing, because the cap is what the far sea actually hits.
   seaCurve(o){ try{ const u=waterMat.uniforms;
-      if(o){ if(o.clamp!=null){ u.uCurveClamp.value=o.clamp?1:0; u.uCurveCap.value=o.clamp?6.0:58.0; }
+      if(o){ if(o.clamp!=null){ u.uCurveClamp.value=o.clamp?1:0; u.uCurveCap.value=o.clamp?2.0:58.0; }
              if(o.cap!=null)u.uCurveCap.value=+o.cap; if(o.r!=null)u.uCurveR.value=+o.r; if(o.k!=null)u.uCurveK.value=+o.k; }
       const at=d=>{ const over=Math.max(0,d-u.uCurveR.value); return Math.min(u.uCurveK.value*over*over, u.uCurveCap.value); };
+      // THE LEDGE AT THE RENDER WALL, which is the fault itself: the far-sea disc has no seabed to clamp against, so it takes
+      // the cap, while the chunk water it continues takes its own column. The difference is the step Ben photographed.
+      const ledge=(d,colD)=>+(at(d) - (u.uCurveClamp.value ? Math.min(at(d), Math.max(0,colD-0.6)) : at(d))).toFixed(2);
       return { clamp:u.uCurveClamp.value, cap:u.uCurveCap.value, r:u.uCurveR.value, k:u.uCurveK.value,
-               dropAt:{ 40:+at(40).toFixed(2), 96:+at(96).toFixed(2), 182:+at(182).toFixed(2) } };
+               dropAt:{ 40:+at(40).toFixed(2), 96:+at(96).toFixed(2), 182:+at(182).toFixed(2) },
+               ledgeAtWall:{ shelf3:ledge(182,3), shelf6:ledge(182,6), deep20:ledge(182,20) } };
     }catch(e){ return {err:String(e.message||e)}; } },
   godrays(o){ try{ if(o&&o.on!=null) _godraysOn=!!o.on;
       // THE THREE TERMS OF _grActive, each on its own, because "enabled:false" does not say which one said no.

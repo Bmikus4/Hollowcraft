@@ -1,0 +1,161 @@
+// THE SKY GOES ALL THE WAY DOWN, AND THE SEA STAYS ON TOP OF THE SEABED.
+//
+// Ben 08-04, two notes with one cause between them:
+//   "all of this needs removed and replaced with sky, this is the dark blue horizon backdrop below the sky. IT NEEDS
+//    REMOVED, the sky should extend down beyond the horizon in its place, ALWAYS"
+//   "the ocean shore is broken, and its falling under the ground far out... we could fix this by making water get deeper
+//    quicker, or by actually fixing the ocean itself"
+//
+// The backdrop is oceanMat, a painted gradient on a camera-centred cylinder that fills everything below a bowed horizon
+// line. The shore is waterMat's world curve: the surface is pushed DOWN by up to 58 blocks with distance while the terrain
+// under it does not move, so every shelf near sea level comes up through the water.
+//
+// Four claims:
+//   1. With the band off, the sky's own gradient is what sits under the horizon — so the region just above the waterline
+//      gets BRIGHTER (sky) rather than dropping onto the sea anchor, and the hard step the band made is gone.
+//   2. The sky no longer paints the sea's anchor colour into its own lowest rows either (uSkyToSea 0).
+//   3. The world curve can no longer sink the surface below its own seabed, so less land shows through the far water.
+//   4. Nothing else went with it: the far-sea disc still draws, and there are no page errors.
+//
+//   node bench/assert-horizon-sky.mjs
+import { spawn } from 'node:child_process'; import { createServer } from 'node:net';
+import http from 'node:http'; import fs from 'node:fs'; import path from 'node:path';
+import { chromium } from 'playwright-core';
+import { decodePNG } from './pngprobe.mjs';
+const ROOT=path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/,'$1')),'..');
+const OUT=path.join(ROOT,'bench','results');
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+function freePort(){ return new Promise((res,rej)=>{ const s=createServer(); s.listen(0,'127.0.0.1',()=>{ const p=s.address().port; s.close(()=>res(p)); }); s.on('error',rej); }); }
+function waitHttp(u,t=20000){ return new Promise((res,rej)=>{ const t0=Date.now(); (function p(){ const rq=http.get(u,r=>{r.resume();res();}); rq.on('error',()=>{ if(Date.now()-t0>t)rej(new Error('down')); else setTimeout(p,250); }); })(); }); }
+function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Google/Chrome/Application/chrome.exe']) if(fs.existsSync(p)) return p; throw new Error('no browser'); }
+const lum=(d,i)=>0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2];
+// A VERTICAL PROFILE down the middle of the frame: one mean per row band. The band Ben photographed is a step in this
+// profile, so the profile is the measurement — a whole-crop mean would average the sky and the band together and move barely
+// at all. x is kept to the middle third so the compass and the held item cannot enter it.
+function rows(file, bands=28){
+  const P=decodePNG(fs.readFileSync(file));
+  const x0=(P.w*0.34)|0, x1=(P.w*0.66)|0, out=[];
+  for(let b=0;b<bands;b++){
+    const y0=((P.h*b)/bands)|0, y1=((P.h*(b+1))/bands)|0; let s=0,n=0;
+    for(let y=y0;y<y1;y++) for(let x=x0;x<x1;x++){ s+=lum(P.data,(y*P.w+x)*P.ch); n++; }
+    out.push(+(s/n).toFixed(1)); }
+  return out;
+}
+// THE BIGGEST DOWNWARD STEP between adjacent bands, and where it is.
+function step(prof, from, to){ let best=0, at=-1;
+  for(let i=Math.max(1,from);i<Math.min(prof.length,to);i++){ const d=prof[i-1]-prof[i]; if(d>best){ best=d; at=i; } }
+  return { drop:+best.toFixed(1), at }; }
+// THE PLATEAU IS THE ARTEFACT, not the step. A sky meeting a sea across a horizon is a hard edge by nature — the first
+// version of this file asserted that edge should be soft and failed the fix for working: with the band gone the sky/water
+// step got BIGGER (56 -> 137) precisely because the band was no longer standing between them at a middle value.
+// What Ben photographed is a REGION: rows that are neither sky nor sea, holding a value between the two. So count them.
+function plateau(prof, from, to, lo=60, hi=130){ const rows=[];
+  for(let i=from;i<Math.min(prof.length,to);i++) if(prof[i]>lo && prof[i]<hi) rows.push(i+':'+prof[i]);
+  return rows; }
+// SAND, by hue: the beach and the shelf are warm and desaturated-bright, the sea is blue. Counting "not blue" pixels in a
+// crop of far water is what "the ground is coming up through the sea" looks like as a number.
+function warmPct(file, crop){
+  const P=decodePNG(fs.readFileSync(file));
+  const x0=(P.w*crop[0])|0,x1=(P.w*crop[1])|0,y0=(P.h*crop[2])|0,y1=(P.h*crop[3])|0;
+  let warm=0,n=0;
+  for(let y=y0;y<y1;y++) for(let x=x0;x<x1;x++){ const i=(y*P.w+x)*P.ch;
+    const r=P.data[i], g=P.data[i+1], b=P.data[i+2];
+    if(r>b+6 && r>70) warm++;                     // red over blue: sand, never sea
+    n++; }
+  return +(100*warm/n).toFixed(3);
+}
+(async()=>{
+  const port=await freePort();
+  const server=spawn(process.execPath,[path.join(ROOT,'server.js')],{cwd:ROOT,env:{...process.env,PORT:String(port),NO_OPEN:'1'},stdio:'ignore'});
+  fs.mkdirSync(OUT,{recursive:true});
+  let browser=null, fails=0, checks=0;
+  const check=(n,ok,d)=>{ checks++; if(!ok)fails++; console.log((ok?'  PASS  ':'  FAIL  ')+n+(d!==undefined?'   '+d:'')); };
+  try{
+    const base='http://127.0.0.1:'+port; await waitHttp(base+'/index.html');
+    browser=await chromium.launch({executablePath:findBrowser(),headless:true,args:['--enable-gpu','--use-angle=d3d11','--mute-audio']});
+    const ctx=await browser.newContext({viewport:{width:1000,height:560},deviceScaleFactor:1});
+    await ctx.addInitScript(()=>{ try{ localStorage.setItem('hollowcraft_grain','0'); }catch(e){} });
+    const page=await ctx.newPage();
+    const errs=[]; page.on('pageerror',e=>{ errs.push(String(e.message||e)); console.log('  PAGEERROR:',String(e.message||e).slice(0,180)); });
+    await page.goto(base+'/index.html?debug=1&rd=8',{waitUntil:'load',timeout:120000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
+    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
+    await page.evaluate(`__hc.lock(true); __hc.pinScene(); __hc.cmdRun('/gamemode creative'); __hc.cmdRun('/fly on');`);
+    const S=await page.evaluate(`__hc.st()`);
+    const gy=await page.evaluate(`__hc.groundY(${S.sx},${S.sz})`);
+    // BEN'S VANTAGE: a little above the beach, looking out to sea and slightly down — the shot he sent. A high vantage hides
+    // both faults (the band shrinks to a strip and the far shelf falls outside the frame), so height is part of the test.
+    await page.evaluate(`__hc.tpAt(${S.sx}+0.5, ${gy+9}, ${S.sz}+0.5); __hc.cam({yaw:0.0, pitch:-0.16});`);
+    for(let i=0;i<30;i++){ const f=await page.evaluate(`__hc.fill()`); if(f&&f.meshed>=f.want) break; await sleep(500); }
+    await sleep(2200);
+    // TWO BEARINGS, because the two faults are visible from opposite ones. The backdrop wants OPEN water — any land in the
+    // frame is a second thing changing between the pair. The shore fault wants the most land it can get in the far-water
+    // band, which is where a shelf near sea level comes up through a surface that has been pushed down. Scanning for the
+    // clearest bearing and then testing the shore from it measured a stretch of sea with no shelf in it at all.
+    const scan=[];
+    for(let i=0;i<12;i++){ const yaw=i*Math.PI/6;
+      await page.evaluate(`__hc.cam({yaw:${yaw}, pitch:-0.16})`); await sleep(240);
+      const f=path.join(OUT,'tmp-horizon-scan.png'); await page.screenshot({path:f});
+      scan.push({yaw, warm:warmPct(f,[0.20,0.80,0.40,0.58])}); }
+    scan.sort((a,b)=>a.warm-b.warm);
+    const bestYaw=scan[0].yaw, landYaw=scan[scan.length-1].yaw;
+    console.log(`  open water at yaw ${bestYaw.toFixed(2)} (${scan[0].warm}% land in the far band); most shelf at yaw ${landYaw.toFixed(2)} (${scan[scan.length-1].warm}%)`);
+    await page.evaluate(`__hc.cam({yaw:${bestYaw}, pitch:-0.16})`); await sleep(400);
+    const shot=async(t,name)=>{ await page.evaluate(`__hc.setTime(${t})`); await sleep(420); await page.evaluate(`__hc.setTime(${t})`); await sleep(200);
+      const f=path.join(OUT,name); await page.screenshot({path:f}); return f; };
+
+    // ---- 1+2. THE BACKDROP ---------------------------------------------------------------------------------------------
+    const before=await page.evaluate(`(()=>{ __hc.horizonBand({on:true}); __hc.skyToSea(1); return __hc.horizonBand(); })()`);
+    const fBefore=await shot(0.20,'horizon-band-before.png');
+    await page.evaluate(`__hc.horizonBand({on:false}); __hc.skyToSea(0);`);
+    const fAfter=await shot(0.20,'horizon-band-after.png');
+    const pB=rows(fBefore), pA=rows(fAfter);
+    console.log('  band ON  rows: '+pB.join(' '));
+    console.log('  band OFF rows: '+pA.join(' '));
+    const sB=step(pB,4,20), sA=step(pA,4,20);
+    const qB=plateau(pB,4,15), qA=plateau(pA,4,15);
+    console.log(`  biggest step, upper frame:  band ON ${sB.drop} at ${sB.at}   band OFF ${sA.drop} at ${sA.at}  (the OFF one IS the waterline)`);
+    console.log(`  rows between sky and sea:   band ON [${qB.join(' ')}]   band OFF [${qA.join(' ')}]`);
+    check('the band was there to begin with', qB.length>=2, `${qB.length} row bands hold a value between sky and sea: [${qB.join(' ')}] — if this is empty the vantage is wrong, not the fix`);
+    check('and nothing sits between the sky and the sea any more', qA.length===0, `[${qA.join(' ')}]`);
+    const bandRow=sB.at>=0?sB.at:14;
+    check('what replaced it is brighter, i.e. sky', pA[bandRow] > pB[bandRow]+6, `row band ${bandRow}: ${pB[bandRow]} -> ${pA[bandRow]}`);
+    // …and the sky it was replaced with is a smooth gradient, not a second edge.
+    // sA.at-1, not sA.at: the row band directly above the waterline STRADDLES it — part sky, part sea — so it reads as a
+    // 12-level step that is really the horizon inside one band, not a second edge in the sky. A 28-band profile cannot
+    // resolve a boundary finer than a band, and pretending otherwise failed the check on the geometry of its own bins.
+    const skyStep=step(pA,4,Math.max(5,sA.at-1));
+    check('the sky above the waterline is smooth', skyStep.drop<8, `biggest step in the sky itself ${skyStep.drop} levels over row bands 4..${sA.at-2}`);
+    const st=await page.evaluate(`__hc.horizonBand()`);
+    console.log('  state: '+JSON.stringify(st));
+    check('the far-sea disc is still drawing', st.farSea===true && st.layerVisible===true && st.band===false, JSON.stringify(st));
+
+    // ---- 3. THE SHORE --------------------------------------------------------------------------------------------------
+    // Same frame, clamp off then on. Less land in the far-water band is the whole claim.
+    const curve=await page.evaluate(`__hc.seaCurve()`);
+    console.log('  curve: '+JSON.stringify(curve));
+    // FROM THE OPEN-WATER BEARING, and in a thin strip just under the horizon — that is where the render wall is and where a
+    // seabed drained by the curve shows up as sand. The bearing with the most land in it is the island itself, and measuring
+    // there measured a beach in the foreground that the curve has nothing to do with: 28.1% -> 27.9%, which is noise.
+    await page.evaluate(`__hc.cam({yaw:${bestYaw}, pitch:-0.16})`); await sleep(400);
+    await page.evaluate(`__hc.seaCurve({clamp:0})`);
+    const fUnclamped=await shot(0.20,'horizon-shore-unclamped.png');
+    await page.evaluate(`__hc.seaCurve({clamp:1})`);
+    const fClamped=await shot(0.20,'horizon-shore-clamped.png');
+    const FAR=[0.10,0.90,0.455,0.50];   // the strip immediately below the horizon: the far sea at the render wall
+    const wU=warmPct(fUnclamped,FAR), wC=warmPct(fClamped,FAR);
+    console.log(`  land showing through the far water:  curve unclamped ${wU}%   clamped ${wC}%`);
+    check('the sea no longer falls under the ground far out', wC < wU-0.02, `${wU}% -> ${wC}% of the far-water band is land, from the bearing with the most shelf in it`);
+    const cv=await page.evaluate(`__hc.seaCurve()`);
+    console.log('  curve now: '+JSON.stringify(cv));
+    check('and the clamp is what is live', cv.clamp===1 && cv.cap<=2.0);
+    // THE LEDGE, geometrically, so this does not depend on a vantage being lucky: at the render wall the disc takes the cap
+    // and the shallow chunk water beside it takes its own column, and the difference is the step.
+    check('the step where the far sea meets chunk water is under a block and a half', cv.ledgeAtWall.shelf3<1.5,
+      `ledge at the wall against a 3-deep shelf ${cv.ledgeAtWall.shelf3} blocks (was 55.3 at the old 58-block cap), against 6-deep ${cv.ledgeAtWall.shelf6}, deep water ${cv.ledgeAtWall.deep20}`);
+    check('no page errors', errs.length===0, errs.slice(0,2).join(' | '));
+    console.log('  frames: bench/results/horizon-*.png');
+    console.log(`\n${checks-fails}/${checks} checks pass`);
+  } finally { try{ if(browser) await browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }
+  process.exit(fails?1:0);
+})().catch(e=>{ console.error(e); process.exit(1); });
