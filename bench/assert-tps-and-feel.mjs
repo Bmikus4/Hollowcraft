@@ -332,6 +332,20 @@ const ok=(name,cond,got)=>{ if(!cond)fails++; console.log(`  ${cond?'ok  ':'FAIL
     const withBed = await page.evaluate(`(()=>{ __hc.objPlace(1,'bed'); return __hc.objBase(); })()`);
     ok('blocks, a door AND a bed completes it', withBed.bed===true && withBed.met===true, withBed);
 
+    console.log('\n[18] the eye is still when you are');
+    const still1 = await page.evaluate(`__hc.eyeStill(120)`);
+    console.log('   ', JSON.stringify(still1));
+    ok('standing on the ground, the camera does not move at all', still1.peakToPeak<0.002, {peakToPeak:still1.peakToPeak});
+    ok('and no landing correction is being re-armed every frame', still1.landCorr.max===0, still1.landCorr);
+    // …and a landing DOES move it: measured across the jump itself rather than after it, since the whole point of the smoothing
+    // is that the movement is spread over the tenth of a second following the impact.
+    // Measured INSIDE the arc, on the frame the correction is armed: sampling afterwards races the decay, which is over in a
+    // tenth of a second by design.
+    // Stamina first: [16] deliberately empties it, and an empty bar means no jump — so without this the arc measures the stamina
+    // gate working rather than the landing.
+    const landed = await page.evaluate(`(()=>{ __hc.stamSet(100); return __hc.jumpArc(0.6); })()`);
+    ok('a real landing still arms the smoothing', landed.landCorr>0, {landCorr:landed.landCorr, rise:landed.rise});
+
     ok('no page errors', errors.length===0, errors);
     await browser.close();
   } finally { server.kill(); }
