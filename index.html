@@ -16,10 +16,14 @@
          rgba(120,0,0,0) 50%, rgba(120,0,0,0.55) 100%); opacity:0; transition:opacity .45s; }
   #water { position:fixed; inset:0; pointer-events:none; z-index:4; opacity:0; transition:opacity .25s;
            background:radial-gradient(ellipse at center, rgba(12,64,74,0.5) 0%, rgba(3,22,28,0.9) 100%); }
-  #xh { position:fixed; left:50%; top:50%; width:18px; height:18px; transform:translate(-50%,-50%);
+  /* CROSSHAIR — A RING THAT BREATHES, not a fixed plus (Ben 08-04). updateCrosshair writes width/height every frame it
+     changes; translate(-50%,-50%) is a percentage of the element's OWN box, so it re-centres itself on every resize and the
+     size is a single style write with no arithmetic on the JS side. The ring is the border; the dot is ::after. */
+  #xh { position:fixed; left:50%; top:50%; width:16px; height:16px; transform:translate(-50%,-50%);
+        border:2px solid #fff; border-radius:50%; box-sizing:border-box;
         mix-blend-mode:difference; z-index:5; opacity:.85; }
-  #xh::before,#xh::after{content:'';position:absolute;background:#fff;}
-  #xh::before{left:8px;top:0;width:2px;height:18px;} #xh::after{left:0;top:8px;width:18px;height:2px;}
+  #xh::after{ content:''; position:absolute; left:50%; top:50%; width:2px; height:2px;
+        transform:translate(-50%,-50%); background:#fff; border-radius:50%; }
   #hud { position:fixed; left:0; right:0; bottom:8px; z-index:5; display:flex; flex-direction:column;
          align-items:center; gap:6px; pointer-events:none; }
   #bars { display:flex; gap:120px; align-items:flex-end; height:22px; }
@@ -5470,8 +5474,23 @@ function physics(dt){
   if(p.fly && cineMode){ const k=Math.min(1,dt*2.4);   // CINEMATIC FLIGHT — inertial easing on all three axes → glassy, floaty camera glide; look pitch drives forward too (fly where you look)
     const ld=lookDir(), ty=(((keys.Space?1:0)-((keys.ShiftLeft||keys.ShiftRight)?1:0))*base) + (mag>0?ld.y*fwd*base:0);
     p.vel.x+=(mvx*base-p.vel.x)*k; p.vel.z+=(mvz*base-p.vel.z)*k; p.vel.y+=(ty-p.vel.y)*k; }
-  else { p.vel.x=mvx*base; p.vel.z=mvz*base;
-    if(p.fly){ p.vel.y=((keys.Space?1:0)-((keys.ShiftLeft||keys.ShiftRight)?1:0))*base*0.85; } }
+  else if(p.fly){ p.vel.x=mvx*base; p.vel.z=mvz*base;                                  // flight stays crisp and instant — it is a camera, not a body
+    p.vel.y=((keys.Space?1:0)-((keys.ShiftLeft||keys.ShiftRight)?1:0))*base*0.85; }
+  else {
+    // MOMENTUM (Ben 08-04: "can we make jumping/movement more realistic?"). Velocity was assigned straight from the keys, so you
+    // reached full sprint in one frame, stopped dead in one frame, and could turn 180 degrees in mid-air — three things a body
+    // cannot do, and the three that make movement feel like a cursor rather than a person.
+    //
+    // Ground rates are deliberately fast: 18/s reaches 90% of target in about 0.13 s, which is still inside the window where
+    // input feels direct. Stopping is slower than starting (12/s) and that asymmetry is what reads as weight.
+    //
+    // IN THE AIR YOU KEEP WHAT YOU LAUNCHED WITH. Steering authority drops to 3.2/s and only applies while a key is held —
+    // there is no air friction, so releasing the keys mid-jump does NOT brake you. A jump is a committed arc you aimed before
+    // leaving the ground, instead of a hover you fly.
+    const tx=mvx*base, tz=mvz*base, air=!p.onGround && !p.inWater;
+    if(air){ if(mag>0){ const k=Math.min(1,dt*3.2); p.vel.x+=(tx-p.vel.x)*k; p.vel.z+=(tz-p.vel.z)*k; } }
+    else { const k=Math.min(1, dt*(mag>0?18:12)); p.vel.x+=(tx-p.vel.x)*k; p.vel.z+=(tz-p.vel.z)*k;
+      if(Math.abs(p.vel.x)<0.02) p.vel.x=0; if(Math.abs(p.vel.z)<0.02) p.vel.z=0; } }   // an exponential never reaches zero; a standing player must actually stand still
   if(p.fly){}                                                                          // flying → skip the swim/ladder/gravity chain below (its y is already set above)
   else if(p.inWater || (p.wading && getBlock(p.pos.x, p.pos.y+0.35, p.pos.z)===WATER)){ // buoyant water physics: swim up (Space), dive (Sneak), else float+slow-sink. Waist-deep ALSO swims — previously only a submerged torso did, so holding Space stalled with your eyes at the waterline and you could never break out of the water
     if(keys.Space){ if(p.inWater) p.vel.y=3.8;    // submerged: steady rise toward the surface
@@ -5490,7 +5509,23 @@ function physics(dt){
     const ld=lookDir(); const spd=12 + Math.max(0,-ld.y)*20;                                          // point DOWN to dive and build speed (up to ~32); level to glide far
     p.vel.x=ld.x*spd; p.vel.z=ld.z*spd; p.vel.y=clamp(ld.y*spd,-20,8);                                 // pitch controls climb vs dive
     if(ld.y>-0.06 && p.vel.y<-3) p.vel.y=-3; p._gliding=true; }                                        // gliding roughly level → a gentle sink, so you soar
-  else { p._gliding=false; p.vel.y-=CFG.GRAVITY*dt; if(p.vel.y<-56)p.vel.y=-56; if(keys.Space&&p.onGround){p.vel.y=8.4;p.onGround=false; if(typeof emitNoise==='function')emitNoise(p.pos.x,p.pos.y,p.pos.z,0.4);} }
+  else { p._gliding=false;
+    // A REAL JUMP IS NOT A SYMMETRIC PARABOLA. Rising under full gravity and falling under the same gravity is the floatiest
+    // curve there is; every jump that feels physical falls harder than it rose. And LETTING GO OF SPACE ENDS THE JUMP: hold it
+    // for the full arc, tap it to hop. Same impulse (8.4) so the maximum height is unchanged — what changes is that you now have
+    // a say in it, and that the descent is quicker than the ascent.
+    const rising=p.vel.y>0;
+    p.vel.y -= CFG.GRAVITY*dt*(rising ? (keys.Space?1.0:1.7) : 1.15);
+    if(p.vel.y<-56)p.vel.y=-56;
+    // COYOTE TIME + JUMP BUFFERING. Both cover the gap between what a player did and what the frame boundary recorded: a jump
+    // pressed a few hundredths after walking off a ledge, or a few hundredths before landing, was silently eaten. They are not
+    // cheats — they make the input match the intent that was already there, which is why every jump feels late without them.
+    p._coyote = p.onGround ? 0.11 : Math.max(0,(p._coyote||0)-dt);
+    p._jumpBuf = keys.Space ? 0.12 : Math.max(0,(p._jumpBuf||0)-dt);
+    p._jumpCd = Math.max(0,(p._jumpCd||0)-dt);
+    if(p._jumpBuf>0 && p._jumpCd<=0 && (p.onGround || p._coyote>0)){
+      p.vel.y=8.4; p.onGround=false; p._coyote=0; p._jumpBuf=0; p._jumpCd=0.14;      // the cooldown is what stops a held Space auto-bouncing on landing
+      if(typeof emitNoise==='function')emitNoise(p.pos.x,p.pos.y,p.pos.z,0.4); } }
   if(cineMode && p.fly){ p.pos.x+=p.vel.x*dt; p.pos.y+=p.vel.y*dt; p.pos.z+=p.vel.z*dt; p.onGround=false; return; }   // CINEMATIC: noclip — the free camera glides straight through terrain, no collision resolve
   if(typeof VOID!=='undefined' && VOID.on && VOID.floored){   // STAGE III: the real tiles are GONE — the player stands on a single flat, clear surface held up above the white nothing (no voxel collision, free to roam)
     p.pos.x+=p.vel.x*dt; p.pos.z+=p.vel.z*dt; p.pos.y+=p.vel.y*dt;
@@ -5526,9 +5561,15 @@ function physics(dt){
     if(rs!==null && p.pos.y < rs+0.02 && p.pos.y > rs-0.8){ p.pos.y=rs; if(p.vel.y<0)p.vel.y=0; p.onGround=true; p._impactVy=0; } }
   // FALL DAMAGE: based on IMPACT VELOCITY (momentum), not distance — water clamps fall velocity to ~-4, so a splash-landing is harmless
   const landed = p.onGround && !p._wasGround;
+  p.landT=Math.max(0,(p.landT||0)-dt*3.0);   // decays BEFORE this frame's landing can set it, or the impact would be eaten on arrival
   if(landed && p._impactVy!=null){ const spd=-p._impactVy;
     const wet = p.inWater || getBlock(Math.floor(p.pos.x),Math.floor(p.pos.y),Math.floor(p.pos.z))===WATER || getBlock(Math.floor(p.pos.x),Math.floor(p.pos.y+0.9),Math.floor(p.pos.z))===WATER;
-    if(spd>16 && !wet) damage(Math.min(20,Math.round((spd-14)*1.1)),'the fall broke you','env'); }
+    if(spd>16 && !wet) damage(Math.min(20,Math.round((spd-14)*1.1)),'the fall broke you','env');
+    // LANDING COSTS YOU SOMETHING. You arrive on your legs, not on wheels: a real landing absorbs into the knees and bleeds
+    // speed. Anything under 7 m/s (a hop, a kerb, a stair) is free, so ordinary walking is untouched — this only shows up when
+    // you actually drop. p.landT drives the camera dip and the body's knee bend, so one number keeps them in step.
+    if(spd>7 && !wet){ const f=Math.max(0.55, 1-(spd-7)*0.045); p.vel.x*=f; p.vel.z*=f;
+      p.landT=Math.min(0.34,(spd-7)*0.032); } }
   p._impactVy=null;
   p._wasGround=p.onGround;
   if(p.pos.y<-24 && !p.fly){ damage(4,'the dark below','env'); respawn(); }
@@ -5889,7 +5930,10 @@ defItem('rifle_ammo',{name:'Rifle Cartridge',max:64,icon:{t:'bullet',c:'#caa23c'
 // place that mapping lives, so the reload, the dry-click and the ammo readout cannot disagree about it.
 defItem('shotgun',{name:'12 Gauge',max:1,icon:{t:'tool',kind:'sword',c:'#2a1c12'},gun:'shotgun'});   // pump-action; five shells, nine pellets a shell — see buildShotgun/fireGun
 defItem('shotgun_suppressed',{name:'12 Gauge · Suppressed',max:1,icon:{t:'tool',kind:'sword',c:'#26262c'},gun:'shotgun',suppressed:true});
-defItem('buckshot',{name:'12 Gauge Buckshot',max:64,icon:{t:'bullet',c:'#b23c2a'}});   // a red plastic shell, brass head — the icon reads apart from the rifle cartridge's gold at hotbar size
+// ITS OWN PAINTER NOW (Ben 08-04). It shared 'bullet' with the rifle cartridge and differed only in the colour of the
+// CONICAL TIP — so it was a brass rifle case with a red bullet in it. rifle_ammo keeps 'bullet'; assert-buckshot holds the
+// two apart by counting how many of the 256 icon pixels differ, because the game refuses to let one feed the other gun.
+defItem('buckshot',{name:'12 Gauge Buckshot',max:64,icon:{t:'shell',c:'#b23c2a'}});   // red plastic hull, short brass head, star crimp   // red plastic hull, short brass head, star crimp
 // ---- LOOT (Ben 07-21): the boss/wretch reward. Right-click a bag to spill its contents into your bags. ----
 defItem('loot_bag',{name:"Ceraphim's Reward",max:16,icon:{t:'basket',c:'#e8c86a'},
   loot:[['ceraphim_trophy',1],['atlas',1],['nvg',1],['angel_wings',1],['minigun',1],['backrooms_egg',1],['diamond',4],['rifle_ammo',64],['holy_water',2]]});
@@ -5948,6 +5992,17 @@ function drawIcon(cx,id){
   else if(s.t==='bread'){ cx.fillStyle=c; cx.beginPath(); cx.ellipse(8,9,6,4,0,0,7); cx.fill(); cx.strokeStyle='rgba(80,50,20,.6)'; cx.beginPath();cx.moveTo(5,7);cx.lineTo(6,11);cx.moveTo(9,7);cx.lineTo(10,11);cx.stroke(); }
   else if(s.t==='pie'){ circ(8,9,6,'#caa15a'); cx.fillStyle=c; cx.beginPath(); cx.arc(8,9,6,3.6,6); cx.fill(); }
   else if(s.t==='jar'||s.t==='cup'){ cx.fillStyle='rgba(210,225,230,.5)'; rect(4,4,8,10,'rgba(210,225,230,.5)'); rect(5,7,6,6,c); }
+  // A 12-GAUGE IS NOT A CARTRIDGE. It was drawn by the 'bullet' painter with a red tip, i.e. a brass rifle case with a red
+  // bullet in it, which is exactly what Ben saw. A real shell is mostly COLOURED PLASTIC HULL, straight-sided, with a short
+  // BRASS HEAD about a third of the hull's length and a star crimp folded shut across the mouth. At 16px the silhouette is
+  // what separates them: this is FAT (6px) and square-topped where the cartridge is narrow (4px) and tapers to a point.
+  else if(s.t==='shell'){
+    rect(5,2,6,9,c);                                                                   // the plastic hull
+    cx.fillStyle='rgba(0,0,0,.34)'; cx.fillRect(5,2,6,1);                              // the crimp folded shut across the mouth
+    cx.fillRect(7,3,1,1); cx.fillRect(9,3,1,1);                                        // two of the six folds catching shadow
+    rect(5,11,6,3,'#b8892f');                                                          // the brass head — a third of the hull
+    cx.fillStyle='#8a6a24'; cx.fillRect(4,13,8,1);                                     // the extractor rim, standing proud
+    cx.fillStyle='rgba(255,255,255,.32)'; cx.fillRect(6,3,1,8); }                      // the wet sheen plastic has and brass has not
   else if(s.t==='bullet'){ rect(6,5,4,9,'#b8892f'); cx.fillStyle='#8a6a24'; cx.fillRect(6,11,4,1); cx.beginPath(); cx.moveTo(6,5); cx.lineTo(10,5); cx.lineTo(8,1); cx.closePath(); cx.fillStyle=c; cx.fill(); cx.fillStyle='rgba(255,255,255,.35)'; cx.fillRect(6.5,6,1,6); }   // brass cartridge + copper tip
   else if(s.t==='flower'){ circ(8,5,3,c); rect(7,7,2,7,'#5a7a3a'); }
   else if(s.t==='basket'){ rect(3,7,10,7,c); cx.strokeStyle='#7a5a34';cx.beginPath();cx.arc(8,7,5,3.14,6.28);cx.stroke(); }
@@ -6999,8 +7054,8 @@ addEventListener('keydown',e=>{ if(e.code==='Space')e.preventDefault();
   // F3 = THIRD PERSON (Ben). It was on F4 and F3 toggled the profiler; the profiler moves to SHIFT+F3, since a debug
   // overlay is the rarer of the two and third person is a thing you flip constantly.
   if(e.code==='F3' && e.shiftKey){ prof.style.display=prof.style.display==='none'?'block':'none'; return; }
-  if(e.code==='F3'){ e.preventDefault(); _tpsOn=!_tpsOn; _tpsPos.set(0,0,0); flashName(_tpsOn?'third person':'first person'); return; }
-  if(e.code==='F4'){ e.preventDefault(); _tpsOn=!_tpsOn; _tpsPos.set(0,0,0); flashName(_tpsOn?'third person':'first person'); return; }   // kept: F4 was the shortcut before F3 took over, and muscle memory is cheap to honour
+  if(e.code==='F3'){ e.preventDefault(); _tpsOn=!_tpsOn; _tpsReset(); flashName(_tpsOn?'third person':'first person'); return; }
+  if(e.code==='F4'){ e.preventDefault(); _tpsOn=!_tpsOn; _tpsReset(); flashName(_tpsOn?'third person':'first person'); return; }   // kept: F4 was the shortcut before F3 took over, and muscle memory is cheap to honour
   if(e.code==='F8'){ dbg.style.display=dbg.style.display==='none'?'block':'none'; updateDbg&&updateDbg(); return; }
   if(e.code==='KeyC' && (!openUI||openUI==='creative') && !player.grabbed){ if(!window._allowCreative){ flashName('creative is locked in survival'); return; } toggleCreative(); return; }   // creative all-items menu (open from play, close from the menu) — SURVIVAL locks it; NOTHING opens while it has you
   if(openUI && e.code==='KeyQ' && !_NO_Q_DROP){ dropHovered(); return; }   // Q over ANY slot in ANY open UI drops one from it (Ben: anytime). Must sit ABOVE the pointer-lock guard, which a container has already released.
@@ -8018,7 +8073,10 @@ function updateCamera(dt){
   const speed=Math.hypot(p.vel.x,p.vel.z);
   if(p.onGround&&speed>0.5){ p.bob+=dt*speed*1.4; } else if(p.inWater){ p.bob+=dt*(1.3+speed*0.7); }   // keep the stroke cycling while swimming (no ground contact)
   const swim=p.inWater;
-  const bobY=Math.sin(p.bob*2)*(swim?0.08:0.045)*clamp((speed+(swim?1.6:0))/6,0,1) + (swim?Math.sin(clock.elapsedTime*1.15)*0.04:0);   // swim stroke + a gentle buoyant bob even at rest
+  // The landing dip rides on the bob because it is the same quantity — where the eye is relative to the body. One sine hump over
+//  the life of p.landT: the knees give, then push back. See the landing block in physics for where landT comes from.
+  const landDip = p.landT>0 ? Math.sin(Math.min(1,p.landT/0.34)*Math.PI)*0.20 : 0;
+  const bobY=Math.sin(p.bob*2)*(swim?0.08:0.045)*clamp((speed+(swim?1.6:0))/6,0,1) + (swim?Math.sin(clock.elapsedTime*1.15)*0.04:0) - landDip;   // swim stroke + a gentle buoyant bob even at rest
   const bobX=Math.cos(p.bob)*(swim?0.05:0.03)*clamp((speed+(swim?1.0:0))/6,0,1);
   const swimRoll=swim?Math.sin(p.bob)*0.025*clamp(speed/3,0.4,1):0;   // slight body roll with each stroke
   const targetFov = view.ads ? 62 : (74 + (p.sprint?9:0));                 // ADS → only a mild bring-to-eye zoom; the SCOPE GLASS (PiP) does the real magnification
@@ -8031,21 +8089,78 @@ function updateCamera(dt){
   camera.position.set(p.pos.x+right.x*bobX, p.pos.y+EYE+bobY, p.pos.z+right.z*bobX);
   // ---- F4 THIRD PERSON (Ben 07-27) — deliberately ROUGH tracking: the boom lags the eye instead of being welded to it,
   //      so the camera swings and settles behind you rather than snapping. Pulled in if a wall is in the way.
-  if(_tpsOn){ const d=lookDir();
-    const wantX=camera.position.x-d.x*_TPS_D, wantY=camera.position.y-d.y*_TPS_D+0.55, wantZ=camera.position.z-d.z*_TPS_D;
-    if(_tpsPos.x===0&&_tpsPos.y===0&&_tpsPos.z===0) _tpsPos.set(wantX,wantY,wantZ);
-    const k=Math.min(1, dt*5.5); _tpsPos.x+=(wantX-_tpsPos.x)*k; _tpsPos.y+=(wantY-_tpsPos.y)*k; _tpsPos.z+=(wantZ-_tpsPos.z)*k;   // the lag IS the roughness
-    let bx=_tpsPos.x, by=_tpsPos.y, bz=_tpsPos.z;                                     // wall check: step back from the head and stop at the last clear cell
-    { const hx=camera.position.x, hy=camera.position.y, hz=camera.position.z, vx=bx-hx, vy=by-hy, vz=bz-hz, vl=Math.hypot(vx,vy,vz)||1;
-      for(let s=vl; s>0.4; s-=0.35){ const px=hx+vx/vl*s, py=hy+vy/vl*s, pz=hz+vz/vl*s;
-        if(typeof solidAt!=='function' || !solidAt(Math.floor(px),Math.floor(py),Math.floor(pz))){ bx=px; by=py; bz=pz; break; } } }
-    camera.position.set(bx,by,bz);
+  if(_tpsOn){ updateTpsCamera(dt, p);
     _tpsHideHands(true);                                                              // no held viewmodel floating in the air behind you
   } else if(!player.grabbed) _tpsHideHands(false);
   globalU.uCamPos.value.copy(camera.position);
   updateTpsBody(dt);
 }
 let _tpsOn=false; const _TPS_D=3.6, _tpsPos=new THREE.Vector3();
+// =====================================================================
+//  THIRD-PERSON BOOM (Ben 08-04: "smoother but better tracking, less sway" + "should go around blocks/structures never
+//  inside, if the player is inside a structure get close to them")
+// =====================================================================
+// FOUR THINGS THE OLD BOOM GOT WRONG, and they are separable:
+//
+// 1  IT HUNG OFF THE BOBBING EYE. The target was camera.position, which already carries head-bob, the strafe lean and the
+//    swim roll — a 3.6 m lever multiplying every footstep. That is the sway. The pivot is now the player's OWN position at
+//    eye height, so walking cannot wave the camera about, and the bob stays where it belongs: in first person.
+//
+// 2  IT LAGGED THE DIRECTION AS WELL AS THE POSITION, so the aim drifted behind the mouse and "smooth" read as "vague".
+//    Direction is now instantaneous — the boom points exactly where you look — and only the PIVOT is damped. Tighter
+//    tracking and less sway are not a trade-off once those two are separated.
+//
+// 3  IT COULD SIT INSIDE GEOMETRY. The pull-in was smoothed like everything else, so a wall arriving faster than the lag
+//    put the camera in the stone for a few frames. Pull-in is now instantaneous and push-out is damped: the boom can never
+//    lag INTO a wall, only out of one. A final containment step walks the camera back toward the pivot if it somehow ends
+//    up in a solid cell anyway, so "never inside" is enforced at the last possible moment rather than hoped for.
+//
+// 4  IT ONLY KNEW HOW TO SHORTEN. Behind a pillar or in a doorway the only move it had was to slide up your back. It now
+//    tries a fan of yaw offsets and takes the smallest one that clears, so it swings AROUND the obstruction instead of
+//    through it; the chosen offset is itself damped, which is what makes that read as the camera walking round a corner.
+//    Indoors — anything solid overhead — it stops fighting the walls and comes in close by default.
+const _TPS_OFFS=[0,-0.3,0.3,-0.62,0.62,-1.0,1.0], _TPS_MIN=0.85, _TPS_IN=1.9;
+let _tpsInit=false, _tpsDist=_TPS_D, _tpsYawOff=0; const _tpsAnchor=new THREE.Vector3();
+function _tpsReset(){ _tpsInit=false; _tpsYawOff=0; _tpsDist=_TPS_D; _tpsPos.set(0,0,0); }
+function _tpsSolid(x,y,z){ return (typeof solidAt==='function') && solidAt(Math.floor(x),Math.floor(y),Math.floor(z)); }
+// How far the boom can go along (yaw,pitch) before it would put the camera in something. Samples the CENTRE plus the two
+// horizontal flanks, so the camera keeps a body's width of clearance instead of kissing the wall and clipping through it.
+function _tpsClear(ox,oy,oz, yaw, pitch, maxD){
+  const cp=Math.cos(pitch), dx=-Math.sin(yaw)*cp, dy=Math.sin(pitch), dz=-Math.cos(yaw)*cp;
+  const rx=Math.cos(yaw), rz=-Math.sin(yaw), R=0.28;                        // boom-relative right, for the flank samples
+  let last=_TPS_MIN;
+  for(let s=_TPS_MIN; s<=maxD+1e-6; s+=0.18){
+    const px=ox+dx*s, py=oy+dy*s, pz=oz+dz*s;
+    if(_tpsSolid(px,py,pz) || _tpsSolid(px+rx*R,py,pz+rz*R) || _tpsSolid(px-rx*R,py,pz-rz*R)
+       || _tpsSolid(px,py+0.22,pz)) return Math.max(_TPS_MIN, last-0.14);
+    last=s; }
+  return maxD;
+}
+function _tpsRoofed(p){ const x=p.pos.x, z=p.pos.z;                          // solid overhead → a room, a tunnel, a cabin
+  for(let dy=2.2; dy<=4.2; dy+=0.8) if(_tpsSolid(x,p.pos.y+dy,z)) return true;
+  return false; }
+function updateTpsCamera(dt, p){
+  const ax=p.pos.x, ay=p.pos.y+EYE+0.18, az=p.pos.z;
+  if(!_tpsInit){ _tpsAnchor.set(ax,ay,az); _tpsDist=_TPS_D; _tpsYawOff=0; _tpsInit=true; }
+  const ka=Math.min(1, dt*14);                                              // the pivot is damped — this is the whole of the smoothing
+  _tpsAnchor.x+=(ax-_tpsAnchor.x)*ka; _tpsAnchor.y+=(ay-_tpsAnchor.y)*ka; _tpsAnchor.z+=(az-_tpsAnchor.z)*ka;
+  const px0=_tpsAnchor.x, py0=_tpsAnchor.y, pz0=_tpsAnchor.z;
+  const want=_tpsRoofed(p)?_TPS_IN:_TPS_D;
+  let bestOff=0, bestDist=-1;                                               // straight back if it clears, else swing around
+  for(const off of _TPS_OFFS){ const c=_tpsClear(px0,py0,pz0, p.yaw+off, p.pitch, want);
+    if(c>=want-0.06){ bestOff=off; bestDist=c; break; }
+    if(c>bestDist){ bestDist=c; bestOff=off; } }
+  _tpsYawOff += (bestOff-_tpsYawOff)*Math.min(1, dt*7);                      // slide round the corner rather than snapping to it
+  const yaw=p.yaw+_tpsYawOff, cp=Math.cos(p.pitch);
+  const dx=-Math.sin(yaw)*cp, dy=Math.sin(p.pitch), dz=-Math.cos(yaw)*cp;
+  const hit=_tpsClear(px0,py0,pz0, yaw, p.pitch, want), target=Math.min(want,hit);
+  if(target<_tpsDist) _tpsDist=target;                                      // in NOW: the boom must never lag into stone
+  else _tpsDist += (target-_tpsDist)*Math.min(1, dt*4.5);                   // out gently, so leaving a doorway is not a lurch
+  let cx=px0-dx*_tpsDist, cy=py0-dy*_tpsDist, cz=pz0-dz*_tpsDist;
+  for(let g=0; g<6 && _tpsSolid(cx,cy,cz); g++){ const s=_tpsDist*(1-(g+1)/6);   // containment: end up outside the world, never in it
+    cx=px0-dx*s; cy=py0-dy*s; cz=pz0-dz*s; _tpsDist=s; }
+  camera.position.set(cx,cy,cz);
+}
 // ALL THREE VIEWMODEL GROUPS, NOT JUST THE MAIN HAND (Ben 08-04: "hide the players hand from the hud, same goes for any offhand
 // stuff"). The held item, the offhand item and the offhand ARM are three separate groups on the camera, and third person hid
 // only the first -- which is why a shield and a bare forearm went on hanging in the middle of the screen.
@@ -8087,8 +8202,25 @@ function updateTpsBody(dt){
   const hs=inv[selSlot], hid=hs?hs.id:null;
   if(P.held!==hid){ P.held=hid; try{ setAvatarHeld(P,hid); }catch(e){} }
   const it=hid?ITEMS[hid]:null;
-  if(it&&it.gun) P.armR.rotation.x=-1.45-player.pitch*0.6;
-  else if(it) P.armR.rotation.x=Math.min(P.armR.rotation.x,-0.35);              // anything else is carried, not swung freely
+  // A TOOL IS HELD OUT IN FRONT, IN THE RIGHT HAND, AND IT SWINGS (Ben 08-04: "tools should be held in the right hand in 3rd
+  // person, and held tools should be held out in front of the player arm up, also hitting/using tools animations arent there").
+  // P.hand has always hung off armR, which IS the right arm — with the model facing +z and the group turned by yaw+PI, its local
+  // +x maps to the player's right — but the arm hung at its walk-cycle angle, so the item sat at the hip behind the leg and read
+  // as neither hand. Raising the arm forward is what makes the hand, and the thing in it, visible at all.
+  //
+  // THE SWING IS THE VIEWMODEL'S OWN SWING, not a second animation invented here. view.swing is the one-shot click arc and
+  // view.swingPhase is the loop while a use is held; both are already integrated every frame for first person. Reading them is
+  // what guarantees the third-person body strikes on the same frame the hit lands — a separately timed animation would drift.
+  const loopArc = (view.swingPhase>0) ? Math.max(0, Math.sin(view.swingPhase)) : 0;
+  const swArc = Math.max((view.swing||0)*Math.sin((view.swing||0)*Math.PI), loopArc);
+  if(it&&it.gun) P.armR.rotation.x = -1.45 - player.pitch*0.6;                  // rifle up, tracking where you look
+  else {
+    const carry = it ? (-1.15 - player.pitch*0.45) : P.armR.rotation.x;         // held out in front, arm up, angled with your look
+    P.armR.rotation.x = carry - swArc*1.35;                                     // …and the strike arcs from there, down and through
+    if(it) P.armR.rotation.z = -swArc*0.28;                                     // a real swing comes across the body, not straight down
+    else P.armR.rotation.z = 0;
+    if(!it) P.armR.rotation.x = P.armR.rotation.x - swArc*1.5;                  // empty-handed punch still throws the arm
+  }
   P.hand.getWorldPosition(_tpsHandW);                                           // where the held light must come from this frame
 }
 function updateHighlight(){ const h=locked?raycastVoxel():null; if(h){ hlMesh.visible=true; hlMesh.position.set(h.x+0.5,h.y+0.5,h.z+0.5); } else hlMesh.visible=false; }
@@ -11899,6 +12031,26 @@ function buildAtlasGlobe(){ const g=new THREE.Group();
   const axis=M(new THREE.CylinderGeometry(0.012,0.012,0.5,10),dark); axis.rotation.z=0.35;          // tilted polar axis pin through it
   g.traverse(o=>{ if(o.isMesh)o.frustumCulled=false; });
   return g; }
+// A 12-GAUGE SHELL, for the hand and the ground. The 16px icon is the right thing in the hotbar — a purpose-drawn sprite
+// reads better at that size than a snapshot of a model — but held and dropped, buckshot fell through to extrudeIcon and was
+// a flat extruded sprite, and the PRIMER cannot exist in a side-view sprite at all.
+// Proportions are the real object: 70mm hull to a 20mm diameter is 3.5:1, and the brass head is a third of the hull.
+function buildShotShell(){ const g=new THREE.Group();
+  const plastic=new THREE.MeshPhongMaterial({color:0xb23c2a, shininess:38, specular:0x4a2a24});   // plastic has a sheen; the brass has a harder one
+  const brass  =new THREE.MeshPhongMaterial({color:0xb8892f, shininess:95, specular:0xd8c07a});
+  const dark   =new THREE.MeshPhongMaterial({color:0x7a2418, shininess:20, specular:0x2a1410});
+  const hull=new THREE.Mesh(cyl(0.0100,0.0100,0.050,14), plastic); hull.position.y=0.035; g.add(hull);
+  const head=new THREE.Mesh(cyl(0.0104,0.0104,0.020,14), brass);   head.position.y=0.010; g.add(head);
+  const rim =new THREE.Mesh(cyl(0.0118,0.0118,0.0035,14), brass);  rim.position.y=0.0018; g.add(rim);
+  const prim=new THREE.Mesh(cyl(0.0034,0.0034,0.0016,10), new THREE.MeshPhongMaterial({color:0x9a7a3a, shininess:70, specular:0xbfae7a}));
+  prim.position.y=-0.0004; g.add(prim);                                                          // the primer disc in the base
+  // THE SIX-POINT STAR CRIMP. Six folds pressed shut across the mouth — the one feature that says shotgun at a glance, and
+  // the reason this is a model and not a sprite: it lives on the END face, which a side-view icon can never show.
+  const cap=new THREE.Mesh(cyl(0.0100,0.0094,0.0030,14), plastic); cap.position.y=0.0605; g.add(cap);
+  for(let i=0;i<6;i++){ const f=new THREE.Mesh(new THREE.BoxGeometry(0.0017,0.0022,0.0094), dark);
+    f.position.set(0,0.0622,0); f.rotation.y=i*Math.PI/3; f.translateZ(0.0042); g.add(f); }
+  g.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
+  return g; }
 function itemModel(id){ const it=ITEMS[id];
   if(it&&it.atlas) return buildAtlasGlobe();   // The Atlas relic renders as the steel Atlas-and-globe everywhere (held / drop / 3D icon)
   if(it&&it.syringe) return buildSyringe();   // 3D syringe (drop + inventory 3D icon + held)
@@ -11918,6 +12070,7 @@ function itemModel(id){ const it=ITEMS[id];
   if(it.block===BID.torch) return buildHeldTorch();
   if(it.block===BID.red_torch) return buildHeldTorch(true,true);   // red shrine torch — same model, bright-red flame
   if(it.spear) return buildSpear(it.spear);   // spears are real 3D objects everywhere they appear
+  if(id==='buckshot') return buildShotShell();   // a real shell in the hand and on the ground; the hotbar keeps the drawn sprite
   if(it.block!=null && B[it.block] && B[it.block].cat==='model'){ const bd=B[it.block];
     if(MODEL_ITEM_BUILDERS[bd.model]){ try{ return MODEL_ITEM_BUILDERS[bd.model](bd); }catch(e){} }   // rich decorative model — single source of truth
     let geo; try{ geo=modelMeshFor(it.block); }catch(e){} if(!geo)geo=new THREE.BoxGeometry(0.4,0.4,0.4);   // MODEL blocks (fence/bars/chair/gate/…) render their real model as the icon, not a grass cube
@@ -12843,6 +12996,14 @@ function setViewItem(id){ if(view.id===id)return; view.id=id;
   else if(it.tool && (it.tool.kind==='pickaxe'||it.tool.kind==='axe'||it.tool.kind==='shovel')){   // the real 3D tool models in-hand (not the flat extruded icon)
     const grp=new THREE.Group(); const tm=(it.tool.kind==='pickaxe'?buildPickaxe(it.tool):it.tool.kind==='axe'?buildAxe(it.tool):buildShovel(it.tool));
     tm.position.set(0.30,0.28,0); grp.add(tm); grp.scale.setScalar(1.08); grp.rotation.set(0.12,0.18+Math.PI/2,0.14); view.mesh=grp; }   // handle-bottom near the pivot → swings from the base (1.5x bigger in hand)
+  // THE VIEWMODEL IS A SECOND DISPATCH, and this is the branch that proves it matters: itemModel already returned a real
+  // 3D shell for the drop and a peer's hand, and the held form still came out as the flat extruded sprite because THIS
+  // list never heard about it. Adding a model to itemModel alone changes nothing you can see in your own hands.
+  // position is PRE-SCALE (the tool branches above do the same), so 0.088 x 3.4 lands it where every other held item sits.
+  else if(id==='buckshot'){ const grp=new THREE.Group(); const sh=buildShotShell();
+    sh.rotation.z=-1.15;                                        // laid across the hand so the hull, the brass head and the crimp all read at once
+    sh.position.set(0.088,0.088,0); grp.add(sh); grp.scale.setScalar(3.4);
+    grp.rotation.set(0.1,0.18+Math.PI/2,0.15); view.mesh=grp; }
   else { const grp=new THREE.Group(); const em=extrudeIcon(id); em.position.set(0.34,0.44,0); grp.add(em); grp.scale.setScalar(0.5);
     grp.rotation.set(0.1,0.18+Math.PI/2,0.15); view.mesh=grp; }   // food / materials → extruded pixel model
   view.group.add(view.mesh); applyViewFog(view.mesh); }
@@ -12912,6 +13073,39 @@ function finishReload(){ const key=view.reloadKey, it=view.reloadDef; view.reloa
 // and never touched again, so the shield rode through the menu flythrough, the wake-up cinematic, the Wretch's grab and
 // the hide-HUD setting — the one viewmodel that ignored all four.
 function _hideOffHand(){ offView.group.visible=false; offArm.group.visible=false; }
+// =====================================================================
+//  THE CROSSHAIR IS A DYNAMIC RING (Ben 08-04: "crosshair should be a circle, not a plus, and it should show the
+//  expanding/contracting aim ring with movement")
+// =====================================================================
+// The ring's diameter IS the spread it is describing, so it is driven by the same things that would actually cost you accuracy:
+// how fast you are moving, whether your feet are on the ground, and whether you just swung or fired. Crouching tightens it.
+// It expands FASTER than it contracts (0.18 s out, 0.5 s back) because that asymmetry is what makes the movement legible —
+// a symmetric ring reads as noise, an asymmetric one reads as "you did that".
+//
+// AIMING SHRINKS IT TO ALMOST NOTHING. In first person a raised sight replaces it, so it still fades out under the holosight or
+// the scope — but in THIRD person there is no sight to hand over to, so instead of fading it collapses to a tiny hard circle
+// (Ben: "when aiming in 3rd person it should get very small"), which is the only aiming reference the over-shoulder view has.
+let _xhEl=null, _xhCur=16, _xhLastD=-1, _xhLastOp=-1;
+const XH_REST=16, XH_AIM_TPS=6;
+function updateCrosshair(dt, isGun){
+  const xh=_xhEl||(_xhEl=document.getElementById('xh')); if(!xh) return;
+  const p=player, ads=isGun?(view.adsT||0):0;
+  const spd=Math.hypot(p.vel.x,p.vel.z);
+  const kick=Math.max(0, Math.min(1, view.swing||0));
+  let d = XH_REST
+        + Math.min(1, spd/7.2)*10                    // walking opens it, sprinting opens it fully
+        + (p.onGround?0:8)                           // airborne: you have no business being accurate
+        + (p.sneak?-4:0)                             // crouched and steady
+        + kick*12;                                   // a swing or a shot throws it wide, then it recovers
+  if(ads>0.01){ const t=Math.min(1,ads); d = d*(1-t) + (_tpsOn?XH_AIM_TPS:XH_REST*0.5)*t; }
+  const rate = d>_xhCur ? 0.18 : 0.5;                // out fast, back slow
+  _xhCur += (d-_xhCur)*Math.min(1, dt/rate);
+  const px=Math.round(_xhCur);
+  if(px!==_xhLastD){ _xhLastD=px; xh.style.width=px+'px'; xh.style.height=px+'px'; }
+  // Third person keeps its ring at full strength however far the sight is raised; first person hands over to the optic.
+  const op = _tpsOn ? 0.85 : 0.85*(1-clamp((ads-0.3)/0.4,0,1));
+  if(Math.abs(op-_xhLastOp)>0.01){ _xhLastOp=op; xh.style.opacity=op.toFixed(2); }
+}
 function updateView(dt){ updateRecoil(dt);                                          // camera recoil integrates every frame (kick + smooth recovery)
   if(player.grabbed){ view.group.visible=false; _hideOffHand(); if(view.holoRet)view.holoRet.visible=false; return; }   // no hands/held item during the capture — only the maw fills the screen
   if(!started || intro.active){ view.group.visible=false; _hideOffHand(); if(view.holoRet)view.holoRet.visible=false; return; }   // CINEMATICS own the camera — no floating hand/held item in the menu flythrough or the wake-up (Ben 07-20)
@@ -13073,10 +13267,7 @@ function updateView(dt){ updateRecoil(dt);                                      
     else { view.group.position.set(0.34,-0.30+b,-0.62); view.group.rotation.set(-sw*1.3,0,0); }
     if(view.mesh&&view.mesh.isMesh) view.mesh.rotation.y = (ITEMS[view.id]&&ITEMS[view.id].block!=null)?0.6:0;
     /* held flame no longer bounces — it holds a steady big flame (the flameMat still shimmers subtly on its own) */ }
-  // ---- HUD CROSSHAIR fades out with the raise (any ADS — holosight or scope); restores as the gun lowers ----
-  { const xh=view._xh||(view._xh=document.getElementById('xh'));
-    if(xh){ const a=isGun?(view.adsT||0):0, op=0.85*(1-clamp((a-0.3)/0.4,0,1));
-      if(Math.abs(op-(view._xhOp||-1))>0.01){ view._xhOp=op; xh.style.opacity=op.toFixed(2); } } }
+  updateCrosshair(dt, isGun);   // the ring's size and its fade under a raised sight — one owner (see below)
   // ---- HOLOGRAPHIC RETICLE — parented to the CAMERA on the true aim axis (parallax-free, exactly the point of impact;
   //      the gun/window wobble AROUND it, and recoil moves reticle+aim together). Fades in as the eye comes on-axis. ----
   if(!view.holoRet){ const D=0.5, S=2*D*Math.tan(0.0098902)*(128/100);                     // ring subtends a TRUE 68 MOA diameter (radius 34 MOA); texture ring radius = 100px of 128
@@ -21067,7 +21258,7 @@ window.__hc={
       return { nodes:n, floating:bad.length, first:bad.slice(0,6) }; }catch(e){ return {err:String(e.message||e)}; } },
   // THIRD PERSON, end to end: is there a body, is it wearing what you are wearing, is the held item in its hand, is the hand
   // where the held light is coming from, and are all three first-person hand groups actually off.
-  tpsProbe(on){ try{ if(on!=null){ _tpsOn=!!on; _tpsPos.set(0,0,0); }
+  tpsProbe(on){ try{ if(on!=null){ _tpsOn=!!on; _tpsReset(); }
       updateTpsBody(0.016); const P=_tpsBody; if(!P) return { tps:_tpsOn, body:false };
       const hw=new THREE.Vector3(); P.hand.getWorldPosition(hw);
       return { tps:_tpsOn, body:!!P.group.visible, yaw:+P.group.rotation.y.toFixed(2),
@@ -21162,6 +21353,36 @@ window.__hc={
         armTris:arm.attributes.position.count/3, postTris:post.attributes.position.count/3,
         armTop:+arm.boundingBox.max.y.toFixed(3), postTop:+post.boundingBox.max.y.toFixed(3),
         alphaTest:_chainlinkMat().alphaTest, hasDepthMat:!!_clDepth() }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: the two ammo ICONS classified pixel by pixel, and the 3D shell measured. Both are read rather than judged —
+  // "does it look like a shell" is an opinion, "how many of its 256 pixels differ from the rifle cartridge's" is a number,
+  // and the game refuses to feed one gun with the other's ammo so they must not be confusable.
+  ammoIcons(){ try{ const grab=(id)=>{ const cv=document.createElement('canvas'); cv.width=cv.height=16;
+        const cx=cv.getContext('2d'); cx.imageSmoothingEnabled=false; drawIcon(cx,id);
+        return cx.getImageData(0,0,16,16).data; };
+      const A=grab('buckshot'), B=grab('rifle_ammo');
+      let diff=0, hull=0, brass=0, litA=0, litB=0, topW=0;
+      for(let p=0;p<A.length;p+=4){
+        const aOn=A[p+3]>8, bOn=B[p+3]>8; if(aOn)litA++; if(bOn)litB++;
+        if(aOn!==bOn || Math.abs(A[p]-B[p])>24 || Math.abs(A[p+1]-B[p+1])>24 || Math.abs(A[p+2]-B[p+2])>24) diff++;
+        if(aOn){ const r=A[p],g=A[p+1],b=A[p+2];
+          if(r>90 && g<90 && b<90) hull++;            // red plastic
+          else if(r>120 && g>90 && b<90) brass++; }   // brass head
+      }
+      // THE SILHOUETTE, which is what actually separates them at hotbar size: a shell is square-topped and FAT, a cartridge
+      // tapers to a point, so count how wide each icon is on its topmost lit row.
+      const rowW=(d)=>{ for(let y=0;y<16;y++){ let w=0; for(let x=0;x<16;x++) if(d[(y*16+x)*4+3]>8) w++; if(w) return w; } return 0; };
+      topW=rowW(A);
+      const m=buildShotShell(); let parts=0; m.traverse(o=>{ if(o.isMesh)parts++; });
+      const bb=new THREE.Box3().setFromObject(m), sz=bb.getSize(new THREE.Vector3());
+      return { diffPixels:diff, litBuckshot:litA, litRifle:litB, hullPx:hull, brassPx:brass,
+        hullToBrass:+(hull/Math.max(1,brass)).toFixed(2), topRowWidth:topW, rifleTopRowWidth:rowW(B),
+        modelParts:parts, modelLen:+sz.y.toFixed(4), modelDia:+Math.max(sz.x,sz.z).toFixed(4),
+        lenToDia:+(sz.y/Math.max(1e-6,Math.max(sz.x,sz.z))).toFixed(2) }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: how many meshes the CURRENTLY HELD viewmodel is made of. An extruded pixel sprite is a single mesh; a real
+  // model is many. This exists because buckshot's drop and its hand come from two different dispatches, and the hand kept
+  // the flat sprite long after the drop was a proper shell — a probe on itemModel alone would have called that done.
+  heldParts(){ try{ let n=0, sprite=false; if(view.mesh) view.mesh.traverse(o=>{ if(o.isMesh){ n++; if(o.userData&&o.userData.extruded) sprite=true; } });
+      return { id:view.id, meshes:n, sprite }; }catch(e){ return {err:String(e.message||e)}; } },
   chainlinkRun(x,y,z,n,axis){ try{ n=Math.max(1,n|0||1); const ax=(axis==='z')?'z':'x';
       for(let i=0;i<n;i++) setBlockWorld(ax==='x'?x+i:x, y, ax==='x'?z:z+i, BID.chainlink, true);
       return { n, axis:ax }; }catch(e){ return {err:String(e.message||e)}; } },
