@@ -11263,6 +11263,9 @@ const OFF_POSE={ shield:{p:[-0.22,-0.10,-0.35], r:[0.10,-0.10,0.16]}, hand:{p:[-
 // How long a GUN is in the offhand fist, in world units along its longest axis. A dial rather than a literal so three
 // candidate sizes can be photographed in one run and Ben can pick, instead of shipping a guess and asking if he likes it.
 let _gunOffFit=0.34;
+// The same for the two classes of non-gun item: a cube-shaped thing (a block, a berry) and a real object model (a tool, a
+// book, a lantern). They need different lengths to look the same size as the right hand -- see the scale line below.
+let _itemOffFit=0.152, _objOffFit=0.22;
 function setOffItem(id){ if(offView.id===id)return; offView.id=id;
   if(offView.mesh){ offView.group.remove(offView.mesh); _disposeView(offView.mesh); offView.mesh=null; }
   if(!id||!ITEMS[id]) return;
@@ -11295,7 +11298,26 @@ function setOffItem(id){ if(offView.id===id)return; offView.id=id;
     // fitting a metre-long rifle's LENGTH into that leaves a barrel a few pixels across -- which is precisely the sliver the
     // mn floor used to prevent, reintroduced by removing it. One size for every gun is still the rule; the size is just the
     // length of a carried weapon rather than the width of a fist.
-    const s = ITEMS[id].gun ? (_gunOffFit/mx) : Math.max(0.115/mx, 0.010/mn);
+    //
+    // ONE LENGTH FOR EVERY NON-GUN ITEM IS THE WRONG SHAPE (Ben, third time: "items are still really tiny in the offhand").
+    // __hc.handSize() prices both hands in APPARENT size -- longest side over the group's depth, -0.62 main against -0.34
+    // here -- and at 0.115 the left hand was drawing a median 0.473 of the right: a pickaxe 0.21, an axe 0.17, a bible 0.31.
+    // A single dial cannot fix that, because the main hand does NOT draw everything at one size. A held block is a 0.20 cube
+    // and a held axe is 1.22 long, seven times more, so 0.115 -- derived from the block, the smallest case there is -- was
+    // always going to leave every real object model a third of its right-hand size. Blocks were the one class already close
+    // (0.754). Hence two dials, both of them raises: no item gets smaller, and nothing exceeds parity with the right hand,
+    // which is the ceiling here -- an object bigger in the left fist than the right one reads as a bug, not as a fix.
+    // 0.152 puts a block and a berry at exactly 1.0; 0.22 puts tools, books, the syringe and the model blocks at ~0.6, which
+    // is where _gunOffFit already sits (0.629) and is the only such number Ben has accepted. 0.34 is the known-bad end.
+    // The median across the sixteen classes moves 0.473 -> 0.631. Two deliberately-miniature trinkets, the atlas globe and
+    // the Ghost, come out ~15% OVER their right-hand size at 0.22 -- the right hand draws them at 0.34-0.35, smaller than a
+    // tool. Fixing that needs the main hand's own per-class scale to be readable from here, which is a third dispatch to
+    // keep in sync for two items; 15% is under the threshold at which anyone would notice, so it is left alone knowingly.
+    const _bd = ITEMS[id].block!=null ? B[ITEMS[id].block] : null;
+    const _fit = ITEMS[id].gun ? _gunOffFit
+               : ((_bd && _bd.cat==='solid') || ITEMS[id].food) ? _itemOffFit
+               : _objOffFit;
+    const s = ITEMS[id].gun ? (_fit/mx) : Math.max(_fit/mx, 0.010/mn);
     m.scale.setScalar(s); m.position.set(-ctr.x*s,-ctr.y*s,-ctr.z*s);
     m.userData.offFit=+(mx*s).toFixed(4);   // the achieved longest side. A world-space AABB of this fist is rotated, so it is NOT the object's size — measuring that reported a 21% spread across guns that are all fitted to the same length.
     const P=OFF_POSE.hand; offView.group.position.set(P.p[0],P.p[1],P.p[2]); offView.group.rotation.set(P.r[0],P.r[1],P.r[2]);
@@ -19233,6 +19255,28 @@ window.__hc={
   offFit(v){ try{ if(v!=null) _gunOffFit=+v; const keep=armor[EQ_OFF]?armor[EQ_OFF].id:null;
       offView.id=null; if(keep) setOffItem(keep);
       return { fit:_gunOffFit, extent:(offView.mesh&&offView.mesh.userData.offFit)||null, scale:offView.mesh?+offView.mesh.scale.x.toFixed(5):null }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: how big the thing in each hand is TO THE EYE. Raw scales cannot be compared across the two hands -- the main
+  // view group sits at z=-0.62 and the offhand group at -0.34, so an object of the same length looks 1.8x bigger on the left.
+  // `ang` is longest side / depth, which is the quantity the complaint "items are tiny in the offhand" is actually about.
+  // Measured in the GROUP's space, not the world: these groups are children of the camera, so a world AABB is the box of a
+  // rotated object rotated again by wherever the player is looking, and it moves as you turn your head.
+  handSize(){ try{
+      const meas=(g,m,id)=>{ if(!m) return null;
+        g.updateWorldMatrix(true,true);
+        const inv=new THREE.Matrix4().copy(g.matrixWorld).invert(), bb=new THREE.Box3(), v=new THREE.Vector3(), mm=new THREE.Matrix4();
+        m.traverse(o=>{ if(!o.geometry) return; o.geometry.computeBoundingBox(); const gb=o.geometry.boundingBox; if(!gb) return;
+          mm.multiplyMatrices(inv,o.matrixWorld);
+          for(let i=0;i<8;i++){ v.set(i&1?gb.max.x:gb.min.x, i&2?gb.max.y:gb.min.y, i&4?gb.max.z:gb.min.z).applyMatrix4(mm); bb.expandByPoint(v); } });
+        if(bb.isEmpty()) return { id, empty:true };
+        const sz=bb.getSize(new THREE.Vector3()), L=Math.max(sz.x,sz.y,sz.z), d=Math.abs(g.position.z)||1e-3;
+        return { id, len:+L.toFixed(4), z:+g.position.z.toFixed(3), ang:+(L/d).toFixed(4) }; };
+      const a=meas(view.group,view.mesh,view.id), b=meas(offView.group,offView.mesh,offView.id);
+      return { main:a, off:b, ratio:(a&&b&&a.ang&&b.ang)?+(b.ang/a.ang).toFixed(3):null, gunFit:_gunOffFit, itemFit:_itemOffFit, objFit:_objOffFit }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: the two offhand sizes for things that are not guns, live. Same rebuild trick as offFit.
+  itemFit(v,o){ try{ if(v!=null) _itemOffFit=+v; if(o!=null) _objOffFit=+o; const keep=armor[EQ_OFF]?armor[EQ_OFF].id:null;
+      offView.id=null; if(keep) setOffItem(keep);
+      return { fit:_itemOffFit, objFit:_objOffFit, extent:(offView.mesh&&offView.mesh.userData.offFit)||null }; }catch(e){ return {err:String(e.message||e)}; } },
   offhandSet(id,n){ try{ armor[EQ_OFF]= id? {id, n:(n|0)||1} : null; offUse=false;
       if(typeof updateArmorView==='function')updateArmorView(); refreshHotbar();
       return { off:armor[EQ_OFF]?armor[EQ_OFF].id:null }; }catch(e){ return {err:String(e.message||e)}; } },
