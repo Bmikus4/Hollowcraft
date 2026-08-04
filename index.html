@@ -1847,6 +1847,13 @@ const craters=[];                                   // {x,z,r,d} — PERSISTED (
 // Lowering and raising are accumulated separately and the lowering wins outright. Folding both into one running value with a
 // max for the bowl and a min for the lip lets the two branches fight: a column inside one crater's bowl and inside another's
 // lip ring would take whichever happened to be tested last.
+// Is this column inside a crater's kill footprint? Used by worldgen to refuse to decorate or build there: nothing grows on the
+// floor of a fresh bowl, and a cabin that regenerates inside one was never destroyed in the first place. Slightly INSIDE the
+// bowl's own radius (0.94) so the rim, which is where the bowl blends back into real ground, still carries its own scrub.
+function inCrater(wx,wz){ if(!craters.length) return false;
+  for(let i=0;i<craters.length;i++){ const c=craters[i], dx=wx-c.x, dz=wz-c.z;
+    if(dx*dx+dz*dz < (c.r*0.94)*(c.r*0.94)) return true; }
+  return false; }
 function craterDrop(wx,wz){ if(!craters.length) return 0;
   let low=0, lip=0;
   for(let i=0;i<craters.length;i++){ const c=craters[i], dx=wx-c.x, dz=wz-c.z, d=Math.sqrt(dx*dx+dz*dz);
@@ -2107,9 +2114,13 @@ function pineEmit(wx,wz,emit){
   return true;
 }
 function decorate(c){
+  // NOTHING GROWS IN A CRATER (Ben 08-04). decorate runs on every chunk build, so a nuked chunk that streams back in was being
+  // re-seeded with the same trees, sulfur and litter it had before the warhead — which is most of why the blast looked like it
+  // had done nothing but dent the ground.
   // scan an expanded region so trees straddle borders
   for (let dz=-3; dz<CK+3; dz++) for (let dx=-3; dx<CK+3; dx++){
     const wx=c.cx*CK+dx, wz=c.cz*CK+dz;
+    if(craters.length && inCrater(wx,wz)) continue;                          // dead ground: no trees, no scrub, no litter
     const h=surfaceH(wx,wz);
     // SULFUR NODES — yellow-grey blobs on the surface: common along the dry beach band, rare inland. Mine for sulfur powder (→ gunpowder → ammo). Placed BEFORE the tree setback so they populate the beach the trees skip.
     { const near=h-CFG.SEA, sr=tileRng((wx*40503^wz*13007)>>>0)();
@@ -5950,6 +5961,7 @@ function buildChunkStaged(c){
   if(c.hasCross){ const fg=foliageMesh(c); if(fg){ fg.computeBoundingSphere(); const m=new THREE.Mesh(fg,_fm); m.castShadow=false; m.receiveShadow=true; m.userData.detail=1; m.userData.baseMat=foliageMat; g.userData.foliage=m; g.add(m); } }   // detail=1: suppressible in the fogged far rings
   if(c.hasWater){ const wg=waterMesh(c); if(wg){ wg.computeBoundingSphere(); const m=new THREE.Mesh(wg,waterMat); m.castShadow=false; m.receiveShadow=false; m.renderOrder=3; m.userData.detail=1; g.userData.water=m; g.add(m); } }
   if(c.hasModel) buildModelBlocks(c,g); else c.emitters=[];
+  _lampRegister(c);   // remember this chunk's lights so they survive it unloading — see updateLampHalos
   if(c.group){ c.group.traverse(o=>{ if(o.isMesh||o.isInstancedMesh){ o.geometry.dispose(); if(o.userData.modelMat) o.userData.modelMat.dispose(); if(o.material&&o.material.userData&&o.material.userData.chunkClone) o.material.dispose(); } }); chunkRoot.remove(c.group); }   // dispose the OLD group only now (it stayed visible through the stage gap); light3D deliberately NOT touched here
   if(c._oldL){ c._oldL.dispose(); c._oldL=null; }      // now nothing samples the old volume — safe to free
   chunkRoot.add(g); c.group=g; c.meshed=true;
@@ -8960,9 +8972,11 @@ function updateBars(){ const op=(player.grabbed||player.tied||(typeof intro!=='u
 let _mm=null, _dungeonSeen=false, _mmHurt=0, _mmLastHP=20, _mmStam=1;
 function buildMinimap(){ const wrap=document.createElement('div'); wrap.id='minimap';
   // 420x360, not 360 square: the extra 60 is a left margin for the armour shields, which sit outside the outermost gauge.
-  // left is 470+33 because 60 canvas px at the map's 198/360 scale is 33 css px — the ring's centre stays exactly where it was.
-  wrap.style.cssText='position:fixed;left:calc(50% - 503px);bottom:14px;width:231px;height:198px;z-index:6;pointer-events:none;opacity:0;transition:opacity .3s;filter:drop-shadow(0 6px 18px rgba(0,0,0,.7))';   // to the LEFT of the hotbar, 10% bigger
-  const cvs=document.createElement('canvas'); cvs.width=420; cvs.height=360; cvs.style.cssText='width:231px;height:198px;display:block';
+  // left is 470+44 because 80 canvas px at the map's 198/360 scale is 44 css px — the ring's centre stays exactly where it was.
+  // 80 and not 60: the shields moved out to Rmap+74 to clear the stamina ring, and at the old margin their left edge fell six
+  // pixels off the canvas. The margin has to be the column's radius plus half a shield, or the canvas edge crops them.
+  wrap.style.cssText='position:fixed;left:calc(50% - 514px);bottom:14px;width:242px;height:198px;z-index:6;pointer-events:none;opacity:0;transition:opacity .3s;filter:drop-shadow(0 6px 18px rgba(0,0,0,.7))';   // to the LEFT of the hotbar, 10% bigger
+  const cvs=document.createElement('canvas'); cvs.width=440; cvs.height=360; cvs.style.cssText='width:242px;height:198px;display:block';
   wrap.appendChild(cvs); document.body.appendChild(wrap);
   const b=document.getElementById('bars'); if(b)b.style.display='none';   // retire the old pip rows — health/hunger live in the ring now
   _mm={wrap,cvs,ctx:cvs.getContext('2d')}; }
@@ -8988,7 +9002,7 @@ function _mmIcon(g,x,y,t){ g.save(); g.translate(x,y);
 function updateMinimap(dt){ if(!_mm){ buildMinimap(); }
   if(typeof BR!=='undefined' && BR.inside){ try{ brMinimapStatic(dt); }catch(e){} return; }   // THE BACKROOMS: the map is dead — animated static (Ben 07-24); guarded so it can never halt the loop
   if(!started || (typeof intro!=='undefined' && intro.active)){ _mm.wrap.style.opacity='0'; return; }
-  const g=_mm.ctx, S=360, SW=420, cx=210, cy=180;   // SW is the canvas WIDTH; the ring is still 360 tall and centred on cy
+  const g=_mm.ctx, S=360, SW=440, cx=230, cy=180;   // SW is the canvas WIDTH; the ring is still 360 tall and centred on cy
   if(player.health<_mmLastHP) _mmHurt=1; _mmLastHP=player.health; _mmHurt=Math.max(0,_mmHurt-dt*2.2);
   _mm.wrap.style.opacity=(player.grabbed||player.tied)?'0':(_mmHurt>0?'1':'0.9');
   const sh=_mmHurt>0.3?(Math.random()-0.5)*_mmHurt*5:0; _mm.wrap.style.transform='translate('+sh.toFixed(1)+'px,'+sh.toFixed(1)+'px)';
@@ -9998,7 +10012,7 @@ function loop(){ try{
   T.end(TID.input);
   applyWaterFog();
   T.begin(TID.entities); T.begin(TID.props);
-  updateDrops(dt); updateSpears(dt); updateStuckSpears(dt); updateParticles(dt); updateShells(dt); updateView(dt); if(typeof updateWings==='function')updateWings(dt); updateWatchers(dt); checkNotes(dt); updateSkyBirds(dt); updateFireflies(dt); updateLeaves(dt); if(typeof updateDungeonBugs==='function')updateDungeonBugs(dt);  // floating items, thrown/stuck spears, particles, ejected shell casings, held viewmodel, angel wings, watching-eyes, notes, sky birds, dungeon arachnids
+  updateDrops(dt); updateSpears(dt); updateStuckSpears(dt); updateParticles(dt); updateShells(dt); updateView(dt); if(typeof updateWings==='function')updateWings(dt); updateWatchers(dt); checkNotes(dt); updateSkyBirds(dt); updateFireflies(dt); updateLampHalos(dt); updateLeaves(dt); if(typeof updateDungeonBugs==='function')updateDungeonBugs(dt);  // floating items, thrown/stuck spears, particles, ejected shell casings, held viewmodel, angel wings, watching-eyes, notes, sky birds, dungeon arachnids
   netUpdate(dt);                                                             // co-op: send my transform, interpolate peers, host broadcasts the Wretch/time
   T.end(TID.props); T.end(TID.entities);
   T.begin(TID.audio); updateAudio(dt); T.end(TID.audio);
@@ -13454,7 +13468,7 @@ function extrudeIcon(id){
     if(al(ix,iy+1)<128) quad(A,B,F,E, 0,-1,0, r,g,b); }                                  // bottom
   const geo=new THREE.BufferGeometry();
   geo.setAttribute('position',new THREE.Float32BufferAttribute(P,3)); geo.setAttribute('normal',new THREE.Float32BufferAttribute(Nm,3)); geo.setAttribute('color',new THREE.Float32BufferAttribute(C,3));
-  return new THREE.Mesh(geo,_extrudeMat); }
+  const m=new THREE.Mesh(geo,_extrudeMat); m.userData.extruded=true; return m; }   // the flag __hc.heldParts/_sigModel read to tell "flat sprite" from "real model" — it was never set, so that check could only ever report false
 // ---- FIELD NOTEBOOK: a held, page-turnable recipe reference (right-click = next page; no menus) ----
 const BOOK_PAGES=[
   {title:'HOW TO LIVE', small:true, note2:['Move WASD · Jump Space · Sprint Shift','Sneak Ctrl · Break/Place left/right click','1-9 select · E inventory · R respawn','','Eat before hunger empties you.','Craft stairs and ladders to climb.','Torches and lanterns keep the dark back.','Everything you need is in these pages.'] },
@@ -13631,6 +13645,19 @@ function buildShotShell(){ const g=new THREE.Group();
     f.position.set(0,0.0622,0); f.rotation.y=i*Math.PI/3; f.translateZ(0.0042); g.add(f); }
   g.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
   return g; }
+// QA ONLY (#75): sign a built model so a harness can compare the TWO dispatch sites against each other.
+// A tool is built once by itemModel (icon / ground drop / a peer's hand) and AGAIN by setViewItem (your own
+// hands); nothing makes those agree, and the failure is silent — the buckshot item shipped with a real shell
+// on the ground and a flat sprite in hand while every number said done. Comparing signatures is what makes
+// that visible from outside module scope.
+function _sigModel(root){ if(!root) return {meshes:0,tris:0,sprite:false,mats:{},cols:[]};
+  let meshes=0, tris=0, sprite=false; const mats={}, cols={};
+  root.traverse(o=>{ if(!o.isMesh) return; meshes++;
+    const g=o.geometry; if(g&&g.attributes&&g.attributes.position) tris += (g.index?g.index.count:g.attributes.position.count)/3;
+    if(o.userData&&o.userData.extruded) sprite=true;
+    for(const m of (Array.isArray(o.material)?o.material:[o.material])){ if(!m) continue;
+      mats[m.type]=(mats[m.type]||0)+1; if(m.color) cols['#'+m.color.getHexString()]=1; } });
+  return { meshes, tris:Math.round(tris), sprite, mats, cols:Object.keys(cols).sort() }; }
 function itemModel(id){ const it=ITEMS[id];
   if(it&&it.atlas) return buildAtlasGlobe();   // The Atlas relic renders as the steel Atlas-and-globe everywhere (held / drop / 3D icon)
   if(it&&it.syringe) return buildSyringe();   // 3D syringe (drop + inventory 3D icon + held)
@@ -16022,14 +16049,74 @@ function icbmDetonate(x,z,r,depth){
   else if(pd<NUKE_HURT && !player.dead && typeof damage==='function') damage(Math.max(6,Math.round(40*(1-pd/NUKE_HURT))),'the shockwave',"blast");
   if(typeof animals!=='undefined') for(let i=animals.length-1;i>=0;i--){ const a=animals[i];
     if(!a.dead && Math.hypot(a.x-x,a.z-z)<NUKE_HURT && typeof killAnimal==='function') killAnimal(a,{carcassOnly:true}); }
+  // EVERYTHING BUILT INSIDE IT IS FORGOTTEN. edits is the canonical store and it is what a regenerated chunk replays, so a
+  // player's bunker survived its own vaporisation by being written back a second later. Deleting the keys is the whole fix, and
+  // it has to take the block-state maps with it or a chest that no longer exists still holds its items and a monitor that is
+  // gone still owns a feed. Vertically unbounded on purpose: a warhead does not stop at the old ground line.
+  { const R2=R*R; let wiped=0;
+    const inside=(k)=>{ const p=k.split(','); const dx=+p[0]-x, dz=+p[2]-z; return dx*dx+dz*dz < R2; };
+    for(const k in edits){ if(inside(k)){ delete edits[k]; wiped++; } }
+    for(const m of [ (typeof chests!=='undefined'?chests:null), (typeof furnaces!=='undefined'?furnaces:null),
+                     (typeof campfires!=='undefined'?campfires:null), (typeof screens!=='undefined'?screens:null) ])
+      if(m) for(const k in m){ if(inside(k)) delete m[k]; }
+    if(typeof scrRebuildAll==='function') try{ scrRebuildAll(); }catch(e){}
+    _nukeWiped=wiped; }
   icbmFlash(x,gy,z);
+  icbmFirestorm(x,gy,z,R);
   RADS.zone=craters;                                                         // the bowl IS the fallout zone; one list, so they cannot drift apart
   if(typeof scareAnimals==='function') scareAnimals(x,z,180);
   return { x:Math.round(x), z:Math.round(z), r:R, d:D, chunksDropped:dropped, craters:craters.length }; }
 // FLASH, CLOUD, SOUND. The cloud is a stack of expanding smoke billboards plus a stem — enough to read as a mushroom from a
 // distance, which is the only place you will ever see one from and survive.
-let _nukeCloud=null, _nukeT=0;
+let _nukeCloud=null, _nukeT=0, _nukeWiped=0;
+// THE FIRESTORM (Ben 08-04: "ITS MASSIVE BLAST SHOULD HAVE A TON OF FIRE"). The detonation threw six puffs of particles up the
+// stem and that was all the fire there was — a mushroom cloud with nothing burning under it.
+//
+// It is a SUSTAINED emitter and not one big burst, for two reasons. A burst is over in the frame it happens and a firestorm is
+// the thing that keeps burning after the flash; and the particle pool is a fixed ring buffer, so a thousand particles in one
+// frame simply overwrite each other and you see a few hundred. Spread over eight seconds at a few dozen a frame, every one of
+// them lives out its life and the crater burns.
+// Fire is thrown across the whole bowl by AREA, not uniformly in radius: scattering by r alone piles everything at the middle,
+// because a ring at radius r holds r times as much ground as one at 1. sqrt of a uniform roll fixes that, and it is why this
+// reads as a burning landscape rather than a bonfire at ground zero.
+const NUKE_FIRE_SEC=8.0;
+let _fireT=0, _fireX=0, _fireY=0, _fireZ=0, _fireR=0;
+function icbmFirestorm(x,gy,z,R){ _fireT=NUKE_FIRE_SEC; _fireX=x; _fireY=gy; _fireZ=z; _fireR=R;
+  // THE FIREBALL ITSELF, at once: a hard sphere of flame at ground zero before any of the slow burning starts.
+  if(typeof spawnParticles==='function'){
+    for(let i=0;i<26;i++){ const a=Math.random()*6.283, rr=Math.sqrt(Math.random())*R*0.55;
+      spawnParticles(x+Math.cos(a)*rr, gy+1+Math.random()*14, z+Math.sin(a)*rr,
+        i%3?0xffb022:0xfff0a0, 22, 7.0, 5.5); } } }
+function icbmFireTick(dt){
+  if(_fireT<=0) return;
+  _fireT-=dt;
+  if(typeof spawnParticles!=='function') return;
+  const u=1-_fireT/NUKE_FIRE_SEC;                                            // 0 at the blast, 1 as it dies down
+  const puffs=Math.max(2, Math.round(9*(1-u*0.72)));                         // fiercest at once, then settling to embers
+  for(let i=0;i<puffs;i++){
+    const a=Math.random()*6.283, rr=Math.sqrt(Math.random())*_fireR;         // sqrt: even coverage of the bowl's AREA
+    const px=_fireX+Math.cos(a)*rr, pz=_fireZ+Math.sin(a)*rr;
+    const gy=(typeof groundYAt==='function')?groundYAt(px,pz):_fireY;
+    // Hot orange near the middle, smoke and embers at the rim: the fire is worst where the warhead was.
+    const hot=1-Math.min(1, rr/_fireR);
+    const col = (Math.random()<0.30+0.45*hot) ? (Math.random()<0.5?0xff7a10:0xffc23a) : 0x4a423c;
+    spawnParticles(px, gy+0.4+Math.random()*3.5, pz, col, 5, 1.6+2.4*hot, 1.2+3.0*hot); } }
+
+// EVERYTHING GOES WHITE (Ben 08-04: "when it fires, everything in the entire game should go [blank] white for a split second").
+// A DOM overlay and not a post-process pass, deliberately: it has to take the HUD, the hotbar and the viewmodel with it, and a
+// shader in the render chain can only reach the things the renderer drew. This is the one effect in the game where covering
+// literally everything is the point.
+// 0.09 s of solid white and then a fade — a nuclear flash is not a fade-in, it is already at full when you notice it.
+function whiteOut(hold, fade){
+  let el=document.getElementById('whiteout');
+  if(!el){ el=document.createElement('div'); el.id='whiteout';
+    el.style.cssText='position:fixed;inset:0;z-index:9999;background:#fff;opacity:0;pointer-events:none;'; document.body.appendChild(el); }
+  el.style.transition='none'; el.style.opacity='1';
+  clearTimeout(whiteOut._t1); clearTimeout(whiteOut._t2);
+  whiteOut._t1=setTimeout(()=>{ el.style.transition='opacity '+(fade||0.9)+'s ease-out'; el.style.opacity='0'; }, (hold||0.09)*1000);
+  whiteOut._t2=setTimeout(()=>{ el.style.transition='none'; }, ((hold||0.09)+(fade||0.9))*1000+80); }
 function icbmFlash(x,gy,z){
+  whiteOut(0.10, 1.1);
   if(typeof weather!=='undefined'){ weather.flash=1; weather.thunderT=0.1; }   // the sky goes white at once, thunder right behind it
   if(typeof playSample==='function'){ playSample('thunder',null,1.0); setTimeout(()=>playSample('thunder',null,0.9),700); }
   if(typeof AC!=='undefined'&&AC){ tone(master,{f:34,type:'sine',dur:9.0,vol:0.5,to:18,atk:0.05}); burst(master,0.6,4.0,70,0.4,26); }
@@ -16048,6 +16135,7 @@ function icbmFlash(x,gy,z){
 }
 // The cloud grows for ~8s, stands for a while, then fades. Driven from the frame loop like every other effect here.
 function icbmUpdate(dt){
+  icbmFireTick(dt);
   if(_nukeCloud){ _nukeT+=dt;
     const grow=Math.min(1, _nukeT/8);
     _nukeCloud.scale.setScalar(0.05+grow*0.95);
@@ -16150,7 +16238,8 @@ function buildSilo(){ if(_siloDone) return;
 // The rocket is a MESH, not blocks: it exists for ten seconds and blocks would mean thousands of writes and remeshes per frame
 // of flight. Lift, arc, descend — and the detonation is the same icbmDetonate the harness already drives, so the flight cannot
 // diverge from the thing it triggers.
-const ICBM={ state:'idle', t:0, tx:0, tz:0, mesh:null, from:null, dur:11, cool:0, silo:null };   // silo = the cell the spent round came out of, so the cooldown can stand a fresh one back in it
+const ICBM={ state:'idle', t:0, tx:0, tz:0, mesh:null, from:null, dur:11, cool:0, silo:null };
+let _icbmTrail=0;   // the exhaust column's own emit clock — see icbmFlight   // silo = the cell the spent round came out of, so the cooldown can stand a fresh one back in it
 function icbmRocket(){ const g=new THREE.Group();
   const body=new THREE.MeshLambertMaterial({color:0x9aa0a6}), band=new THREE.MeshLambertMaterial({color:0x8a2b24}), fin=new THREE.MeshLambertMaterial({color:0x5c6167});
   const hull=new THREE.Mesh(new THREE.CylinderGeometry(0.9,0.9,9,12), body); hull.position.y=4.5; g.add(hull);
@@ -16215,6 +16304,15 @@ function icbmFlight(dt){
   // A ballistic arc: horizontal position eases from pad to target, height is a parabola over it. Nose follows the tangent, so
   // it goes up pointing up and comes down pointing down without any of it being hand-keyed.
   const x=f.x+(ICBM.tx-f.x)*u, z=f.z+(ICBM.tz-f.z)*u, y=f.y + 4*apex*u*(1-u);
+  // THE TRAIL (Ben 08-04: "AND A SMOKE TRAIL"). Emitted from the ENGINE, not the model's origin, and thrown backward down the
+  // arc so the column hangs where the missile has been rather than travelling with it. Rate-limited on its own clock: the
+  // flight is eleven seconds and the particle pool is a ring buffer, so a puff every frame would recycle the head of the trail
+  // before the tail of it had faded and the column would never grow longer than a second or so.
+  _icbmTrail-=dt;
+  if(_icbmTrail<=0 && typeof spawnParticles==='function'){ _icbmTrail=0.045;
+    const ex=x+0.5, ez=z+0.5;
+    spawnParticles(ex, y-1.2, ez, (u<0.10)?0xffb347:0xb9b2a8, 3, 1.1, 0.5);   // still lit by the motor on the way off the pad
+    spawnParticles(ex, y-2.4, ez, 0x8d8880, 2, 1.6, 0.2); }
   if(ICBM.mesh){ ICBM.mesh.position.set(x+0.5,y,z+0.5);
     const dy=4*apex*(1-2*u), dh=Math.hypot(ICBM.tx-f.x, ICBM.tz-f.z);
     ICBM.mesh.rotation.set(0, Math.atan2(ICBM.tx-f.x, ICBM.tz-f.z), 0);
@@ -17799,7 +17897,7 @@ function brForceLeaveOnDeath(){ brStopAudio(); brResumeMusic(); brRestoreAtmo();
 let _brNoise=null;
 function brMinimapStatic(dt){ if(!_mm){ if(typeof buildMinimap==='function')buildMinimap(); if(!_mm)return; }
   if((player.grabbed||player.tied)){ _mm.wrap.style.opacity='0'; return; } _mm.wrap.style.opacity='0.9'; _mm.wrap.style.transform='';
-  const g=_mm.ctx,S=360,cx=210,cy=180,R=130, N=100;   // cx follows the widened canvas (see buildMinimap) or the static would sit 30px off the ring
+  const g=_mm.ctx,S=360,cx=230,cy=180,R=130, N=100;   // cx follows the widened canvas (see buildMinimap) or the static would sit 30px off the ring
   if(!_brNoise){ _brNoise=document.createElement('canvas'); _brNoise.width=_brNoise.height=N; _brNoise._c=_brNoise.getContext('2d'); _brNoise._im=_brNoise._c.createImageData(N,N); }
   const dat=_brNoise._im.data;                                                                 // REAL TV static: fresh white-noise every frame (not a scrolled image)
   for(let i=0;i<N*N;i++){ const v=(Math.random()*255)|0; dat[i<<2]=v; dat[(i<<2)+1]=v; dat[(i<<2)+2]=v; dat[(i<<2)+3]=255; }
@@ -21055,6 +21153,76 @@ function updateFireflies(dt){
   _ffPts.geometry.attributes.position.needsUpdate=true;
   _ffPts.geometry.attributes.color.needsUpdate=true;
 }
+// ---- LAMP HALOS: an emitter stays a light after its chunk is gone (Ben 08-04: "light emitters need to be visible from
+// ---- farther away") ------------------------------------------------------------------------------------------------------
+// MEASURED FIRST (bench/tmp-emit-reach.mjs). Neither the bloom threshold nor fog is the cause: a row of lanterns keeps its glow
+// identically at threshold 0.88 and 1.15, and switching fog off changes a distant lamp's peak by under 7 of 255. What actually
+// happens is cruder — past the chunk radius there is NO LANTERN. /setblock at 160, 224 and 288 blocks with RENDER_DIST 12 wrote
+// nothing at all (blockAt read 0), because the chunk does not exist to write to; and RENDER_DIST BOOTS AT 6, which is 96 blocks.
+// A lamp is not dim at distance, it is absent, and no shader change can reach it.
+//
+// So the positions are remembered instead. Every chunk mesh registers its own emitters (buildModelBlocks already collects them
+// for the point-light pool) and the registry is NOT cleared when the chunk unloads: a light you have seen once keeps burning out
+// to camera.far. ONE Points object, one draw call, one buffer upload every 0.15 s — the fireflies' pattern, and for the same
+// reason (a PointLight per lamp would end the frame budget and takes no occlusion here).
+//
+// WHAT IT DELIBERATELY DOES NOT DO. It does not invent lights in chunks that have never been generated: a village you have not
+// visited has no lamps in it yet, and evaluating the structure oracle at range to find out would cost more than the whole
+// feature. It also does not touch NEAR lamps — the halo's strength ramps in from 40 blocks and is zero closer than that, so the
+// lantern in your hand and the torch on the wall look exactly as they did.
+const _lampReg=new Map();          // 'cx,cz' -> [x,y,z,level] ... ; survives chunk unload on purpose
+const LAMP_MAX=384, LAMP_NEAR=40, LAMP_FULL=80;
+let _lampPts=null, _lampPos=null, _lampCol=null, _lampLive=0, _lampT=0, _lampOn=true, _lampCapped=0;
+function _lampRegister(c){
+  const k=c.cx+','+c.cz;
+  if(c.emitters&&c.emitters.length){ const a=new Array(c.emitters.length);
+    for(let i=0;i<c.emitters.length;i++){ const e=c.emitters[i]; a[i]=[e[0],e[1],e[2],e[3]]; }   // copied, not referenced: the chunk's own array is rebuilt on every remesh
+    _lampReg.set(k,a); }
+  else _lampReg.delete(k);         // a remesh that finds no lights means they were mined out, not that the chunk went away
+}
+function updateLampHalos(dt){
+  if(typeof BR!=='undefined' && BR.inside){ if(_lampPts) _lampPts.visible=false; return; }   // same seal as the fireflies and the birds
+  const day=globalU.uDay.value;
+  const night=1-clamp((day-0.02)/0.30,0,1);
+  const rain=(typeof weather!=='undefined')?clamp(weather.rain||0,0,1):0;
+  const want=_lampOn?night*(1-0.6*rain):0;
+  if(!want && !_lampPts) return;   // by day this costs nothing at all: no object, no scan
+  if(!_lampPts){
+    _lampPos=new Float32Array(LAMP_MAX*3); _lampCol=new Float32Array(LAMP_MAX*3);
+    const g=new THREE.BufferGeometry();
+    g.setAttribute('position',new THREE.BufferAttribute(_lampPos,3)); g.setAttribute('color',new THREE.BufferAttribute(_lampCol,3));
+    g.setDrawRange(0,0);
+    // sizeAttenuation FALSE is the whole point: a remembered lamp holds a constant angular size instead of shrinking to a
+    // sub-pixel speck that the mip chain and FXAA then average away. fog:false for the fireflies' reason — an additive sprite
+    // multiplied by fog turns grey, and a grey light reads as dirt on the screen; the distance ramp below does the fading.
+    _lampPts=new THREE.Points(g,new THREE.PointsMaterial({size:7,map:_starTex(),sizeAttenuation:false,vertexColors:true,
+      transparent:true,depthWrite:false,blending:THREE.AdditiveBlending,fog:false}));
+    _lampPts.frustumCulled=false; _lampPts.renderOrder=6; scene.add(_lampPts);
+  }
+  _lampPts.visible = want>0;
+  if(!want){ _lampPts.geometry.setDrawRange(0,0); _lampLive=0; return; }
+  _lampT-=dt; if(_lampT>0) return;   // the lamps do not move; only the camera does, and the ramp is smooth over 40 blocks
+  _lampT=0.15;
+  const px=player.pos.x, py=player.pos.y+1, pz=player.pos.z;
+  const far=camera.far, far2=far*far;
+  let n=0; _lampCapped=0;
+  for(const arr of _lampReg.values()){
+    for(let i=0;i<arr.length;i++){ const e=arr[i];
+      const dx=e[0]-px, dy=e[1]-py, dz=e[2]-pz, d2=dx*dx+dy*dy+dz*dz;
+      if(d2>far2) continue;
+      const d=Math.sqrt(d2); if(d<LAMP_NEAR) continue;
+      if(n>=LAMP_MAX){ _lampCapped++; continue; }
+      const ramp=clamp((d-LAMP_NEAR)/(LAMP_FULL-LAMP_NEAR),0,1);
+      const lvl=e[3], k=want*ramp*(lvl>=15?1:lvl>=12?0.8:0.55);
+      _lampPos[n*3]=e[0]; _lampPos[n*3+1]=e[1]; _lampPos[n*3+2]=e[2];
+      _lampCol[n*3]=k*1.00; _lampCol[n*3+1]=k*0.62; _lampCol[n*3+2]=k*0.26;   // the same warm the point-light pool uses
+      n++; }
+  }
+  _lampLive=n;
+  _lampPts.geometry.setDrawRange(0,n);
+  _lampPts.geometry.attributes.position.needsUpdate=true;
+  _lampPts.geometry.attributes.color.needsUpdate=true;
+}
 function updateSkyBirds(dt){
   // Same isolation rule as the leaves (Ben 07-28): outdoor ambience must not appear inside the Backrooms — birds were
   // free to fly through the ceiling of a sealed hall.
@@ -23854,6 +24022,13 @@ window.__hc={
       return { built:true, visible:!!_ffPts.visible, live:_ffLive, lit, maxBright:+mx.toFixed(3),
         day:+globalU.uDay.value.toFixed(4), hush:(typeof worldHush==='function')?+worldHush().toFixed(3):null,
         rain:(typeof weather!=='undefined')?+(weather.rain||0).toFixed(3):null }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: the remembered-lamp halos. `reg` is how many chunks are in the registry and `emitters` how many lights it holds in
+  // total — the two that say whether a lamp survived its chunk unloading, which is the whole feature. on:false is the A/B off.
+  lampHalos(o){ try{ if(o&&o.on!=null){ _lampOn=!!o.on; _lampT=0; }
+      let regN=0, emN=0; _lampReg.forEach(a=>{ regN++; emN+=a.length; });
+      return { on:_lampOn, built:!!_lampPts, visible:!!(_lampPts&&_lampPts.visible), live:_lampLive, capped:_lampCapped,
+               reg:regN, emitters:emN, near:LAMP_NEAR, max:LAMP_MAX, far:+camera.far.toFixed(1), day:+globalU.uDay.value.toFixed(4) };
+    }catch(e){ return {err:String(e.message||e)}; } },
   pinScene(){ try{
       weather.raining=false; weather.rain=0; weather.rainTgt=0; weather.rainHold=1e9; weather.rainNext=1e9;
       weather.fog=0; weather.fogTgt=0; weather.fogHold=1e9; weather.fogNext=1e9; weather.overcast=0;
@@ -24023,6 +24198,18 @@ window.__hc={
       return { done:_siloDone, pad:_siloPad?{x:_siloPad.x,y:_siloPad.y,z:_siloPad.z}:null }; }catch(e){ return {err:String(e.message||e)}; } },
   siloGoto(){ try{ const p=_siloPad||_siloFindSpot(); if(!p) return {err:'no silo'};
       if(typeof __hc.tp==='function') __hc.tp(p.x, p.z+14); return {x:p.x, z:p.z+14}; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA: fire a warhead at a spot and read back what the blast actually did. "It destroys everything in its radius" is a claim
+  // about the edit map and about worldgen refusing to rebuild, neither of which is visible in a frame.
+  nuke(x,z,r){ try{ const out=icbmDetonate(+x,+z,r); out.wiped=_nukeWiped; return out; }catch(e){ return {err:String(e.message||e)}; } },
+  inCrater(x,z){ try{ return inCrater(Math.round(+x),Math.round(+z)); }catch(e){ return {err:String(e.message||e)}; } },
+  nukeFx(){ try{ const w=document.getElementById('whiteout');
+      return { fireT:+_fireT.toFixed(2), fireR:+_fireR.toFixed(1), wiped:_nukeWiped,
+               whiteOpacity:w?+(getComputedStyle(w).opacity||0):0,
+               particles:(typeof _pN!=='undefined')?_pN:null, cloud:!!_nukeCloud }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  icbmState(){ try{ return { state:ICBM.state, t:+ICBM.t.toFixed(2), tx:ICBM.tx, tz:ICBM.tz }; }catch(e){ return {err:String(e.message||e)}; } },
+  // A launch spends a real missile standing in a real shaft, so the bench stands one first rather than conjuring a flight.
+  icbmLaunch(tx,tz,silo){ try{ return icbmLaunch(+tx,+tz,silo); }catch(e){ return {err:String(e.message||e)}; } },
   icbmLaunchAt(tx,tz){ try{ const r=icbmLaunch(+tx,+tz); return r; }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: open and close the launch board. openIcbmUI is module scope and a page.evaluate cannot see it — the first run of the
   // terminal harness called it directly, got a silent ReferenceError inside a .catch, and then asserted against a panel that had
@@ -24762,6 +24949,12 @@ window.__hc={
   blockOutReset(){ try{ view._blockOutN=0; return 0; }catch(e){ return {err:String(e.message||e)}; } },
   heldParts(){ try{ let n=0, sprite=false; if(view.mesh) view.mesh.traverse(o=>{ if(o.isMesh){ n++; if(o.userData&&o.userData.extruded) sprite=true; } });
       return { id:view.id, meshes:n, sprite }; }catch(e){ return {err:String(e.message||e)}; } },
+  // #75 audit: the same item, signed at each of its representations. toolSig = the itemModel dispatch (icon /
+  // drop / peer), heldSig = the viewmodel's SEPARATE dispatch, iconRoute = whether the hotbar shows the 3D bake
+  // or the flat TOOLPIX sprite. Held via __hc.hold(id) first, or heldSig signs whatever was in hand.
+  toolSig(id){ try{ return _sigModel(itemModel(id)); }catch(e){ return {err:String(e.message||e)}; } },
+  heldSig(){ try{ const s=_sigModel(view.mesh); s.id=view.id; return s; }catch(e){ return {err:String(e.message||e)}; } },
+  iconRoute(id){ try{ const u=slotIconURL(id); return { threeD: _icon3D[id]===u }; }catch(e){ return {err:String(e.message||e)}; } },
   chainlinkRun(x,y,z,n,axis){ try{ n=Math.max(1,n|0||1); const ax=(axis==='z')?'z':'x';
       for(let i=0;i<n;i++) setBlockWorld(ax==='x'?x+i:x, y, ax==='x'?z:z+i, BID.chainlink, true);
       return { n, axis:ax }; }catch(e){ return {err:String(e.message||e)}; } },
