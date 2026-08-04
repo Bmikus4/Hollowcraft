@@ -148,7 +148,14 @@ function warmPct(file, crop){
     check('the sea no longer falls under the ground far out', wC < wU-0.02, `${wU}% -> ${wC}% of the far-water band is land, from the bearing with the most shelf in it`);
     const cv=await page.evaluate(`__hc.seaCurve()`);
     console.log('  curve now: '+JSON.stringify(cv));
-    check('and the clamp is what is live', cv.clamp===1 && cv.cap<=2.0);
+    // THE SHAPE BEN ASKED FOR (08-04: "i just want the ocean to look like its going on forever, and to have an ever so slight
+    // world curve out at its end"). Two halves, and the first one is what makes the shore safe by construction rather than by
+    // a clamp: the bend does not begin until beyond the render wall, so NO chunk water is curved at all.
+    check('and the clamp is what is live', cv.clamp===1);
+    check('nothing inside the render wall curves at all', cv.dropAt[cv.wall<=182?182:182]===0 && cv.r>cv.wall,
+      `drop at the wall (${cv.wall} blocks) is ${cv.dropAt[182]}, and the bend starts at ${cv.r}`);
+    check('and the far end curves, ever so slightly', cv.dropAt[2048]>3 && cv.dropAt[2048]<14 && cv.dropAt[1000]<3,
+      `${cv.dropAt[1000]} blocks down at 1000, ${cv.dropAt[2048]} at the disc rim (${cv.discRim}) — 8 blocks over 2048 is a 0.22-degree dip`);
     // THE LEDGE, geometrically, so this does not depend on a vantage being lucky: at the render wall the disc takes the cap
     // and the shallow chunk water beside it takes its own column, and the difference is the step.
     check('the step where the far sea meets chunk water is under a block and a half', cv.ledgeAtWall.shelf3<1.5,
