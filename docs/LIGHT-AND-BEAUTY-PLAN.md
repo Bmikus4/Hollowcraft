@@ -22,6 +22,32 @@ Target 7.14 ms/frame (140 fps). Measured this session on Ben's box, rd=8, 1000x5
 fragment shaders, refuse anything that adds vertices, chunks or per-frame CPU until it has been A/B'd.
 Roughly 3 ms is available, and a fragment-shader effect at this resolution costs hundredths.
 
+### CORRECTION, 2026-08-04 — that licence has expired at the water sites
+
+Re-measured with the tooling §5 mandates, same box, rd=8, 1000x560. The table above still holds where
+it was taken — `perf-run --scenes B1o` (standing in the overworld) reads **2.02 ms median, CPU 1.85,
+draw 1.83, 323 draws**, unchanged. But the census sites are a different story:
+
+| site (`perf-census --dur 10`) | median | draw | draws |
+|---|---|---|---|
+| shore | **7.70 ms** | 6.53 | 805 |
+| forest | 6.27 | 5.99 | 479 |
+| fogbank | 5.59 | 5.33 | 288 |
+| spawn_night | 3.70 | 3.71 | 286 |
+| underwater | 2.99 | 2.14 | 178 |
+
+**`shore` is over the 7.143 ms target, and the GPU is not idle there.** Paired A/B at the shore with
+`__hcPERF.nullFrag`, 4 pairs of 8 s: frame **7.53 → 5.17 ms** and **GPU 4.83 → 2.08 ms**. GPU at 4.83 ms
+of a 7.14 ms budget is nearly seven times what the table above records, so *"a fragment effect costs
+hundredths"* must not be quoted as licence at any water site again. Price each one.
+
+Two honest limits on that number: `nullFrag` also dropped draws 810 → 557, so the −1.74 ms frame delta
+is an upper bound on fragment cost rather than an isolation of it; and none of these sites has a
+pre-today baseline, so the `shore` figure is **not attributed** — several sessions have been adding
+props (sandbags, benches, chainlink, hanging lights) and 805 draw calls is where to look first. What is
+attributable: `shore` runs at `setTime(0.35)`, full daylight, where the night-gated moonglade branch is
+not taken at all, and the ocean-band and ring-landing edits are one `mix` each.
+
 ---
 
 ## 1. Ben's outstanding visual notes, verbatim, with the code each lands in

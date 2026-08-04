@@ -5428,6 +5428,27 @@ function rampSurfAt(wx,wz){ const fx=Math.floor(wx), fz=Math.floor(wz), fy0=Math
   for(let dy=0; dy>=-1; dy--){ const fy=fy0+dy, b=getBlock(fx,fy,fz); if(b===AIR)continue; const m=B[b].model;
     if(m==='stairs'||m==='roof'){ const s=fy+rampSurf(b,wx,wz); if(s<=player.pos.y+0.75 && (best===null||s>best)) best=s; } }
   return best; }
+// A DOOR THAT SWINGS THROUGH YOU PUTS YOU OUTSIDE IT (Ben 08-04: "when i open a door while inside it, it should push me out").
+// Both door states are a thin LEAF rather than a whole solid cell (see aabbHits below), so a doorway you are standing in is legal
+// — right up until the toggle swings that leaf into the space your body occupies, and then you are inside geometry with no way to
+// resolve it: physics only ever tests the position it is MOVING to, so a body that is already overlapping stays overlapping.
+//
+// The push is chosen, not guessed at: the four horizontal directions are tried in order of how far the body already leans away
+// from the cell's centre, so you come out the side you were mostly on — walk into a door from the north and you are pushed back
+// north, not sideways through a wall. Distances step outward and the first free one wins, which keeps the move as small as the
+// geometry allows. Climbing out on top is the last resort for a doorway boxed in on all four sides.
+// Returns true if it moved you, so callers can be silent when nothing was wrong.
+function pushPlayerOutOfSolid(cx,cy,cz){
+  const p=player; if(p.fly || p.grabbed || p.dead) return false;
+  if(!aabbHits(p.pos.x,p.pos.y,p.pos.z)) return false;                     // not stuck: the common case, one test
+  const ox=(cx!=null)?(p.pos.x-(cx+0.5)):0, oz=(cz!=null)?(p.pos.z-(cz+0.5)):0;
+  const dirs=[[Math.sign(ox)||1,0],[0,Math.sign(oz)||1],[-(Math.sign(ox)||1),0],[0,-(Math.sign(oz)||1)]];
+  if(Math.abs(oz)>Math.abs(ox)){ const a=dirs[0]; dirs[0]=dirs[1]; dirs[1]=a; }   // lean decides which axis is tried first
+  for(const d of [0.34,0.68,1.02,1.36,1.7]) for(const [sx,sz] of dirs){
+    const nx=p.pos.x+sx*d, nz=p.pos.z+sz*d;
+    if(!aabbHits(nx,p.pos.y,nz)){ p.pos.x=nx; p.pos.z=nz; p.vel.x=0; p.vel.z=0; return true; } }
+  for(const dy of [1.0,2.0]) if(!aabbHits(p.pos.x,p.pos.y+dy,p.pos.z)){ p.pos.y+=dy; p.vel.y=0; return true; }
+  return false; }
 function aabbHits(x,y,z){
   const x0=Math.floor(x-HW),x1=Math.floor(x+HW), y0=Math.floor(y),y1=Math.floor(y+PH-0.02), z0=Math.floor(z-HW),z1=Math.floor(z+HW);
   for(let xx=x0;xx<=x1;xx++)for(let yy=y0;yy<=y1;yy++)for(let zz=z0;zz<=z1;zz++){ const b=getBlock(xx,yy,zz);
@@ -7231,7 +7252,9 @@ function _vaultToggle(x,y,z){ const c=_vaultCells(x,y,z); if(!c) return null;
   const np = c.open? BID.vault_part : BID.vault_part_open;
   setBlockWorld(c.x,c.y,c.z,nb,true); if(typeof netEdit==='function') netEdit(c.x,c.y,c.z,nb);
   for(const p of c.parts){ setBlockWorld(p[0],p[1],p[2],np,true); if(typeof netEdit==='function') netEdit(p[0],p[1],p[2],np); }
-  doorCreak(c.x+0.5,c.y+1,c.z+0.5); _vaultAnimate(c); return c; }
+  doorCreak(c.x+0.5,c.y+1,c.z+0.5); _vaultAnimate(c);
+  pushPlayerOutOfSolid(c.x,c.y,c.z);   // the same courtesy from the 2x2: closing it on yourself must not leave you in the steel
+  return c; }
 // THE VAULT DOOR OPENS AS A MECHANISM, NOT AS A BLOCK SWAP (Ben 08-04: "open with a clean animation, spinning, and door opening").
 // The ids flip the instant you use it -- collision, saves and the network key off them and must not lag behind the picture -- so
 // what animates is the freshly built clone travelling from the pose it has NOT reached yet to the one it was built in: the wheel
@@ -7301,6 +7324,17 @@ function updateCreatureClip(){ if(_CLIP_OFF || player.grabbed) return;
   const dx=g.position.x-player.pos.x, dz=g.position.z-player.pos.z;
   if(dx*dx+dz*dz > 40*40) return;        // out of sight, out of budget
   clipRig(g,false); }
+// One door toggle, called by the right-click handler and by the QA hook alike, so what a bench exercises is what a player does.
+function toggleDoorAt(x,y,z,b){
+  b=(b==null)?getBlock(x,y,z):b;
+  const by=(b===BID.door||b===BID.door_open)?y:y-1;                          // whichever half you clicked, the pair moves
+  const o=(b===BID.door_open||b===BID.door_top_open);
+  const nb=o?BID.door:BID.door_open, nt=o?BID.door_top:BID.door_top_open;
+  setBlockWorld(x,by,z,nb,true); setBlockWorld(x,by+1,z,nt,true);
+  if(typeof netEdit==='function'){ netEdit(x,by,z,nb); netEdit(x,by+1,z,nt); }
+  doorCreak(x+0.5,by+1,z+0.5);
+  const pushed=pushPlayerOutOfSolid(x,by,z);                                  // the leaf may have just swung through you
+  return { open:!o, pushed }; }
 function _vaultBreak(h, drop){ const c=_vaultCells(h.x,h.y,h.z); if(!c) return false;
   for(const p of [[c.x,c.y,c.z], ...c.parts]){ setBlockWorld(p[0],p[1],p[2],AIR,true); if(typeof netEdit==='function') netEdit(p[0],p[1],p[2],AIR); }
   if(!player.creative) drop();
@@ -7422,8 +7456,7 @@ function useBlock(h){ const u=B[h.b].use;
   else if(u==='gate'){ const o=h.b===BID.gate_open; setBlockWorld(h.x,h.y,h.z,o?BID.gate:BID.gate_open,true); doorCreak(h.x+0.5,h.y+0.5,h.z+0.5); }
   else if(u==='trapdoor'){ const o=h.b===BID.trapdoor_open, nb=o?BID.trapdoor:BID.trapdoor_open; setBlockWorld(h.x,h.y,h.z,nb,true); if(typeof netEdit==='function')netEdit(h.x,h.y,h.z,nb); doorCreak(h.x+0.5,h.y+0.5,h.z+0.5); }   // sync the open/close toggle
   else if(u==='vault'){ _vaultToggle(h.x,h.y,h.z); }
-  else if(u==='door'){ const by=(h.b===BID.door||h.b===BID.door_open)?h.y:h.y-1; const o=(h.b===BID.door_open||h.b===BID.door_top_open);   // toggle BOTH halves together
-    const nb=o?BID.door:BID.door_open, nt=o?BID.door_top:BID.door_top_open; setBlockWorld(h.x,by,h.z,nb,true); setBlockWorld(h.x,by+1,h.z,nt,true); if(typeof netEdit==='function'){ netEdit(h.x,by,h.z,nb); netEdit(h.x,by+1,h.z,nt); } doorCreak(h.x+0.5,by+1,h.z+0.5); }   // sync BOTH halves
+  else if(u==='door') toggleDoorAt(h.x,h.y,h.z,h.b);
   else if(u==='furnace') useFurnace(h);
   else if(u==='campfire') useCampfire(h);
   else if(u==='sign') editSign(h.x,h.y,h.z);
@@ -12415,6 +12448,19 @@ const view={ group:new THREE.Group(), mesh:null, id:'__none__', swing:0, bob:0, 
   scopeFov:(()=>{ try{ const z=localStorage.getItem('hollowcraft_zoom'); return z?clamp(+z,4,16):7; }catch(e){ return 7; } })() };
 camera.add(view.group);
 const muzzleLight=new THREE.PointLight(0xffcc88,0,9,2); scene.add(muzzleLight);   // AR-15 muzzle flash lights the world briefly
+// A FILL LIGHT FOR WHAT IS IN YOUR HANDS (Ben 08-04: "i can still see inside the shotgun's stock when it is ads").
+// With the near-plane clipping fixed the stock was STILL a featureless black slab, and that turned out not to be clipping
+// at all: the game had no viewmodel light. heldLight serves torches and lanterns only, so a gun 18 cm from the eye was lit
+// by whatever the sun and sky happened to give its back faces, which at the rear of a stock is nothing.
+// PARENTED TO THE CAMERA, so it travels with the hands and cannot be shadowed by the world — this is a rig light, the same
+// idea as a fill card next to a lens, not a lamp that exists in the world. It is created ONCE at intensity zero for the
+// reason every light in this file is: three.js keys shader programs on light COUNT, and a light that comes and goes is a
+// recompile storm.
+// RADIUS 1.3 IS DELIBERATE AND MUST STAY SMALL. A three.js PointLight is not occluded by anything, so any radius that
+// reaches past the viewmodel lights the world through walls (Ben 08-04 saw exactly that from a distance). The held gun
+// never sits more than ~1.1 from the eye, so 1.3 covers the hands and can reach nothing else.
+const viewFill=new THREE.PointLight(0xbfd0e8,0.85,1.3,1.6); viewFill.position.set(0.32,0.22,0.22); camera.add(viewFill);
+const VIEW_FILL_BASE=0.85;
 let _flashHold=false;   // QA only (__hc.flashHold) — see the flash-decay block in updateView
 // How much room the held gun must keep in front of the near plane. One constant, because the fault it fixes was 14 of 16
 // gun variants having their stock at or behind the eye while aimed; per-gun tuning is what let them drift apart.
@@ -13493,8 +13539,16 @@ function updateView(dt){ updateRecoil(dt);                                      
   if(_flashHold) view.flashT=0.06;   // QA only (__hc.flashHold): a flash lasts 0.06s, which is far too short to photograph or to measure a luminance delta against
   const fl=view.mesh&&view.mesh.userData.flash;
   if(fl){ fl.visible=view.flashT>0; if(fl.visible){ const bs=fl.userData.base||1; fl.scale.set(bs*(1+Math.random()*0.7), bs*(1+Math.random()*0.7), 1); fl.rotation.z=Math.random()*6.28; } }   // flicker size + spin so each shot's flash looks different
-  if(view.flashT>0){ const d=lookDir(); muzzleLight.position.set(camera.position.x+d.x*1.1, camera.position.y+d.y*1.1-0.08, camera.position.z+d.z*1.1); muzzleLight.intensity=10*(view.flashT/0.06); }
-  else muzzleLight.intensity=0;
+  // THE FLASH LIGHTS THE WORLD FROM THE MUZZLE (Ben 08-04: "all muzzle flashes should actually shoot light").
+  // It used to be pinned 1.1 along lookDir from the CAMERA, which is not where any gun's muzzle is: a long rifle put its
+  // flash 0.5 further forward than the light, and the light sat inside the player. The sprite already knows exactly where
+  // the muzzle is, so the light is placed AT the sprite and nothing has to be kept in step by hand.
+  if(view.flashT>0){ const f=view.flashT/0.06;
+    if(fl) fl.getWorldPosition(muzzleLight.position);
+    else { const d=lookDir(); muzzleLight.position.set(camera.position.x+d.x*1.1, camera.position.y+d.y*1.1-0.08, camera.position.z+d.z*1.1); }
+    muzzleLight.intensity=26*f; muzzleLight.distance=11;   // 16 reached far enough to light blocks THROUGH terrain (point lights take no occlusion); the flash brightness comes from intensity, not radius — measured 60-97 night luminance against a 12 baseline with the sprite hidden
+    viewFill.intensity=VIEW_FILL_BASE+5.2*f; }                                   // the flash lights the GUN too, or the world flashes while the barrel in front of you does not
+  else { muzzleLight.intensity=0; viewFill.intensity=VIEW_FILL_BASE; }
   // ---- MINIGUN — the barrel cluster SPINS while firing, and the muzzle tip heats to RED under sustained fire (Ben 07-21) ----
   { const ud=view.mesh&&view.mesh.userData, bar=ud&&ud.barrels, hot=ud&&ud.hotMat;
     if(bar){ const firing=view.flashT>0.001;
@@ -13613,8 +13667,16 @@ function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id
 // ONE PELLET, OR ONE BULLET, down a ray: terrain, the Ceraphim's eyes and wings, the Wretch, birds, animals, and a peer's
 // mirrored animals. Split out of fireGun for the 12 gauge, which needs it nine times per trigger pull. `sg` marks a pellet:
 // a ninth of a shell's damage, and a fifth of a rifle bullet's reach.
+// EVERY PELLET THAT CONNECTS DEALS 25 (Ben 08-04). One constant, because the pellet number was written out at FOUR sites
+// — animals, the Ceraphim eyes, the wing hit and the Wretch head/body — and four copies of a damage value drift apart the
+// same way the sight-sway coefficients did.
+// AND THAT IS WHY THERE IS NO RANGE MULTIPLIER. "More damage up close" is already what the geometry does: the pattern is a
+// cone, so nine pellets land in a body at 8 m and three or four at 30, and assert-shotgun measures it (324 hits at 4
+// blocks against 128 at 30). Scaling each pellet by distance as WELL would contradict the flat 25 Ben asked for, and it
+// would put back the per-range special case this function was deliberately built without.
+const PELLET_DMG=25, PELLET_HEAD=1.33, PELLET_SUP=6;   // a suppressed 12 gauge keeps the proportional cost it always had (3 of 12 -> 6 of 25)
 function _traceBullet(o,d,bolt,rev,sup,sg){
-  const animDmg=Math.max(3,(sg?6:bolt?40:rev?14:10) - (sup?(sg?1:bolt?20:4):0));   // one pellet is worth 6 on an animal, so a whole shell is 54 — a deer dies to one                               // the hunting rifle hits far harder; suppressor costs the rifle -20 but light guns only -4 (the flat -20 drove AR/Python animal damage NEGATIVE — bullets healed animals)
+  const animDmg=Math.max(3,(sg?PELLET_DMG:bolt?40:rev?14:10) - (sup?(sg?2:bolt?20:4):0));   // one pellet is worth 6 on an animal, so a whole shell is 54 — a deer dies to one                               // the hunting rifle hits far harder; suppressor costs the rifle -20 but light guns only -4 (the flat -20 drove AR/Python animal damage NEGATIVE — bullets healed animals)
   const _maxR=sg?36:bolt?210:rev?120:70;   // shot sheds velocity fast: past ~36 blocks a 12 gauge is not a weapon                                                                    // the hunting rifle reaches ~3x as far as the AR; the revolver ~mid
   for(let t=0.6;t<_maxR;t+=0.35){ const px=o.x+d.x*t, py=o.y+d.y*t, pz=o.z+d.z*t;                      // finer step so tight hitboxes aren't skipped
     if((t%(sg?9:3))<0.5) spawnParticles(px,py,pz,0xfff0b0,1,0.2,0.12);   // at the bullet's tracer rate, nine pellets would be nine times the particles for one trigger pull                                    // bullet TRACER streak down the line
@@ -13656,7 +13718,7 @@ function _wretchRayHit(px,py,pz,d,bolt,rev,sup,sg){
 function _wretchRayHit1(){
   const px=_wrp.x, py=_wrp.y, pz=_wrp.z, bolt=_wrp.bolt, rev=_wrp.rev, sup=_wrp.sup, sg=_wrp.sg;
   if(wretch.active && wretch.boss){ for(const e of seraphEyeSpheres()){ const ex=px-e.x, ey=py-e.y, ez=pz-e.z;   // THE CERAPHIM: every eye = 100% damage (central = weak point); checked BEFORE wings so eyes set into wings still pay full
-    if(ex*ex+ey*ey+ez*ez < e.r*e.r){ const _wd=((sg?12:bolt?100:rev?68:65) - (sup?(sg?3:20):0)) * (e.central?1.5:1);
+    if(ex*ex+ey*ey+ez*ez < e.r*e.r){ const _wd=((sg?PELLET_DMG:bolt?100:rev?68:65) - (sup?(sg?PELLET_SUP:20):0)) * (e.central?1.5:1);
       if(!NET.on||wretchOwner()===NET.id){ wretch._gunHit=true; hurtWretch(_wd); } else netSend({t:'hw',v:_wd,h:wretch._hid||0});
       spawnParticles(px,py,pz,0xf1e7d9,16,2.4,0.7); spawnParticles(px,py,pz,0x8a1010,10,1.8,0.6);
       if(!e.central && !e.closed && typeof seraphEyeClose==='function'){ seraphEyeClose(e.i,90); flashName('eye SEALED — 90s'); if(NET.on)netSend({t:'eyeSeal',i:e.i}); }   // shoot a side eye → it clamps shut 90s (in stage 3 a sealed eye can't fire its burst laser) (Ben 07-21)
@@ -13664,7 +13726,7 @@ function _wretchRayHit1(){
       if(typeof seraphSay==='function'&&Math.random()<0.4)seraphSay(e.central?'hitCentral':(Math.random()<0.5?'hit1':'hit2')); return true; } }
     for(const wsp of seraphWingSpheres()){ const wx2=px-wsp.x, wy2=py-wsp.y, wz2=pz-wsp.z;                       // WINGS: big tempting targets — 10% chance a shot wounds (user spec 07-20); feathers soak the rest
       if(wx2*wx2+wy2*wy2+wz2*wz2 < wsp.r*wsp.r){
-        if(Math.random()<0.10){ const _wd=((sg?12:bolt?100:rev?68:65) - (sup?(sg?3:20):0));
+        if(Math.random()<0.10){ const _wd=((sg?PELLET_DMG:bolt?100:rev?68:65) - (sup?(sg?PELLET_SUP:20):0));
           if(!NET.on||wretchOwner()===NET.id){ wretch._gunHit=true; hurtWretch(_wd); } else netSend({t:'hw',v:_wd,h:wretch._hid||0});
           spawnParticles(px,py,pz,0x8a1010,12,2,0.6); flashName('through the wing'); }
         else { spawnParticles(px,py,pz,0xb03030,10,1.8,0.8); spawnParticles(px,py,pz,0xf1e7d9,4,1.2,0.5); }      // feather burst — the shot is EATEN
@@ -13674,7 +13736,7 @@ function _wretchRayHit1(){
     // A PELLET IS WORTH 12, so a whole shell is 108 on the body and 144 through the head — two shells rout even the
     // Horrific one. The suppressor's flat -20 must never drive a pellet NEGATIVE (bullets that heal shipped once
     // already, on animals): 3 is the same share of 12 that 20 is of 70.
-    if(head||body){ const _wd=(sg?(head?16:12):bolt?(head?100:70):rev?(head?68:45):(head?65:50)) - (sup?(sg?3:20):0);
+    if(head||body){ const _wd=(sg?(head?Math.round(PELLET_DMG*PELLET_HEAD):PELLET_DMG):bolt?(head?100:70):rev?(head?68:45):(head?65:50)) - (sup?(sg?PELLET_SUP:20):0);
       if(!NET.on||wretchOwner()===NET.id){ wretch._gunHit=true; hurtWretch(_wd); } else netSend({t:'hw',v:_wd,h:wretch._hid||0});   // AR 50 / Python 45 body (Ben 07-20), heads scaled; co-op: only the owner mutates HP; guests request the hit
       spawnParticles(px,py,pz,head?0xff3020:0x3a0608,head?16:12,2,0.6); if(head)flashName('headshot'); return true; } }   // blood burst only — no lingering wound decal (Ben 07-21)
   return false;
@@ -19052,7 +19114,7 @@ function updateAnimalsFrame(dt){
       spawnParticles(kx,ky+0.4,kz,0x4a0606,26,3.2,1.7); spawnParticles(kx,ky+0.5,kz,0x260303,14,2.2,1.2);   // dark arterial spray
       if(typeof spawnBloodSplat==='function')spawnBloodSplat(kx,kz,1.0+Math.random()*0.4);                  // painted gore on the ground
       wretchVoice&&wretchVoice('close_clicks',{x:kx,y:ky,z:kz}); spawnCarcass(kx,ky,kz); break; } } }
-  updateCarcasses(dt); updateRagdolls(dt); }
+  updateCarcasses(dt); updateRagdolls(dt); updateDread(dt); }
 // ---- RAGDOLL CORPSES — a slain body keeps its own mesh and falls under gravity, collides with the ground, and flops
 //      onto its flank. Creatures fade out + despawn after their ttl (~120s); boss bodies (ttl=Infinity) lie there forever.
 //      Blood pools beneath on the killing blow. One rigid tumble reads as a ragdoll on these blocky low-poly bodies. ----
@@ -19120,8 +19182,17 @@ function bloodPlane(size,op){ const m=new THREE.Mesh(new THREE.PlaneGeometry(siz
 function spawnBloodSplat(x,z,scale){ const sc=scale||1, gy=groundYAt(x,z); const g=new THREE.Group(); g.position.set(x,gy+0.03,z); carcassGroup.add(g);
   g.add(bloodPlane((1.1+Math.random()*0.5)*sc));
   for(let k=0;k<2+((Math.random()*2)|0);k++){ const sp=bloodPlane((0.4+Math.random()*0.5)*sc); sp.position.set((Math.random()-0.5)*1.5*sc,0.002+k*0.002,(Math.random()-0.5)*1.5*sc); g.add(sp); }   // satellite spatter around it
-  carcasses.push({g,life:80,mats:g.children.map(o=>o.material)}); if(carcasses.length>14){ const old=carcasses.shift(); carcassGroup.remove(old.g); } }
+  carcasses.push({g,life:SPLAT_LIFE,fade:SPLAT_FADE,mats:g.children.map(o=>o.material)}); if(carcasses.length>SPLAT_CAP){ const old=carcasses.shift(); carcassGroup.remove(old.g); } }
 // carcasses left behind by the Wretch's feeding — a split ribcage + blood pool that lingers then fades
+// HOW LONG A KILL SITE LASTS (Ben 08-04: carcasses "decompose wayy too fast"). It was 70 SECONDS for a carcass and 80 for
+// a blood splat, fading over the last 8 — so a body you left behind was gone before you had walked a chunk and come back,
+// and the world read as if nothing you did stuck. Ten and eight minutes respectively, with a fade long enough that it is a
+// carcass rotting away rather than a prop being switched off.
+// THE CAPS RISE WITH THE LIFETIMES, and they have to: with the old 70s almost nothing was ever alive at once, so an
+// unchanged oldest-first cap would silently become the real lifetime the moment a hunt got busy — a carcass vanishing
+// because a tenth one spawned looks exactly like the bug this change fixes.
+const CARCASS_LIFE=600, CARCASS_FADE=45, CARCASS_CAP=16;
+const SPLAT_LIFE=480, SPLAT_FADE=40, SPLAT_CAP=22;
 const carcassGroup=new THREE.Group(); scene.add(carcassGroup); const carcasses=[];
 function spawnCarcass(x,y,z){ const g=new THREE.Group(); g.position.set(x,y+0.02,z); g.rotation.y=Math.random()*6.283; carcassGroup.add(g);
   const bone=new THREE.MeshLambertMaterial({color:0xcfc7b0});
@@ -19130,9 +19201,30 @@ function spawnCarcass(x,y,z){ const g=new THREE.Group(); g.position.set(x,y+0.02
   for(let r=-2;r<=2;r++){ const rib=new THREE.Mesh(new THREE.TorusGeometry(0.22,0.025,5,8,Math.PI),bone); rib.position.set(0,0.14,r*0.14); rib.rotation.y=0; rib.rotation.z=(Math.random()-0.5)*0.5; g.add(rib); }   // split-open ribcage — ribs arc UP across the body (spaced along the spine), rotated 90° from before
   const spine=new THREE.Mesh(new THREE.BoxGeometry(0.06,0.06,0.7),bone); spine.position.y=0.08; g.add(spine);
   for(let i=0;i<5;i++){ const b=new THREE.Mesh(new THREE.BoxGeometry(0.05,0.05,0.24),bone); b.position.set((Math.random()-0.5)*0.9,0.05,(Math.random()-0.5)*0.9); b.rotation.y=Math.random()*6.283; g.add(b); }   // scattered bones
-  carcasses.push({g,life:70,mats:[pool.material]}); if(carcasses.length>10){ const old=carcasses.shift(); carcassGroup.remove(old.g); } }
+  carcasses.push({g,life:CARCASS_LIFE,fade:CARCASS_FADE,mats:[pool.material]}); if(carcasses.length>CARCASS_CAP){ const old=carcasses.shift(); carcassGroup.remove(old.g); } }
+// ---- THE DREAD RAMP: one signal for "the Wretch is closing" ----------------------------------------------------------
+// Ben 08-04: "all game music should stop when the ambient sound also cuts out, so when before the wretch attacks all game
+// music should stop." E2 of the plan wants the birds and the insects to thin out on the same approach, so this is ONE
+// signal both read instead of two proximity tests that can disagree about the moment the world goes quiet. When #71 builds
+// the ambient gating it multiplies its bird/insect density by (1-_dread) and nothing else needs deciding.
+// RAMPED, NEVER A RADIUS FLIP. A hard cut at a fixed distance announces itself and the player learns the number; 90 blocks
+// out this is still 0, and by 26 it is 1 and the soundtrack is silent. The rise is faster than the fall so the world does
+// not cheerfully brighten up the instant the thing turns its head away.
+// The BOSS track is deliberately exempt: it starts because the Ceraphim has arrived, and ducking it would silence the
+// encounter this whole mechanism exists to build up to.
+let _dread=0;
+function updateDread(dt){
+  let target=0;
+  try{ if(typeof wretch!=='undefined' && wretch && wretch.active && !(typeof BR!=='undefined' && BR.inside)){
+    const dx=wretch.pos.x-player.pos.x, dz=wretch.pos.z-player.pos.z, d=Math.hypot(dx,dz);
+    target=clamp((90-d)/64,0,1); } }catch(e){ target=0; }
+  const k=(target>_dread? dt*0.55 : dt*0.28);
+  const nd=_dread+clamp(target-_dread,-k,k);
+  if(Math.abs(nd-_dread)>0.004){ _dread=nd; if(typeof applyMusicVol==='function') applyMusicVol(); }
+  else _dread=nd;
+}
 function updateCarcasses(dt){ for(let i=carcasses.length-1;i>=0;i--){ const c=carcasses[i]; c.life-=dt;
-    if(c.life<8){ const f=c.life/8; c.g.traverse(o=>{ if(o.material){ o.material.transparent=true; o.material.opacity=(o.material===c.mats[0]?0.85:1)*f; } }); }   // fade out over the last 8s
+    const fd=c.fade||8; if(c.life<fd){ const f=c.life/fd; c.g.traverse(o=>{ if(o.material){ o.material.transparent=true; o.material.opacity=(o.material===c.mats[0]?0.85:1)*f; } }); }   // fade out over the last 8s
     if(c.life<=0){ carcassGroup.remove(c.g); carcasses.splice(i,1); } } }
 _animalsFrame=updateAnimalsFrame;   // hook into the existing updateAnimals(dt) loop call
 
@@ -20117,8 +20209,8 @@ function playSample(base,pos,vol){ if(!AC)return false;
 //
 // A MISSING FILE IS NOT A BROKEN GAME. If rain_music.ogg is absent the element errors, the flag latches, and rain simply plays the
 // ordinary soundtrack as it always did.
-const MUSIC_SILENCE=120, MUSIC_RAIN='./sounds/rain_music.ogg', RAIN_MUSIC_ON=0.25, RAIN_MUSIC_OFF=0.12;
-let _musicT0=null, _musicSkew=0, _rainMusicEl=null, _rainMusicDead=false, _rainMusicOn=false;
+const MUSIC_SILENCE=120, MUSIC_GAP=180, MUSIC_FADE=6, MUSIC_RAIN='./sounds/rain_music.ogg', RAIN_MUSIC_ON=0.25, RAIN_MUSIC_OFF=0.12;
+let _musicT0=null, _musicSkew=0, _rainMusicEl=null, _rainMusicDead=false, _rainMusicOn=false, _musicGapUntil=0;
 function musicElapsed(){ return (_musicT0==null?0:(performance.now()/1000)-_musicT0)+_musicSkew; }
 function rainMusicWanted(){ if(_rainMusicDead) return false;
   const r=(typeof weather!=='undefined' && weather) ? (weather.rain||0) : 0;
@@ -20138,10 +20230,29 @@ function startGameMusic(){ _ensureMusicEls(); if(!_gameMusicEl)return;
   if(_musicT0==null && typeof started!=='undefined' && started) _musicT0=performance.now()/1000;   // the world began — start counting the silence
   if(musicElapsed()<MUSIC_SILENCE){ _musicPause(_gameMusicEl); _musicPause(_rainMusicEl); return; }   // the opening silence: nothing plays, and nothing starts
   const rain=rainMusicWanted();
+  // THREE MINUTES OF QUIET BEFORE THE MAIN SOUNDTRACK COMES BACK (Ben 08-04: "there should be a 3 min gap before main game music
+  // transitions"). Two tracks butted end to end sound like a playlist, not like a world — so when the rain stops, the weather
+  // track's absence is the point, and the soundtrack waits. Only the MAIN track waits: rain starting is weather, and weather does
+  // not queue, so a shower cancels the gap and comes straight in.
+  if(rain) _musicGapUntil=0;
+  else if(_rainMusicEl && !_rainMusicEl.paused) _musicGapUntil=musicElapsed()+MUSIC_GAP;   // the rain track is playing and should not be → start the gap
+  if(!rain && musicElapsed()<_musicGapUntil){ _musicPause(_gameMusicEl); _musicPause(_rainMusicEl); return; }
   const play=rain?_rainMusicEl:_gameMusicEl, hush=rain?_gameMusicEl:_rainMusicEl;
   _musicPause(hush);
-  if(play){ play.volume=_bossMusicOn?0:_musicVol; if(play.paused) play.play().catch(()=>{}); } }
+  if(play && play.paused){ _musicFadeIn(play); play.play().catch(()=>{}); }
+  else if(play && !_bossMusicOn && play.volume>=_musicVol-1e-3) play.volume=_musicVol; }   // already at level: nothing to do but track the slider
 function _musicPause(a){ if(a && !a.paused){ try{ a.pause(); }catch(e){} } }   // pause WITHOUT rewinding — see "it resumes" above
+// MUSIC ALWAYS FADES IN (Ben 08-04: "music should always fade in slowly"). A track that starts at full level announces itself as a
+// file being played; over MUSIC_FADE seconds it arrives as weather. Driven on the element's own volume rather than a WebAudio ramp
+// because the element volume is what applyMusicVol and the boss-duck already write, and two owners of one gain is how a track ends
+// up stuck silent. The ramp is re-based on every call, so a fade interrupted by another fade does not fight itself.
+let _musicFade=null;
+function _musicFadeIn(el){ if(!el) return; el.volume=0; _musicFade={el, t:0}; }
+function updateMusicFade(dt){ const f=_musicFade; if(!f) return;
+  if(!f.el || f.el.paused || _bossMusicOn){ _musicFade=null; return; }        // the boss duck owns the volume while it is up
+  f.t+=dt; const v=Math.min(1, f.t/MUSIC_FADE)*_musicVol;
+  try{ f.el.volume=v; }catch(e){ _musicFade=null; return; }
+  if(f.t>=MUSIC_FADE) _musicFade=null; }
 // The schedule changes at moments no user gesture coincides with — the silence ending, and the rain starting or stopping — so it
 // is polled twice a second rather than waiting to be asked. startGameMusic only ever plays something already paused, which is what
 // makes calling it on a timer safe. Boss music and the Backrooms own the mix while they are up and both restore through it.
@@ -20149,6 +20260,7 @@ let _musicPoll=0;
 function updateMusicSchedule(dt){ if(!AC || _bossMusicOn) return;
   if(typeof BR!=='undefined' && BR && BR.inside) return;                    // the Backrooms are deliberately silent
   if(typeof started!=='undefined' && !started) return;
+  updateMusicFade(dt);                                                      // the fade needs every frame; the SCHEDULE only needs twice a second
   _musicPoll-=dt; if(_musicPoll>0) return; _musicPoll=0.5;
   startGameMusic(); }
 function startBossMusic(){ _ensureMusicEls(); if(!_bossMusicEls)return; _bossMusicOn=true; _bossMusicIdx=0;
@@ -20157,7 +20269,8 @@ function startBossMusic(){ _ensureMusicEls(); if(!_bossMusicEls)return; _bossMus
   try{ _bossMusicEls[1].pause(); _bossMusicEls[0].currentTime=0; _bossMusicEls[0].volume=_bossMusicVol; _bossMusicEls[0].play().catch(()=>{}); }catch(e){} }
 function stopBossMusic(){ _bossMusicOn=false; if(_bossMusicEls)for(const a of _bossMusicEls){ try{ a.pause(); a.currentTime=0; }catch(e){} }
   startGameMusic(); }   // the boss track does NOT loop; whatever the weather calls for comes back
-function applyMusicVol(){ if(!_bossMusicOn){ if(_gameMusicEl)_gameMusicEl.volume=_musicVol; if(_rainMusicEl)_rainMusicEl.volume=_musicVol; }   // whichever of the two is paused simply keeps the new level for when it comes back
+function applyMusicVol(){ const duck=Math.max(0,1-(typeof _dread!=='undefined'?_dread:0));   // the dread ramp silences the soundtrack as the Wretch closes (see updateDread)
+  if(!_bossMusicOn){ if(_gameMusicEl)_gameMusicEl.volume=_musicVol*duck; if(_rainMusicEl)_rainMusicEl.volume=_musicVol*duck; }   // whichever of the two is paused simply keeps the new level for when it comes back
   if(_bossMusicEls)for(const a of _bossMusicEls)a.volume=_bossMusicVol; }
 // HYPERREALISTIC HEARTBEAT (Ben 07-21) — a lub-dub pulse. Fires on adrenaline (racing pulse) and when the creature RUNS BY.
 let _hbActive=false, _hbEnd=0, _hbBpm=100, _hbBus=null;
@@ -21463,6 +21576,7 @@ window.__hc={
   musicProbe(){ try{ _ensureMusicEls();
       return { elapsed:+musicElapsed().toFixed(1), silence:MUSIC_SILENCE, started:(typeof started!=='undefined'?!!started:null), clockRunning:_musicT0!=null,
         rain:+((typeof weather!=='undefined'&&weather.rain)||0).toFixed(2), rainWanted:_rainMusicOn, rainDead:_rainMusicDead,
+        gapUntil:+_musicGapUntil.toFixed(1), inGap:musicElapsed()<_musicGapUntil, gap:MUSIC_GAP, fading:!!_musicFade, fadeSec:MUSIC_FADE,
         rainPlaying:!!(_rainMusicEl&&!_rainMusicEl.paused), rainVol:_rainMusicEl?+_rainMusicEl.volume.toFixed(2):null,
         loopPlaying:!!(_gameMusicEl&&!_gameMusicEl.paused), loopVol:_gameMusicEl?+_gameMusicEl.volume.toFixed(2):null,
         boss:!!_bossMusicOn }; }catch(e){ return {err:String(e.message||e)}; } },
@@ -21497,6 +21611,12 @@ window.__hc={
       coyote:+((player._coyote||0)).toFixed(3), buf:+((player._jumpBuf||0)).toFixed(3), landT:+((player.landT||0)).toFixed(2),
       vx:+player.vel.x.toFixed(2), vz:+player.vel.z.toFixed(2), spd:+Math.hypot(player.vel.x,player.vel.z).toFixed(2),
       locked:!!locked, ui:openUI||null }; }catch(e){ return {err:String(e.message||e)}; } },
+  // A DOOR SWUNG THROUGH THE PLAYER: stand in the cell, toggle it, and report whether the body ended up outside geometry.
+  doorPush(x,y,z){ try{ const before={x:+player.pos.x.toFixed(2),z:+player.pos.z.toFixed(2)};
+      const r=toggleDoorAt(x|0,y|0,z|0);
+      const stuck=aabbHits(player.pos.x,player.pos.y,player.pos.z);
+      return { open:r.open, pushed:r.pushed, stuck, before, after:{x:+player.pos.x.toFixed(2),z:+player.pos.z.toFixed(2)},
+               moved:+Math.hypot(player.pos.x-before.x, player.pos.z-before.z).toFixed(2) }; }catch(e){ return {err:String(e.message||e)}; } },
   musicRain(v){ try{ if(typeof weather!=='undefined'){ weather.rain=+v||0; weather.rainTgt=+v||0; } startGameMusic(); return this.musicProbe(); }catch(e){ return {err:String(e.message||e)}; } },   // QA: set the rain and read which track the schedule picked
   vaultTick(n,dt){ try{ for(let i=0;i<(n|0||1);i++) updateVaultDoors(dt||0.016); return Object.keys(_vaultFx).length; }catch(e){ return {err:String(e.message||e)}; } },
   // Are any surface decorations standing on nothing? Scans the columns around the player at their own ground level, which is the
@@ -21671,6 +21791,15 @@ window.__hc={
         rearZ:+maxZ.toFixed(4), frontZ:+minZ.toFixed(4),
         clearance:+(-maxZ-camera.near).toFixed(4),      // positive = the whole gun sits beyond the near plane
         clipped:(-maxZ)<=camera.near }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: the dread ramp and what it is doing to the soundtrack. Read rather than heard — "does the music stop" is not
+  // something a headless run can listen to, but the gain it is multiplied by is a number.
+  dread(){ try{ const d=(typeof _dread!=='undefined')?_dread:null;
+      return { dread:d==null?null:+d.toFixed(4), musicVol:_musicVol, bossOn:!!_bossMusicOn,
+        gameEl:_gameMusicEl?+(_gameMusicEl.volume||0).toFixed(4):null,
+        wretchActive:!!(wretch&&wretch.active),
+        wretchDist:(wretch&&wretch.active)?+Math.hypot(wretch.pos.x-player.pos.x,wretch.pos.z-player.pos.z).toFixed(2):null }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: force the ramp so a probe does not have to walk a Wretch across the map to see the music duck.
+  dreadSet(v){ try{ _dread=clamp(+v||0,0,1); if(typeof applyMusicVol==='function')applyMusicVol(); return +_dread.toFixed(4); }catch(e){ return {err:String(e.message||e)}; } },
   heldParts(){ try{ let n=0, sprite=false; if(view.mesh) view.mesh.traverse(o=>{ if(o.isMesh){ n++; if(o.userData&&o.userData.extruded) sprite=true; } });
       return { id:view.id, meshes:n, sprite }; }catch(e){ return {err:String(e.message||e)}; } },
   chainlinkRun(x,y,z,n,axis){ try{ n=Math.max(1,n|0||1); const ax=(axis==='z')?'z':'x';

@@ -87,6 +87,13 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     check('at night it lifts off absolute black',     night.birdLum > day.darkLum*3, `${night.birdLum} at night against a constant of ${day.darkLum}`);
     check('but stays darker than the air behind it',  night.birdLum < night.airLum*0.5, `bird ${night.birdLum} vs air ${night.airLum} — a silhouette, not a firefly`);
 
+    // 4. AND IT COSTS NOTHING TO DRAW. Plan §0: the frame is CPU/draw-bound with the GPU nearly idle, so nothing may add draw
+    //    calls without being priced. The head and the tail are merged into the body geometry, so a bird is three meshes — body,
+    //    wing, wing — exactly as it was before either existed. Asserted as a COUNT rather than timed: sixteen draw calls do not
+    //    resolve in a 2-4ms frame, and a count is decisive where a timing would be noise.
+    const meshes=(await page.evaluate(`__hc.skyFlock()`)).map(b=>b.meshes);
+    check('a bird is still three meshes',   meshes.every(m=>m===3), `meshes per bird: ${meshes.join('/')}`);
+
     check('no page errors', errs.length===0, errs.slice(0,2).join(' | '));
     console.log(`\n${checks-fails}/${checks} checks pass`);
   } finally { try{ if(browser) await browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }
