@@ -1854,6 +1854,9 @@ const craters=[];                                   // {x,z,r,d} — PERSISTED (
 // Is this column inside a crater's kill footprint? Used by worldgen to refuse to decorate or build there: nothing grows on the
 // floor of a fresh bowl, and a cabin that regenerates inside one was never destroyed in the first place. Slightly INSIDE the
 // bowl's own radius (0.94) so the rim, which is where the bowl blends back into real ground, still carries its own scrub.
+// Any block that is a grass block: the plain one and the leaf-strewn variants, which differ only in what is lying on top of
+// them. Foliage, mob spawns and anything else that means "is this a lawn" go through this, or a leaf drift reads as bare rock.
+function isGrassBlock(b){ return b===BID.grass || b===BID.grass_leaf1 || b===BID.grass_leaf2 || b===BID.grass_leaf3; }
 function inCrater(wx,wz){ if(!craters.length) return false;
   for(let i=0;i<craters.length;i++){ const c=craters[i], dx=wx-c.x, dz=wz-c.z;
     if(dx*dx+dz*dz < (c.r*0.94)*(c.r*0.94)) return true; }
@@ -2154,7 +2157,7 @@ function decorate(c){
     if (!isGrassSurface(wx,wz)) continue;   // pines only on grass → natural treeline; bare rock/snow/ice/beach stay clear (deterministic so border trees still straddle)
     if (pineAt(wx,wz)){ pineEmit(wx,wz,(bx,by,bz,id,trunk)=>placeSet(c,bx,by,bz,id,trunk)); continue; }
     if (dx<0||dx>=CK||dz<0||dz>=CK) continue;             // understory only in-chunk
-    if (getBlock(wx,h,wz)!==BID.grass) continue;
+    if (!isGrassBlock(getBlock(wx,h,wz))) continue;   // the leaf-strewn variants are grass too (Ben 08-04)
     const r=xhash(wx,3,wz,919);
     let deco=AIR;
     if (r<0.09) deco=BID.tallgrass;
@@ -2201,7 +2204,7 @@ function beachLog(c){
 function enrichTerrain(c){
   const rng=tileRng((c.cx*19349663 ^ c.cz*83492791)>>>0);
   const spot=()=>{ const bx=2+(rng()*12|0), bz=2+(rng()*12|0), wx=c.cx*CK+bx, wz=c.cz*CK+bz; return {bx,bz,wx,wz,h:surfaceH(wx,wz)}; };
-  const grass=(bx,bz,h)=> h>CFG.SEA+1 && h<WH-28 && bx>=0&&bx<CK&&bz>=0&&bz<CK && c.blocks[idx(bx,h,bz)]===BID.grass && c.blocks[idx(bx,h+1,bz)]===AIR;
+  const grass=(bx,bz,h)=> h>CFG.SEA+1 && h<WH-28 && bx>=0&&bx<CK&&bz>=0&&bz<CK && isGrassBlock(c.blocks[idx(bx,h,bz)]) && c.blocks[idx(bx,h+1,bz)]===AIR;
   const scatter=(s,n,spread,put)=>{ for(let k=0;k<n;k++){ const lx=s.bx+((rng()*(spread*2+1)|0)-spread), lz=s.bz+((rng()*(spread*2+1)|0)-spread); const hh=(lx>=0&&lx<CK&&lz>=0&&lz<CK)?surfaceH(c.cx*CK+lx,c.cz*CK+lz):-1; if(grass(lx,lz,hh)){ c.blocks[idx(lx,hh+1,lz)]=put; c.hasCross=true; } } };
   let s;
   if(rng()<0.16){ s=spot(); if(grass(s.bx,s.bz,s.h)){ const rad=1+(rng()*1.6|0);   // BOULDER (rock outcrop)
@@ -7154,7 +7157,11 @@ function buildNVG(){ const g=new THREE.Group();   // forward = -Z (lenses point 
   box(0.05,0.05,0.05, dark, 0.19,0.05,-0.05);                                                     // little IR illuminator nub
   return g; }
 function nvgWorn(){ return !!(armor[0] && armor[0].id==='nvg'); }
-function nvgActive(){ return nvgWorn() && player.nvgOn!==false && !player.grabbed && !player.dead; }
+// NOT IN THIRD PERSON (Ben 08-04: "night vision shouldnt work in third person"). Goggles are a thing strapped to your face,
+// and over the shoulder you are not looking through them — the amplified image was coming from a camera hanging three metres
+// behind the head that is wearing them. Everything downstream reads this one predicate, so the lift, the green cast, the grain
+// and the goggle light all go together.
+function nvgActive(){ return nvgWorn() && player.nvgOn!==false && !player.grabbed && !player.dead && !(typeof _tpsAct!=='undefined' && _tpsAct); }
 let _nvEl=null,_nvGrain=null,_nvGCv=null,_nvGCtx=null,_nvImg=null;
 function _nvBuild(){ if(_nvEl)return;
   _nvEl=document.createElement('div'); _nvEl.style.cssText='position:fixed;inset:0;z-index:19;pointer-events:none;display:none';
@@ -8094,27 +8101,45 @@ function actWithSlot(slot, hand){
 // back into the normal wretch"). "Shown" is the right-click you already use for everything held: what makes it showing rather than
 // waving is that the creature has to be IN FRONT of you and close — 22 m and within about 50 degrees of where you are looking.
 // It costs the cross whether you like it or not; that is what makes carrying one a decision.
-const CROSS_RANGE=22, CROSS_DOT=0.62;
-function crossShow(slot){
+const CROSS_RANGE=22, CROSS_DOT=0.62, CROSS_BURN=12;
+// The cross going off by itself, checked every frame it is in a hand. No facing test: it is not something you AIM, it is
+// something you are carrying when she gets close.
+function crossProxTick(){
+  const cands=[inv[selSlot], armor[EQ_OFF]];
+  for(const slot of cands){ const it=slot&&ITEMS[slot.id]; if(!it||!it.relic) continue;
+    const all=[wretchPrime].concat(wretchExtra||[]);
+    for(const w of all){ if(!w||!w.active||!w.horrific) continue;
+      if(Math.hypot(w.pos.x-player.pos.x, w.pos.z-player.pos.z) <= CROSS_BURN){ crossShow(slot, w); return true; } } }
+  return false; }
+function crossShow(slot, forced){
   const d=lookDir();
-  let best=null, bestDot=CROSS_DOT;
-  const all=[wretchPrime].concat(wretchExtra||[]);
-  for(const w of all){ if(!w||!w.active||!w.horrific) continue;
-    const dx=w.pos.x-player.pos.x, dy=(w.pos.y+1.4)-(player.pos.y+EYE), dz=w.pos.z-player.pos.z;
-    const dist=Math.hypot(dx,dy,dz); if(dist>CROSS_RANGE) continue;
-    const dot=(dx*d.x+dy*d.y+dz*d.z)/Math.max(0.001,dist);
-    if(dot>bestDot){ bestDot=dot; best=w; } }
+  let best=forced||null, bestDot=CROSS_DOT;
+  if(!best){ const all=[wretchPrime].concat(wretchExtra||[]);
+    for(const w of all){ if(!w||!w.active||!w.horrific) continue;
+      const dx=w.pos.x-player.pos.x, dy=(w.pos.y+1.4)-(player.pos.y+EYE), dz=w.pos.z-player.pos.z;
+      const dist=Math.hypot(dx,dy,dz); if(dist>CROSS_RANGE) continue;
+      const dot=(dx*d.x+dy*d.y+dz*d.z)/Math.max(0.001,dist);
+      if(dot>bestDot){ bestDot=dot; best=w; } } }
   if(!best){ flashName('you hold it up. nothing answers'); return {shown:false}; }
   // THE CROSS BURNS. Particles and the sound come from the player's own hands, because that is where it happens — the creature's
   // end of it is simply that it is no longer what it was.
   const hx=player.pos.x+d.x*0.7, hy=player.pos.y+EYE-0.25, hz=player.pos.z+d.z*0.7;
-  if(typeof spawnParticles==='function'){ spawnParticles(hx,hy,hz,0xffd070,26,3.2,1.1); spawnParticles(hx,hy,hz,0xff6a20,18,2.4,1.4); }
+  // IT BURNS, in flames (Ben 08-04) — not a puff. Three colours over the gold so it reads as fire consuming the thing rather
+  // than as sparks coming off it, and a slow upward drift because that is what a flame does with what it has eaten.
+  if(typeof spawnParticles==='function'){
+    spawnParticles(hx,hy,hz,0xfff0b0,22,1.4,2.2); spawnParticles(hx,hy,hz,0xffa022,34,1.9,2.6);
+    spawnParticles(hx,hy,hz,0xff5a10,26,2.3,2.0); spawnParticles(hx,hy+0.35,hz,0x40382f,16,1.6,2.8); }
   if(AC){ const pn=panAt(hx,hy,hz); burst(pn,0.5,0.55,320,0.7,-180); tone(pn,{f:1568,type:'sine',dur:0.7,vol:0.10,atk:0.02}); }
   hwDress(best,false);
+  // AND THEN SHE RUNS (Ben 08-04). fleeing is the AI's own latch — the same one a rout sets — so this is not a special case in
+  // the state machine, it is the state machine being told the truth about what just happened to her. routed with it, because a
+  // flee that the next line of sight cancels is not running away.
+  best.fleeing=true; best.routed=true; best.stealth=1.0;
+  if(best===wretchPrime){ wretch.fleeing=true; wretch.routed=true; }
   if(slot){ slot.n--; if(slot.n<=0){ if(inv[selSlot]===slot) inv[selSlot]=null; else if(armor[EQ_OFF]===slot) armor[EQ_OFF]=null;
       for(let i=0;i<INV_N;i++) if(inv[i]===slot) inv[i]=null; }
     refreshHotbar(); if(typeof updateArmorView==='function')updateArmorView(); }
-  flashName('the cross burns away, and it is only the Wretch again');
+  flashName('the cross burns away in your hand, and it flees');
   return {shown:true, reverted:true}; }
 function offhandLeftClick(){ if(!offActing()) return {no:'mode off'};
   return actWithSlot(armor[EQ_OFF], 'off'); }
@@ -10065,7 +10090,7 @@ function loop(){ try{
   _bulkRun(buildCabin);   // build the cabin even on the menu so the cinematic's cabin shot has something to frame
   if(started){ const B=_BUILDERS; _builderIdx=(_builderIdx+1)%B.length; _bulkRun(B[_builderIdx]); }   // ONE builder per frame, in bulk-edit mode: a village fires as ~3ms of array writes + a deferred remesh wave instead of a 50-90ms frame; a 16-frame poll rotation delays a structure's appearance imperceptibly
   assignPointLights();
-  updateBlockFx(dt); updateCookingFx(dt); updateChimes(dt); updateVaultDoors(dt); updateCreatureClip(); updateMusicSchedule(dt); updateLeafPiles(); updateMarks(dt); hwNightTick();
+  updateBlockFx(dt); updateCookingFx(dt); updateChimes(dt); updateVaultDoors(dt); updateCreatureClip(); updateMusicSchedule(dt); updateLeafPiles(); updateMarks(dt); hwNightTick(); crossProxTick();
   scrUpdate();   // CCTV: point each monitor at its tile and re-render exactly ONE camera this frame (see SCR)
   icbmUpdate(dt);   // mushroom cloud growth/fade + the radiation dose
   icbmFlight(dt);   // …and the rocket's arc, which ends by calling the same icbmDetonate the harness drives
@@ -10751,14 +10776,24 @@ function spawnHorrific(x,z){
 // Placement is pre-tested with the same gate spawnWretch uses, because spawnHorrific builds a whole rig before it finds
 // out the ground is unusable, and blind retries would leak one per attempt.
 function hwOnSacrifice(){
-  if(wretchExtra.some(w=>w.active)) return null;
-  const px=player.pos.x, pz=player.pos.z;
-  for(let k=0;k<8;k++){ const a=k/8*6.2831853, x=px+Math.cos(a)*12, z=pz+Math.sin(a)*12;
-    const gy=groundYAt(x,z); if(gy<=CFG.SEA-2 || gy>WH-6) continue;
-    const inst=spawnHorrific(x,z);
-    if(inst){ flashName('something was made of what you gave it'); return inst; } }
+  // Already changed, by any route: there is nothing to do and nothing to stack.
+  if(wretchPrime && wretchPrime.horrific) return wretchPrime;
+  if(wretchExtra.some(w=>w.active && w.horrific)) return null;      // a deliberately spawned one is already the thing this makes
+  // THE WRETCH HAS TO BE OUT TO BECOME IT. On a quiet day it may be dormant, and a trigger that quietly did nothing is how
+  // "the horrific wretch doesnt seem to convert when a monk is killed" reads from the outside even when the code ran.
+  if(wretchPrime && !wretchPrime.active){
+    if(typeof spawnWretch==='function'){ try{ spawnWretch(); }catch(e){} }
+    else if(wretchPrime.spawnT!=null) wretchPrime.spawnT=0;
+  }
+  if(wretchPrime && wretchPrime.group && hwDress(wretchPrime,true)){
+    wretchPrime._hwNightly=false;                                   // an EVENT change is not the nightly one: dawn does not undo it, only the cross does
+    flashName('something was made of what you gave it');
+    return wretchPrime; }
   return null;
 }
+// ONE CREATURE, TWO FORMS. Anything that spawns or re-spawns the Wretch has to see the changed one as the Wretch already being
+// out, or a night-three conversion followed by a routine respawn tick would stand a second, ordinary Wretch beside it.
+function wretchIsOut(){ return !!(wretchPrime && (wretchPrime.active || wretchPrime.horrific)); }
 // =====================================================================
 //  THE WRETCH BECOMES THE HORRIFIC WRETCH — the same creature, not a second one (Ben 08-04)
 // =====================================================================
@@ -20983,8 +21018,14 @@ function _markTex(kind){ const S=64, cv=document.createElement('canvas'); cv.wid
     g.beginPath(); g.moveTo(x0+r,y0); g.arcTo(x0+w,y0,x0+w,y0+w,r); g.arcTo(x0+w,y0+w,x0,y0+w,r);
     g.arcTo(x0,y0+w,x0,y0,r); g.arcTo(x0,y0,x0+w,y0,r); g.closePath(); g.fill(); }
   else if(kind==='claw'){                                              // the Wretch: long splayed digits, barely a pad
-    for(const c of [[14,26,5],[26,16,5.5],[38,16,5.5],[50,26,5]]){ g.beginPath(); g.ellipse(c[0],c[1],c[2],10,0,0,7); g.fill(); }
-    g.beginPath(); g.ellipse(32,46,12,9,0,0,7); g.fill(); }
+    // Each toe is its own soft blob rather than a filled ellipse — a radial gradient per shape is what gives the whole print
+    // the same pressed-in rim the player's square has, without giving up the shape that says it was not a boot.
+    const blob=(cx,cy,rx,ry)=>{ const gr=g.createRadialGradient(cx,cy,1,cx,cy,Math.max(rx,ry));
+      gr.addColorStop(0,'rgba(255,255,255,0.95)'); gr.addColorStop(0.6,'rgba(255,255,255,0.60)'); gr.addColorStop(1,'rgba(255,255,255,0)');
+      g.fillStyle=gr; g.save(); g.translate(cx,cy); g.scale(rx/Math.max(rx,ry), ry/Math.max(rx,ry)); g.translate(-cx,-cy);
+      g.beginPath(); g.arc(cx,cy,Math.max(rx,ry),0,7); g.fill(); g.restore(); };
+    for(const c of [[14,26,6,11],[26,16,6.5,11],[38,16,6.5,11],[50,26,6,11]]) blob(c[0],c[1],c[2],c[3]);
+    blob(32,46,13,10); }
   else {                                                               // blood: an irregular splat with a few outlying drops
     g.beginPath(); g.ellipse(32,32,17,15,0.3,0,7); g.fill();
     for(const c of [[12,20,4],[52,24,5],[22,52,3.5],[46,50,4.5],[32,10,3]]){ g.beginPath(); g.arc(c[0],c[1],c[2],0,7); g.fill(); } }
@@ -20992,7 +21033,7 @@ function _markTex(kind){ const S=64, cv=document.createElement('canvas'); cv.wid
 function _markPool(kind,cap,base){
   // BLENDED, not alpha-tested: the soft rim above is the whole point of the mark and a 0.34 cutoff would turn it back into a hard
   // square. depthWrite off + a polygon offset keeps a decal lying flat ON a block face from z-fighting with it.
-  const soft=(kind==='foot'||kind==='paw');
+  const soft=(kind==='foot'||kind==='paw'||kind==='claw');   // the Wretch's print is pressed into the ground like everything else's
   const mat=new THREE.MeshLambertMaterial({ map:_markTex(kind), transparent:true, opacity:soft?0.42:1,
     alphaTest:soft?0:0.34, depthWrite:false, polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2 });
   const im=new THREE.InstancedMesh(new THREE.PlaneGeometry(1,1), mat, cap);
@@ -21005,7 +21046,7 @@ const _markDummy=new THREE.Object3D(), _markCol=new THREE.Color();
 function _marksInit(){ if(_markFoot) return;
   _markFoot =_markPool('foot', MARK_FOOT, 0x3a3a3c);   // grey: a scuff, not mud
   _markPaw  =_markPool('paw',  MARK_FOOT, 0x3a3a3c);
-  _markClaw =_markPool('claw', 48,        0x1d1512);
+  _markClaw =_markPool('claw', 48,        0x3a3a3c);   // the same grey the boots leave: it is a scuff, not ink
   _markBlood=_markPool('blood',MARK_BLOOD,0x6d0d0d); }
 // Put one mark on the ground under (x,y,z). Returns false when there was nowhere to put it, so a caller in a bad spot simply
 // stops spending instances: no ground under it, standing in water, or too far from the eye to be worth drawing.
@@ -21115,7 +21156,7 @@ function _ffSeat(i){
     const a=Math.random()*6.283, r=4+Math.random()*(FF_R-4);
     const wx=Math.floor(player.pos.x+Math.cos(a)*r), wz=Math.floor(player.pos.z+Math.sin(a)*r);
     const gy=groundYAt(wx,wz); if(gy<=CFG.SEA+1) continue;
-    const sb=getBlock(wx,gy-1,wz); if(!(B[sb] && B[sb].name==='grass')) continue;
+    const sb=getBlock(wx,gy-1,wz); if(!isGrassBlock(sb)) continue;   // leaf-strewn grass is still the forest floor
     // IN THE WOODS, AND ONLY THERE (Ben 08-04: "lightning bugs should only spawn in the woods"). The comment above always said
     // "a tree within a couple of blocks" and the code never checked it, so they filled every meadow, field and cleared garden on
     // the island — which is where you notice them, and where they do not belong. Canopy overhead is the cheap definition and the
@@ -21522,7 +21563,7 @@ let _animLodTick=0;
 // find a nearby graze (grass) or drink (water's edge) target for an animal — cheap random-ring sample
 function _grazeTarget(ax,az,water){ for(let k=0;k<16;k++){ const a=Math.random()*6.283, r=3+Math.random()*9, x=Math.floor(ax+Math.cos(a)*r), z=Math.floor(az+Math.sin(a)*r), gy=surfaceH(x,z);
     if(water){ if(gy<=CFG.SEA){ const bx=x+Math.sign(ax-x), bz=z+Math.sign(az-z); if(surfaceH(bx,bz)>CFG.SEA) return {x:bx+0.5,z:bz+0.5}; return {x:x+0.5,z:z+0.5}; } }   // stand at the shore to drink
-    else if(gy>CFG.SEA && getBlock(x,gy,z)===BID.grass) return {x:x+0.5,z:z+0.5}; }
+    else if(gy>CFG.SEA && isGrassBlock(getBlock(x,gy,z))) return {x:x+0.5,z:z+0.5}; }
   return null; }
 // heading (yaw) toward the NEAREST open water from (x,z) — 24-ray heightfield march; null if no sea within 180 blocks
 function _seaYaw(x,z){ let best=null; for(let k=0;k<24;k++){ const th=k*0.2618; for(let r=10;r<=180;r+=6){ if(surfaceH(Math.round(x+Math.sin(th)*r),Math.round(z+Math.cos(th)*r))<=CFG.SEA){ if(!best||r<best.r)best={th,r}; break; } } } return best?best.th:null; }
@@ -23345,7 +23386,7 @@ _audioFrame=(dt)=>{ if(!AC)return;
   if(night2 && _amb>0.06){ if(cricketT<=0){ cricketT=(0.5+Math.random()*2.2)/Math.max(0.12,_amb); if(Math.random()<_amb){
       const ang=Math.random()*6.283, r=6+Math.random()*15, wx=Math.floor(cp.x+Math.cos(ang)*r), wz=Math.floor(cp.z+Math.sin(ang)*r);
       const gy=groundYAt(wx,wz), sb=getBlock(wx,gy-1,wz);
-      if(gy>CFG.SEA+1 && B[sb] && B[sb].name==='grass'){                                   // forest floor, NOT the sandy beach/waterline
+      if(gy>CFG.SEA+1 && isGrassBlock(sb)){                                                // forest floor, NOT the sandy beach/waterline
         let tree=false; for(let dyv=0;dyv<3&&!tree;dyv++)for(let rr=-2;rr<=2&&!tree;rr++)for(let ss=-2;ss<=2;ss++){ const b=getBlock(wx+rr,gy+dyv,wz+ss); if(b===BID.log||b===BID.leaves){tree=true;break;} }
         if(tree) cricketChirp(wx+0.5, gy+1.2, wz+0.5);
       } } } }
