@@ -105,8 +105,14 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
       grass: __hc.screenOf(`+spot.grassPillar.x+`+0.5, `+spot.grassPillar.top+`+0.5, `+spot.grassPillar.z+`+0.5),
       bush:  __hc.screenOf(`+spot.bushBase.x+`+0.5, `+(spot.bushBase.top+1)+`+0.5, `+spot.bushBase.z+`+0.5) }))()`);
     console.log('  grass top projects to '+JSON.stringify(box.grass)+'\n  bush projects to      '+JSON.stringify(box.bush));
-    const pick=(im, b)=>{ const px=[]; if(!b||!b.onScreen) return px;
-      const sx=im.w/b.w, sy=im.h/b.h, cx=Math.round(b.px*sx), cy=Math.round(b.py*sy), R=Math.max(10, Math.round(26*sx));
+    // THE BOX HAS TO SHRINK WITH DISTANCE. A fixed 26-pixel radius is the inside of a bush at 26 blocks and a frame around one
+    // at 12: the bush tile is a painted blob covering about half its block, so at close range the box reached well past the leaf
+    // into sky and ground and found 362 green pixels where the same box at 26 blocks found 1046 -- backwards, for a subject that
+    // is twice as big on screen. Every "shrubs fog less than the block beside them" reading this harness has produced came from
+    // that one distance, so the box is now sized from the distance and always samples the blob's interior.
+    const pick=(im, b, D)=>{ const px=[]; if(!b||!b.onScreen) return px;
+      const sx=im.w/b.w, sy=im.h/b.h, cx=Math.round(b.px*sx), cy=Math.round(b.py*sy),
+        R=Math.max(5, Math.min(34, Math.round(230/Math.max(6,D||26)*sx)));
       for(let y=Math.max(0,cy-R); y<Math.min(im.h,cy+R); y++) for(let x=Math.max(0,cx-R); x<Math.min(im.w,cx+R); x++){
         const i=(y*im.w+x)*im.ch, r=im.data[i], g=im.data[i+1], b2=im.data[i+2];
         if(g-(r+b2)/2 > 18) px.push({x,y,r,g,b:b2}); }
@@ -124,7 +130,7 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     for(const pr of spot.pairs){
       const bx2 = await page.evaluate(`(()=>({ g:__hc.screenOf(`+pr.grass.x+`+0.5,`+pr.grass.top+`+0.5,`+pr.grass.z+`+0.5),
         b:__hc.screenOf(`+pr.bush.x+`+0.5,`+pr.bush.top+`+0.5,`+pr.bush.z+`+0.5) }))()`);
-      const gp=pick(clear,bx2.g), bp=pick(clear,bx2.b);
+      const gp=pick(clear,bx2.g,pr.D), bp=pick(clear,bx2.b,pr.D);
       if(gp.length<20||bp.length<20){ console.log('     d='+String(pr.D).padStart(3)+'  too few pixels to judge (g='+gp.length+' b='+bp.length+')'); continue; }
       const g0=readAt(clear,gp), g1=readAt(foggy,gp), b0=readAt(clear,bp), b1=readAt(foggy,bp);
       const wg=wash(g0,g1)*100, wb=wash(b0,b1)*100;
@@ -133,7 +139,7 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
         +'\n              block '+f(g0)+' → '+f(g1)+'   bush '+f(b0)+' → '+f(b1)+'   (px g='+gp.length+' b='+bp.length+')');
     }
 
-    const gPx=pick(clear,box.grass), bPx=pick(clear,box.bush);
+    const gPx=pick(clear,box.grass,spot.D), bPx=pick(clear,box.bush,spot.D);
     console.log('  fog colour rgb('+fogRGB.join(',')+')   grass-top pixels found '+gPx.length+', bush pixels found '+bPx.length);
     if(gPx.length>40 && bPx.length>40){
       const g0=readAt(clear,gPx), g1=readAt(foggy,gPx), b0=readAt(clear,bPx), b1=readAt(foggy,bPx);
