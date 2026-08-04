@@ -2143,6 +2143,14 @@ function decorate(c){
     { const cxq=wx>>3, czq=wz>>3, cr=tileRng((cxq*92837^czq*68909)>>>0);
       if(cr()<0.055){
         const kind=cr(), tr=tileRng((wx*15731^wz*789221)>>>0), t=tr();
+        // MOSTLY UNDER TREES (Ben 08-04: "fallen leaves mostly spawn under trees"). Leaves fall off something. A drift in the
+        // middle of open meadow reads as litter the generator dropped; under a canopy it reads as autumn. Deterministic rather
+        // than sampled from the world, because decorate runs while the chunk is being built and the neighbouring trees it would
+        // look for may not exist yet — pineAt is the same function the generator itself asks, so it agrees by construction.
+        // "Mostly", not "only": a fifth still land in the open, which is where wind puts them.
+        let _under=false;
+        for(let ox=-4;ox<=4 && !_under;ox+=2) for(let oz=-4;oz<=4;oz+=2){ if(pineAt(wx+ox,wz+oz) && isGrassSurface(wx+ox,wz+oz)){ _under=true; break; } }
+        if(!_under && tr()>0.20) continue;
         if(t<0.32 && h>=CFG.SEA && h<WH-30 && trailDist(wx,wz)>2 && !inCabin(wx,wz)){
           const cur=getBlock(wx,h,wz), mix=tr();
           const st0 = kind<0.34?0 : kind<0.70?1 : 2, st = (mix<0.80)?st0:((st0+1)%3);
@@ -14368,6 +14376,14 @@ function buildSpear(spec){ spec=spec||{};
 // 'spear' is deliberately absent: a spear dispatches earlier in BOTH sites on it.spear (buildSpear takes the
 // spear spec, not the tool), so adding it here would only give the fall-through a second, colder path.
 const TOOL_BUILDERS={ sword:buildGreatsword, pickaxe:buildPickaxe, axe:buildAxe, shovel:buildShovel };
+// A SPEAR IS BUILT AT ITS TRUE LENGTH — 6.7 blocks, a real pike — which is right for the ground drop, a peer's
+// hand and the thrown projectile, and impossible in your own hands: at 1:1 the shaft runs through the camera and
+// half its bounding box sits BEHIND the near plane, so the viewmodel reports drawn and you see nothing at all.
+// The held copy alone is scaled. Raise this and it starts clipping the camera again.
+// buildSpear centres the shaft on its own origin, so scaling alone shrinks it AROUND THE CAMERA and half of it
+// stays behind the near plane. The held copy is also pushed forward by rather more than its own half-length, so
+// the whole pike sits in front of the eye and the grip is the end nearest the hand.
+const SPEAR_HELD_SCALE=0.26, SPEAR_HELD_Z=-1.05;
 const TOOL_POSE={ sword:{x:0.30,y:-0.12,s:0.60,rx:0.20,rz:0.24}, pickaxe:{x:0.30,y:0.28,s:1.08,rx:0.12,rz:0.14},
   axe:{x:0.30,y:0.28,s:1.08,rx:0.12,rz:0.14}, shovel:{x:0.30,y:0.28,s:1.08,rx:0.12,rz:0.14} };
 const _WRAP_COLS=[0x7a6444,0x6a5638,0x87724d,0x6f5a3c], _WRAP_YS=[-0.055,-0.014,0.028,0.066], _WRAP_TILT=0.5;   // yOffsets up the stick
@@ -14944,7 +14960,8 @@ function setViewItem(id){ if(view.id===id)return; view.id=id;
   else if(it.atlas){ const mm=buildAtlasGlobe(); const bb=new THREE.Box3().setFromObject(mm), sz=bb.getSize(new THREE.Vector3()), ctr=bb.getCenter(new THREE.Vector3()), s=0.30/(Math.max(sz.x,sz.y,sz.z)||1);
     mm.scale.setScalar(s); mm.position.set(-ctr.x*s,-ctr.y*s,-ctr.z*s); mm.rotation.y=0.4; view.mesh=mm; view.mesh.userData.atlasHeld=true; }   // held steel globe, centred in the palm (was the flat extruded book icon)
   else if(it.syringe){ view.mesh=buildSyringe(); view.mesh.userData.syringeHeld=true; }   // 3D syringe held ready; injecting is an overlay animation — see updateView
-  else if(it.spear){ view.mesh=buildSpear(it.spear); view.mesh.userData.spearHeld=true; }   // carried cocked behind the shoulder — see updateView
+  else if(it.spear){ view.mesh=buildSpear(it.spear); view.mesh.userData.spearHeld=true;
+    view.mesh.scale.setScalar(SPEAR_HELD_SCALE); view.mesh.position.z=SPEAR_HELD_Z; }   // carried cocked behind the shoulder — see updateView
   else if(it.book){ view.mesh=it.healBook?buildHealBook():buildBook(); view.mesh.userData.bookHeld=true; }   // held open, readable — see updateView
   else if(it.bible){ view.mesh=buildBible(); view.mesh.userData.bookHeld=true; }  // THE BIBLE — same held-open reading pose
   else if(it.block!=null && B[it.block] && B[it.block].cat==='model'){ const mm=itemModel(id);   // MODEL blocks held as their REAL 3D model (fence/chest/gate/bars/bed/…), centred + scaled — not a tiny cube
@@ -15317,6 +15334,14 @@ function updateView(dt){ updateRecoil(dt);                                      
     // the gun off screen.
     if(isDotG && e>0.02 && view._holoHs){
       const _gw=view._hgW||(view._hgW=new THREE.Vector3());
+      // THE MEASUREMENT HAS TO BE OF THIS FRAME'S POSE (Ben 08-04: "the top of holosights are still cut off" / "not all
+      // holosights are lined up in the centerpoints"). Measured settled, every sight is dead on the axis — but updateWorldMatrix
+      // on the glass alone walks up to a group whose own matrix is still LAST frame's, because the pose was assigned a few lines
+      // above and nothing has flushed it. So the correction was always one frame stale, and the residual is proportional to how
+      // fast you are turning: standing still it is zero, mid-turn it measured 0.057 rad against 0.034 of room inside the glass,
+      // which clips an arc off the ring — the top of it, if you are turning upward. Flushing the group first makes the
+      // correction exact at any turn rate.
+      view.group.updateMatrix(); view.group.updateMatrixWorld(true);
       view._holoHs.updateWorldMatrix(true,false); _gw.setFromMatrixPosition(view._holoHs.matrixWorld);
       camera.worldToLocal(_gw);
       view.group.position.x -= clamp(_gw.x,-0.06,0.06)*e;
@@ -25032,6 +25057,19 @@ window.__hc={
   // EMPTY THE HAND. The counterpart to hold(): a harness that wants to measure the viewmodel itself has to
   // subtract a frame with nothing in it, or the brightest pixel it finds is the sky.
   holdNone(){ try{ inv[selSlot]=null; refreshHotbar(); setViewItem(null); return { held:view.id }; }catch(e){ return {err:String(e.message||e)}; } },
+  // WHERE THE HELD ITEM LANDS ON SCREEN, in normalised device coords (-1..1 across and up, +Z past the far plane).
+  // visible/meshVis/hasMesh can all read true for a model that is drawn entirely outside the frustum, which is
+  // exactly how a held spear looks: every flag green, nothing on screen.
+  viewBounds(){ try{ if(!view.mesh) return {mesh:false};
+      view.group.updateWorldMatrix(true,true); const b=new THREE.Box3().setFromObject(view.mesh);
+      if(!isFinite(b.min.x)) return {mesh:true,empty:true};
+      let x0=9,x1=-9,y0=9,y1=-9,zMax=-9, behind=0, n=0;
+      for(const cx of [b.min.x,b.max.x]) for(const cy of [b.min.y,b.max.y]) for(const cz of [b.min.z,b.max.z]){
+        const v=new THREE.Vector3(cx,cy,cz).project(camera); n++;
+        if(v.z>1) behind++; x0=Math.min(x0,v.x); x1=Math.max(x1,v.x); y0=Math.min(y0,v.y); y1=Math.max(y1,v.y); zMax=Math.max(zMax,v.z); }
+      const ox=Math.max(0,Math.min(x1,1)-Math.max(x0,-1)), oy=Math.max(0,Math.min(y1,1)-Math.max(y0,-1));
+      return { mesh:true, x:[+x0.toFixed(2),+x1.toFixed(2)], y:[+y0.toFixed(2),+y1.toFixed(2)],
+        onScreen:+((ox*oy)/4).toFixed(3), cornersBehind:behind+'/'+n }; }catch(e){ return {err:String(e.message||e)}; } },
   chainlinkRun(x,y,z,n,axis){ try{ n=Math.max(1,n|0||1); const ax=(axis==='z')?'z':'x';
       for(let i=0;i<n;i++) setBlockWorld(ax==='x'?x+i:x, y, ax==='x'?z:z+i, BID.chainlink, true);
       return { n, axis:ax }; }catch(e){ return {err:String(e.message||e)}; } },
@@ -25348,7 +25386,12 @@ window.__hc={
     else if(mode==='emissive'){ if(typeof leafMat!=='undefined'){ leafMat.emissive=new THREE.Color(0x224018); leafMat.needsUpdate=true; } }
     else if(mode==='doubleSide'){ if(typeof leafMat!=='undefined'){ leafMat.side=THREE.DoubleSide; leafMat.needsUpdate=true; } }
     return { mode, touched:n, sunShadow:sunLight.castShadow, leafShadowSide:(typeof leafMat!=='undefined')?leafMat.shadowSide:null }; }catch(e){ return {err:e.message}; } },
-  hold(id){ try{ id=id||'field_guide'; invAdd(id,1); for(let i=0;i<9;i++){ if(inv[i]&&inv[i].id===id){ selSlot=i; break; } } refreshHotbar(); setViewItem(id); return { held:view.id }; }catch(e){ return {err:e.message}; } },   // QA: give + hold an item to inspect the first-person view model
+  // QA: give + hold an item to inspect the first-person view model. It writes STRAIGHT INTO THE SELECTED SLOT
+  // rather than calling invAdd and hunting for the item, because invAdd stops at the first free space and the
+  // hotbar is only nine of them: once it filled, the selected slot no longer held what was asked for, and the
+  // main loop's per-frame setViewItem(inv[selSlot]) emptied the hand again a frame later. Three separate
+  // measurements read the ninth tool, or nothing at all, before that was the answer.
+  hold(id){ try{ id=id||'field_guide'; inv[selSlot]={id,n:1}; refreshHotbar(); setViewItem(id); return { held:view.id, slot:selSlot }; }catch(e){ return {err:e.message}; } },
   useHeld(){ try{ doPlace(); const bag={}; for(const s of inv){ if(s)bag[s.id]=(bag[s.id]||0)+s.n; } return { held:heldSlot()?heldSlot().id:null, inv:bag }; }catch(e){ return {err:e.message, stack:(e.stack||'').slice(0,200)}; } },   // QA: right-click the held item (open a loot bag etc), report the resulting inventory
   qaAtlasCarve(){ try{ const px=Math.floor(player.pos.x)+4, pz=Math.floor(player.pos.z), py=groundYAt(px,pz,player.pos.y)-1;   // dig into solid ground so there's real terrain to carve
     const was=getBlock(px,py,pz); bossScar=new Map(); bossBlast(px,py,pz,3);
