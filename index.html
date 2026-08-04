@@ -4318,6 +4318,43 @@ function _mergeGeos(geos){ const P=[],N=[],U=[]; for(let g of geos){ g=g.index?g
 function _barsGeo(){ const P=[]; for(const ox of [-0.3,0,0.3]){ const r=box(0.12,1,0.12); r.translate(ox,0,0); P.push(r); }
   for(const y of [-0.42,0,0.42]){ const rx=box(1.0,0.1,0.12); rx.translate(0,y,0); const rz=box(0.12,0.1,1.0); rz.translate(0,y,0); P.push(rx,rz); }
   return _mergeGeos(P); }
+// ---- CHAINLINK: diamond-weave FABRIC on a top rail, with posts at INTERVALS ------------------------------------------
+// The block was model:'bars' — _barsGeo above, three vertical bars and three rails — which is exactly why Ben saw iron
+// bars. iron_bars still uses that builder and is untouched by this.
+// ONE MATERIAL, ONE MESH PER DIRECTION. The rail, the bottom tension wire and the post are opaque steel while the fabric
+// is alpha-cut, so the obvious build needs a second material and twice the draws. Instead every solid part pins its UVs
+// to the centre of texel (0,0), which the weave already makes a WIRE, so the solid parts sample an opaque pixel of the
+// SAME tile and a whole fence is one merged alpha-tested geometry per direction — 4 arms plus a post, matching the cost
+// the fence branch already pays.
+const _clGeo={}; let _clMat=null, _clDepthMat=null;
+function _chainlinkMat(){ return _clMat || (_clMat=new THREE.MeshPhongMaterial({map:tileTex('chainlink_mesh'), transparent:true, alphaTest:0.35,
+  side:THREE.DoubleSide, depthWrite:true, fog:true, shininess:55, specular:0x6f757e})); }   // the _leafMat idiom: alpha-TESTED cutout, not blended, so nothing has to sort
+// Without this the fence casts the shadow of a SOLID panel — the shadow pass runs its own depth material and knows
+// nothing about the colour material's alphaTest. _leafIM does the same thing for exactly the same reason.
+function _clDepth(){ return _clDepthMat || (_clDepthMat=new THREE.MeshDepthMaterial({depthPacking:THREE.RGBADepthPacking, map:tileTex('chainlink_mesh'), alphaTest:0.35})); }
+// 0.03125 = 0.5/16, the centre of a texel. The V is 1-0.03125 and NOT 0.03125, and that is the whole trap: a CanvasTexture
+// has flipY on, so uv.y=0.03125 samples the BOTTOM row of the tile — the rust band — and every rail, post and cap came out
+// rust-brown instead of galvanised. Sampling row 0 needs uv.y near 1. assert-chainlink now checks the colour of the texel
+// these UVs actually land on, because the first version of that check read canvas (0,0) and passed while the geometry was
+// reading canvas (0,15).
+function _clSolidUV(geo){ const uv=geo.attributes.uv; for(let i=0;i<uv.count;i++) uv.setXY(i,0.03125,1-0.03125); uv.needsUpdate=true; return geo; }
+function _chainlinkArm(dx,dz){                       // half a panel: from the cell centre out to the edge it links across
+  const k='a'+dx+','+dz; if(_clGeo[k]) return _clGeo[k];
+  // NOT planeG(): that cache is keyed on w|h and shared, and this geometry gets rotated and translated. Mutating a cached
+  // geometry would move every other plane in the game that happened to ask for the same size.
+  const fab=new THREE.PlaneGeometry(0.5,0.92,1,2);
+  { const uv=fab.attributes.uv; for(let i=0;i<uv.count;i++) uv.setX(i, uv.getX(i)*0.5); uv.needsUpdate=true; }   // half a tile across half a cell → the weave is the same size whichever way the fence runs
+  if(dz) fab.rotateY(Math.PI/2);
+  fab.translate(dx*0.25, 0.5, dz*0.25);
+  const rail=box(dx?0.5:0.06, 0.06, dz?0.5:0.06); rail.translate(dx*0.25, 0.97, dz*0.25);
+  const wire=box(dx?0.5:0.04, 0.04, dz?0.5:0.04); wire.translate(dx*0.25, 0.05, dz*0.25);   // the bottom tension wire a real fence is strung to
+  return (_clGeo[k]=_mergeGeos([fab, _clSolidUV(rail), _clSolidUV(wire)]));
+}
+function _chainlinkPost(){ if(_clGeo.post) return _clGeo.post;
+  const p=cyl(0.055,0.062,1.06,8); p.translate(0,0.53,0);          // a galvanised pipe, tapering very slightly
+  const cap=cyl(0.075,0.075,0.05,8); cap.translate(0,1.08,0);      // the pressed cap every real post wears
+  return (_clGeo.post=_mergeGeos([_clSolidUV(p), _clSolidUV(cap)]));
+}
 // SINGLE SOURCE OF TRUTH for rich decorative model-blocks: model-name -> (bd)=>THREE.Group, base at y=0, centred on x/z, ~1 unit tall.
 // Used by itemModel (icon+drop), setViewItem (held), and buildModelBlocks (placed) so every form of a block agrees.
 // Empty entries fall back to modelMeshFor (a single-colour merged geo). Builders are registered just below modelMeshFor.
@@ -4757,6 +4794,12 @@ function _sandbagPileGeo(variant){
 }
 // The icon, the held viewmodel, the dropped item and a peer's hands all come through here, and the world comes through the
 // instanced branch in buildModelBlocks — BOTH read _sandbagPileGeo, so the pile in your hand cannot disagree with the wall.
+// The hotbar icon, the held viewmodel and the dropped item, all from the same geometry the world uses. A builder gets no
+// position and so no neighbour mask, so the standalone form is a POST with a panel each way — which is what a section of
+// chainlink looks like in your hand, and it is distinguishable from iron_bars at icon size, which the old shared model was not.
+MODEL_ITEM_BUILDERS.chainlink=(bd)=>{ const g=new THREE.Group();
+  const m=new THREE.Mesh(_mergeGeos([_chainlinkArm(1,0), _chainlinkArm(-1,0), _chainlinkPost()]), _chainlinkMat());
+  m.name='clPanel'; m.customDepthMaterial=_clDepth(); g.add(m); return g; };
 MODEL_ITEM_BUILDERS.sandbag=(bd)=>{ const g=new THREE.Group();
   const m=new THREE.Mesh(_sandbagPileGeo(0), _sandbagMat()); m.name='sandbagPile'; g.add(m); return g; };
 function buildModelBlocks(c,g){
@@ -4931,6 +4974,27 @@ function buildModelBlocks(c,g){
         for(const a of arr){ for(let di=0;di<4;di++){ if(links(getBlock(cx0+a[0]+dirs[di][0], a[1], cz0+a[2]+dirs[di][1]))) cells[di].push(a); } }
         for(let di=0;di<4;di++){ const cl=cells[di]; if(!cl.length)continue; const im=new THREE.InstancedMesh(railGeo(dirs[di][0],dirs[di][1]), fmat, cl.length); im.castShadow=true; im.receiveShadow=true;
           for(let i=0;i<cl.length;i++){ const a=cl[i]; m4.makeTranslation(a[0]+0.5, a[1], a[2]+0.5); im.setMatrixAt(i,m4); } im.instanceMatrix.needsUpdate=true; im.userData.modelMat=fmat; g.add(im); }
+        continue; }
+      if(m==='chainlink'){ const cmat=_chainlinkMat(), dmat=_clDepth();
+        const links=(nid)=> nid!==undefined && nid!==AIR && (B[nid].connect || isOpaque[nid] || B[nid].model==='gate' || B[nid].model==='gate_open');
+        const dirs=[[1,0],[-1,0],[0,1],[0,-1]], cells=[[],[],[],[]], posts=[];
+        for(const a of arr){ const wx=cx0+a[0], wz=cz0+a[2]; const S=[false,false,false,false]; let ns=0;
+          for(let di=0;di<4;di++){ const nid=getBlock(wx+dirs[di][0], a[1], wz+dirs[di][1]);
+            if(links(nid)) cells[di].push(a);          // the FABRIC reaches anything that reads as a barrier, a rock face included
+            if(nid===id){ S[di]=true; ns++; } }        // the POST line is the fence's OWN run, and only that
+          // POSTS AT INTERVALS — the fault was one post per block, which is what made it a row of bars. A real fence posts
+          // every few metres along a straight run and ALWAYS at an end, a corner or a junction, because those cells carry
+          // the tension. Asked in WORLD space so the interval does not restart at every chunk boundary.
+          // THE TEST MUST USE SAME-KIND NEIGHBOURS, not `links`. links() counts any opaque block, so a fence run along a
+          // hillside saw terrain on its flank, called every cell a junction, and posted 10 of 12 — measured, not guessed.
+          const straight=(ns===2)&&((S[0]&&S[1])||(S[2]&&S[3]));
+          if(!straight || (((wx+wz)%3)+3)%3===0) posts.push(a); }
+        const put=(geo,cl,nm)=>{ if(!cl.length)return; const im=new THREE.InstancedMesh(geo,cmat,cl.length);
+          im.castShadow=true; im.receiveShadow=true; im.name=nm; im.customDepthMaterial=dmat;
+          for(let i=0;i<cl.length;i++){ const a=cl[i]; m4.makeTranslation(a[0]+0.5,a[1],a[2]+0.5); im.setMatrixAt(i,m4); }
+          im.instanceMatrix.needsUpdate=true; im.userData.modelMat=cmat; g.add(im); };
+        for(let di=0;di<4;di++) put(_chainlinkArm(dirs[di][0],dirs[di][1]), cells[di], 'clArm');
+        put(_chainlinkPost(), posts, 'clPost');
         continue; }
       if(m==='bars'){ const bmat=new THREE.MeshPhongMaterial({color:0x9aa0aa, shininess:70, specular:0x6b7078}); addIM(_barsGeo(), bmat, 0.5); continue; }   // thick metal bars, base on the floor
       // SANDBAGS take the instanced path and never reach the clone branch below, because a wall is the common case and a
@@ -19524,6 +19588,12 @@ function updateWeather(dt){
   if(under && weather.dripT<=0){ weather.dripT=0.9+Math.random()*2.6; caveDrip(); }
   else if(!under) weather.dripT=Math.max(weather.dripT,0.3);
   weather.flash=Math.max(0,weather.flash-dt*3.5);
+  // EXPOSURE STAYS FLAT ACROSS THE DAY, and that is now a measurement rather than an oversight. Plan Tier 1 item 2 proposed a
+  // per-hour curve so night would sit above AgX's toe instead of inside it. Tried at +0.35 toward midnight: the crushed-black
+  // speckle on lantern-lit ground fell from 0.109% to 0.060% of the crop while the night SKY's median rose from 17.7 to 23.5 —
+  // a third brighter night to remove not even half the artefact. Ben has asked four separate times for night to be genuinely
+  // black, so the lever that lifts everything is the wrong one; the floor below is aimed only where a lamp is actually lighting
+  // a surface. Left flat deliberately: do not "finish" this item.
   renderer.toneMappingExposure = 1.05 + weather.flash*1.7;                                          // lightning briefly blows out exposure
   // FOG WEATHER EVENT — a cold bank gathers slowly, hangs, then lifts (drives weather.fog, read by updateSky)
   if(!NET.on||NET.host){ if(weather.fogHold>0){ weather.fogHold-=dt; if(weather.fogHold<=0){ weather.fogTgt=0; if(typeof reasonEvent==='function')reasonEvent('fog_lifts'); } }
@@ -21076,6 +21146,33 @@ window.__hc={
         // tile is appended below, "is it last" goes red on working code, which is how assert-pastel-pack failed.
         tile:TILEIDX.sandbag_cloth, aboveLastPastel:TILEIDX.sandbag_cloth>TILEIDX.pastel_shell,
         indSandbagKept:TILEIDX.ind_sandbag!=null, atlas:ATLAS_COUNT }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: the chainlink tile read from the ATLAS ITSELF, plus the two models kept apart. Reading the atlas pixels is
+  // the point — "does it look like mesh" is a judgement, "how many of its 256 texels are holes" is a number, and a fence
+  // you cannot see through is the exact fault being fixed.
+  chainlinkInfo(){ try{ const i=TILEIDX.chainlink_mesh, tx=(i%ATLAS_TILES)*TILE, ty=((i/ATLAS_TILES)|0)*TILE;
+      const d=actx.getImageData(tx,ty,TILE,TILE).data; let holes=0, solid=0;
+      for(let p=3;p<d.length;p+=4){ if(d[p]===0) holes++; else solid++; }
+      // THE TEXEL THE RAILS ACTUALLY SAMPLE. _clSolidUV points at canvas row 0 via uv.y near 1, because flipY is on; the
+      // first version of this probe read (0,0) while the geometry read (0,15) and reported galvanised steel about rust.
+      const a0=d[3], r0=d[0], g0=d[1], b0=d[2];
+      const arm=_chainlinkArm(1,0), post=_chainlinkPost();
+      arm.computeBoundingBox(); post.computeBoundingBox();
+      return { tile:i, holes, solid, holeFrac:+(holes/(TILE*TILE)).toFixed(3), texel00Alpha:a0, railTexel:[r0,g0,b0], railIsSteel:(b0>=r0),
+        chainlinkModel:B[BID.chainlink].model, ironBarsModel:B[BID.iron_bars].model,
+        armTris:arm.attributes.position.count/3, postTris:post.attributes.position.count/3,
+        armTop:+arm.boundingBox.max.y.toFixed(3), postTop:+post.boundingBox.max.y.toFixed(3),
+        alphaTest:_chainlinkMat().alphaTest, hasDepthMat:!!_clDepth() }; }catch(e){ return {err:String(e.message||e)}; } },
+  chainlinkRun(x,y,z,n,axis){ try{ n=Math.max(1,n|0||1); const ax=(axis==='z')?'z':'x';
+      for(let i=0;i<n;i++) setBlockWorld(ax==='x'?x+i:x, y, ax==='x'?z:z+i, BID.chainlink, true);
+      return { n, axis:ax }; }catch(e){ return {err:String(e.message||e)}; } },
+  // THE INTERVAL CLAIM, counted ACROSS THE WHOLE RUN and never per block — the fault was never "this block has the wrong
+  // post", it was "twelve blocks bring twelve posts", and a per-block count passes on that.
+  chainlinkCount(x,y,z,n,axis){ try{ n=Math.max(1,n|0||1); const ax=(axis==='z')?'z':'x';
+      let placed=0; for(let i=0;i<n;i++) if(getBlock(ax==='x'?x+i:x, y, ax==='x'?z:z+i)===BID.chainlink) placed++;
+      let armMeshes=0, arms=0, postMeshes=0, posts=0;
+      world.forEach(c=>{ if(!c.group)return; c.group.traverse(o=>{ if(!o.isInstancedMesh)return;
+        if(o.name==='clArm'){ armMeshes++; arms+=o.count; } else if(o.name==='clPost'){ postMeshes++; posts+=o.count; } }); });
+      return { n, axis:ax, placed, armMeshes, arms, postMeshes, posts }; }catch(e){ return {err:String(e.message||e)}; } },
   sandbagWall(x,y,z,n,axis){ try{ n=Math.max(1,n|0||1); const ax=(axis==='z')?'z':'x';
       for(let i=0;i<n;i++) setBlockWorld(ax==='x'?x+i:x, y, ax==='x'?z:z+i, BID.sandbag, true);
       return { n, axis:ax }; }catch(e){ return {err:String(e.message||e)}; } },
