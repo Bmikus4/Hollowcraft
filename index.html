@@ -5612,7 +5612,8 @@ function buildModelBlocks(c,g){
                        m==='chest'||m==='barrel');   // Ben 08-04: "also texture chests" — a chest is planks and iron, and it was flat brown
       const _tile = bd.tile || (_wooden ? (bd.wattle?'log_side':'planks') : null);
       const _map = _tile ? tileTex(_tile) : null;
-      addIM(geo, new THREE.MeshLambertMaterial(_map?{map:_map, color:col}:{color:col}), m==='trapdoor'?0.08:-geo.boundingBox.min.y);   // rest the model's BASE on the cell floor (not floating at cell-centre)
+      const _tint = _map ? (((((col>>16&255)+(255-(col>>16&255))*0.45)|0)<<16) | ((((col>>8&255)+(255-(col>>8&255))*0.45)|0)<<8) | (((col&255)+(255-(col&255))*0.45)|0)) : col;
+      addIM(geo, new THREE.MeshLambertMaterial(_map?{map:_map, color:_tint}:{color:col}), m==='trapdoor'?0.08:-geo.boundingBox.min.y);   // rest the model's BASE on the cell floor (not floating at cell-centre)
     }
   }
   const fg=buildFlameGeo(flames); if(fg){ const fm=new THREE.Mesh(fg,flameMat); fm.renderOrder=4; fm.userData.flame=1; g.add(fm); }
@@ -7934,7 +7935,7 @@ addEventListener('keydown',e=>{ if(e.code==='Space')e.preventDefault();
     // a branded item goes back to an empty slot as the object it already is.
     if(h){ armor[EQ_OFF]={id:h.id,n:1,uid:h.uid}; h.n--; if(h.n<=0)inv[selSlot]=null;
       if(cur) _offReturn(cur);                                        // whatever was in the offhand comes back to the pack, never vanishes
-      offUse=false;                                                   // a full main hand acts with itself; the mode is only for an empty one
+      offUse=!inv[selSlot];                                           // a full main hand acts with itself; the mode is only for an empty one — and this move may have just emptied it
       flashName(ITEMS[armor[EQ_OFF].id].name+' to offhand'); }
     // F ON AN EMPTY HAND TOGGLES THE MODE instead of emptying the offhand (Ben). Pressing it used to send the offhand item
     // back to the pack, which meant there was no way to act with the offhand at all. The slot is still emptied from the
@@ -22144,6 +22145,7 @@ function resumeMusic(){ _ensureMusicEls();
   else startGameMusic(); }   // startGameMusic is idempotent (plays only if paused; never resets)
 // intermittent spatial ambience one-shots — drips underground; wind/creak/branch/birds/owls/crows outside
 let _ambT=4, _chimeT=3;
+let _encT=0, _encCov=0;   // the enclosure probe's timer and its last reading — see the reverb/lowpass block in _audioFrame
 let _ambN=0, _cricketN=0;   // cues actually emitted — __hc.ambCount. "The birds stop" is a rate, and a rate has to be counted.
 function ambientOneShot(){ if(!AC)return; const cp=camera.position; const under=opaqueTop(Math.floor(cp.x),Math.floor(cp.z))>cp.y+2;
   if(under) return;                                   // underground drips are owned by caveDrip
@@ -22200,7 +22202,14 @@ function panVoice(x,y,z){ const p=voicePanners[vIdx=(vIdx+1)%voicePanners.length
 function burst(dest,vol,dur,freq,q,sweep,type){ if(!AC)return;
   if(typeof BR!=='undefined' && BR.inside && dest!==_brBus) return;   // sealed: only cues explicitly routed to the Backrooms bus may sound in there
   try{ const s=AC.createBufferSource(); s.buffer=NB; s.loop=true; s.playbackRate.value=0.8+Math.random()*0.4;
-  const bp=AC.createBiquadFilter(); bp.type=type||'bandpass'; bp.Q.value=q||1.2; bp.frequency.setValueAtTime(freq,AC.currentTime); if(sweep)bp.frequency.exponentialRampToValueAtTime(sweep,AC.currentTime+dur);
+  // A NEGATIVE SWEEP MEANT "SWEEP DOWN BY THIS MUCH", AND IT WAS SILENCING THE WHOLE CUE. exponentialRampToValueAtTime throws a
+  // RangeError when the target has the opposite sign to the current value, and the throw landed in the try/catch around this whole
+  // function — so the source never started and the sound simply did not exist. TWENTY-TWO call sites pass a negative sweep: the
+  // leaf rustle, the bush, the flint strike, the syringe, the church bell's strike transient, the drink, the page turn. All of them
+  // have been mute. Read as a RELATIVE move (2600 with -1400 means down to 1200), which is what every one of those call sites reads
+  // as in context, with a 40 Hz floor so it can never cross zero and start throwing again.
+  const bp=AC.createBiquadFilter(); bp.type=type||'bandpass'; bp.Q.value=q||1.2; bp.frequency.setValueAtTime(freq,AC.currentTime);
+  if(sweep){ const tgt=Math.max(40, sweep<0 ? freq+sweep : sweep); bp.frequency.exponentialRampToValueAtTime(tgt,AC.currentTime+dur); }
   const g=AC.createGain(); g.gain.setValueAtTime(0.0001,AC.currentTime); g.gain.exponentialRampToValueAtTime(vol,AC.currentTime+0.005); g.gain.exponentialRampToValueAtTime(0.0001,AC.currentTime+dur);
   s.connect(bp); bp.connect(g); g.connect(dest||spatBus); s.start(); s.stop(AC.currentTime+dur+0.05); }catch(e){} }
 // pitched tone with a natural pluck/knock envelope — the "body" layer real sounds have that pure noise lacks
@@ -22211,7 +22220,19 @@ function tone(dest,o){ if(!AC)return;
   const g=AC.createGain(); g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(vol,t+(o.atk||0.004)); g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
   osc.connect(g); g.connect(dest||spatBus); osc.start(t); osc.stop(t+dur+0.03); }catch(e){} }
 const FOOT={ grass:[2400,1.1,0.06,0.32], stone:[1500,6,0.08,0.6], wood:[900,8,0.11,0.5], sand:[1800,0.8,0.07,0.3], water:[700,0.6,0.18,0.4], dirt:[1600,1.5,0.07,0.4] };
-function matAt(x,y,z){ const b=getBlock(x,y,z); if(b===AIR)return 'grass'; if(b===WATER)return 'water'; const n=B[b]?B[b].name:''; if(n==='stone'||n==='cobble'||n==='mossy'||n==='iron_ore'||n==='coal_ore')return 'stone'; if(n==='planks'||n==='log'||n==='bookshelf')return 'wood'; if(n==='sand'||n==='gravel')return 'sand'; if(n==='grass')return 'grass'; return 'dirt'; }
+// WHAT YOU ARE STANDING ON (E3a). Three materials were being answered by the wrong voice: GRAVEL was folded into sand, so a shingle
+// beach scuffed like a dune instead of crunching; WATER was returned here but sfxStep had no branch for it, so wading fell through
+// to the dirt case; and the industrial pack — an entire bunker's worth of steel that the game did not have when this was written —
+// read as 'dirt' too, so a steel grate walkway sounded like a garden path. Concrete stays with stone, which is what it is.
+// The brief also lists MUD; there is no mud block in the game yet (it arrives with #61/E4), so there is nothing to classify.
+function matAt(x,y,z){ const b=getBlock(x,y,z); if(b===AIR)return 'grass'; if(b===WATER)return 'water'; const n=B[b]?B[b].name:'';
+  if(n==='stone'||n==='cobble'||n==='mossy'||n==='iron_ore'||n==='coal_ore'||n==='concrete'||n==='warning_block')return 'stone';
+  if(n==='planks'||n==='log'||n==='bookshelf')return 'wood';
+  if(n==='gravel')return 'gravel';
+  if(n==='sand')return 'sand';
+  if(n==='reinforced_wall'||n==='riveted_plate'||n==='corrugated_sheet'||n==='steel_grate'||n==='industrial_pipe'
+     ||n==='metal_bench'||n==='vault_door_x'||n==='vault_door_z'||n==='vault_part')return 'metal';
+  if(n==='grass')return 'grass'; return 'dirt'; }
 function matUnder(){ return matAt(player.pos.x,player.pos.y-0.2,player.pos.z); }
 sfxStep=(pos,mul)=>{ if(!AC)return; const pp=pos||player.pos, m=(mul!=null?mul:0.7);   // no args = YOUR OWN tread at 70% (-30% locally, Ben 07-20); peers pass their avatar position at full volume — the SAME sound, fully spatial
   const mat=pos?matAt(pp.x,pp.y-0.2,pp.z):matUnder();
@@ -22222,6 +22243,18 @@ sfxStep=(pos,mul)=>{ if(!AC)return; const pp=pos||player.pos, m=(mul!=null?mul:0
   else if(mat==='stone'){ burst(P,0.13*m,0.028,2100*r,7,900); tone(P,{f:170*r,type:'triangle',dur:0.045,vol:0.05*m,to:110}); }   // sharp click + little ring
   else if(mat==='wood'){ tone(P,{f:205*r,type:'triangle',dur:0.11,vol:0.13*m,to:150}); burst(P,0.05*m,0.04,880,4,520); }          // hollow plank knock
   else if(mat==='sand'){ burst(P,0.10*m,0.07,560*r,0.7,300,'lowpass'); }                              // soft muffled scuff
+  // GRAVEL IS SAND WITH EDGES: three short grains rather than one smooth scuff, which is the whole difference between shingle and
+  // dune underfoot, and it is why folding gravel into sand was audible.
+  else if(mat==='gravel'){ for(let i=0;i<3;i++) burst(P,(0.055+Math.random()*0.03)*m,0.022+i*0.006,1500*r+Math.random()*900,2.2,-500,'bandpass');
+    tone(P,{f:120*r,type:'triangle',dur:0.05,vol:0.045*m,to:80}); }   // three grains of different LENGTH, since burst takes no delay — a stagger would need three timers for one footstep
+  // WATER: a bright splash over a low gulp. The sharp part carries the direction (HRTF cues live above ~1.5 kHz) and the low part
+  // carries the mass of a leg going in.
+  else if(mat==='water'){ burst(P,0.16*m,0.10,2600*r,0.9,-1800,'bandpass'); burst(P,0.10*m,0.16,420*r,0.8,-260,'lowpass');
+    tone(P,{f:300*r,type:'sine',dur:0.09,vol:0.05*m,to:170,atk:0.004}); }
+  // METAL: a plate rings. A hard transient plus two short partials a fifth apart is enough to say steel without turning a walkway
+  // into a bell — the industrial pack is a whole bunker of this now, and it used to sound like a garden path.
+  else if(mat==='metal'){ burst(P,0.11*m,0.02,4200*r,6,-2200);
+    tone(P,{f:520*r,type:'triangle',dur:0.10,vol:0.055*m,to:430}); tone(P,{f:780*r,type:'sine',dur:0.07,vol:0.03*m,to:700,delay:0.01}); }
   else { burst(P,0.075*m,0.05,1300*r,1.4,600); } };                                                   // dirt
 // ===== WRETCH FOOTSTEPS v2 — fired by the ANIMATION layer at the exact frame a foot plants (see the beat
 // hook in the gait code), so if it visibly steps it audibly steps — no separate cadence clock, no state gates
@@ -22406,18 +22439,32 @@ _audioFrame=(dt)=>{ if(!AC)return;
   // threat from entity proximity/state
   let threat=0; if(wretch.active){ threat=clamp(1-wretch.dist/45,0,1); if(wretch.state==='HUNT')threat=Math.max(threat,0.9); if(wretch.state==='STALK')threat=Math.max(threat,0.5); }
   setThreat(threat);
-  // SUBMERGED MUFFLE — head underwater clamps the master low-pass to a dull thud; opens back up at the surface
-  if(submergeLP){ submergeLP.frequency.setTargetAtTime(_submerged?460:20000, t, 0.08); }
+  // SUBMERGED MUFFLE — head underwater clamps the master low-pass to a dull thud; opens back up at the surface.
+  // AND AN ENCLOSURE MUFFLE WITH IT (E3b): a room takes the top off what you hear, and until now only WATER did. The dungeon, the
+  // cathedral and a cabin all sounded like open ground with a bit of echo on top, because the enclosure probe drove a reverb send
+  // and nothing else. Same probe, one more consumer. The two share the filter and take the LOWER corner: underwater in a cave is
+  // not brighter than either.
+  // NUMBERS: fully open ground stays at 20 kHz, i.e. untouched, and a boxed room lands near 6.5 kHz — audible as "inside" without
+  // making dialogue-less audio sound broken. The 0.35 threshold is where the reverb send starts to matter too, so one number
+  // describes both.
+  if(submergeLP){ const encF = 20000 - 13500*clamp((_encCov-0.35)/0.5,0,1);
+    submergeLP.frequency.setTargetAtTime(Math.min(_submerged?460:20000, encF), t, 0.25); }
   // SHORELINE LAP — swells when open water sits within a few blocks of the ear (and hushes underwater / when parched-fog eats the world)
   if(shoreGain){ let near=0; for(const [dx,dz] of [[2,0],[-2,0],[0,2],[0,-2],[3,3],[-3,-3],[3,-3],[-3,3],[5,0],[0,5]]){ if(getBlock(Math.floor(cp.x+dx),Math.floor(cp.y-1),Math.floor(cp.z+dz))===WATER || getBlock(Math.floor(cp.x+dx),Math.floor(cp.y),Math.floor(cp.z+dz))===WATER){ near++; } }
     const lap=_submerged?0.0:Math.min(0.10, near*0.016); shoreGain.gain.setTargetAtTime(lap, t, 0.5); }
   // reverb by ENCLOSURE — how boxed-in the player is (proximity-weighted solid-block coverage around them). Open beach
   // → DRY (no echo); dense woods → some echo; a cave → the full cave echo. Falloff is exponential (cov²), so exposed
   // ground stays clean and only genuine enclosure rings.
-  { const px=cp.x, py=cp.y+1.0, pz=cp.z; let cov=0, nn=0;
+  // PROBED ON A TIMER, NOT EVERY FRAME (E3b says so explicitly, and it was per-frame). Nine ray steps across nine directions is 81
+  // solidAt calls, and a room does not change shape between frames — you can only walk into one at 5 m/s. Three times a second is
+  // faster than the 0.7 s smoothing that consumes it, so nothing about the sound changes except that it costs a fifth as much.
+  _encT-=dt;
+  if(_encT<=0){ _encT=0.32;
+    const px=cp.x, py=cp.y+1.0, pz=cp.z; let cov=0, nn=0;
     const D=_REVERB_RAYS;   // hoisted to module scope (see decl) — 8 horizontal (dominant) + ceiling rays
     for(let di=0; di<D.length; di++){ const d=D[di]; nn++; let c=0; for(let s=1;s<=9;s++){ if(solidAt(Math.floor(px+d[0]*s),Math.floor(py+d[1]*s),Math.floor(pz+d[2]*s))){ c=1-(s-1)/9.0; break; } } cov+=c; }
-    cov/=nn; const wet=cov*cov;                                                                  // exponential: little coverage → almost no reverb
+    _encCov=cov/nn; }
+  { const cov=_encCov; const wet=cov*cov;                                                        // exponential: little coverage → almost no reverb
     const inCave = opaqueTop(Math.floor(cp.x),Math.floor(cp.z))>cp.y+2 && cov>0.45;              // genuine cave = a ceiling AND boxed-in walls
     if(gForest&&gCave){ gCave.gain.setTargetAtTime(inCave?wet:0, t, 0.7); gForest.gain.setTargetAtTime(inCave?0:wet, t, 0.7); } }
   // starchy crackle grains
@@ -23137,6 +23184,18 @@ window.__hc={
   // any frame-to-frame pixel diff read as motion. A z-fighting check built on such a diff measured 45,000 changed pixels on a
   // perfectly stable door, all of it grain.
   grainSet(v){ try{ if(gradePass) gradePass.uniforms.uGrain.value=Math.max(0,+v||0); return { grain:gradePass?+gradePass.uniforms.uGrain.value.toFixed(3):null }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: E3. What material is under the player, what the enclosure probe reads, and where the master lowpass sits — a
+  // footstep and a muffle are both inaudible to a headless run, but the material it chose and the corner frequency are numbers.
+  // stepProbe(x,y,z) classifies any cell, so every material can be checked without walking the player onto one.
+  audioE3(x,y,z){ try{
+      const mat=(x!=null)?matAt(+x,+y,+z):matUnder();
+      return { mat, encCov:+(_encCov||0).toFixed(4),
+        lowpass:(typeof submergeLP!=='undefined'&&submergeLP)?Math.round(submergeLP.frequency.value):null,
+        submerged:!!_submerged, cave:(typeof gCave!=='undefined'&&gCave)?+gCave.gain.value.toFixed(4):null,
+        forest:(typeof gForest!=='undefined'&&gForest)?+gForest.gain.value.toFixed(4):null }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: does a cue actually SOUND? burst() swallows its own failures in a try/catch — a negative sweep threw a RangeError and
+  // silenced twenty-two call sites for who knows how long — so this counts the nodes a cue creates instead of trusting it.
+  audioNodes(){ try{ return { ctx:AC?AC.state:null, count:AC?(AC._nodeCount||null):null }; }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: the firefly swarm. Live count and the brightest sprite, because "are there fireflies" is answered by a draw range
   // and "can you see them" is answered by how bright the brightest one currently is — a swarm mid-blink is legitimately dim.
   fireflies(){ try{ if(!_ffPts) return { built:false, live:0, day:+globalU.uDay.value.toFixed(4) };

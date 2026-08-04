@@ -76,8 +76,10 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
 
     // ---- 2. THE OFFHAND GUN SURVIVES A FULL MAIN HAND ----
     await page.evaluate(`__hc.shoot()`); await sleep(200);                       // one round down, so the magazine is identifiable
-    await K('KeyF'); await sleep(300);                                           // gun → offhand
-    await K('KeyF'); await sleep(300);                                           // empty hand + F → use mode
+    await K('KeyF'); await sleep(300);                                           // gun → offhand, and the mode comes on with it
+    // The second F press this used to need is gone (Ben 08-04: "left click still hits the fist of an empty fist when f was
+    // pressed"). Moving the gun across empties the main hand, so the rule that the mode is only for an empty hand is now asked
+    // of the hand as it IS after the move — one press arms the left trigger, and a second one would disarm it again.
     const off1 = await mags(); console.log('  in the offhand:', JSON.stringify({off:off1.off,mag:off1.mag,active:off1.active}));
     check('the offhand gun keeps its magazine',      off1.offMag===CAP-1, `offhand mag ${off1.offMag}, was ${CAP-1}`);
     await page.evaluate(`__hc.qSet('inv',0,'stone',8)`); await sleep(300);        // THE OLD BUG: anything here switched the mode off
