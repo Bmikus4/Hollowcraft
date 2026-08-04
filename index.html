@@ -3630,14 +3630,7 @@ const waterMat = new THREE.ShaderMaterial({
       vec3 skyRefl=uRing;
       vec3 col=mix(base, skyRefl, F);
       // NO specular glints and NO white foam crests — they read as "shiny white flashes". Removed on purpose.
-      // MOONGLADE (night only): the one specular term we keep — a soft glinting path where the moon reflects
-      // off the ripples toward the eye. Gated hard to night (1-uDay) so it never becomes a daytime sparkle.
-      float night = clamp(1.0 - uDay*1.3, 0.0, 1.0);
-      if(night > 0.02){ vec3 Rm = reflect(-normalize(-uMoonDir), N);      // moon comes FROM -uMoonDir; reflect its incoming ray about the rippled normal
-        float glint = pow(max(dot(Rm, V), 0.0), 60.0);                    // tight lobe = a coherent shimmering track, not a wash
-        float track = smoothstep(0.55, 1.0, abs(N.x)+abs(N.z));           // only the tilted ripple faces catch it → broken, watery path
-        col += vec3(0.28,0.34,0.42) * glint * night * (0.35 + 0.65*track);
-      }
+      // MOONGLADE — moved BELOW the absorption, next to the sunglade it was copied from. See the block after it.
       // Beer-Lambert depth absorption: the deeper the water column, the darker & more opaque, until the bottom disappears.
       float absorb = 1.0 - exp(-vDepth*0.9);                          // 0 at a thin film -> ~1 in deep water (steeper → opaque sooner)
       col = mix(col, vec3(0.002,0.008,0.012), absorb*0.97);           // sink toward near-black with depth — the deep must read genuinely DARK (Ben 07-20)
@@ -3670,6 +3663,22 @@ const waterMat = new THREE.ShaderMaterial({
         float track = smoothstep(0.50, 1.0, abs(N.x)+abs(N.z));           // the same broken-facet term the moonglade uses
         vec3 sunCol = mix(vec3(1.0,0.94,0.82), vec3(1.0,0.60,0.32), low); // white-warm overhead, orange at the horizon
         col += sunCol * (tight*(0.45+0.55*track) + wide) * dayl * above * (0.55 + 1.25*low);
+      }
+      // MOONGLADE — the same term for the moon, and the two faults it carried are the two the sunglade's comments above
+      // describe, which is unsurprising since one was copied from the other. It sat ABOVE the absorption, which mixes 97% of
+      // the way to near-black in deep water and erased it; and it was written reflect(-normalize(-uMoonDir), N), a double
+      // negative that cancels to reflect(+uMoonDir, N) — the lobe pointing down into the water, dot(Rm,V) negative for any
+      // camera above the surface, and max(...,0.0) zeroing the whole term at every hour and every angle. Measured before this:
+      // the water crop was identical to two decimal places aimed at the moon's reflection and aimed 90 degrees away from it,
+      // which is what "no specular at all" looks like from outside.
+      float night = clamp(1.0 - uDay*1.3, 0.0, 1.0);
+      // AND A MOON-ELEVATION GATE, which the sun has and this did not: without it the glade lights the water from a moon that
+      // has already set. Same shape as the sun's, starting under the horizon so it outlives the geometric moonrise.
+      float mAbove = smoothstep(-0.06, 0.05, uMoonDir.y);
+      if(night*mAbove > 0.02){ vec3 Rm = reflect(-normalize(uMoonDir), N);
+        float glint = pow(max(dot(Rm, V), 0.0), 60.0);                    // tight lobe = a coherent shimmering track, not a wash
+        float track = smoothstep(0.55, 1.0, abs(N.x)+abs(N.z));           // only the tilted ripple faces catch it → broken, watery path
+        col += vec3(0.28,0.34,0.42) * glint * night * mAbove * (0.35 + 0.65*track);
       }
       float alpha = clamp(0.72 + 0.26*absorb + 0.08*F, 0.0, 0.99);    // NOT glass: even shallow water is mostly opaque so you never see through it to infinity; deep = solid
       if(vTop<0.5) alpha = max(alpha, 0.95);                          // side faces stay solid-looking
@@ -19594,20 +19603,61 @@ function playSample(base,pos,vol){ if(!AC)return false;
   const g=AC.createGain(); g.gain.value=(vol==null?0.8:vol); s.connect(g); g.connect(pos?panAt(pos.x,pos.y,pos.z):ambBus); s.start(); return true; }
 // MUSIC (Ben 07-21) — STREAMING HTMLAudio (these are long songs; decodeAudioData would hold many minutes of PCM in RAM and crash).
 // Game soundtrack = Classical Villain (quiet LOOP). Boss = Loves Sorrow → Wild World, played through ONCE (no loop → silence after).
+// THE SOUNDTRACK OPENS ON SILENCE (Ben 08-04): two minutes of nothing, then ONE opening track played through once, and only
+// then the looping soundtrack that was always here. The order is a property of the SESSION, not of any caller: startGameMusic is
+// called from a dozen places (every pointer-lock gesture, respawn, closing the inventory, leaving the Backrooms) and each of them
+// must land on whatever the schedule says should be sounding right now rather than on "the soundtrack". So the schedule lives
+// inside startGameMusic and every one of those callers gets it for free.
+//
+// The clock starts when the WORLD does, not when the page loads — audioResume fires on the first click at the menu, and counting
+// the two minutes from there would spend the silence on the main menu, where there is no music anyway.
+//
+// A MISSING OPENING TRACK IS NOT A BROKEN GAME. If intro_music.ogg is absent the element errors, the intro is marked done and the
+// silence hands straight over to the existing loop — the schedule degrades to "two minutes of quiet, then as before".
+const MUSIC_SILENCE=120, MUSIC_INTRO='./sounds/intro_music.ogg';
+let _musicT0=null, _musicSkew=0, _introMusicEl=null, _introState='pending';   // pending → playing → done
+function musicElapsed(){ return (_musicT0==null?0:(performance.now()/1000)-_musicT0)+_musicSkew; }
 function _ensureMusicEls(){ if(_gameMusicEl||!AC)return;
   _musicBus=AC.createGain(); _musicBus.gain.value=1; _musicBus.connect(master);   // routed through master so the Volume slider governs music too
   _gameMusicEl=new Audio('./sounds/game_music.ogg'); _gameMusicEl.loop=true; _gameMusicEl.preload='auto'; _gameMusicEl.volume=_musicVol;
+  _introMusicEl=new Audio(MUSIC_INTRO); _introMusicEl.loop=false; _introMusicEl.preload='auto'; _introMusicEl.volume=_musicVol;
+  _introMusicEl.addEventListener('ended',()=>{ _introState='done'; startGameMusic(); });     // opening track over → the soundtrack takes it from here
+  _introMusicEl.addEventListener('error',()=>{ _introState='done'; });                       // no such file → skip it rather than stall the soundtrack forever
+  try{ AC.createMediaElementSource(_introMusicEl).connect(_musicBus); }catch(e){}
   _bossMusicEls=[new Audio('./sounds/boss_music2.ogg'), new Audio('./sounds/boss_music1.ogg')];   // boss_music2 now plays FIRST → boss_music1 (Ben 07-24, swapped order)
   for(const a of _bossMusicEls){ a.loop=false; a.preload='auto'; a.volume=_bossMusicVol; }
   _bossMusicEls[0].addEventListener('ended',()=>{ if(_bossMusicOn){ _bossMusicIdx=1; try{ _bossMusicEls[1].currentTime=0; _bossMusicEls[1].play().catch(()=>{}); }catch(e){} } });   // song1 → song2; song2 end → silence
   try{ AC.createMediaElementSource(_gameMusicEl).connect(_musicBus); for(const a of _bossMusicEls)AC.createMediaElementSource(a).connect(_musicBus); }catch(e){} }
-function startGameMusic(){ _ensureMusicEls(); if(!_gameMusicEl)return; _gameMusicEl.volume=_bossMusicOn?0:_musicVol; if(_gameMusicEl.paused)_gameMusicEl.play().catch(()=>{}); }
+function startGameMusic(){ _ensureMusicEls(); if(!_gameMusicEl)return;
+  if(_musicT0==null && typeof started!=='undefined' && started) _musicT0=performance.now()/1000;   // the world began — start counting the silence
+  if(musicElapsed()<MUSIC_SILENCE) return;                                                        // the opening silence: nothing is playing, and nothing starts
+  if(_introMusicEl && _introState!=='done'){
+    if(_introMusicEl.ended) _introState='done';                                                   // belt and braces: never wait forever on an 'ended' that already fired
+    else { _gameMusicEl.volume=0;                                                                 // the loop must not come up underneath the opening track
+      _introMusicEl.volume=_bossMusicOn?0:_musicVol;
+      if(_introMusicEl.paused){ _introState='playing'; _introMusicEl.play().catch(()=>{ _introState='done'; }); }
+      return; } }
+  _gameMusicEl.volume=_bossMusicOn?0:_musicVol; if(_gameMusicEl.paused)_gameMusicEl.play().catch(()=>{}); }
+// The schedule has two moments no user gesture is guaranteed to coincide with — the silence ending and the opening track ending —
+// so it is polled twice a second rather than waiting to be asked. startGameMusic only ever plays something that is paused, which
+// is what makes calling it on a timer safe. Boss music and the Backrooms own the mix while they are up, and both restore through
+// startGameMusic, so the schedule is still honoured when they hand it back.
+let _musicPoll=0;
+function updateMusicSchedule(dt){ if(!AC || _bossMusicOn) return;
+  if(typeof BR!=='undefined' && BR && BR.inside) return;                    // the Backrooms are deliberately silent
+  if(typeof started!=='undefined' && !started) return;
+  _musicPoll-=dt; if(_musicPoll>0) return; _musicPoll=0.5;
+  startGameMusic(); }
 function startBossMusic(){ _ensureMusicEls(); if(!_bossMusicEls)return; _bossMusicOn=true; _bossMusicIdx=0;
   if(_gameMusicEl)_gameMusicEl.volume=0;                                          // duck the soundtrack under the boss track
+  if(_introMusicEl)_introMusicEl.volume=0;                                        // …and the opening track, if the fight starts during it
   try{ _bossMusicEls[1].pause(); _bossMusicEls[0].currentTime=0; _bossMusicEls[0].volume=_bossMusicVol; _bossMusicEls[0].play().catch(()=>{}); }catch(e){} }
 function stopBossMusic(){ _bossMusicOn=false; if(_bossMusicEls)for(const a of _bossMusicEls){ try{ a.pause(); a.currentTime=0; }catch(e){} }
-  if(_gameMusicEl){ _gameMusicEl.volume=_musicVol; if(_gameMusicEl.paused)_gameMusicEl.play().catch(()=>{}); } }   // the boss track does NOT loop; the soundtrack returns
-function applyMusicVol(){ if(_gameMusicEl&&!_bossMusicOn)_gameMusicEl.volume=_musicVol; if(_bossMusicEls)for(const a of _bossMusicEls)a.volume=_bossMusicVol; }
+  if(_introMusicEl)_introMusicEl.volume=_musicVol;
+  startGameMusic(); }   // the boss track does NOT loop; whatever the schedule says comes back — opening track or soundtrack
+function applyMusicVol(){ if(_gameMusicEl&&!_bossMusicOn)_gameMusicEl.volume=(_introState==='playing'?0:_musicVol);
+  if(_introMusicEl&&!_bossMusicOn)_introMusicEl.volume=_musicVol;
+  if(_bossMusicEls)for(const a of _bossMusicEls)a.volume=_bossMusicVol; }
 // HYPERREALISTIC HEARTBEAT (Ben 07-21) — a lub-dub pulse. Fires on adrenaline (racing pulse) and when the creature RUNS BY.
 let _hbActive=false, _hbEnd=0, _hbBpm=100, _hbBus=null;
 function startHeartbeat(dur,bpm){ if(!AC)return; _hbBpm=bpm||100; _hbEnd=(performance.now()/1000)+(dur||8);
