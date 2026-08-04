@@ -2962,6 +2962,16 @@ const _farSeaGeo=(()=>{ const g=new THREE.RingGeometry(0.55, 16.0, 128, 44);   /
   return g; })();
 // Built on FIRST USE, not here: waterMat is declared a few hundred lines further down, and naming it at this point is a
 // use-before-initialisation that stops the file dead. The geometry above has no such dependency, so only the mesh waits.
+// HOW FAR OUT THE WATER HAS FINISHED BECOMING THE RING COLOUR, as a multiple of the render wall. 16 was the annulus's own outer
+// radius, which sounds right and is not: the annulus is 2560 blocks across but the drop caps at 58 blocks, so everything past
+// about 180 blocks is already lying flat below the eye and the last visible stretch of it was still deep-water dark while the
+// ocean cylinder immediately above it drew at the bright shared horizon anchor. Measured from 140 blocks offshore, that meeting
+// was a 33-luminance step (65.7 above, 32.1 below) with the ocean layer on and 0.3 with it off -- the divider Ben photographed.
+// Bracketed against that step from the same vantage: 16 -> 33.8, 4 -> 18.9, 2 -> gone (both sides read 65.x and the only steps
+// left in open water are the beach and the sky's own gradient, both present with the ocean layer hidden). 2 also puts the whole
+// fade past the 182-block radius where the drop caps, so every part of the far sea that is lying flat below the eye is the ring
+// colour, which is the colour the sky and the horizon anchor already share. Lower than 2 changes nothing further.
+let _ringFadeMul=2.0;
 let farSea=null;
 // THE FIXED HORIZON SEA COLOUR (Ben 07-28) — waterMat's own grazing-angle sky reflection at its NIGHT end. Used at every
 // hour on purpose: the horizon band must not brighten with the sun, and the water it meets is this colour, so they match 24/7.
@@ -3070,9 +3080,21 @@ const pineUnderMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false
     // The SAME anchoring the treeline gets, and it has to be the same to the term: the band is clipped against a
     // reproduction of the canopy above it, so a projection range that differed by any amount would tear the join.
     uPushD:{value:1}, uHide:{value:1},
+    // HOW MUCH OF THE ATMOSPHERE THIS BAND IS ALLOWED TO BREATHE — the dial behind Ben's "the bottom of skybox pines are NOT
+    // affected by volumetric fog still". The pines run at uFogAmt (0.93 at the wall); the band ran at a hard-coded 0.26 of it
+    // capped at 0.42, three times less, which is exactly a strip that ignores the haze. Uniforms so the two numbers can be
+    // bracketed against a frame instead of guessed at (__hc.bandFog).
+    // 0.93/0.97 is not a taste: it is EXACTLY the expression the canopy's own uFogAmt is clamped to one screenful above
+    // (clamp(_ef*0.93,0,0.97)). Same distance, same air, same exposure — measured in clear daylight the band's base went from
+    // 24 luminance below the haze it should be dissolving into to 8, while still reading 10% darker than the canopy above it,
+    // so it is wood receding rather than a strip pasted over the horizon.
+    uFogMul:{value:0.93},     // THE SKIRT, DOUBLED, because Ben asked for the wood further down and this is the term that puts it there. 0.22 was "the same
+    // generous under-skirt the pines use"; 0.45 takes the wood about twice as far below the treeline base, and it is a uniform so
+    // his eye can settle it in one round rather than in four: __hc.bandFog(null,null,skirt).
+    uFogCap:{value:0.97}, uBandSkirt:{value:0.45},
     uEntAz:{value:0}, uEntW:{value:0.115}, uEntOn:{value:1} },
   vertexShader:_horizVert, fragmentShader:[
-  'precision highp float; varying vec3 vPos; uniform sampler2D uMask; uniform vec3 uBand, uFogCol, uPineCol; uniform float uFogAmt, uWx, uCamY, uVisD, uBandH, uPushD, uHide;',
+  'precision highp float; varying vec3 vPos; uniform sampler2D uMask; uniform vec3 uBand, uFogCol, uPineCol; uniform float uFogAmt, uWx, uCamY, uVisD, uBandH, uPushD, uHide, uFogMul, uFogCap, uBandSkirt;',
   'uniform float uEntAz, uEntW, uEntOn;',
   'float hash(float n){ return fract(sin(n)*43758.5453); }',
   'float nz(float x){ float i=floor(x),f=fract(x); return mix(hash(i),hash(i+1.0),f*f*(3.0-2.0*f)); }',
@@ -3095,19 +3117,37 @@ const pineUnderMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false
   '  float bandTop=min(hT+uBandH*hs, tip);',                                                     // BOUND INSIDE: the band can never be taller than the canopy standing on the same column
   '  float base=hT/sqrt(dist*dist+hT*hT), topE=bandTop/sqrt(dist*dist+bandTop*bandTop);',
   '  float pineTop=tip/sqrt(dist*dist+tip*tip);',
-  '  float bottom=base-0.22*max(hs,0.35);',                                                      // the same generous under-skirt the pines use
-  '  float sink=(1.0-smoothstep(0.05,0.5,hs))*0.06; base-=sink; topE-=sink; bottom-=sink; pineTop-=sink;',   // the same sink, so the band slips under the waterline where the treeline does
+  // HOW FAR DOWN THE WOOD REACHES (Ben, asked which of three readings of "extend farther out" he meant: "further down, taller
+  // band"). The extra height goes DOWNWARD, toward the water, not upward: the band's top is the seam blend with the canopy and
+  // that is locked (bb96697), and uBandH raises exactly that top. So the under-skirt is the dial, and there are two bottoms --
+  // bottom0 is the skirt the seam was tuned against and t stays keyed to it, so the blend at the top is bit-identical however
+  // far the wood is extended; bottom is where it actually stops. Below bottom0, t clamps to 0, which is the darkest wood in
+  // the ramp, so the extension reads as the trunks continuing down rather than as a second gradient.
+  '  float bottom0=base-0.22*max(hs,0.35);',
+  '  float bottom=base-uBandSkirt*max(hs,0.35);',
+  '  float sink=(1.0-smoothstep(0.05,0.5,hs))*0.06; base-=sink; topE-=sink; bottom-=sink; bottom0-=sink; pineTop-=sink;',   // the same sink, so the band slips under the waterline where the treeline does
   '  topE=min(topE,pineTop);',                                                                   // clipped in ELEVATION as well as in blocks — belt and braces, since the two conversions are non-linear
   '  if(elev>topE || elev<bottom) discard;',
-  '  float t=clamp((elev-bottom)/max(topE-bottom,1e-4),0.0,1.0);',                               // 0 at the skirt, 1 at the top of the band
+  '  float t=clamp((elev-bottom0)/max(topE-bottom0,1e-4),0.0,1.0);',                             // 0 at the ORIGINAL skirt, 1 at the top of the band — see bottom0
   '  float col=nz(az*130.0);',                                                                   // the SAME per-tree column id as the pines, so trunks line up with the crowns above them
   '  vec3 band=uBand*(0.55+0.55*col)*(1.0-0.35*t);',                                             // darkest at the floor, easing up toward where the canopy takes over; per-column variation gives it depth instead of a flat stripe
   '  band*=mix(1.0,0.05,ment);',                                                                 // the entranceway runs through this layer too, or the mouth would have a lit floor across it
   // AND THE HAZE STOPS BLEACHING IT. 0.45 with a 0.72 ceiling meant that by day this band was mixed up to seventy-two per cent
   // into the fog colour, which is why it "wasnt darkened" -- the darkness was being erased downstream of the colour. 0.26 with
   // a 0.42 ceiling keeps it a dark strip in daylight while still letting it drown past the shore on the line below.
-  '  float fog=clamp(uFogAmt*0.26*(1.0-0.25*t),0.0,0.42);',                                      // HALF the pines\' fog exposure and capped at 0.72: this band is the one thing on the horizon that must stay dark, and full-strength daylight haze is precisely what erased the seam it replaces
-  '  fog=max(fog, 1.0-smoothstep(0.0,0.22,hs));',                                                // …but past the shore it still drowns completely, like everything else on this horizon
+  // FIFTH PASS (Ben: "the bottom of skybox pines are NOT affected by volumetric fog STILL"). The fix before this one routed only
+  // the weather amount uWx into the mix, so a fog BANK took the band, and ordinary atmospheric haze -- the volumetric fog that
+  // is present every hour of every day -- still could not, because these two constants choked it to a third of what the canopy
+  // above it breathes. That is the whole bug: at the wall the pines sit at uFogAmt 0.93 and this band sat at 0.42, so however
+  // far the treeline dissolved, the wood under it stayed a hard dark strip at a fixed strength. Same distance, same air, so it
+  // gets the same exposure; the reserve that keeps it reading as wood rather than vanishing is uFogMul/uFogCap, which are now
+  // uniforms because the level Ben's eye accepts is a number only a frame can settle.
+  '  float fog=clamp(uFogAmt*uFogMul*(1.0-0.25*t),0.0,uFogCap);',
+  // Past the shore the band drowns completely, like everything else on this horizon. This looked like the dial behind Ben's "the
+  // wooden part of the horizon pines should extend farther out" -- hs is the mask's land strength, so the bound is where the wood
+  // gives up -- and it is not: taken to 0.15, 0.10 and 0.05 from the shore view it moved the brown extent by 12 columns of 1280
+  // and 126 pixels of 12,682, i.e. nothing. Whatever "farther out" is, it is not this term, so do not spend another pass here.
+  '  fog=max(fog, 1.0-smoothstep(0.0,0.22,hs));',
   // WEATHER FOG REACHES THE BAND (Ben: "the bottom (brown) of horizon pines is not affected by fog"). Cutting the daylight
   // haze exposure to 0.26/0.42 to stop the band being bleached also left it ignoring a fog BANK, so in weather that washed the
   // whole treeline pale the wood underneath stayed a hard dark strip. uWx is the live weather-fog amount the pines already use;
@@ -3170,7 +3210,7 @@ function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.p
   // Nudged 3cm below sea level so that in the overlap band real chunk water wins outright. Both surfaces carry the same
   // curve, so without the offset they are coplanar over that whole ring and z-fight into a shimmering mess.
   { const wall=CFG.RENDER_DIST*CK; farSea.scale.set(wall, 1, wall); farSea.position.set(0, CFG.SEA-0.03-camera.position.y, 0);
-    waterMat.uniforms.uRingFade.value = wall*16.0; }   // the annulus outer radius, so the water shader fades to the ring colour exactly at its rim
+    waterMat.uniforms.uRingFade.value = wall*_ringFadeMul; }   // where the water has finished becoming the ring colour — see _ringFadeMul
   { // ---- THE HORIZON COLOUR: THE NIGHT SEA, AT EVERY HOUR ----
     // Ben 07-28: "much darker even during the day ... zero blending on this even during the day, just make sure it is colour
     // matched to the water 24/7 ... copy the bottom of it at night, with lighting overrides to the day."
@@ -4942,7 +4982,17 @@ function applyWaterFog(){
   _camSubmerged=sub;
   if(sub){ const fc=scene.fog.color; fc.setRGB(0.03,0.13,0.16); scene.background=_uwBG.copy(fc);   // murky teal — the volumetric near-limit colour
     scene.fog.density=0.34;                                                                    // VOLUMETRIC: visibility closes to ~8-9 blocks in every direction
-    if(waterMat&&waterMat.uniforms&&waterMat.uniforms.uFogDensity)waterMat.uniforms.uFogDensity.value=0.34; }
+    if(waterMat&&waterMat.uniforms&&waterMat.uniforms.uFogDensity)waterMat.uniforms.uFogDensity.value=0.34;
+    // THE HORIZON BACKDROP IS UNDERWATER TOO. updateSky -> updateHorizon has already run this frame and set the treeline's fog
+    // from the SURFACE density, so with visibility closed to nine blocks the distant forest and the woody band under it were
+    // still being drawn at 0.07 fog: a crisp pine horizon hanging in murk you cannot see your own hands through. Their materials
+    // declare fog:false and mix by hand, so three's fog cannot reach them -- this is the same "which of the three fog systems
+    // does this material actually read" bug as the band's haze path, in its third place. Set here rather than in updateHorizon
+    // because submersion is only known after it has run, and it recomputes both from the real density the moment you surface.
+    _uPineFog.copy(fc);
+    // 1.0, not the 0.97 the surface clamp holds them under: that ceiling exists so the treeline's tip gradient still reads
+    // against the sky, and at 0.34 density there is nothing at the render wall left to read -- it is all water.
+    pineMat.uniforms.uFogAmt.value=1.0; pineUnderMat.uniforms.uFogAmt.value=1.0; }
   // above water: updateSky already set the normal horizon fog this frame
 }
 
@@ -18947,6 +18997,20 @@ window.__hc={
                push:+pineMat.uniforms.uPushD.value.toFixed(4), hide:+pineMat.uniforms.uHide.value.toFixed(4),
                bandPush:+pineUnderMat.uniforms.uPushD.value.toFixed(4), bandHide:+pineUnderMat.uniforms.uHide.value.toFixed(4) };
     }catch(e){ return {err:String(e.message||e)}; } },
+  // QA: the woody band's fog exposure against the canopy's, and the dial that sets it. pineFog is what the pines breathe at this
+  // instant, bandFog what the band actually resolves to at its base — the pair of numbers Ben's "not affected by fog" is about.
+  bandFog(mul,cap,skirt){ try{ const u=pineUnderMat.uniforms;
+      if(mul!=null) u.uFogMul.value=+mul; if(cap!=null) u.uFogCap.value=+cap; if(skirt!=null) u.uBandSkirt.value=+skirt;
+      return { mul:+u.uFogMul.value.toFixed(3), cap:+u.uFogCap.value.toFixed(3), skirt:+u.uBandSkirt.value.toFixed(3),
+               pineFog:+pineMat.uniforms.uFogAmt.value.toFixed(3),
+               bandFog:+Math.min(u.uFogCap.value, u.uFogAmt.value*u.uFogMul.value).toFixed(3),
+               // the weather-bank floor the fragment applies under the haze term, and the two resolved together — the three fog
+               // systems this band has to answer to are uFogAmt, uWx and (through scene.fog.density) the volumetric pass, and
+               // reporting only the first is how the last fix passed while two of the three were still being ignored.
+               wxFloor:+Math.min(0.95, u.uWx.value*1.15).toFixed(3),
+               effective:+Math.max(Math.min(u.uFogCap.value, u.uFogAmt.value*u.uFogMul.value), Math.min(0.95, u.uWx.value*1.15)).toFixed(3),
+               wx:+u.uWx.value.toFixed(3), vis:pineLayer.visible, fogCol:_uPineFog.getHexString() };
+    }catch(e){ return {err:String(e.message||e)}; } },
   horizonDbg(o,p){ try{ oceanLayer.visible=o!==false; pineLayer.visible=p!==false; return {ocean:oceanLayer.visible,pine:pineLayer.visible, fogShellVis:fogShell.visible, fogShellOp:+fogShell.material.opacity.toFixed(2), wfog:(typeof weather!=='undefined'?+(weather.fog||0).toFixed(2):null), fogCol:scene.fog.color.getHexString(), dens:+(scene.fog.density*1000).toFixed(3)}; }catch(e){ return {err:e.message}; } },   // QA: bisect the horizon layers + atmosphere state
   golgotha(){ try{ return _golgothaSpot?{x:_golgothaSpot.x,z:_golgothaSpot.z,done:_golgothaDone}:{done:_golgothaDone}; }catch(e){ return {err:e.message}; } },   // QA: where the crosses stand
   church(){ try{ return _churchSpot?{x:_churchSpot.x,z:_churchSpot.z,done:_churchDone,bless:+(player.blessT||0).toFixed(1)}:{done:_churchDone}; }catch(e){ return {err:e.message}; } },   // QA: chapel spot + live blessing timer
@@ -19733,8 +19797,12 @@ window.__hc={
       if(o.seavib!=null)_uSeaVib.value=o.seavib; if(o.seabow!=null)_uSeaBow.value=o.seabow; if(o.seahaze!=null){ _uSeaHaze.value=o.seahaze; _saveVis('seahaze',o.seahaze); }
       // THE WATER CURVE, live: drop = curvek*(d-curver)^2 past curver blocks, sea only. Separate from seabow, which bows the
       // ocean RING angularly and cannot be seen past 0.13 because real water hides its drooping edge.
-      if(o.curvek!=null)waterMat.uniforms.uCurveK.value=o.curvek; if(o.curver!=null)waterMat.uniforms.uCurveR.value=o.curver; }
-    return { skydark:_uSkyDark.value, waterdeep:_uWaterDeep.value, cloud:_uCloud.value, stars:_uStars.value, fogmul:CFG.fogMul, seavib:_uSeaVib.value, seabow:_uSeaBow.value, seahaze:_uSeaHaze.value }; },
+      if(o.curvek!=null)waterMat.uniforms.uCurveK.value=o.curvek; if(o.curver!=null)waterMat.uniforms.uCurveR.value=o.curver;
+      // ringfade is in BLOCKS and updateHorizon rewrites it every frame from the annulus radius, so setting it here is a probe,
+      // not a setting: it holds for one frame. _ringFadeMul is the dial that survives, as a multiple of the render wall.
+      if(o.ringfademul!=null)_ringFadeMul=o.ringfademul; }
+    return { skydark:_uSkyDark.value, waterdeep:_uWaterDeep.value, cloud:_uCloud.value, stars:_uStars.value, fogmul:CFG.fogMul, seavib:_uSeaVib.value, seabow:_uSeaBow.value, seahaze:_uSeaHaze.value,
+             ringfademul:_ringFadeMul, ringfade:+waterMat.uniforms.uRingFade.value.toFixed(0) }; },
   qaAt(x,y,z,i){ this.qa(i==null?90:i); if(this._qaLight) this._qaLight.position.set(x,y,z);
     if(this._qaKey){ this._qaKey.position.set(x+4,y+7,z+3); this._qaKey.target.position.set(x,y,z); this._qaKey.target.updateMatrixWorld(); }
     return {x,y,z,i:this._qaLight?this._qaLight.intensity:0}; },
