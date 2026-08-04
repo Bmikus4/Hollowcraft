@@ -73,8 +73,18 @@ const PACK = ['vault_door_x','concrete','warning_block','metal_bench','reinforce
     // ---- 3. PLACED AND DRAWN. A block that meshes to nothing is the failure this catches: put each one in front of the camera
     // in open air and require the frame to change. Open air at height, because at ground level the subject lands inside a hill.
     const spot=await page.evaluate('(()=>{ const p=__hc.probe(); return {x:Math.round(p.x), z:Math.round(p.z), y:118}; })()');
-    await page.evaluate('__hc.tpExact('+spot.x+','+spot.z+','+spot.y+')'); await sleep(2500);
+    // FROZEN, or the subject is not where the sweep looks for it. This teleports to open air at y=118 and then waits 2.5 s;
+    // physics runs unlocked now (gravity does not pause for a menu — Ben 08-04), so the player was thirty blocks below the test
+    // cell by the time the yaw sweep ran and no yaw could ever put it on screen. It was reading as "the pack does not draw".
+    // A FLOOR, not a freeze. Physics runs unlocked now (gravity does not pause for a menu — Ben 08-04), so the player was
+    // thirty-eight blocks below the test cell by the time the yaw sweep ran and no yaw could put it on screen — it read as
+    // "the pack does not draw". __hc.freeze does not hold the PLAYER, so the honest fix is to give it something to stand on.
+    await page.evaluate('__hc.tpExact('+spot.x+','+spot.z+','+spot.y+')'); await sleep(500);
+    await page.evaluate(`(()=>{ for(let dx=-2;dx<=2;dx++) for(let dz=-2;dz<=2;dz++) __hc.setBlock(dx,-2,dz,'stone'); })()`);
+    await sleep(600); await page.evaluate('__hc.tpExact('+spot.x+','+spot.z+','+spot.y+')'); await sleep(1400);
     await page.evaluate('__hc.setTime(0.35)'); await page.evaluate('__hc.pinScene()'); await sleep(1200);
+    console.log('    where the player actually is:', JSON.stringify(await page.evaluate('__hc.probe()')));
+    console.log('    the cell it is looking for:', JSON.stringify(await page.evaluate('__hc.screenOf('+spot.x+'+6.5,'+spot.y+'+0.5,'+spot.z+'+0.5)')));
     const aim=await page.evaluate(`(async()=>{ const f=()=>new Promise(r=>requestAnimationFrame(()=>r()));
       let best=null;
       for(let i=0;i<32;i++){ const yaw=i/32*Math.PI*2; __hcBR.look(yaw,-0.05); await f(); await f();

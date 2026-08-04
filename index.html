@@ -4987,27 +4987,73 @@ const modelProto = {};   // cached geometries for model blocks
 function box(w,h,d){ return new THREE.BoxGeometry(w,h,d); }
 function cyl(rt,rb,h,seg){ return new THREE.CylinderGeometry(rt,rb,h,seg||6); }
 // ---- animated procedural FLAME — one shared shader, crossed billboard quads (torch/lantern/candle/campfire) ----
+// The flame quad is built TALLER than the flame it draws, so the embers rising off the top have somewhere to live
+// without a second mesh, a second draw or a single extra vertex. The shader divides the quad at y=1.0: below is fire,
+// above is sparks. Change this and both halves move — the body's y is vUv.y scaled by it.
+const FLAME_QUAD_EXT=1.55;
 const flameMat=new THREE.ShaderMaterial({
   transparent:true, depthWrite:false, side:THREE.DoubleSide, blending:THREE.AdditiveBlending, fog:false,
   uniforms:{ uTime:globalU.uTime },
   vertexShader:`attribute vec2 aUV; attribute float aSeed; attribute float aType; varying vec2 vUv; varying float vSeed; varying float vType;
     void main(){ vUv=aUV; vSeed=aSeed; vType=aType; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+  // THE FLAME, REWRITTEN (#65). What the old one was: one octave of noise for the lateral wobble, a smooth teardrop
+  // mask, and a single sin(t*15) for the flicker — so every flame breathed on one clean frequency and a wall of them
+  // pulsed together no matter what seed they carried. What it is now: a THREE-OCTAVE field advected upward through
+  // the flame, so the body has structure that moves through it rather than a shape that wobbles; the tip BREAKS,
+  // because the erosion threshold climbs with height and is cut by that same field, which is what makes fire read as
+  // fire rather than as a lit teardrop; and the flicker is two incommensurate frequencies plus noise, so it never
+  // repeats audibly. Embers rise out of the top and cool as they go.
+  //
+  // THE BUDGET, MEASURED BEFORE ANY OF IT (bench/tmp-flame-perf.mjs, 1280x720, dusk): no fire 147 fps, one torch
+  // close 141, twenty-five 151, eighty-five 151. Fire cost nothing at all, which is the licence for three octaves
+  // and a three-spark loop. It is still ONE draw call for a whole chunk's flames and still discards early.
   fragmentShader:`precision highp float; uniform float uTime; varying vec2 vUv; varying float vSeed; varying float vType;
     float h(vec2 p){ return fract(sin(dot(p,vec2(41.3,289.1)))*43758.5); }
     float nz(vec2 x){ vec2 i=floor(x),f=fract(x); f=f*f*(3.0-2.0*f); return mix(mix(h(i),h(i+vec2(1,0)),f.x),mix(h(i+vec2(0,1)),h(i+vec2(1,1)),f.x),f.y); }
+    float fbm(vec2 p){ float a=0.55, s=0.0; for(int i=0;i<3;i++){ s+=a*nz(p); p=p*2.03+vec2(1.7,-0.9); a*=0.5; } return s; }
     void main(){
-      float t=uTime*2.6+vSeed*12.0; float x=vUv.x-0.5, y=vUv.y;
-      x -= (nz(vec2(y*3.5 - t*1.3, vSeed*7.0))-0.5)*0.24*(0.25+y);          // rising wobble
-      float w=(1.0-y)*0.46*(0.82+0.18*sin(t*5.0+vSeed));                    // teardrop width
-      float body=smoothstep(w, w*0.25, abs(x))*smoothstep(1.0,0.72,y)*smoothstep(0.0,0.10,y);
-      body*=0.78+0.22*sin(t*15.0+vSeed*4.0)+0.12*nz(vec2(t*3.0,vSeed));     // flicker
-      if(body<0.03) discard;
-      float core=smoothstep(w*0.55,0.0,abs(x))*(1.0-y);
-      vec3 col=mix(vec3(0.55,0.06,0.0), vec3(1.0,0.32,0.03), smoothstep(0.0,0.45,body));   // deep-red → orange
-      col=mix(col, vec3(1.0,0.72,0.18), smoothstep(0.25,0.7,1.0-y));                        // hot lower body
-      col=mix(col, vec3(1.0,0.95,0.72), core*0.85);                                         // white-hot core
-      if(vType>3.5){ col=mix(vec3(0.9,0.02,0.0), vec3(1.0,0.18,0.10), smoothstep(0.0,0.5,body)); col=mix(col, vec3(1.0,0.55,0.45), core*0.9); }   // type 4 = BRIGHT RED shrine-torch flame
-      gl_FragColor=vec4(col*body*1.7, body);
+      // The quad is FLAME_QUAD_EXT taller than the flame so the embers have somewhere to be; the body works in y,
+      // which is the old 0..1 over the flame itself, and the sparks work in q, which is 0..1 over the whole quad.
+      float q=vUv.y, y=q*${FLAME_QUAD_EXT.toFixed(2)}; float x=vUv.x-0.5;
+      float t=uTime, ph=vSeed*12.0;
+      if(y<=1.0){
+        float rise=fbm(vec2(x*3.4, y*2.4 - t*1.85) + vSeed*9.0);            // the field the flame is made of, moving UP through it
+        x -= (rise-0.5)*0.30*(0.22+y);                                      // lean and curl, strongest at the tip
+        float wide=(vType>2.5&&vType<3.5)?0.62:0.46;                        // a campfire is a column, not a candle
+        float w=(1.0-y)*wide*(0.84+0.16*sin(t*2.6+ph));
+        float body=smoothstep(w, w*0.22, abs(x))*smoothstep(0.0,0.10,y);
+        // THE TIP BREAKS. The threshold climbs with height and the noise field cuts into it, so the top tears into
+        // separate cooler wisps instead of tapering to a clean point. This is the single biggest part of the look.
+        float tear=smoothstep(0.34,1.0,y)*0.85;
+        body*=smoothstep(tear, tear+0.30, rise*1.15+0.16);
+        body*=smoothstep(1.0,0.80,y);
+        // TWO frequencies that do not share a period, plus a noise term: no repeat, and neighbours with different
+        // seeds never land in step even when they are the same kind of light.
+        body*=0.74+0.16*sin(t*13.0+ph)+0.10*sin(t*8.3+ph*1.7)+0.14*nz(vec2(t*3.4,vSeed));
+        if(body<0.03) discard;
+        float core=smoothstep(w*0.50,0.0,abs(x))*(1.0-y*1.15);
+        vec3 col=mix(vec3(0.42,0.04,0.0), vec3(1.0,0.30,0.02), smoothstep(0.0,0.45,body));  // soot-red edge → orange
+        col=mix(col, vec3(1.0,0.70,0.16), smoothstep(0.22,0.72,1.0-y));                     // hot lower body
+        col=mix(col, vec3(1.0,0.97,0.80), clamp(core,0.0,1.0)*0.92);                        // white-hot core
+        if(vType>3.5){ col=mix(vec3(0.9,0.02,0.0), vec3(1.0,0.18,0.10), smoothstep(0.0,0.5,body)); col=mix(col, vec3(1.0,0.55,0.45), core*0.9); }   // type 4 = BRIGHT RED shrine-torch flame
+        gl_FragColor=vec4(col*body*1.75, body);
+        return;
+      }
+      // EMBERS — three sparks per flame, each with its own speed and phase off the seed, rising and cooling. They
+      // live in the part of the quad above the flame, so they cost no extra geometry and no extra draw.
+      float e=0.0, warm=0.0;
+      for(int i=0;i<3;i++){ float fi=float(i);
+        float sp=0.30+0.34*h(vec2(vSeed*13.0+fi, 3.0));
+        float a=fract(t*sp + h(vec2(vSeed*7.0+fi, 1.0)));                   // 0..1 life, restarting
+        float ey=1.0+a*(${FLAME_QUAD_EXT.toFixed(2)}-1.0);
+        float ex=(h(vec2(vSeed*5.0+fi,4.0))-0.5)*0.34*a + (nz(vec2(t*1.1+fi, vSeed))-0.5)*0.10;
+        float d=length(vec2((x-ex)*1.0, (y-ey)*0.42));
+        float s=smoothstep(0.055,0.0,d)*(1.0-a)*(1.0-a);                    // shrinks and dims as it cools
+        e+=s; warm+=s*(1.0-a); }
+      if(e<0.02) discard;
+      vec3 col=mix(vec3(0.85,0.16,0.02), vec3(1.0,0.78,0.34), clamp(warm*2.2,0.0,1.0));
+      if(vType>3.5) col=mix(vec3(0.9,0.05,0.03), vec3(1.0,0.35,0.28), clamp(warm*2.2,0.0,1.0));
+      gl_FragColor=vec4(col*e*2.0, e);
     }`
 });
 flameMat.customProgramCacheKey=()=>'flame';
@@ -5017,7 +5063,8 @@ function buildFlameGeo(flames){ if(!flames.length) return null;
     const c=[[x0-ux*hw,y0,z0-uz*hw],[x0+ux*hw,y0,z0+uz*hw],[x0+ux*hw,y0+h,z0+uz*hw],[x0-ux*hw,y0+h,z0-uz*hw]];
     const uv=[[0,0],[1,0],[1,1],[0,1]], o=[0,1,2,0,2,3];
     for(const k of o){ P.push(c[k][0],c[k][1],c[k][2]); UV.push(uv[k][0],uv[k][1]); SE.push(seed); TY.push(type); } };
-  for(const f of flames){ quad(f.x,f.y,f.z,1,0,f.w,f.h,f.seed,f.type); quad(f.x,f.y,f.z,0,1,f.w,f.h,f.seed,f.type); }
+  for(const f of flames){ const hh=f.h*FLAME_QUAD_EXT;   // taller than the flame: the top of the quad is where the embers are
+    quad(f.x,f.y,f.z,1,0,f.w,hh,f.seed,f.type); quad(f.x,f.y,f.z,0,1,f.w,hh,f.seed,f.type); }
   const geo=new THREE.BufferGeometry();
   geo.setAttribute('position',new THREE.Float32BufferAttribute(P,3));
   geo.setAttribute('aUV',new THREE.Float32BufferAttribute(UV,2));
@@ -6322,7 +6369,31 @@ function pushPlayerOutOfSolid(cx,cy,cz){
     if(!aabbHits(nx,p.pos.y,nz)){ p.pos.x=nx; p.pos.z=nz; p.vel.x=0; p.vel.z=0; return true; } }
   for(const dy of [1.0,2.0]) if(!aabbHits(p.pos.x,p.pos.y+dy,p.pos.z)){ p.pos.y+=dy; p.vel.y=0; return true; }
   return false; }
+// Every OPEN vault door, as {x,y,z,alongX} of its origin cell. Rebuilt by the toggle and by the loader rather than scanned:
+// there are never more than a handful and aabbHits runs several times a frame.
+const _vaultOpen=[];
+function _vaultOpenSync(){ _vaultOpen.length=0;
+  for(const k in edits){ const b=edits[k];
+    if(b!==BID.vault_door_x_open && b!==BID.vault_door_z_open) continue;
+    const p=k.split(',');
+    _vaultOpen.push({x:+p[0], y:+p[1], z:+p[2], alongX:(b===BID.vault_door_x_open)}); } }
+// The swung leaf's box, in world space. y spans the door's two cells.
+function _vaultLeafHit(x,y,z){
+  if(!_vaultOpen.length) return false;
+  for(let i=0;i<_vaultOpen.length;i++){ const v=_vaultOpen[i];
+    // VERIFIED AGAINST THE WORLD, not trusted from the list. The list is a fast index and anything that writes the block by
+    // another route — a console command, a load, a peer's edit — would otherwise leave a panel standing in an empty doorway.
+    { const b=getBlock(v.x,v.y,v.z); if(b!==BID.vault_door_x_open && b!==BID.vault_door_z_open) continue; }
+    if(y+PH-0.02 <= v.y || y >= v.y+2) continue;
+    // The panel is 0.26 thick and it swings OUT of the opening, so its box starts at the doorway's far face — half a block
+    // earlier and it would fill the doorway it just cleared, which is the same bug from the other side.
+    if(v.alongX){ const hx=v.x, hz=v.z+1.0;
+      if(x+HW>hx-0.18 && x-HW<hx+0.18 && z+HW>hz && z-HW<hz+1.99) return true; }
+    else { const hx=v.x+1.0, hz=v.z;
+      if(x+HW>hx && x-HW<hx+1.99 && z+HW>hz-0.18 && z-HW<hz+0.18) return true; } }
+  return false; }
 function aabbHits(x,y,z){
+  if(_vaultLeafHit(x,y,z)) return true;
   const x0=Math.floor(x-HW),x1=Math.floor(x+HW), y0=Math.floor(y),y1=Math.floor(y+PH-0.02), z0=Math.floor(z-HW),z1=Math.floor(z+HW);
   for(let xx=x0;xx<=x1;xx++)for(let yy=y0;yy<=y1;yy++)for(let zz=z0;zz<=z1;zz++){ const b=getBlock(xx,yy,zz);
     // AN OPEN DOOR IS STILL A PANEL (Ben 08-04: "we should not be able to walk inside doors"). The open ids are solid:false so
@@ -7587,6 +7658,7 @@ function applySave(s){
   Object.assign(screens, s.screens||{});   // camera codes and monitor tunings. A 4-digit id you had to re-enter every session would be pointless.
   // CRATERS: one record each, however wide. Restored BEFORE the world streams, and _hmCache is dropped, or columns cached from
   // the pre-blast heightfield would come back un-cratered and the bowl would appear only where you had not already walked.
+  if(typeof _vaultOpenSync==='function') _vaultOpenSync();   // a door loaded OPEN needs its leaf's hitbox back with it
   if(Array.isArray(s.craters)){ craters.length=0; for(const c of s.craters) craters.push({x:+c.x,z:+c.z,r:+c.r,d:+c.d}); _hmCache.clear(); }
   setTimeout(()=>{ try{ scrRebuildAll(); }catch(e){} }, 1200);   // …and rebuild their screen quads once the chunks holding them exist; a monitor restored by applySave was never placed, so it never built one
   if(s.horror){ HORROR.nightsSurvived=s.horror.nightsSurvived|0; HORROR.tier=s.horror.tier||1; HORROR.menace=s.horror.menace||0; HORROR.monkWrath=s.horror.monkWrath|0; }   // the monk count MUST come back: it is a gate, and a gate that forgets is not one
@@ -8392,6 +8464,7 @@ function _vaultToggle(x,y,z){ const c=_vaultCells(x,y,z); if(!c) return null;
   setBlockWorld(c.x,c.y,c.z,nb,true); if(typeof netEdit==='function') netEdit(c.x,c.y,c.z,nb);
   for(const p of c.parts){ setBlockWorld(p[0],p[1],p[2],np,true); if(typeof netEdit==='function') netEdit(p[0],p[1],p[2],np); }
   doorCreak(c.x+0.5,c.y+1,c.z+0.5); _vaultAnimate(c);
+  if(typeof _vaultOpenSync==='function') _vaultOpenSync();   // the swung leaf's hitbox follows the state, not the animation
   pushPlayerOutOfSolid(c.x,c.y,c.z);   // the same courtesy from the 2x2: closing it on yourself must not leave you in the steel
   return c; }
 // THE VAULT DOOR OPENS AS A MECHANISM, NOT AS A BLOCK SWAP (Ben 08-04: "open with a clean animation, spinning, and door opening").
@@ -9299,6 +9372,16 @@ function survivalTick(dt){ if(player.creative||player.dead)return;
   if(player.inWater||player.wading){ player.water=Math.min(20,player.water+dt*5); waterAcc=0; }
   else { waterAcc += dt*WATER_PER_S*(1+1.9*ex); while(waterAcc>=1){ waterAcc-=1; if(player.water>0)player.water--; } }
   if(player.water<=0){ if((survivalTick._w=(survivalTick._w||0)+dt)>5){survivalTick._w=0; damage(1,'thirst wrings you dry','env');} }   // thirst kills slowly
+  // IN THE FIRE. Both the cell you are standing IN and the one under your feet: a campfire is a shallow model and the player's
+  // feet sit on top of it, so testing only the feet cell would let you stand on the flames and take nothing.
+  { const fx=Math.floor(player.pos.x), fz=Math.floor(player.pos.z), fy=Math.floor(player.pos.y);
+    const inFire = getBlock(fx,fy,fz)===BID.campfire || getBlock(fx,fy-1,fz)===BID.campfire;
+    if(inFire && !player.dead){
+      if((survivalTick._f=(survivalTick._f||0)+dt)>1.0){ survivalTick._f=0;
+        damage(3,'you stood in the fire','env');
+        if(typeof spawnParticles==='function') spawnParticles(player.pos.x,player.pos.y+0.4,player.pos.z,0xff7a10,10,0.9,1.6);
+        if(AC) burst(master,0.35,0.22,900,0.7,-300); } }
+    else survivalTick._f=0; }
   // NATURAL REGEN (Ben 07-27): nothing knits until you've gone a FULL MINUTE untouched, then 1hp every 3s and only
   // back up to 70% (14/20) — the last 30% needs food or medicine. A starved or parched body cannot mend at all.
   if(player.noDmgT>=60 && player.health<14 && player.hunger>0 && player.water>0){
@@ -21360,7 +21443,7 @@ function makeBird(){ const g=new THREE.Group(); const bm=_birdMat;
 // WHEN: dusk into night, from uDay (measured: uDay reaches 0 across clock 0.63..0.94 — the hook's "0 = midnight" comment is
 // wrong). Gone by day, gone in rain, and thinned by worldHush(), so the same approach that takes the birds and the crickets away
 // takes the lights out of the trees. That last one is not decoration: the wood going dark and quiet together is the point of E2.
-const FF_MAX=128, FF_R=26;
+const FF_MAX=128, FF_R=60;
 let _ffPts=null, _ffPos=null, _ffCol=null, _ffState=null, _ffLive=0;
 function _ffTex(){ return _starTex(); }   // the same round soft sprite the stars use — a firefly IS a pin-point glow
 function _ffSeat(i){
@@ -21425,7 +21508,7 @@ function updateFireflies(dt){
     // a floor of 0.06 keeps a hint of the swarm between flashes so it does not read as random pixels appearing.
     const u=((t+s.ph)%s.per)/s.per, k=Math.pow(Math.max(0,Math.sin(u*Math.PI)),8)*0.94+0.06;
     const d=Math.hypot(s.x-player.pos.x, s.y-(player.pos.y+EYE), s.z-player.pos.z);
-    const fade=1-clamp((d-(FF_R-8))/8,0,1);                             // out of sight by the seat radius, so none pop as they recycle
+    const fade=1-clamp((d-(FF_R-16))/16,0,1);                           // out of sight by the seat radius, so none pop as they recycle
     const w=k*fade*night;
     const o=n*3;
     _ffPos[o]=s.x; _ffPos[o+1]=s.y; _ffPos[o+2]=s.z;
@@ -24693,12 +24776,16 @@ window.__hc={
         out[n]={ bid:b==null?null:b, name:it?it.name:null, inCreative:!!(it&&!it.hidden),
                  recipe:RECIPES.some(r=>r.out===n), light:(b!=null?blockLight[b]:null), solid:(b!=null?!!isSolid[b]:null) }; }
       return out; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA: does the PLAYER's box collide at this exact spot? aabbHits is the one function every movement decision runs through,
+  // and a hitbox that only exists for a swung door panel cannot be checked any other way — there is no block there to inspect.
+  hitAt(x,y,z){ try{ return !!aabbHits(+x,+y,+z); }catch(e){ return {err:String(e.message||e)}; } },
   vaultPlace(x,y,z,alongX){ try{ const a=alongX!==false, t=a?BID.vault_door_x:BID.vault_door_z;
       setBlockWorld(x,y,z,t,true); _vaultFill(x,y,z,a);
       const c=_vaultCells(x,y,z); if(!c) return {err:'placed but not resolvable'};
       const cells=[[c.x,c.y,c.z],...c.parts];
       return { cells:cells.length, alongX:c.alongX, solid:cells.filter(p=>isSolid[getBlock(p[0],p[1],p[2])]).length }; }catch(e){ return {err:String(e.message||e)}; } },
   vaultToggle(x,y,z){ try{ const before=_vaultCells(x,y,z); if(!before) return {err:'no vault door there'};
+      // sync after, whatever route this hook takes to flip the ids — the leaf's hitbox is keyed off them
       const c=_vaultToggle(x,y,z); if(!c) return {err:'toggle found nothing'};
       const cells=[[c.x,c.y,c.z],...c.parts];
       return { openCells:cells.length, wasOpen:before.open,
