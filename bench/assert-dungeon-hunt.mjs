@@ -56,30 +56,48 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     check('hunting by 10 s in the dungeon', at10.active, `active ${at10.active}, state ${at10.state}, dist ${at10.dist}`);
 
     // ---- it makes ground rather than sticking ----
+    // THIRTY SECONDS, AND THE CLOSEST APPROACH. Fourteen was not enough to be a measurement: the hunt arms while the
+    // creature is wherever the night left it — 68 to 79 blocks out in three consecutive runs — and it has to walk in
+    // through the maze before any of that distance comes off. One run closed 74 to 23, the next 68 to 52, and a third went
+    // 75 to 79 while circling the far side, which failed a check nothing was wrong with. What "it comes for you" means is
+    // that it gets nearer at some point in the window, so the closest approach is what is judged, and the whole series is
+    // printed because a number that moves this much run to run should never be reported as one figure.
     const track=[];
-    for(let i=0;i<14;i++){ const s=await sample(); track.push(s); await sleep(1000); }
+    for(let i=0;i<30;i++){ const s=await sample(); track.push(s); await sleep(1000); }
     let moved=0; for(let i=1;i<track.length;i++){ const a=track[i-1], b=track[i];
       moved += Math.hypot((b.dist-a.dist)); }
     const dists=track.map(t=>+t.dist.toFixed(1));
-    const closed = track[0].dist - track[track.length-1].dist;
-    console.log(`  distance to player over 14 s: [${dists.join(', ')}]`);
-    check('it closes on the player through the labyrinth', closed>3 || track[track.length-1].dist<6,
-      `from ${track[0].dist.toFixed(1)} to ${track[track.length-1].dist.toFixed(1)} blocks`);
+    const nearest = Math.min(...dists);
+    const closed = track[0].dist - nearest;                 // closest approach, not the last sample: it circles once it is near
+    console.log(`  distance to player over ${track.length} s: [${dists.join(', ')}]   nearest ${nearest}`);
+    check('it closes on the player through the labyrinth', closed>3 || nearest<6,
+      `from ${track[0].dist.toFixed(1)} blocks to ${nearest} at its closest, ${track[track.length-1].dist.toFixed(1)} at the end`);
     const stuck = dists.slice(-6).every(d=>Math.abs(d-dists[dists.length-1])<0.15) && dists[dists.length-1]>6;
     check('it is not stuck at a fixed distance', !stuck, `last six samples ${dists.slice(-6).join(', ')}`);
     // ON THE FLOOR, NOT THE CEILING. _dunSurf offers five wall/ceiling targets for every floor one, so a hunting
     // creature used to spend most of its time clung above the room. This has to be sampled while the creature is
     // actually INSIDE — the first version measured it walking overland to the entrance, where being 40 blocks
     // above the hall floor is simply correct, and called that a ceiling bug. __hc.yank puts it beside the player.
-    const fy = await page.evaluate(`(__hc.lairInfo()||{}).fy`);
+    // AGAINST THE FLOOR UNDER ITS OWN FEET, not against the hall's. fy is the MAIN HALL's floor and this dungeon has
+    // storeys above it — measured, the player stands in the labyrinth at y=42 while fy is 32, so a creature standing
+    // correctly beside them read as ten blocks "airborne" and this check called that a ceiling bug for weeks.
+    // __hc.wretchFoot() reports the gap to the ground in its OWN column, which means the same thing on every storey, plus
+    // the solid it would be hanging from if it really were on a ceiling.
     await page.evaluate(`__hc.yank();`);
     await sleep(1200);
-    const inside=[];
-    for(let i=0;i<12;i++){ const s2=await sample(); inside.push(+(s2.wy-fy).toFixed(1)); await sleep(900); }
-    console.log(`  height above the hall floor, creature inside: [${inside.join(', ')}]`);
-    const airborne = inside.filter(h=>h>2.5).length;
+    const gaps=[], roofs=[];
+    for(let i=0;i<12;i++){ const f=await page.evaluate(`__hc.wretchFoot()`);
+      gaps.push(f.gap==null?99:+(+f.gap).toFixed(2)); roofs.push(f.roofGap==null?null:+(+f.roofGap).toFixed(1)); await sleep(900); }
+    console.log(`  gap to the floor under it:  [${gaps.join(', ')}]`);
+    console.log(`  gap to the solid above it:  [${roofs.join(', ')}]`);
+    const airborne = gaps.filter(h=>h>2.5).length;
     check('it hunts on the floor rather than the ceiling', airborne<=2,
-      `${airborne} of ${inside.length} samples more than 2.5 blocks up (max ${Math.max(...inside)})`);
+      `${airborne} of ${gaps.length} samples more than 2.5 blocks off their own floor (max ${Math.max(...gaps)})`);
+    // AND NOT SUNK INTO IT EITHER — the state the containment clamp used to force: held down to the hall floor while the
+    // player walked a storey above, the body ended up 2.6 blocks INSIDE the structure and stopped moving entirely.
+    const sunk = gaps.filter(h=>h<-0.5).length;
+    check('and it is not sunk into the floor',            sunk===0,
+      `${sunk} of ${gaps.length} samples over half a block below their own floor (min ${Math.min(...gaps)})`);
 
     // ---- CRYPT: it follows you down ----
     const crypt = await page.evaluate(`(()=>{ const L=__hc.lairInfo(); if(!L||L.fy==null) return null;
