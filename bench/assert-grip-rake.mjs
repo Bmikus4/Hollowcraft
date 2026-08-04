@@ -25,16 +25,17 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     console.log('gun'.padEnd(10)+'size'.padEnd(20)+'rx'.padStart(7)+'topZ'.padStart(10)+'botZ'.padStart(10)+'  rake');
     for(const r of rows) console.log(r.gun.padEnd(10)+r.size.padEnd(20)+String(r.rx).padStart(7)+String(r.topZ).padStart(10)+String(r.botZ).padStart(10)+'  '+r.rake);
     fs.writeFileSync(path.join(ROOT,'bench','results','grip-rake.json'), JSON.stringify(rows,null,2));
-    // Only the two PISTOL grips are asserted. The bolt rifle's and the shotgun's stock wrists still rake forward and Ben has
-    // not asked for those, so listing them above is the report; failing on them would fail a bench for unrequested work.
+    // Every grip and stock WRIST, on all four guns. The shotgun's buttstock and recoil pad are excluded on purpose: their
+    // +0.10 is comb drop (positive rx lowers the REAR end of a lengthwise box), not a rake, and flipping it would raise the butt.
     let bad=0;
-    for(const want of [{gun:'revolver',size:'0.03x0.11x0.06'},{gun:'revolver',size:'0.026x0.07x0.03'},{gun:'ar15',size:'0.032x0.088x0.04'}]){
+    for(const want of [{gun:'revolver',size:'0.03x0.11x0.06'},{gun:'revolver',size:'0.026x0.07x0.03'},{gun:'ar15',size:'0.032x0.088x0.04'},
+                       {gun:'bolt',size:'0.05x0.11x0.05'},{gun:'shotgun',size:'0.042x0.058x0.075'}]){
       const r=rows.find(x=>x.gun===want.gun&&x.size===want.size);
       if(!r){ console.log('FAIL missing '+want.gun+' '+want.size); bad++; continue; }
       if(r.rake!=='REARWARD'){ console.log('FAIL '+want.gun+' '+want.size+' rakes '+r.rake+' (topZ '+r.topZ+' botZ '+r.botZ+')'); bad++; }
       else console.log('ok   '+want.gun+' '+want.size+' rearward');
     }
-    console.log(bad?('FAILED '+bad):'PASS 3/3 pistol grips rake rearward');
+    console.log(bad?('FAILED '+bad):'PASS all grips and stock wrists rake rearward');
     if(bad) process.exitCode=1;
   } finally { try{ if(browser) await browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }
 })().catch(e=>{ console.error(e); process.exit(1); });
