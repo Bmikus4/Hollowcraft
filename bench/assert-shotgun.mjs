@@ -57,12 +57,34 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
 
     // ---- THE PUMP RACKS ONCE, AT THE END OF THE RELOAD ----
     await page.evaluate(`__hc.shoot()`); await sleep(200);
-    await page.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown',{code:'KeyR',bubbles:true}))`);
-    const pumpZ=[];
-    for(let i=0;i<26;i++){ const z=await page.evaluate(`(()=>{ const v=__hc.viewDbg(); return __hc.pumpZ?__hc.pumpZ():null; })()`); if(z!=null) pumpZ.push(z); await sleep(120); }
+    // SAMPLED EVERY FRAME, FROM INSIDE THE PAGE, AND R PRESSED IN THE SAME EVALUATE.
+    //
+    // This polled 26 times at 120 ms from node, hoping the rack happened to fall inside one of those windows. The forend travels
+    // and returns in a fraction of a second at the END of the reload, so the whole check rested on the animation overlapping a
+    // sample -- a false FAILURE any time the reload timing shifted, on working code, with nothing in the output to say why.
+    // A per-frame loop cannot miss it: the pump has no frame to move in that is not measured.
+    //
+    // The keypress moved inside too, for the reason the comment two blocks down already records: split across evaluates, frames
+    // pass in between, and here those are exactly the frames the rack could happen in.
+    //
+    // It ends on STATE, not a duration -- reloadT going positive then back to zero, plus a tail for the rack that comes after it.
+    const pump = await page.evaluate(`(async()=>{
+      const f=()=>new Promise(r=>requestAnimationFrame(()=>r()));
+      const z=[]; let sawReload=false, tail=0;
+      document.dispatchEvent(new KeyboardEvent('keydown',{code:'KeyR',bubbles:true}));
+      for(let i=0;i<900;i++){
+        const v=(__hc.pumpZ?__hc.pumpZ():null); if(v!=null) z.push(v);
+        const rt=+((__hc.sight()||{}).reloadT||0);
+        if(rt>0) sawReload=true; else if(sawReload) tail++;
+        if(sawReload && tail>120) break;
+        await f(); }
+      return { z, sawReload, frames:z.length }; })()`);
+    const pumpZ=pump.z||[];
     const travel = pumpZ.length? Math.max(...pumpZ)-Math.min(...pumpZ) : 0;
-    console.log('  forend travel over the reload: '+travel.toFixed(4)+' from '+pumpZ.length+' samples');
-    check('the forend is racked during the reload',  travel>0.03, `travel ${travel.toFixed(4)}`);
+    console.log('  forend travel over the reload: '+travel.toFixed(4)+' from '+pumpZ.length+' per-frame samples (reload seen: '+pump.sawReload+')');
+    // If the reload never started, travel would read 0 and look like a broken pump. Say which of the two it is.
+    check('the reload actually ran', pump.sawReload===true, `reloadT went positive: ${pump.sawReload}`);
+    check('the forend is racked during the reload',  travel>0.03, `travel ${travel.toFixed(4)} over ${pumpZ.length} frames`);
 
     // ---- NINE PELLETS: measured as damage, close in, against the same shot far away ----
     // PLACE AND FIRE IN ONE EVALUATE. Split across two, the AI gets frames in between: measured, the creature walked from
