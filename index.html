@@ -7050,7 +7050,20 @@ function _onMouseDown(e){ if(!locked)return;
     // OFFHAND-USE MODE: left click does what that item is FOR. A gun fires and a tool swings, which is already what a
     // left click means; a block or a consumable has to run the USE path instead, so the click is re-entered as the right
     // one. heldSlot() already resolves to the offhand in this mode, so the whole path acts on the correct item.
-    if(offActing()){ offhandLeftClick(); return; }
+    // BOTH GUNS FIRE ON ONE LEFT CLICK (Ben 08-04: "make sure that both guns can be fired with left click when f is pressed
+    // from an empty slot"). This SUPERSEDES the 08-03 ruling recorded below, which split them across the two buttons: left
+    // fired the offhand and right fired the main hand, so akimbo took two fingers and could never be simultaneous.
+    // The order matters. offhandLeftClick() resolves heldSlot() to the OFFHAND, so it has to run before the main hand's shot
+    // or the second call fires the offhand twice and the main-hand gun never goes off at all.
+    // Both hands must actually hold GUNS — "both guns" is literal. With a torch or a shield in the offhand this is unchanged,
+    // and a right-click still fires the main hand on its own, because that binding is what a player already has in their
+    // fingers from yesterday and taking it away breaks the habit for nothing.
+    if(offActing()){
+      const off=armor[EQ_OFF], mh=inv[selSlot];
+      const bothGuns=!!(off && ITEMS[off.id] && ITEMS[off.id].gun && mh && ITEMS[mh.id] && ITEMS[mh.id].gun);
+      offhandLeftClick();
+      if(bothGuns){ fireGun(mh); nextAct=performance.now()+120; }
+      return; }
     doSwing(); }   // swing/attack now + begin timed mining (held)
   else if(e.button===2){ if(typeof brTryPullCord==='function'&&brTryPullCord())return;        // BACKROOMS: right-click a hanging bulb's cord → switch it on/off
     if(typeof brTryEat==='function'&&brTryEat())return;                 // BACKROOMS: right-click a plate of food on a laid table → eat it
@@ -8273,7 +8286,21 @@ function updateTpsBody(dt){
   if(P.group.visible!==show){ P.group.visible=show; if(show) applyWorn(P); }   // catch up on anything equipped while it was hidden
   if(!show) return;
   P.group.position.set(player.pos.x, player.pos.y, player.pos.z);
-  P.group.rotation.y = player.yaw + Math.PI;                                   // the model is built facing +z (its feet point that way); the camera looks down -z
+  // THE BODY HAS WEIGHT AND THE HEAD DOES NOT (Ben 08-04: "head should swivel on look in 3rd person, and turning should take some
+  // more time/slightly more emphasized weight system"). A body welded to the mouse spins on the spot like a turret. So the torso
+  // EASES toward where you are looking and the head takes up the difference immediately — which is exactly how a person looks
+  // around: the eyes and neck go first, the shoulders follow. The lag is clamped to ~75 degrees so the head can always account
+  // for the rest without looking broken, and past that the body is dragged along; and it turns faster while you are moving,
+  // because a walking body cannot leave its shoulders behind.
+  const yawTo=player.yaw;
+  if(P.bodyYaw==null) P.bodyYaw=yawTo;
+  let dy=((yawTo-P.bodyYaw+Math.PI*3)%(Math.PI*2))-Math.PI;                     // shortest way round, so crossing +/-PI never spins the long way
+  const sp0=Math.hypot(player.vel.x,player.vel.z);
+  P.bodyYaw += dy*Math.min(1, dt*(sp0>0.6?9:3.4));                              // standing still: slow and deliberate. walking: the shoulders keep up
+  dy=((yawTo-P.bodyYaw+Math.PI*3)%(Math.PI*2))-Math.PI;
+  const LIM=1.3; if(dy>LIM){ P.bodyYaw+=dy-LIM; dy=LIM; } else if(dy<-LIM){ P.bodyYaw+=dy+LIM; dy=-LIM; }
+  P.group.rotation.y = P.bodyYaw + Math.PI;                                     // the model is built facing +z (its feet point that way); the camera looks down -z
+  if(P.head){ P.head.rotation.y = dy; P.head.rotation.x = -player.pitch*0.85; } // the neck carries the residual yaw, and all of the pitch
   P.group.position.y -= player.sneak?0.22:0;                                    // crouch: sink the whole body, matching the eye drop
   // WALK CYCLE from actual velocity rather than from the keys: knockback, water drift and a slide down a slope all move you
   // without a key held, and a body that only animates while you press W reads as broken in exactly those moments.
@@ -8313,7 +8340,13 @@ function updateTpsBody(dt){
   const carry = it ? -1.15 : -0.15;
   P.armR.rotation.x = carry - swArc*(it?1.35:1.5);
   P.armR.rotation.z = it ? -swArc*0.28 : 0;                                     // a swing comes across the body, not straight down
-  if(it&&it.gun){ P.armR.rotation.x = -1.45; P.hand.rotation.x = 1.45; }         // rifle up and level: total 0 = barrel straight forward
+  // AIMING IS THE ONE TIME THE HAND FOLLOWS THE CAMERA (Ben 08-04: "when aiming the players gun hand should track where they are
+  // aiming"). Carried, the rifle sits level and still — that is what stopped it rolling about every time you glanced around. But a
+  // raised gun is being pointed AT something, so the arm and the wrist blend onto the look axis by adsT: the same 0..1 raise curve
+  // the sights come up on, so the tracking arrives exactly as the aim does and is gone again the moment you lower it.
+  if(it&&it.gun){ const a=Math.min(1, view.adsT||0);
+    P.armR.rotation.x = -1.45 - player.pitch*0.9*a;
+    P.hand.rotation.x = player.pitch*a - P.armR.rotation.x; }                    // total = pitch*a: level at the hip, on the look axis at full aim
   else P.hand.rotation.x = TPS_GRIP - carry;                                     // tool/block/torch: forward and slightly up, never down
   // The offhand mirrors it, minus the swing: a shield or a torch is CARRIED, and the left arm only lifts when it has something.
   if(oit){ const oc = oit.gun ? -1.35 : -0.95;
@@ -8327,10 +8360,10 @@ const TPS_GRIP=-0.42;   // how the fist itself is cocked: a shade forward of lev
 function _tpsSetOff(P,id){
   if(P.offMesh){ P.handOff.remove(P.offMesh); try{ _disposeView(P.offMesh); }catch(e){} P.offMesh=null; }
   if(!id||!ITEMS[id]) return; const it=ITEMS[id]; let m; try{ m=itemModel(id); }catch(e){ return; }
-  const w=new THREE.Group(); w.add(m);
-  if(it.gun){ m.scale.setScalar(0.8); w.position.set(-0.02,-0.04,-0.1); }
+  const w=new THREE.Group(); w.add(m); w.rotation.y=Math.PI;   // see setAvatarHeld: viewmodel models face -z, the body faces +z
+  if(it.gun){ m.scale.setScalar(1.0); w.position.set(-0.02,-0.05,0.12); }
   else if(it.block!=null){ m.scale.setScalar(0.85); w.position.set(0,0.02,0); }
-  else { m.scale.setScalar(0.55); w.rotation.set(0,0,-0.2); w.position.set(0,0.04,-0.02); }
+  else { m.scale.setScalar(0.55); w.rotation.z=-0.2; w.position.set(0,0.04,-0.02); }
   w.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
   P.handOff.add(w); P.offMesh=w; }
 function updateHighlight(){ const h=locked?raycastVoxel():null; if(h){ hlMesh.visible=true; hlMesh.position.set(h.x+0.5,h.y+0.5,h.z+0.5); } else hlMesh.visible=false; }
@@ -8469,7 +8502,15 @@ function removeAvatar(id){ const a=NET.avatars[id]; if(a){ avatarGroup.remove(a.
 function setAvatarHeld(a,id){ if(a.heldMesh){ a.hand.remove(a.heldMesh); _disposeView(a.heldMesh); a.heldMesh=null; }   // render a peer's held item in their hand
   if(!id||!ITEMS[id])return; const it=ITEMS[id]; let m; try{ m=itemModel(id); }catch(e){ return; }
   const w=new THREE.Group(); w.add(m);                                                                          // wrapper carries the per-type grip pose (the arm points forward-down while holding)
-  if(it.gun){ m.scale.setScalar(0.8); w.position.set(0.02,-0.04,-0.1); w.rotation.set(-0.2,0,0); }              // rifle at low-ready, barrel points forward (-z)
+  // IT POINTS AWAY FROM THE BODY, NOT AT IT (Ben 08-04: "they are flipped towards the player not away from the player"). Every
+  // item model is authored for the VIEWMODEL, where forward is -z because that is where the camera looks. The body is built
+  // facing +z, so dropping an unrotated model into its hand aims the muzzle back through the player's own chest. Half a turn
+  // about Y is the whole fix, and it belongs here rather than in one hand's pose because peers, the third-person body and both
+  // of its hands all inherit this same wrapper.
+  w.rotation.y=Math.PI;
+  // AND AT ITS REAL SIZE (Ben: "guns are still not their proper size in 3rd person hands"). A viewmodel gun is authored at about
+  // a metre, which is what a rifle is; 0.8 was shrinking it to a carbine-sized prop in a full-height body's hands.
+  if(it.gun){ m.scale.setScalar(1.0); w.position.set(0.02,-0.05,0.12); }                                        // rifle at low-ready, barrel down the body's forward
   else if(it.block===BID.torch||it.block===BID.lantern||it.block===BID.candle){ m.scale.setScalar(0.6); w.position.set(0,0.12,0.02); }   // upright torch/lantern in the fist
   else if(it.block!=null){ m.scale.setScalar(0.85); w.position.set(0,0.02,0); }                                 // a block cube gripped
   else { m.scale.setScalar(0.5); w.rotation.set(-0.4,0,0.25); w.position.set(0,0.04,-0.02); }                   // tools/materials: canted up out of the grip like the viewmodel
@@ -8690,7 +8731,21 @@ function loop(){ try{
     godrayPass.enabled = _grActive;                                                        // a DISABLED pass is skipped by the composer entirely — "uActive=0 passthrough" still paid a full-screen pass every frame (all night long)
     godrayPass.uniforms.uActive.value = _grActive ? 1 : 0;
     godrayPass.uniforms.uSun.value.set(_sunProj.x*0.5+0.5, _sunProj.y*0.5+0.5);
-    godrayPass.uniforms.uStrength.value = 0.6*day; }                                      // shafts strongest at midday, gone at night
+    // STRONGEST AT A LOW SUN, not at midday (plan §4 Tier 1 item 5). It was 0.6*day, which peaks with the sun overhead and is
+    // backwards: crepuscular rays are a grazing-light phenomenon — a long path through the atmosphere and shafts raking through
+    // trunks at a shallow angle — and at noon the shafts are short, steep and mostly under the canopy where they cannot be seen.
+    // `day` also measures only 0.5 at the horizon, so the old expression was at HALF strength at the one hour the effect is
+    // really about, and at full strength at the hour it is least about.
+    //
+    // The elevation gate rather than `day`, for that reason, and it outlives the geometric horizon by a shade so the effect is
+    // alive through the minutes either side of sunset — the same lesson the water sunglade paid for (plan §7).
+    const _sy=globalU.uSunDir.value.y;
+    const _above=smooth(-0.05,0.06,_sy);                    // 0 once the sun is properly down, full just above the horizon
+    const _low=1-smooth(0.10,0.62,_sy);                     // 1 at grazing → 0 with the sun high; same shape the sunglade uses
+    // A FLOOR AT NOON RATHER THAN NOTHING. The plan says "absent at noon"; 0.22 of full is kept instead, because a canopy with a
+    // sun straight overhead does still throw short shafts through its gaps, and that dappling is the one thing this pass renders
+    // that is not about the horizon. Deliberate deviation, and small enough that noon reads as haze rather than as beams.
+    godrayPass.uniforms.uStrength.value = 0.62*_above*(0.22+0.78*_low); }
   if(_mbMode && motionPass){                                                           // depth-reprojection motion blur uniforms
     camera.updateMatrixWorld();
     _curVP.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
@@ -11574,8 +11629,13 @@ function buildPlayerModel(){ const g=new THREE.Group();
   const skin=new THREE.MeshLambertMaterial({color:0xcbb89a}), shoe=new THREE.MeshLambertMaterial({color:0x2c2118});
   const shirt=new THREE.MeshLambertMaterial({map:_shirtTex}), pants=new THREE.MeshLambertMaterial({map:_pantsTex});
   const mk=(w,h,d,mat,x,y,z,par)=>{ const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mat); m.position.set(x,y,z); (par||g).add(m); return m; };
-  mk(0.30,0.30,0.32,skin,0,1.85,0);                                          // head (small, ~1/6.7 h)
-  mk(0.15,0.12,0.15,skin,0,1.64,0);                                          // neck
+  // THE HEAD IS ON A PIVOT (Ben 08-04: "head should swivel on look in 3rd person"). Everything that sits ON the head - the head
+  // itself, the neck, the helmet overlay, the straw hat, the hazmat hood - hangs off this one group at the base of the neck, so a
+  // look-around turns all of it together and nothing floats free of it. Local offsets are absolute-minus-1.62, which keeps every
+  // part exactly where it was built for the inventory paperdoll (where the head never turns).
+  const headG=new THREE.Group(); headG.position.set(0,1.62,0); g.add(headG);
+  mk(0.30,0.30,0.32,skin,0,0.23,0,headG);                                    // head (small, ~1/6.7 h)
+  mk(0.15,0.12,0.15,skin,0,0.02,0,headG);                                    // neck
   mk(0.42,0.62,0.24,shirt,0,1.31,0);                                         // torso (trim, textured)
   mk(0.40,0.14,0.24,pants,0,0.95,0);                                         // waist/hips
   // THE FOUR LIMBS HANG FROM PIVOTS (Ben 08-04: third person has to show the player, and a mannequin sliding about is not a
@@ -11596,7 +11656,7 @@ function buildPlayerModel(){ const g=new THREE.Group();
   // ARMOUR THAT COVERS A LIMB RIDES THAT LIMB. A sleeve or a boot parented to the body group would stay behind when the limb
   // swings, so those pieces hang off the pivots and are listed in userData.extra: the visibility/tint pass walks the group AND
   // its extras, which is what keeps one armour piece one thing while its parts live on four different nodes.
-  const helm=new THREE.Group(); mk(0.36,0.36,0.38,lea(),0,1.86,0,helm); mk(0.40,0.06,0.42,lea(),0,1.70,0,helm); g.add(helm);
+  const helm=new THREE.Group(); helm.position.y=-1.62; mk(0.36,0.36,0.38,lea(),0,1.86,0,helm); mk(0.40,0.06,0.42,lea(),0,1.70,0,helm); headG.add(helm);   // -1.62 cancels the pivot, so the absolute build heights still land where the paperdoll expects
   const chest=new THREE.Group(); mk(0.48,0.66,0.30,lea(),0,1.31,0,chest); g.add(chest);
   chest.userData.extra=[mk(0.19,0.42,0.21,lea(),0,-0.22,0,armL), mk(0.19,0.42,0.21,lea(),0,-0.22,0,armR)];
   const legs=new THREE.Group(); mk(0.44,0.18,0.28,lea(),0,0.95,0,legs); g.add(legs);
@@ -11648,23 +11708,25 @@ function buildPlayerModel(){ const g=new THREE.Group();
     const crown=new THREE.Mesh(new THREE.CylinderGeometry(0.19,0.28,0.24,18),strawM); crown.position.y=1.86; straw.add(crown);                    // tapered crown
     const cap=new THREE.Mesh(new THREE.CylinderGeometry(0.19,0.19,0.03,18),strawM); cap.position.y=1.985; straw.add(cap);                          // flat top
     const band=new THREE.Mesh(new THREE.CylinderGeometry(0.285,0.285,0.05,18),new THREE.MeshLambertMaterial({color:0x7a4a2a})); band.position.y=1.775; straw.add(band); }   // leather band
-  straw.visible=false; g.add(straw);
+  straw.visible=false; straw.position.y=-1.62; headG.add(straw);   // same trick as the helm: absolute build heights, head-local parent
   // HAZMAT SUIT (Ben 07-24): a full-body plastic suit (colour chosen at wear-time) with big translucent windows
   const hzMat=new THREE.MeshPhongMaterial({color:0x2f7fd0, shininess:70, specular:0x2a2a2a});
   const hzWin=new THREE.MeshPhongMaterial({color:0xcfeaf2, transparent:true, opacity:0.42, shininess:130, specular:0xffffff});
   const hazmat=new THREE.Group();
-  mk(0.44,0.42,0.46,hzMat,0,1.85,0,hazmat);                                          // hood over the head
-  mk(0.34,0.26,0.06,hzWin,0,1.85,0.235,hazmat);                                      // MASSIVE face visor
+  const hzHead=new THREE.Group(); hzHead.position.y=-1.62; headG.add(hzHead);        // the hood swivels with the head; the rest of the suit does not
+  mk(0.44,0.42,0.46,hzMat,0,1.85,0,hzHead);                                          // hood over the head
+  mk(0.34,0.26,0.06,hzWin,0,1.85,0.235,hzHead);                                      // MASSIVE face visor
   mk(0.52,0.70,0.38,hzMat,0,1.30,0,hazmat);                                          // torso
   mk(0.30,0.34,0.08,hzWin,0,1.34,0.20,hazmat);                                       // chest window panel
   hazmat.userData={body:hzMat,win:hzWin,
     extra:[ mk(0.21,0.88,0.21,hzMat,0,-0.42,0,armL), mk(0.21,0.88,0.21,hzMat,0,-0.42,0,armR),                 // sleeves
             mk(0.25,0.88,0.30,hzMat,0,-0.40,0,legL), mk(0.25,0.88,0.30,hzMat,0,-0.40,0,legR),                 // trousers
-            mk(0.27,0.22,0.36,hzMat,0,-0.83,0.04,legL), mk(0.27,0.22,0.36,hzMat,0,-0.83,0.04,legR) ]};         // boots
+            mk(0.27,0.22,0.36,hzMat,0,-0.83,0.04,legL), mk(0.27,0.22,0.36,hzMat,0,-0.83,0.04,legR),         // boots
+            hzHead ]};   // the hood lives on the HEAD pivot, so it has to be listed here or taking the suit off would leave it floating
   hazmat.visible=false; g.add(hazmat);
   for(const grp of [helm,chest,legs,boots,hazmat]) _wornVis(grp,false);
   return {group:g, armorMesh:[helm,chest,legs,boots], strawHat:straw, hazmat, pack:packG,
-          armL, armR, legL, legR, hand, handOff, heldMesh:null, offMesh:null, gait:0}; }
+          armL, armR, legL, legR, hand, handOff, head:headG, hzHead, heldMesh:null, offMesh:null, gait:0, bodyYaw:null}; }
 // A worn piece is its group PLUS the parts of it that had to be parented to a swinging limb. One helper so visibility and
 // tinting cannot end up disagreeing about which of those two lists they act on.
 function _wornVis(grp,on){ if(!grp) return; grp.visible=on; const ex=grp.userData&&grp.userData.extra; if(ex) for(const o of ex) o.visible=on; }
@@ -13037,6 +13099,13 @@ let _gunOffFit=0.34;
 // The same for the two classes of non-gun item: a cube-shaped thing (a block, a berry) and a real object model (a tool, a
 // book, a lantern). They need different lengths to look the same size as the right hand -- see the scale line below.
 let _itemOffFit=0.152, _objOffFit=0.22;
+// The offhand's gun sits inside a mirror wrapper, so its flash sprite is a DESCENDANT rather than the model's own userData.flash.
+// Cached on the wrapper the first time it is found: a traverse per frame per shot is pointless when the model only changes on a swap.
+function _findFlash(root){ if(!root) return null;
+  if(root.userData && root.userData._flashCache!==undefined) return root.userData._flashCache;
+  let f=(root.userData&&root.userData.flash)||null;
+  if(!f) root.traverse(o=>{ if(!f && o.userData && o.userData.base!=null && o.material) f=o; });
+  root.userData._flashCache=f||null; return f; }
 function setOffItem(id){ if(offView.id===id)return; offView.id=id;
   if(offView.mesh){ offView.group.remove(offView.mesh); _disposeView(offView.mesh); offView.mesh=null; }
   if(!id||!ITEMS[id]) return;
@@ -13095,8 +13164,8 @@ function setOffItem(id){ if(offView.id===id)return; offView.id=id;
     if(ITEMS[id].gun){
       m.traverse(o=>{ if(o.isMesh&&o.material){ const L=Array.isArray(o.material)?o.material:[o.material]; for(const mm of L) mm.side=THREE.DoubleSide; } });
       const mir=new THREE.Group(); mir.scale.x=-1; mir.add(m);
-      offView.group.position.set(-0.34,-0.30,-0.62); offView.group.rotation.set(0,0,0);   // the fist branch of updateView, x negated
-      offView.baseY=-0.30; offView.mesh=mir; offView.group.add(mir); applyViewFog(mir);
+      offView.group.position.set(-0.34,-0.235,-0.62); offView.group.rotation.set(0,0,0);   // the fist branch of updateView, x negated and lifted (Ben: "a little too low")
+      offView.baseY=-0.235; offView.mesh=mir; offView.group.add(mir); applyViewFog(mir);
       return; }
     const _bd = ITEMS[id].block!=null ? B[ITEMS[id].block] : null;
     const _fit = ITEMS[id].gun ? _gunOffFit
@@ -13543,8 +13612,16 @@ function updateView(dt){ updateRecoil(dt);                                      
   // It used to be pinned 1.1 along lookDir from the CAMERA, which is not where any gun's muzzle is: a long rifle put its
   // flash 0.5 further forward than the light, and the light sat inside the player. The sprite already knows exactly where
   // the muzzle is, so the light is placed AT the sprite and nothing has to be kept in step by hand.
-  if(view.flashT>0){ const f=view.flashT/0.06;
-    if(fl) fl.getWorldPosition(muzzleLight.position);
+  // The offhand's own flash, on its own model. Same 0.06 s life; the world light and the viewmodel fill below are shared, so a
+  // shot from either hand lights the scene once — what differs is WHICH barrel it comes out of.
+  offView.flashT=Math.max(0,(offView.flashT||0)-dt);
+  { const ofl=offView.mesh&&_findFlash(offView.mesh);
+    if(ofl){ ofl.visible=offView.flashT>0; if(ofl.visible){ const bs=ofl.userData.base||1; ofl.scale.set(bs*(1+Math.random()*0.7), bs*(1+Math.random()*0.7), 1); ofl.rotation.z=Math.random()*6.28; } } }
+  if(offView.gunKick){ offView.gunKick=Math.max(0, offView.gunKick-dt*5.5);       // the left hand bucks and settles on its own clock
+    offView.group.position.z+=offView.gunKick*0.09; offView.group.rotation.x=(offView.group.rotation.x||0)-offView.gunKick*0.5; }
+  if(view.flashT>0 || offView.flashT>0){ const f=Math.max(view.flashT,offView.flashT)/0.06;
+    const _lit = (view.flashT>0 ? fl : null) || (offView.mesh?_findFlash(offView.mesh):null);
+    if(_lit) _lit.getWorldPosition(muzzleLight.position);
     else { const d=lookDir(); muzzleLight.position.set(camera.position.x+d.x*1.1, camera.position.y+d.y*1.1-0.08, camera.position.z+d.z*1.1); }
     muzzleLight.intensity=26*f; muzzleLight.distance=11;   // 16 reached far enough to light blocks THROUGH terrain (point lights take no occlusion); the flash brightness comes from intensity, not radius — measured 60-97 night luminance against a 12 baseline with the sprite hidden
     viewFill.intensity=VIEW_FILL_BASE+5.2*f; }                                   // the flash lights the GUN too, or the world flashes while the barrel in front of you does not
@@ -13618,6 +13695,12 @@ function _doSwing(){ const h=heldSlot(); if(h&&ITEMS[h.id]&&ITEMS[h.id].gun){ if
 function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id]:null, bolt = it&&it.gun==='bolt', rev = it&&it.gun==='revolver', sup = !!(it&&it.suppressed);
   if(it&&it.gun)achUnlock('armed');   // sup = the suppressed rifle: 40% quieter (sound + heard-range + emitted-noise) and -20 damage; rev = the .357 revolver (handgun)
   if(view.reloadT>0) return false;                                                                // hands are busy with the reload
+  // NOT WHILE IT HAS HOLD OF YOU (Ben 08-04: "you should not be able to fire a gun or an offhand gun when the wretch is dragging
+  // you"). Being hauled is meant to be a helpless sequence you break out of by struggling, and a rifle in a hand that is being
+  // dragged through the dirt is both wrong to look at and an escape hatch out of the one scene the horror rests on. Guarded HERE
+  // rather than at the two mouse buttons, because that is one place and there are several ways to reach a trigger: left click,
+  // right click with a full offhand, held full-auto, and the QA hooks.
+  if(player.grabbed || player.tied) return false;
   if(bolt && (view.boltT||0)>0) return false;                                                     // still cycling the bolt → can't fire
   const _cap=magCap(it);
   if(isFinite(_cap)){ const _mk=gunKey(held); if(magGet(_mk,it)<=0){ if(AC)burst(master,0.4,0.04,340,0.4,80);   // DRY CLICK on an empty mag → auto-reload
@@ -13625,7 +13708,15 @@ function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id
     GUNMAG[_mk]--; if(bolt)view.boltT=0.95; }                                                     // fire from THIS gun's MAG (per-instance); inventory ammo is consumed at reload
   const KP=(bolt?0.056 : rev?0.049 : (it.gun==='auto'?0.006 : it.gun==='shotgun'?0.062 : 0.019))*5;   // the 12 gauge kicks hardest of all — a cylinder-bore pump against the shoulder                            // camera recoil per shot ×5 (Ben 07-20): rifle 16° / Python 14° / AR 5.4° / minigun 1.7° — the gun OWNS your aim
   kickRecoil(KP, KP*0.32);                                                                        // every shot climbs the aim for keeps — manage your muzzle
-  view.gunKick=Math.min(1.3,(view.gunKick||0)+(bolt?1.0 : rev?1.0 : it.gun==='auto'?0.18 : it.gun==='shotgun'?1.25 : 0.45));  // viewmodel buck against the shoulder
+  // THE HAND THAT FIRED IS THE HAND THAT SHOWS IT (Ben 08-04: "when two guns are equipped, and the off hand slotted one is fired,
+  // it looks like the main hand gun is shooting, muzzle flash, recoil, all of it"). fireGun takes the SLOT it is firing, so it
+  // already knows which gun went off — but every visual it triggered was written to `view`, the main-hand model, because that was
+  // the only viewmodel when this code was written. The offhand now keeps its own flash timer and buck, spent by updateView on its
+  // own model. The CAMERA recoil stays shared: your aim is kicked by whichever gun fires, which is the point of recoil.
+  const _off = !!(slotArg && armor[EQ_OFF] && slotArg===armor[EQ_OFF]);
+  const _kick = (bolt?1.0 : rev?1.0 : it.gun==='auto'?0.18 : it.gun==='shotgun'?1.25 : 0.45);
+  if(_off) offView.gunKick=Math.min(1.3,(offView.gunKick||0)+_kick);
+  else view.gunKick=Math.min(1.3,(view.gunKick||0)+_kick);                       // viewmodel buck against the shoulder
   crosshairFireKick(bolt?0.9 : rev?0.7 : it.gun==='auto'?0.28 : it.gun==='shotgun'?1.0 : 0.5);   // the ring blooms by what the gun actually kicks — the 12 gauge widest, the AR least per round
   const d=lookDir(), o={x:player.pos.x,y:player.pos.y+EYE,z:player.pos.z};
   // SCATTER THE SHOT INSIDE THE RING. Jittered in place, so every consumer downstream — the hit trace, the tracer, the impact
@@ -13637,7 +13728,7 @@ function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id
       const vx=-uz*d.y, vy=uz*d.x-ux*d.z, vz=ux*d.y;                            // and up' = right x dir
       const s=Math.sin(r), c=Math.cos(r), ca=Math.cos(a), sa=Math.sin(a);
       d.set(d.x*c+(ux*ca+vx*sa)*s, d.y*c+(vy*sa)*s, d.z*c+(uz*ca+vz*sa)*s).normalize(); } }
-  view.flashT=0.06;                                                                             // trigger the muzzle-flash sprite + light (see updateView)
+  if(_off) offView.flashT=0.06; else view.flashT=0.06;                                          // trigger the muzzle-flash sprite + light (see updateView)
   scareAnimals(o.x, o.z, sup?24:46);                                                              // the GUNSHOT panics wild animals nearby (independent of the Wretch's earshot); a suppressor scares a smaller radius
   if(NET.on && typeof netSend==='function')netSend({t:'shot',x:+o.x.toFixed(2),y:+o.y.toFixed(2),z:+o.z.toFixed(2),dx:+d.x.toFixed(3),dy:+d.y.toFixed(3),dz:+d.z.toFixed(3),g:bolt?'r':(rev?'v':'a')});   // peers see the tracer + hear the shot
   const _gunRange = (200 - 50*(typeof weather!=='undefined'?(weather.rain||0):0)) * (sup?0.6:1);   // a GUNSHOT carries 200 blocks (150 in a downpour) — a suppressor cuts that heard-range by 40%
@@ -20209,8 +20300,8 @@ function playSample(base,pos,vol){ if(!AC)return false;
 //
 // A MISSING FILE IS NOT A BROKEN GAME. If rain_music.ogg is absent the element errors, the flag latches, and rain simply plays the
 // ordinary soundtrack as it always did.
-const MUSIC_SILENCE=120, MUSIC_GAP=180, MUSIC_FADE=6, MUSIC_RAIN='./sounds/rain_music.ogg', RAIN_MUSIC_ON=0.25, RAIN_MUSIC_OFF=0.12;
-let _musicT0=null, _musicSkew=0, _rainMusicEl=null, _rainMusicDead=false, _rainMusicOn=false, _musicGapUntil=0;
+const MUSIC_SILENCE=180, MUSIC_GAP=180, MUSIC_FADE_IN=8, MUSIC_FADE_OUT=4, MUSIC_RAIN='./sounds/rain_music.ogg', RAIN_MUSIC_ON=0.25, RAIN_MUSIC_OFF=0.12;
+let _musicT0=null, _musicSkew=0, _rainMusicEl=null, _rainMusicDead=false, _rainMusicOn=false, _musicGapUntil=0, _musicFades=[];
 function musicElapsed(){ return (_musicT0==null?0:(performance.now()/1000)-_musicT0)+_musicSkew; }
 function rainMusicWanted(){ if(_rainMusicDead) return false;
   const r=(typeof weather!=='undefined' && weather) ? (weather.rain||0) : 0;
@@ -20218,59 +20309,79 @@ function rainMusicWanted(){ if(_rainMusicDead) return false;
   return _rainMusicOn; }
 function _ensureMusicEls(){ if(_gameMusicEl||!AC)return;
   _musicBus=AC.createGain(); _musicBus.gain.value=1; _musicBus.connect(master);   // routed through master so the Volume slider governs music too
-  _gameMusicEl=new Audio('./sounds/game_music.ogg'); _gameMusicEl.loop=true; _gameMusicEl.preload='auto'; _gameMusicEl.volume=_musicVol;
-  _rainMusicEl=new Audio(MUSIC_RAIN); _rainMusicEl.loop=true; _rainMusicEl.preload='auto'; _rainMusicEl.volume=_musicVol;
-  _rainMusicEl.addEventListener('error',()=>{ _rainMusicDead=true; startGameMusic(); });   // no such file → rain keeps the ordinary soundtrack
+  _gameMusicEl=new Audio('./sounds/game_music.ogg'); _gameMusicEl.loop=true; _gameMusicEl.preload='auto'; _gameMusicEl.volume=0;
+  _rainMusicEl=new Audio(MUSIC_RAIN); _rainMusicEl.loop=true; _rainMusicEl.preload='auto'; _rainMusicEl.volume=0;
+  _rainMusicEl.addEventListener('error',()=>{ _rainMusicDead=true; });   // no such file -> rain keeps the ordinary soundtrack
   try{ AC.createMediaElementSource(_rainMusicEl).connect(_musicBus); }catch(e){}
-  _bossMusicEls=[new Audio('./sounds/boss_music2.ogg'), new Audio('./sounds/boss_music1.ogg')];   // boss_music2 now plays FIRST → boss_music1 (Ben 07-24, swapped order)
+  _bossMusicEls=[new Audio('./sounds/boss_music2.ogg'), new Audio('./sounds/boss_music1.ogg')];   // boss_music2 now plays FIRST -> boss_music1 (Ben 07-24, swapped order)
   for(const a of _bossMusicEls){ a.loop=false; a.preload='auto'; a.volume=_bossMusicVol; }
-  _bossMusicEls[0].addEventListener('ended',()=>{ if(_bossMusicOn){ _bossMusicIdx=1; try{ _bossMusicEls[1].currentTime=0; _bossMusicEls[1].play().catch(()=>{}); }catch(e){} } });   // song1 → song2; song2 end → silence
+  _bossMusicEls[0].addEventListener('ended',()=>{ if(_bossMusicOn){ _bossMusicIdx=1; try{ _bossMusicEls[1].currentTime=0; _bossMusicEls[1].play().catch(()=>{}); }catch(e){} } });   // song1 -> song2; song2 end -> silence
   try{ AC.createMediaElementSource(_gameMusicEl).connect(_musicBus); for(const a of _bossMusicEls)AC.createMediaElementSource(a).connect(_musicBus); }catch(e){} }
-function startGameMusic(){ _ensureMusicEls(); if(!_gameMusicEl)return;
-  if(_musicT0==null && typeof started!=='undefined' && started) _musicT0=performance.now()/1000;   // the world began — start counting the silence
-  if(musicElapsed()<MUSIC_SILENCE){ _musicPause(_gameMusicEl); _musicPause(_rainMusicEl); return; }   // the opening silence: nothing plays, and nothing starts
+// WHICH WORLD TRACK SHOULD BE SOUNDING: nothing at all for the first three minutes of a session or during a hand-over gap, the
+// rain track while it rains, the existing soundtrack otherwise. Boss music is NOT in here on purpose (see below).
+function _musicWant(){
+  if(musicElapsed()<MUSIC_SILENCE) return null;                                  // the opening silence
   const rain=rainMusicWanted();
-  // THREE MINUTES OF QUIET BEFORE THE MAIN SOUNDTRACK COMES BACK (Ben 08-04: "there should be a 3 min gap before main game music
-  // transitions"). Two tracks butted end to end sound like a playlist, not like a world — so when the rain stops, the weather
-  // track's absence is the point, and the soundtrack waits. Only the MAIN track waits: rain starting is weather, and weather does
-  // not queue, so a shower cancels the gap and comes straight in.
-  if(rain) _musicGapUntil=0;
-  else if(_rainMusicEl && !_rainMusicEl.paused) _musicGapUntil=musicElapsed()+MUSIC_GAP;   // the rain track is playing and should not be → start the gap
-  if(!rain && musicElapsed()<_musicGapUntil){ _musicPause(_gameMusicEl); _musicPause(_rainMusicEl); return; }
-  const play=rain?_rainMusicEl:_gameMusicEl, hush=rain?_gameMusicEl:_rainMusicEl;
-  _musicPause(hush);
-  if(play && play.paused){ _musicFadeIn(play); play.play().catch(()=>{}); }
-  else if(play && !_bossMusicOn && play.volume>=_musicVol-1e-3) play.volume=_musicVol; }   // already at level: nothing to do but track the slider
-function _musicPause(a){ if(a && !a.paused){ try{ a.pause(); }catch(e){} } }   // pause WITHOUT rewinding — see "it resumes" above
-// MUSIC ALWAYS FADES IN (Ben 08-04: "music should always fade in slowly"). A track that starts at full level announces itself as a
-// file being played; over MUSIC_FADE seconds it arrives as weather. Driven on the element's own volume rather than a WebAudio ramp
-// because the element volume is what applyMusicVol and the boss-duck already write, and two owners of one gain is how a track ends
-// up stuck silent. The ramp is re-based on every call, so a fade interrupted by another fade does not fight itself.
-let _musicFade=null;
-function _musicFadeIn(el){ if(!el) return; el.volume=0; _musicFade={el, t:0}; }
-function updateMusicFade(dt){ const f=_musicFade; if(!f) return;
-  if(!f.el || f.el.paused || _bossMusicOn){ _musicFade=null; return; }        // the boss duck owns the volume while it is up
-  f.t+=dt; const v=Math.min(1, f.t/MUSIC_FADE)*_musicVol;
-  try{ f.el.volume=v; }catch(e){ _musicFade=null; return; }
-  if(f.t>=MUSIC_FADE) _musicFade=null; }
-// The schedule changes at moments no user gesture coincides with — the silence ending, and the rain starting or stopping — so it
-// is polled twice a second rather than waiting to be asked. startGameMusic only ever plays something already paused, which is what
-// makes calling it on a timer safe. Boss music and the Backrooms own the mix while they are up and both restore through it.
+  if(!rain && _rainMusicDead) return _gameMusicEl;
+  return rain ? _rainMusicEl : _gameMusicEl; }
+// EVERY WORLD-MUSIC CHANGE IS FADE OUT -> THREE MINUTES OF SILENCE -> FADE IN (Ben 08-04: "the music fade in/out is still not
+// done, and the 3 min at the start, and 3 min between music is still not done, this DOES NOT apply to boss music").
+//
+// One state machine owns it, because the previous version spread the decision over startGameMusic, a pause helper and a one-shot
+// fade, and each of them could win a frame: a track could be paused before its fade finished, or started at full level by a
+// caller that did not know a fade existed. Here nothing is ever paused mid-fade and nothing is ever started at full volume.
+//
+// THE BOSS IS EXEMPT, ENTIRELY. A summon has to hit on the frame it happens, so startBossMusic still cuts in at full level and
+// this machine stands down while _bossMusicOn (see updateMusicSchedule). What it does do is duck the world track under it.
+function startGameMusic(){ _ensureMusicEls(); if(!_gameMusicEl)return;
+  if(_musicT0==null && typeof started!=='undefined' && started) _musicT0=performance.now()/1000;   // the world began - start counting the silence
+  const want=_musicWant();
+  const live=[_gameMusicEl,_rainMusicEl].filter(a=>a && !a.paused);
+  for(const a of live) if(a!==want) _musicFadeOut(a);                            // the wrong track (or any track, during silence/a gap) leaves gently
+  if(!want || live.some(a=>a!==want)) return;                                    // wait for the fade-out to finish before the gap starts counting
+  if(musicElapsed()<_musicGapUntil) return;                                      // the hand-over gap
+  if(want.paused) _musicFadeIn(want); }
+function _musicFadeIn(el){ if(!el) return; _musicFadeDrop(el);
+  el.volume=0; el.play().catch(()=>{}); _musicFades.push({el,dir:1,t:0,dur:MUSIC_FADE_IN,from:0}); }
+function _musicFadeOut(el){ if(!el || el.paused) return;
+  if(_musicFades.some(f=>f.el===el && f.dir<0)) return;                          // already on its way out
+  _musicFadeDrop(el); _musicFades.push({el,dir:-1,t:0,dur:MUSIC_FADE_OUT,from:el.volume}); }
+function _musicFadeDrop(el){ for(let i=_musicFades.length-1;i>=0;i--) if(_musicFades[i].el===el) _musicFades.splice(i,1); }
+function updateMusicFades(dt){ if(!_musicFades.length) return;
+  for(let i=_musicFades.length-1;i>=0;i--){ const f=_musicFades[i];
+    if(!f.el || (f.dir>0 && f.el.paused)){ _musicFades.splice(i,1); continue; }
+    f.t+=dt; const u=Math.min(1, f.t/f.dur);
+    try{ f.el.volume = f.dir>0 ? (_bossMusicOn?0:u*_musicVol) : f.from*(1-u); }catch(e){ _musicFades.splice(i,1); continue; }
+    if(u>=1){ if(f.dir<0){ try{ f.el.pause(); }catch(e){}                        // fully faded -> pause WITHOUT rewinding, then open the gap
+        _musicGapUntil=musicElapsed()+MUSIC_GAP; }
+      _musicFades.splice(i,1); } } }
+function musicFading(el){ return _musicFades.some(f=>!el||f.el===el); }
+// Polled rather than waiting to be asked: the silence ending, a gap ending and the rain starting or stopping coincide with no user
+// gesture. The FADES need every frame; the schedule only needs a couple of looks a second.
 let _musicPoll=0;
-function updateMusicSchedule(dt){ if(!AC || _bossMusicOn) return;
-  if(typeof BR!=='undefined' && BR && BR.inside) return;                    // the Backrooms are deliberately silent
+function updateMusicSchedule(dt){ if(!AC) return;
+  updateMusicFades(dt);
+  if(_bossMusicOn) return;                                                       // the boss owns the mix, at full level, with no fade
+  if(typeof BR!=='undefined' && BR && BR.inside) return;                         // the Backrooms are deliberately silent
   if(typeof started!=='undefined' && !started) return;
-  updateMusicFade(dt);                                                      // the fade needs every frame; the SCHEDULE only needs twice a second
-  _musicPoll-=dt; if(_musicPoll>0) return; _musicPoll=0.5;
+  _musicPoll-=dt; if(_musicPoll>0) return; _musicPoll=0.4;
   startGameMusic(); }
 function startBossMusic(){ _ensureMusicEls(); if(!_bossMusicEls)return; _bossMusicOn=true; _bossMusicIdx=0;
   if(_gameMusicEl)_gameMusicEl.volume=0;                                          // duck whichever world track is up
   if(_rainMusicEl)_rainMusicEl.volume=0;
   try{ _bossMusicEls[1].pause(); _bossMusicEls[0].currentTime=0; _bossMusicEls[0].volume=_bossMusicVol; _bossMusicEls[0].play().catch(()=>{}); }catch(e){} }
 function stopBossMusic(){ _bossMusicOn=false; if(_bossMusicEls)for(const a of _bossMusicEls){ try{ a.pause(); a.currentTime=0; }catch(e){} }
-  startGameMusic(); }   // the boss track does NOT loop; whatever the weather calls for comes back
+  // Whatever the weather calls for comes back, and it comes back on a fade like everything else: the world track was ducked to 0,
+  // so it is paused first and allowed to fade in properly rather than snapping to level mid-phrase.
+  for(const a of [_gameMusicEl,_rainMusicEl]) if(a && !a.paused){ try{ a.pause(); }catch(e){} }
+  _musicGapUntil=0; startGameMusic(); }
 function applyMusicVol(){ const duck=Math.max(0,1-(typeof _dread!=='undefined'?_dread:0));   // the dread ramp silences the soundtrack as the Wretch closes (see updateDread)
-  if(!_bossMusicOn){ if(_gameMusicEl)_gameMusicEl.volume=_musicVol*duck; if(_rainMusicEl)_rainMusicEl.volume=_musicVol*duck; }   // whichever of the two is paused simply keeps the new level for when it comes back
+  // A TRACK IN THE MIDDLE OF A FADE IS LEFT ALONE. This writes the element volume directly and is called from the slider, the
+  // dread ramp and the boss hand-back; a fade also writes it, and two owners of one value is how a track ends up stuck silent or
+  // snapping to full mid-phrase. The fade is already ramping toward _musicVol, so skipping it here costs nothing but the dread
+  // duck for the few seconds a fade lasts.
+  if(!_bossMusicOn){ if(_gameMusicEl && !musicFading(_gameMusicEl))_gameMusicEl.volume=_musicVol*duck;
+    if(_rainMusicEl && !musicFading(_rainMusicEl))_rainMusicEl.volume=_musicVol*duck; }
   if(_bossMusicEls)for(const a of _bossMusicEls)a.volume=_bossMusicVol; }
 // HYPERREALISTIC HEARTBEAT (Ben 07-21) — a lub-dub pulse. Fires on adrenaline (racing pulse) and when the creature RUNS BY.
 let _hbActive=false, _hbEnd=0, _hbBpm=100, _hbBus=null;
@@ -21201,6 +21312,21 @@ window.__hc={
   giveItem(id,n){ try{ invAdd(id,n||1); refreshHotbar(); return invCount(id); }catch(e){ return e.message; } },
   // (an earlier `hold` was declared here and was dead for the same reason — the later `hold` below is the live one)
   leaves(){ try{ return {count:_leafIM.count, max:LEAF_MAX, init:_leafInit, matColor:+_leafMat.color.r.toFixed(2), y0:+_leafPos[1].toFixed(1), eyeY:+camera.position.y.toFixed(1)}; }catch(e){ return e.message; } },
+  // Where the held gun's BODY sits in camera space at the current pose, next to the frustum it has to fit inside. This is what
+  // "the top of the holosun is cut off" has to be measured against: at the ADS fov, the half-height available at the sight's own
+  // depth is depth*tan(fov/2), and anything above that is off the top of the screen.
+  adsFit(){ try{ const m=view.mesh; if(!m) return {err:'no held mesh'};
+      const bb=new THREE.Box3().setFromObject(m);
+      camera.updateMatrixWorld(true); bb.applyMatrix4(camera.matrixWorldInverse);   // into CAMERA space — setFromObject returns world, and the frustum test only means anything camera-relative
+      const dep=Math.abs((bb.min.z+bb.max.z)/2), half=dep*Math.tan(camera.fov*0.5*Math.PI/180);
+      const topAt=(z)=>Math.abs(z)*Math.tan(camera.fov*0.5*Math.PI/180);
+      return { id:view.id, adsT:+((view.adsT||0)).toFixed(2), fov:+camera.fov.toFixed(1), near:camera.near,
+        pos:[+view.group.position.x.toFixed(3),+view.group.position.y.toFixed(3),+view.group.position.z.toFixed(3)],
+        box:{ minY:+bb.min.y.toFixed(3), maxY:+bb.max.y.toFixed(3), minZ:+bb.min.z.toFixed(3), maxZ:+bb.max.z.toFixed(3) },
+        halfAtMid:+half.toFixed(3), halfAtNearest:+topAt(bb.max.z).toFixed(3),
+        topCutBy:+(bb.max.y-topAt(bb.max.z)).toFixed(3),                            // > 0 means the top of the model is off screen
+        nearClipped:bb.max.z > -camera.near,
+        dotY:(m.userData&&m.userData.dotY)||null, adsZ:(m.userData&&m.userData.adsZ)!=null?m.userData.adsZ:null }; }catch(e){ return {err:String(e.message||e)}; } },
   viewDbg(){ try{ const vm=view.mesh; return { id:view.id, locked:!!locked, vis:!!view.group.visible, hasMesh:!!vm, meshVis:vm?!!vm.visible:null, children:view.group.children.length, rot:[+view.group.rotation.x.toFixed(3),+view.group.rotation.y.toFixed(3),+view.group.rotation.z.toFixed(3)], pos:[+view.group.position.x.toFixed(3),+view.group.position.y.toFixed(3),+view.group.position.z.toFixed(3)] }; }catch(e){ return e.message; } },
   invList(){ try{ return inv.filter(Boolean).map(s=>s.id+':'+s.n); }catch(e){ return e.message; } },
   pos(){ try{ return {x:player.pos.x,y:player.pos.y,z:player.pos.z,yaw:player.yaw,pitch:player.pitch}; }catch(e){ return e.message; } },
@@ -21574,12 +21700,18 @@ window.__hc={
   // THE SOUNDTRACK SCHEDULE. musicSkew fast-forwards the session clock so a bench does not have to sit through two real minutes,
   // and musicIntroEnd stands in for the opening track finishing (a 0.5s stand-in file ends before a probe can catch it playing).
   musicProbe(){ try{ _ensureMusicEls();
-      return { elapsed:+musicElapsed().toFixed(1), silence:MUSIC_SILENCE, started:(typeof started!=='undefined'?!!started:null), clockRunning:_musicT0!=null,
+      const want=_musicWant();
+      return { elapsed:+musicElapsed().toFixed(1), silence:MUSIC_SILENCE, gap:MUSIC_GAP, fadeIn:MUSIC_FADE_IN, fadeOut:MUSIC_FADE_OUT,
+        started:(typeof started!=='undefined'?!!started:null), clockRunning:_musicT0!=null,
         rain:+((typeof weather!=='undefined'&&weather.rain)||0).toFixed(2), rainWanted:_rainMusicOn, rainDead:_rainMusicDead,
-        gapUntil:+_musicGapUntil.toFixed(1), inGap:musicElapsed()<_musicGapUntil, gap:MUSIC_GAP, fading:!!_musicFade, fadeSec:MUSIC_FADE,
-        rainPlaying:!!(_rainMusicEl&&!_rainMusicEl.paused), rainVol:_rainMusicEl?+_rainMusicEl.volume.toFixed(2):null,
-        loopPlaying:!!(_gameMusicEl&&!_gameMusicEl.paused), loopVol:_gameMusicEl?+_gameMusicEl.volume.toFixed(2):null,
-        boss:!!_bossMusicOn }; }catch(e){ return {err:String(e.message||e)}; } },
+        want: want===_rainMusicEl?'rain':(want===_gameMusicEl?'loop':'none'),
+        gapUntil:+_musicGapUntil.toFixed(1), inGap:musicElapsed()<_musicGapUntil,
+        fades:_musicFades.map(f=>({which:f.el===_rainMusicEl?'rain':'loop', dir:f.dir, t:+f.t.toFixed(2)})),
+        rainPlaying:!!(_rainMusicEl&&!_rainMusicEl.paused), rainVol:_rainMusicEl?+_rainMusicEl.volume.toFixed(3):null,
+        loopPlaying:!!(_gameMusicEl&&!_gameMusicEl.paused), loopVol:_gameMusicEl?+_gameMusicEl.volume.toFixed(3):null,
+        boss:!!_bossMusicOn, bossVol:_bossMusicEls?+_bossMusicEls[0].volume.toFixed(2):null }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA: run the schedule + fades forward without waiting in real time. dt per tick, n ticks.
+  musicTick(n,dt){ try{ for(let i=0;i<(n|0||1);i++){ updateMusicFades(dt||0.05); startGameMusic(); } return this.musicProbe(); }catch(e){ return {err:String(e.message||e)}; } },
   musicSkew(sec){ try{ _musicSkew=+sec||0; startGameMusic(); return this.musicProbe(); }catch(e){ return {err:String(e.message||e)}; } },
   // THE BOOM ITSELF: where it ended up, how long it is, which shoulder, and whether it is inside anything (it must never be).
   tpsCam(){ try{ const c=camera.position, P=player.pos;
@@ -22207,6 +22339,17 @@ window.__hc={
   // QA/bench: the sun shadow's softness dial and the filter that decides whether it means anything. three.js honours
   // shadow.radius for PCFShadowMap and VSM; PCFSoftShadowMap uses a fixed tap pattern and ignores it entirely. Plan Tier 1
   // item 4 assumes radius is a lever, so which filter is live has to be readable before that assumption is spent.
+  // QA/bench: the god-ray pass's live state. `on` also forces it off, which is what prices a full-screen pass — the composer
+  // skips a disabled pass entirely, so enabled/disabled is a real A/B rather than a uniform set to zero that still pays.
+  godrays(o){ try{ if(o&&o.on!=null) _godraysOn=!!o.on;
+      // THE THREE TERMS OF _grActive, each on its own, because "enabled:false" does not say which one said no.
+      return { pass:!!godrayPass, on:_godraysOn, enabled:!!(godrayPass&&godrayPass.enabled),
+               front:_sunProj.z<1.0, sunProjZ:+_sunProj.z.toFixed(3),
+               sunProjXY:[+_sunProj.x.toFixed(3),+_sunProj.y.toFixed(3)], camFar:camera.far, dayGate:globalU.uDay.value>0.15,
+               strength:godrayPass?+godrayPass.uniforms.uStrength.value.toFixed(4):null,
+               sunY:+globalU.uSunDir.value.y.toFixed(4), elevDeg:+(Math.asin(Math.max(-1,Math.min(1,globalU.uSunDir.value.y)))*57.29578).toFixed(2),
+               day:+globalU.uDay.value.toFixed(3), quality:CFG.quality };
+    }catch(e){ return {err:String(e.message||e)}; } },
   shadowSoft(o){ try{ if(o&&o.radius!=null){ sunLight.shadow.radius=+o.radius; sunLight.shadow.needsUpdate=true; }
       // FILTER SWAP, for pricing only. Changing shadowMap.type needs every material recompiled and the map rebuilt — the same
       // work setSoftShadows() does — so this borrows its body rather than half-doing it and reporting a number from a stale
