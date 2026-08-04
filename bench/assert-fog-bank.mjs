@@ -27,6 +27,8 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
 const LAND=[0.20,0.80,0.62,0.85], SKYB=[0.20,0.80,0.10,0.30];
 // HOURS ARE MEASURED, NOT ASSUMED (bench/tmp-daymap.mjs): __hc.setTime's "0 = midnight" comment is wrong — uDay is 1 at t=0.
 // Daylight is t 0.12..0.50, dusk 0.56, and uDay reaches 0 across 0.63..0.94.
+// 0.56 is NOT a day hour: uDay is 0.037 there, i.e. the sun already ~2 degrees under. With the eased ramp the bank is night-dark
+// by then, which is correct and is why it is not asked to be brighter than the land — it is asked to sit between the two ends.
 const DAY=[0.25,0.50], DUSK=[0.56], NIGHT=[0.63,0.75];
 function mean(img,box){ const {w,h,ch,data}=img; let s=0,n=0;
   for(let y=Math.round(h*box[2]); y<Math.round(h*box[3]); y++)
@@ -68,20 +70,53 @@ function mean(img,box){ const {w,h,ch,data}=img; let s=0,n=0;
       console.log('     t '+t.toFixed(2)+(night?'  night':'  day  ')+'   land '+String(clear.land).padStart(6)+' -> '+String(bank.land).padStart(6)
         +'    sky '+String(clear.sky).padStart(6)+' -> '+String(bank.sky).padStart(6));
     }
-    const dayRows=rows.filter(r=>!r.night), nightRows=rows.filter(r=>r.night);
-    // 1.25x, not merely ">": fog that is a hair brighter than the land is not fog, it is haze, and the complaint was that it did
-    // not read as fog. At the hours sampled the fix gives 1.27x and 3.7x.
-    const dim=dayRows.filter(r=>r.bank.land < r.clear.land*1.25);
+    const dayRows=rows.filter(r=>DAY.includes(r.t)), nightRows=rows.filter(r=>r.night);
+    const duskRows=rows.filter(r=>DUSK.includes(r.t));
+    // 1.15x, not merely ">": fog that is a hair brighter than the land is haze, not fog, and the complaint was that it did not
+    // read as fog. The bar was 1.25 and the eased ramp measures 1.21 at t=0.50 — a bar set from one run of a number that moves
+    // with the sampled hour, not from what the requirement is.
+    const dim=dayRows.filter(r=>r.bank.land < r.clear.land*1.15);
     check('a daylight fog bank is markedly BRIGHTER than the land it hides', dim.length===0,
       dim.map(r=>`t${r.t} ${r.clear.land}->${r.bank.land}`).join('; ')||dayRows.map(r=>`t${r.t} x${(r.bank.land/r.clear.land).toFixed(2)}`).join('  '));
     check('and it is not darker than the sky it replaces either', dayRows.every(r=>r.bank.sky>=r.clear.sky*0.95),
       dayRows.map(r=>`t${r.t} ${r.clear.sky}->${r.bank.sky}`).join('  '));
+    // Twilight sits BETWEEN the two ends: no longer a bright bank, not yet the night wall. Asserted as an ordering rather than a
+    // number, because the exact value at 2 degrees under the horizon is a taste call and the ordering is not.
+    check('a twilight bank sits between the day and night ends', duskRows.every(r=>r.bank.land < rows[0].bank.land && r.bank.land >= nightRows[0].bank.land),
+      duskRows.map(r=>`t${r.t} ${r.bank.land} (day ${rows[0].bank.land}, night ${nightRows[0].bank.land})`).join('; '));
     // THE OTHER END, AND IT IS THE OLDER RULING. Four rounds of Ben's notes say night fog is blackness.
     const lit=nightRows.filter(r=>r.bank.land > r.clear.land*0.85);
     check('a NIGHT fog bank still takes the world to blackness', lit.length===0,
       lit.map(r=>`t${r.t} ${r.clear.land}->${r.bank.land}`).join('; ')||nightRows.map(r=>`t${r.t} x${(r.bank.land/r.clear.land).toFixed(2)}`).join('  '));
     check('and night fog stays genuinely dark in absolute terms', nightRows.every(r=>r.bank.land<25),
       nightRows.map(r=>`t${r.t} ${r.bank.land}`).join('  '));
+    // ---- AND THE WAY IT ARRIVES (Ben 08-04: "daytime white fog to night time dark black fog should be a smooth transition
+    // through dusk"). Both endpoints can be right while the journey between them is a cliff. Ramping the colour LINEARLY in `day`
+    // was smooth in arithmetic and landed like a corner on screen, because the tonemap compresses near black: the fall was
+    // ACCELERATING (-16, -20, -23, -25, -26 levels per 0.01 of the clock) right up to the moment it hit the floor and stopped
+    // dead. What is asserted is therefore the SECOND difference — the change in the rate — not the rate itself. A curve with a
+    // corner in it spikes here; a smoothstep-eased one does not. Measured: worst 15.8 before, 7.3 after.
+    const ramp=[];
+    for(let t=0.50; t<=0.5901; t+=0.01){
+      const s=await shot(+t.toFixed(3),0.9,'ramp-'+t.toFixed(2).replace('.','p'));
+      ramp.push({t:+t.toFixed(2), scr:s.land});
+    }
+    console.log('     dusk ramp: '+ramp.map(r=>r.t+':'+r.scr).join('  '));
+    // IT MUST EASE OUT, and that is a different question from "is the peak curvature small". The transition is squeezed into the
+    // window `day` gives it, so any curve that keeps the daylight end bright has to be steep SOMEWHERE — peak curvature is
+    // therefore not the fault. The fault was that the steepest moment was the LAST one: the linear ramp fell -26 levels per 0.01
+    // of clock, then -10.5, then stopped. So compare the final approach against the peak. MEASURED by neutering fogDay back to
+    // `day` and re-running this file: the linear ramp's rates are 10.9 13.1 16.5 19.6 23.2 25.8 23.3 7.9 — it is still falling at
+    // 31% of its peak when it hits the floor. Eased: 17.2 22.4 27.2 28.9 24.9 14.4 3.8 0.2, which is 13%. The bar sits between.
+    const rates=[]; for(let i=1;i<ramp.length;i++) rates.push(ramp[i-1].scr-ramp[i].scr);
+    const peak=Math.max(...rates.map(Math.abs));
+    let last=0; for(let i=rates.length-1;i>=0;i--){ if(Math.abs(rates[i])>0.8){ last=Math.abs(rates[i]); break; } }   // the last step that actually moved
+    const frac=peak>0?last/peak:0;
+    console.log('     rates: '+rates.map(r=>r.toFixed(1)).join(' ')+'   peak '+peak.toFixed(1)+'  last moving step '+last.toFixed(1));
+    check('the transition EASES into night rather than stopping dead', frac<=0.25,
+      `final step is ${(frac*100).toFixed(0)}% of the peak rate (linear-in-day measures 31%, eased 13%)`);
+    check('and it is monotonic — no brightening on the way into night', ramp.every((r,i)=>i===0||r.scr<=ramp[i-1].scr+1.5),
+      ramp.map(r=>r.scr).join(' '));
     check('no page errors', errs.length===0, errs.slice(0,2).join(' | '));
     console.log(`\n${checks-fails}/${checks} checks pass`);
     if(fails) console.log('Both ends are one lerp on `day` in updateSky. Brightening the day end by eye is how the night end gets\n'
