@@ -264,8 +264,13 @@ const ok=(name,cond,got)=>{ if(!cond)fails++; console.log(`  ${cond?'ok  ':'FAIL
     await page.evaluate(`__hc.cam({pitch:0})`); await page.evaluate(`__hc.tpsProbe(false)`);
 
     console.log('\n[14] leaves that pile up, and rot a stage a day');
+    // A pile needs open air over solid ground, and the cell must not ALREADY hold one: worldgen scatters leaf drifts across the
+    // whole map now (Ben 08-04), so the spot the player happens to be standing on can come with its own pile and the count this
+    // section is about would start at "already a pile". Cleared a block out in each direction, since groundY can land on the
+    // pile itself rather than the ground under it.
     await page.evaluate(`(()=>{ const P=__hc.pos(), x=Math.floor(P.x), z=Math.floor(P.z), g=__hc.groundY(x,z);
-      __hc.setBlockAt(x,g,z,'stone'); for(let dy=1;dy<=3;dy++) __hc.setBlockAt(x,g+dy,z,'air'); })()`);   // a pile needs open air above solid ground; by now the player may be standing under a canopy
+      for(let dx=-1;dx<=1;dx++) for(let dz=-1;dz<=1;dz++){ for(let dy=0;dy<=4;dy++) __hc.setBlockAt(x+dx,g+dy,z+dz,'air'); __hc.setBlockAt(x+dx,g-1,z+dz,'stone'); }
+      __hc.setBlockAt(x,g-1,z,'stone'); })()`);
     const p1 = await page.evaluate(`__hc.leafPile(null,null,null,3)`);
     ok('three leaves are not a pile', p1.isPile===false && p1.pending===3, {pending:p1.pending, need:p1.need, block:p1.block});
     const p3 = await page.evaluate(`__hc.leafPile(null,null,null,1)`);   // same cell as p1 — the hook resolves it the one way, so the counts add up
