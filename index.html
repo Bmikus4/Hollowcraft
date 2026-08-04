@@ -3920,6 +3920,18 @@ function setBlockWorld(wx,wy,wz,b,record){
   // on a flower, or breaking the block under one. One column, so it costs a single top-down walk. Skipped when the write
   // IS a cross block, because that is a legitimate placement and the invariant would only re-check what was just set.
   if(c.hasCross && blockCat[b]!=='cross') _decoSeatColumn(c,lx,lz);
+  // AND THE FOUR COLUMNS BESIDE IT, when the write was solid. A plant is pocketed by walls raised NEXT to it, not by
+  // anything happening in its own column, and this chokepoint only ever re-checked the column that was written — so
+  // terraforming that raised the ground beside a shrub left it at the bottom of a 1x1 that the invariant never revisited.
+  // Measured: the village pad finished with 2 of 443 decorations sunken with the invariant fully enabled
+  // (bench/assert-shrub-seat.mjs), against 0 on plain terrain. Gated on a SOLID write because nothing else can build a wall,
+  // so a torch, a flower or a break pays nothing.
+  if(b && isSolid[b] && blockCat[b]!=='cross'){
+    for(let i=0;i<4;i++){ const dx=(i===0)?1:(i===1)?-1:0, dz=(i===2)?1:(i===3)?-1:0;
+      const nx=lx+dx, nz=lz+dz;
+      if(nx>=0&&nx<CK&&nz>=0&&nz<CK){ if(c.hasCross) _decoSeatColumn(c,nx,nz); }
+      else { const nc=getChunk((wx+dx)>>4,(wz+dz)>>4);                              // across a chunk seam: that chunk owns the column
+        if(nc && nc.hasCross){ _decoSeatColumn(nc,(wx+dx)&15,(wz+dz)&15); markRemesh(nc.cx,nc.cz); } } } }
   markRemesh(c.cx,c.cz);
   if (lx===0) markRemesh(c.cx-1,c.cz); if (lx===15) markRemesh(c.cx+1,c.cz);
   if (lz===0) markRemesh(c.cx,c.cz-1); if (lz===15) markRemesh(c.cx,c.cz+1);
@@ -11433,9 +11445,16 @@ function buildMinigun(dot,suppressed){ const g=new THREE.Group();
   const gearbox=new THREE.Mesh(new THREE.BoxGeometry(0.15,0.15,0.20),gm); gearbox.position.set(0,0,0.10); g.add(gearbox);   // rear gearbox
   const housing=new THREE.Mesh(new THREE.CylinderGeometry(0.085,0.085,0.12,16),gm); housing.rotation.x=Math.PI/2; housing.position.set(0,0,-0.02); g.add(housing);   // rotor housing
   const barrels=new THREE.Group(); barrels.position.set(0,0,-0.08); g.add(barrels);
-  for(let i=0;i<6;i++){ const a=i/6*Math.PI*2; const br=new THREE.Mesh(new THREE.CylinderGeometry(0.015,0.015,0.5,8),dark); br.rotation.x=Math.PI/2; br.position.set(Math.cos(a)*0.048,Math.sin(a)*0.048,-0.22); barrels.add(br); }
-  const clamp=new THREE.Mesh(new THREE.CylinderGeometry(0.062,0.062,0.03,14),dark); clamp.rotation.x=Math.PI/2; clamp.position.set(0,0,-0.44); barrels.add(clamp);   // front barrel clamp ring
-  const hub=new THREE.Mesh(new THREE.CylinderGeometry(0.06,0.06,0.08,14),gm); hub.rotation.x=Math.PI/2; hub.position.set(0,0,0.02); barrels.add(hub);
+  // THE BARRELS AND THE CHAMBER GET THEIR OWN MATERIALS (Ben: "make all miniguns and minigun barrel chambers overheat too
+  // (gradient)"). Only the muzzle collar used to heat, and it could only be the collar: `dark` is shared with the ammo can and
+  // `gm` with the gearbox and the feed chute, so writing emissive into either would have set the whole gun glowing. Two clones,
+  // driven from the same _miniHeat in updateView at different thresholds, are what makes it a gradient down the weapon rather
+  // than one hot dot at the end of it.
+  const barMat=dark.clone(), chamMat=gm.clone();
+  for(let i=0;i<6;i++){ const a=i/6*Math.PI*2; const br=new THREE.Mesh(new THREE.CylinderGeometry(0.015,0.015,0.5,8),barMat); br.rotation.x=Math.PI/2; br.position.set(Math.cos(a)*0.048,Math.sin(a)*0.048,-0.22); barrels.add(br); }
+  const clamp=new THREE.Mesh(new THREE.CylinderGeometry(0.062,0.062,0.03,14),barMat); clamp.rotation.x=Math.PI/2; clamp.position.set(0,0,-0.44); barrels.add(clamp);   // front barrel clamp ring
+  const hub=new THREE.Mesh(new THREE.CylinderGeometry(0.06,0.06,0.08,14),chamMat); hub.rotation.x=Math.PI/2; hub.position.set(0,0,0.02); barrels.add(hub);
+  g.userData.barMat=barMat; g.userData.chamMat=chamMat;
   const can=new THREE.Mesh(new THREE.BoxGeometry(0.15,0.16,0.16),dark); can.position.set(-0.14,-0.02,0.14); g.add(can);   // side ammo can
   const feed=new THREE.Mesh(new THREE.BoxGeometry(0.08,0.04,0.05),gm); feed.position.set(-0.07,0.0,0.06); g.add(feed);   // delrin feed chute
   { const belt=new THREE.Mesh(new THREE.BoxGeometry(0.05,0.03,0.09),brass); belt.position.set(-0.1,-0.06,0.1); belt.rotation.z=0.3; g.add(belt); }   // a hint of ammo belt
@@ -12075,7 +12094,13 @@ function updateView(dt){ updateRecoil(dt);                                      
       bar.rotation.z -= view._miniSpin*dt;
       if(hot){ view._miniHeat = clamp((view._miniHeat||0) + (firing?dt*0.42:-dt*0.3), 0, 1);                        // sustained fire builds heat (~2.4s to full), cools in ~3s
         const gh=Math.max(0,(view._miniHeat-0.45)/0.55);                                                            // only after ~1s of holding the trigger does the TIP start glowing — "too fast for too long"
-        hot.emissive.setRGB(gh*gh, gh*gh*0.16, gh*0.02); } }
+        hot.emissive.setRGB(gh*gh, gh*gh*0.16, gh*0.02);
+        // THE GRADIENT DOWN THE GUN. Three thresholds off one heat value, so the glow crawls back from the muzzle instead of the
+        // whole weapon lighting at once: the collar from 0.45, the barrel cluster from 0.60, the rotor chamber from 0.78 and only
+        // to a dull red. The squares keep the low end dark — a linear ramp reads as a gun that is always faintly warm.
+        const bh=Math.max(0,(view._miniHeat-0.60)/0.40), ch=Math.max(0,(view._miniHeat-0.78)/0.22);
+        if(ud.barMat)  ud.barMat.emissive.setRGB(bh*bh*0.85, bh*bh*0.11, bh*0.015);
+        if(ud.chamMat) ud.chamMat.emissive.setRGB(ch*ch*0.5, ch*ch*0.05, 0); } }
     else { view._miniSpin=0; view._miniHeat=0; } }
   // ---- SYRINGE INJECTION overlay (Ben 07-21): a dedicated syringe on the camera drives jab → depress → withdraw,
   //      independent of the held stack so the dose ALWAYS plays out — even when it was your last one ----
@@ -19260,6 +19285,20 @@ window.__hc={
       applySave(snap);
       let mismatched=0; for(const k in want){ const p=k.split(',').map(Number); if(getBlock(p[0],p[1],p[2])!==want[k]) mismatched++; }
       return { tested:names.length, mismatched }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA: the minigun's heat gradient. Sets _miniHeat and runs the REAL updateView pass, then reads the emissive each part actually
+  // ended up with -- writing the colours here would only test a copy of the ramp. sharedHot is the guard that matters: the ammo
+  // can and the gearbox use materials the barrels used to share, and they must stay black at full heat.
+  miniHeat(h){ try{ const it=ITEMS['minigun']||ITEMS[(Object.keys(ITEMS).find(k=>ITEMS[k]&&ITEMS[k].gun==='auto'))];
+      if(!it) return {err:'no gun:auto item in the table'};
+      if(!view.mesh || view.id!==it.id){ invAdd(it.id,1); for(let i=0;i<INV_N;i++) if(inv[i]&&inv[i].id===it.id){ selSlot=i; break; }
+        setViewItem(it.id); }
+      const ud=view.mesh&&view.mesh.userData; if(!ud||!ud.hotMat) return {err:'the held view is not a minigun'};
+      if(h!=null){ view._miniHeat=+h; view.flashT=0; updateView(0.0001); }
+      const lum=m=>m?+(m.emissive.r+m.emissive.g+m.emissive.b).toFixed(4):null;
+      let sharedHot=0; view.mesh.traverse(o=>{ if(o.isMesh&&o.material&&o.material!==ud.hotMat&&o.material!==ud.barMat&&o.material!==ud.chamMat
+        && o.material.emissive && (o.material.emissive.r+o.material.emissive.g+o.material.emissive.b)>0.001) sharedHot++; });
+      return { heat:+(view._miniHeat||0).toFixed(3), collar:lum(ud.hotMat), barrels:lum(ud.barMat), chamber:lum(ud.chamMat), sharedHot };
+    }catch(e){ return {err:String(e.message||e)}; } },
   horizonDbg(o,p){ try{ oceanLayer.visible=o!==false; pineLayer.visible=p!==false; return {ocean:oceanLayer.visible,pine:pineLayer.visible, fogShellVis:fogShell.visible, fogShellOp:+fogShell.material.opacity.toFixed(2), wfog:(typeof weather!=='undefined'?+(weather.fog||0).toFixed(2):null), fogCol:scene.fog.color.getHexString(), dens:+(scene.fog.density*1000).toFixed(3)}; }catch(e){ return {err:e.message}; } },   // QA: bisect the horizon layers + atmosphere state
   golgotha(){ try{ return _golgothaSpot?{x:_golgothaSpot.x,z:_golgothaSpot.z,done:_golgothaDone}:{done:_golgothaDone}; }catch(e){ return {err:e.message}; } },   // QA: where the crosses stand
   church(){ try{ return _churchSpot?{x:_churchSpot.x,z:_churchSpot.z,done:_churchDone,bless:+(player.blessT||0).toFixed(1)}:{done:_churchDone}; }catch(e){ return {err:e.message}; } },   // QA: chapel spot + live blessing timer
