@@ -71,6 +71,22 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
         const OUT=path.join(ROOT,'bench','results'); fs.mkdirSync(OUT,{recursive:true});
         await page.screenshot({path:path.join(OUT,'sky-birds.png')});
         console.log('  frame: bench/results/sky-birds.png'); } }
+    // 3. THE FLOCK IS NOT AN INK STROKE AT NIGHT. MeshBasicMaterial takes no light, so the birds were 0x191920 at every hour —
+    //    measured at night from 57 blocks, luminance 0 against a sky of 34, the darkest thing in the frame. A bird against a
+    //    bright sky SHOULD be a dark silhouette; against a dark sky it has to sit just under the air behind it, which is the
+    //    treatment _uPine and _uFolNight already get.
+    // 0.42, NOT 0.5, for full daylight: setTime is a clock and uDay is a daylight AMOUNT — at t=0.5 uDay measures 0.495 on this
+    // world and the sun is barely above the horizon (plan §7). Comparing night against a t=0.5 sample compares two twilights.
+    await page.evaluate(`__hc.setTime(0.42)`); await sleep(700); const day  =await page.evaluate(`__hc.birdTone()`);
+    await page.evaluate(`__hc.setTime(0.94)`); await sleep(700); const night=await page.evaluate(`__hc.birdTone()`);
+    console.log(`  full day (uDay ${day.day}):  bird ${day.birdLum} against air ${day.airLum}   (shipped constant ${day.darkLum})`);
+    console.log(`  night    (uDay ${night.day}): bird ${night.birdLum} against air ${night.airLum}`);
+    // THE DAY END IS UNCHANGED, measured against the constant itself rather than against another sample of the clock. This is
+    // the check that stops the fix from quietly repainting the daytime sky Ben never complained about.
+    check('by day the bird is still the shipped dark',day.birdLum < day.darkLum*1.25, `bird ${day.birdLum} against the constant ${day.darkLum}`);
+    check('at night it lifts off absolute black',     night.birdLum > day.darkLum*3, `${night.birdLum} at night against a constant of ${day.darkLum}`);
+    check('but stays darker than the air behind it',  night.birdLum < night.airLum*0.5, `bird ${night.birdLum} vs air ${night.airLum} — a silhouette, not a firefly`);
+
     check('no page errors', errs.length===0, errs.slice(0,2).join(' | '));
     console.log(`\n${checks-fails}/${checks} checks pass`);
   } finally { try{ if(browser) await browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }

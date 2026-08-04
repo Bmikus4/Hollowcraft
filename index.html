@@ -2139,7 +2139,7 @@ function generateChunk(c){
   // column this chunk's own pass could have re-examined. The cost is unchanged in the common case: a neighbour with no
   // decoration is one boolean.
   for(const [ox,oz] of [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]]){ const nb=getChunk(c.cx+ox,c.cz+oz);
-    if(nb && nb.generated && nb.hasCross){ decoSeatChunk(nb); if(typeof remeshSet!=='undefined') remeshSet.add(nb); } }
+    if(nb && nb.generated && _hasDeco(nb)){ decoSeatChunk(nb); if(typeof remeshSet!=='undefined') remeshSet.add(nb); } }
   // ---- AND THE SAME SHAPE OF RULE FOR TREES INSIDE A CLAIMED SITE ----
   // registerNoTree stops the generator planting in a structure's footprint, but only for chunks generated AFTER the site
   // was claimed. groundStructure's erase handles the ones that already existed — except setBlockWorld returns silently
@@ -4102,10 +4102,22 @@ let _bulk=null;
 // this very build rather than on a hypothetical one: with the flag the assertion must report buried shrubs, without it
 // zero. A check that has only ever been run against working code is not evidence.
 const _NO_DECO_SEAT = Q.get('nodecoseat')!=null;
+// SULFUR AND PEBBLE NODES ARE GROUND DECORATION TOO (Ben 08-04: "make sure sulfur cant spawn one block in the air").
+// decorate() now refuses to place one that is not standing on the finished column (see groundSeat), and that closes worldgen --
+// but it does not close the world: a structure pad levelling the ground, a trail carve or a player digging afterwards can take
+// the block out from under a node that was seated when it was written. Measured on a fresh world: 7 nodes in 129x129 columns, 1
+// of them floating two blocks over its own hill because a later pass cut the surface away. So the same invariant that owns
+// shrubs owns these, minus the pit-lift and the sideways-wall rules: a rock pile is not a plant, and "it has no floor" is the
+// whole of what can be wrong with one.
+function _isGroundDeco(b){ return b===BID.sulfur_ore || b===BID.pebbles; }
+function _hasDeco(c){ return !!(c && (c.hasCross || c.hasModel)); }   // sulfur/pebbles set hasModel, not hasCross
 function _decoSeatColumn(c, lx, lz){
   if(_NO_DECO_SEAT) return -1;
   const bl=c.blocks; let host=-1;
   for(let y=WH-1;y>=1;y--){ const b=bl[idx(lx,y,lz)]; if(b===AIR) continue;
+    if(_isGroundDeco(b)){ const u=bl[idx(lx,y-1,lz)];
+      if(!(u && isSolid[u] && blockCat[u]!=='cross')) bl[idx(lx,y,lz)]=AIR;
+      continue; }
     if(blockCat[b]==='cross'){
       // SEATED iff there is solid ground directly beneath AND open air directly above. Both halves are required and the
       // first draft of this rule only had the first — so a bush at surface level with dirt packed on top of it passed as
@@ -4163,8 +4175,8 @@ function _decoSeatColumn(c, lx, lz){
       continue; }
     if(isSolid[b] && host<0) host=y; }
   return host; }
-// Enforce over a whole chunk. Gated on hasCross so a chunk with no decoration costs one boolean.
-function decoSeatChunk(c){ if(!c||!c.hasCross) return 0; let n=0;
+// Enforce over a whole chunk. Gated on _hasDeco so a chunk with no decoration of either kind costs one boolean.
+function decoSeatChunk(c){ if(!_hasDeco(c)) return 0; let n=0;
   for(let lz=0;lz<CK;lz++)for(let lx=0;lx<CK;lx++) n+=(_decoSeatColumn(c,lx,lz)>=0?0:0);
   return n; }
 function beginBulk(){ if(!_bulk) _bulk={touched:new Map()}; }
@@ -4173,7 +4185,7 @@ function endBulk(){ const t=_bulk; _bulk=null; if(!t||!t.touched.size) return;
     // CHOKEPOINT 1 of 3 for the decoration invariant (see _decoSeatColumn). This is where every bulk build lands —
     // structure pads, trail carving, tree falls, the village, the cathedral — so it is where a shrub gets buried, and
     // therefore where it gets removed. Runs BEFORE the htop rebuild because it changes the column's contents.
-    if(c.hasCross) for(let lz=0;lz<CK;lz++)for(let lx=0;lx<CK;lx++) _decoSeatColumn(c,lx,lz);
+    if(_hasDeco(c)) for(let lz=0;lz<CK;lz++)for(let lx=0;lx<CK;lx++) _decoSeatColumn(c,lx,lz);
     for(let lz=0;lz<CK;lz++)for(let lx=0;lx<CK;lx++){ let top=-1; for(let y=WH-1;y>=0;y--){ if(occludesSky[c.blocks[idx(lx,y,lz)]]){ top=y; break; } } c.htop[lx+lz*CK]=top; }   // occludesSky (not isOpaque): canopy must not fold into htop — matches worldgen (Ben 07-23)
     c._emit=null; markRemesh(c.cx,c.cz);
     for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++){ if(!dx&&!dz)continue; const nc=getChunk(c.cx+dx,c.cz+dz);
@@ -4207,7 +4219,7 @@ function setBlockWorld(wx,wy,wz,b,record){
   // CHOKEPOINT 2 of 3 for the decoration invariant (see _decoSeatColumn). Single writes only — a player placing a block
   // on a flower, or breaking the block under one. One column, so it costs a single top-down walk. Skipped when the write
   // IS a cross block, because that is a legitimate placement and the invariant would only re-check what was just set.
-  if(c.hasCross && blockCat[b]!=='cross') _decoSeatColumn(c,lx,lz);
+  if(_hasDeco(c) && blockCat[b]!=='cross') _decoSeatColumn(c,lx,lz);
   // AND THE FOUR COLUMNS BESIDE IT, when the write was solid. A plant is pocketed by walls raised NEXT to it, not by
   // anything happening in its own column, and this chokepoint only ever re-checked the column that was written — so
   // terraforming that raised the ground beside a shrub left it at the bottom of a 1x1 that the invariant never revisited.
@@ -4217,9 +4229,9 @@ function setBlockWorld(wx,wy,wz,b,record){
   if(b && isSolid[b] && blockCat[b]!=='cross'){
     for(let i=0;i<4;i++){ const dx=(i===0)?1:(i===1)?-1:0, dz=(i===2)?1:(i===3)?-1:0;
       const nx=lx+dx, nz=lz+dz;
-      if(nx>=0&&nx<CK&&nz>=0&&nz<CK){ if(c.hasCross) _decoSeatColumn(c,nx,nz); }
+      if(nx>=0&&nx<CK&&nz>=0&&nz<CK){ if(_hasDeco(c)) _decoSeatColumn(c,nx,nz); }
       else { const nc=getChunk((wx+dx)>>4,(wz+dz)>>4);                              // across a chunk seam: that chunk owns the column
-        if(nc && nc.hasCross){ _decoSeatColumn(nc,(wx+dx)&15,(wz+dz)&15); markRemesh(nc.cx,nc.cz); } } } }
+        if(nc && _hasDeco(nc)){ _decoSeatColumn(nc,(wx+dx)&15,(wz+dz)&15); markRemesh(nc.cx,nc.cz); } } } }
   markRemesh(c.cx,c.cz);
   if (lx===0) markRemesh(c.cx-1,c.cz); if (lx===15) markRemesh(c.cx+1,c.cz);
   if (lz===0) markRemesh(c.cx,c.cz-1); if (lz===15) markRemesh(c.cx,c.cz+1);
@@ -4662,6 +4674,64 @@ function roofGeos(){ if(_roofWedge) return;
   const uv=[]; for(let i=0;i<P.length;i+=3) uv.push(P[i]+0.5, P[i+2]+0.5); g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));
   g.computeVertexNormals(); _roofWedge=g;
   const slab=new THREE.BoxGeometry(1.0,0.12,1.5); slab.rotateX(-Math.PI/4); slab.translate(0,0.06,0.03); _roofSlab=slab; }   // thin tiled surface laid on the 45° slope, slight overhang
+// ===== SANDBAGS ======================================================================================================
+// A revetment is bags LAID: courses about a quarter of a cell deep, each course turned across the one below so the wall
+// bonds, exactly why brickwork alternates stretchers and headers. block('sandbag') used to be a CUBE wearing a picture of
+// bags, and the silhouette is what gave it away — a real pile has a broken lumpy crest and you can count the bags in it
+// at twenty blocks.
+//
+// INSTANCED, NOT PER-BLOCK CLONED, and that is measured rather than assumed: metal_bench and the hanging lamp are Groups
+// cloned per block, which is right for a rare prop and wrong here. NOTHING in worldgen places a sandbag — the whole file
+// mentions it four times: the tile, the block def, the item name and the 2-from-sand recipe — so every sandbag that will
+// ever exist is one a player laid, and players lay them in WALLS. A clone per cell is a draw call per cell.
+// THE CONSEQUENCE TO KNOW: an InstancedMesh carries no per-instance vertex data, so every scrap of per-bag variation has
+// to be BAKED into the merged geometry. That is why the wobble is deterministic, and why there are two variants at all —
+// one geometry repeated down a wall reads as wallpaper, and alternating two kills that for one extra draw call.
+const _sbGeo={}; let _sbMat=null;
+function _sandbagMat(){ return _sbMat || (_sbMat=new THREE.MeshLambertMaterial({map:tileTex('sandbag_cloth')})); }   // burlap is matte: Lambert, not a specular material
+function _sbBagGeo(len,wid,hgt,seed){
+  const g=new THREE.BoxGeometry(len,hgt,wid,3,2,2);   // TWO height segments is not spare detail: the belly bulge needs a mid-height ring of vertices to push outward, and with hSeg=1 the side faces only have vertices at top and bottom, so the bulge silently does nothing
+  const p=g.attributes.position, hx=len/2, hy=hgt/2;
+  // Hash the QUANTIZED POSITION, never the vertex index. A BoxGeometry does not share vertices between its faces, so two
+  // coincident corners have to be nudged IDENTICALLY or the bag splits open along every seam under close inspection.
+  const nz=(x,y,z,s)=>{ const h=Math.imul(((Math.round(x*4096)|0)^Math.imul(Math.round(y*4096)|0,1601)^Math.imul(Math.round(z*4096)|0,2411))+s,2654435761)>>>0; return h/4294967296-0.5; };
+  for(let i=0;i<p.count;i++){
+    const x0=p.getX(i), y0=p.getY(i), z0=p.getZ(i), sx=x0/hx, sy=y0/hy;
+    const end=1-0.42*Math.abs(sx)*Math.abs(sx)*Math.abs(sx);   // the sewn ends pinch in and slump: top drops, base lifts
+    const belly=1+0.30*(1-sy*sy);                              // the fill settles into a belly at mid height
+    p.setXYZ(i, x0 + nz(x0,y0,z0,seed)*0.016,
+                y0*end + nz(x0,y0,z0,seed+7)*0.012,
+                z0*end*belly + nz(x0,y0,z0,seed+13)*0.016);
+  }
+  p.needsUpdate=true;
+  // PER-BAG UV PHASE. tileTex hands back a RepeatWrapping texture, so shifting uv walks each bag onto a different part of
+  // the weave. It costs nothing and it is what stops twelve bags in one cell being twelve photocopies.
+  const uv=g.attributes.uv, du=nz(seed,1,1,3)+0.5, dv=nz(seed,2,2,5)+0.5;
+  for(let i=0;i<uv.count;i++) uv.setXY(i, uv.getX(i)+du, uv.getY(i)+dv);
+  uv.needsUpdate=true;
+  g.computeVertexNormals();   // MANDATORY after bending vertices, or the bag lights as the box it started as
+  return g;
+}
+function _sandbagPileGeo(variant){
+  const k='v'+variant; if(_sbGeo[k]) return _sbGeo[k];
+  const parts=[]; let seed=variant*131+7; const CH=0.245;   // four courses fill the cell; 0.475 x 0.465 x 0.27 is a filled bag's slumped proportion at 1 cell = 1 m
+  for(let c=0;c<4;c++){
+    const alongX=(((c+variant)&1)===0);                     // alternate the bond course by course, and flip the whole stack for the second variant
+    const yc=-0.02 + c*CH + CH*0.5;                         // the bottom course starts 0.02 LOW so a stacked cell shows no daylight seam at the join
+    const top=(c===3);
+    if(alongX){ for(const ox of [-0.245,0.245]) for(const oz of [-0.245,0.245]){        // STRETCHERS: two bags long, two rows deep
+        const b=_sbBagGeo(0.475,0.465,CH*1.10,seed++); b.rotateY((((seed*37)%7)-3)*0.016);
+        b.translate(ox, yc + (top?((seed%5)-2)*0.012:0), oz); parts.push(b); } }
+    else { for(const ox of [-0.245,0.245]){                                             // HEADERS: laid ACROSS the wall, which is the course that actually bonds it
+        const b=_sbBagGeo(0.96,0.465,CH*1.10,seed++); b.rotateY(Math.PI/2 + (((seed*37)%7)-3)*0.016);
+        b.translate(ox, yc + (top?((seed%5)-2)*0.012:0), 0); parts.push(b); } }
+  }
+  return (_sbGeo[k]=_mergeGeos(parts));   // the top course carries a per-bag height jitter: that broken crest IS the silhouette
+}
+// The icon, the held viewmodel, the dropped item and a peer's hands all come through here, and the world comes through the
+// instanced branch in buildModelBlocks — BOTH read _sandbagPileGeo, so the pile in your hand cannot disagree with the wall.
+MODEL_ITEM_BUILDERS.sandbag=(bd)=>{ const g=new THREE.Group();
+  const m=new THREE.Mesh(_sandbagPileGeo(0), _sandbagMat()); m.name='sandbagPile'; g.add(m); return g; };
 function buildModelBlocks(c,g){
   c.emitters=[];
   const list=[], flames=[]; const cx0=c.cx*CK, cz0=c.cz*CK;
@@ -4836,6 +4906,17 @@ function buildModelBlocks(c,g){
           for(let i=0;i<cl.length;i++){ const a=cl[i]; m4.makeTranslation(a[0]+0.5, a[1], a[2]+0.5); im.setMatrixAt(i,m4); } im.instanceMatrix.needsUpdate=true; im.userData.modelMat=fmat; g.add(im); }
         continue; }
       if(m==='bars'){ const bmat=new THREE.MeshPhongMaterial({color:0x9aa0aa, shininess:70, specular:0x6b7078}); addIM(_barsGeo(), bmat, 0.5); continue; }   // thick metal bars, base on the floor
+      // SANDBAGS take the instanced path and never reach the clone branch below, because a wall is the common case and a
+      // clone per cell is a draw call per cell. Two meshes per chunk regardless of how long the wall is.
+      if(m==='sandbag'){ const mat=_sandbagMat(); const cells=[[],[]];
+        // PARITY IN WORLD SPACE. arr holds chunk-local coords, so keying the variant off those restarts the alternation at
+        // every chunk boundary and prints a 16-block grid down the wall — the same trap the bench's neighbour mask hit.
+        for(const a of arr) cells[((cx0+a[0])+(cz0+a[2])+a[1])&1].push(a);
+        for(let v=0;v<2;v++){ const cl=cells[v]; if(!cl.length)continue;
+          const im=new THREE.InstancedMesh(_sandbagPileGeo(v), mat, cl.length); im.castShadow=true; im.receiveShadow=true; im.name='sandbagPile';
+          for(let i=0;i<cl.length;i++){ const a=cl[i]; m4.makeTranslation(a[0]+0.5,a[1],a[2]+0.5); im.setMatrixAt(i,m4); }
+          im.instanceMatrix.needsUpdate=true; im.userData.modelMat=mat; g.add(im); }
+        continue; }
       // The neighbour mask is what lets a run of the SAME block build as one object rather than as N copies — the bench
       // drops the legs and lengthens the shelf where another bench continues the run. Second argument, so every other
       // builder (and the icon/drop/held path at modelForItem, which has no position at all) is unaffected and gets the
@@ -4974,7 +5055,7 @@ function buildChunkStaged(c){
     // boolean and a remesh pays nothing at all.
     // ONCE, not on every remesh. Re-seating on each mesh was measured to change nothing (8 two-walled plants either way) and
     // costs a 256-column top-down walk on the path whose cost is the game's frame rate during streaming.
-    if(c.hasCross && !c._decoMeshSeat){ c._decoMeshSeat=1; decoSeatChunk(c); }
+    if(_hasDeco(c) && !c._decoMeshSeat){ c._decoMeshSeat=1; decoSeatChunk(c); }
     _stagedC=c;
     c._oldL=c.light3D; c.light3D=null;                 // stash the old light volume: the OLD group's materials still sample it until the swap — bake must not dispose or mutate it
     buildLightTexture(c);
@@ -7872,9 +7953,13 @@ let _tpsOn=false; const _TPS_D=3.6, _tpsPos=new THREE.Vector3();
 // ALL THREE VIEWMODEL GROUPS, NOT JUST THE MAIN HAND (Ben 08-04: "hide the players hand from the hud, same goes for any offhand
 // stuff"). The held item, the offhand item and the offhand ARM are three separate groups on the camera, and third person hid
 // only the first -- which is why a shield and a bare forearm went on hanging in the middle of the screen.
+// It only ever RESTORES what it itself hid. Forcing the three groups visible on the way back to first person would put an empty
+// fist on screen in cinematic mode and un-hide the offhand arm of a player holding nothing -- both states the viewmodel owns.
 function _tpsHideHands(hide){
-  for(const v of [ (typeof view!=='undefined')?view:null, (typeof offView!=='undefined')?offView:null, (typeof offArm!=='undefined')?offArm:null ])
-    if(v&&v.group&&v.group.visible===hide) v.group.visible=!hide; }
+  for(const v of [ (typeof view!=='undefined')?view:null, (typeof offView!=='undefined')?offView:null, (typeof offArm!=='undefined')?offArm:null ]){
+    if(!v||!v.group) continue; const g=v.group;
+    if(hide){ if(g.visible){ g.visible=false; g.userData._tpsHid=1; } }
+    else if(g.userData._tpsHid){ g.visible=true; g.userData._tpsHid=0; } } }
 // ---- THE PLAYER'S OWN BODY, IN THIRD PERSON (Ben 08-04: "f3 third person should show the player, hes invisible rn ... make
 // sure that everything loads from that perspective, clothes, hats, backpack, guns etc").
 // It is the SAME buildPlayerModel the inventory paperdoll uses, so every wearable that exists is already on it and every
@@ -8291,6 +8376,11 @@ function loop(){ try{
   T.end(TID.cull);
   T.begin(TID.draw);
   if(typeof updateScopeRT==='function') updateScopeRT();                   // render the magnified scope image to the lens texture BEFORE the main pass draws (and samples) the gun
+  // THE LAST WORD ON THE HANDS, and it has to be here rather than in updateCamera. The viewmodel update runs AFTER the camera
+  // and sets view.group.visible=true from four separate poses of its own, so hiding the hands when third person was switched on
+  // lasted exactly until that ran: the probe read main/off/arm all visible with the body drawn behind them. Deciding it
+  // immediately before the draw is the only point no later writer can undo.
+  if(typeof _tpsHideHands==='function') _tpsHideHands(_tpsOn && !player.grabbed);
   // THE HORRIFIC WRETCH's drift loop writes render targets the scene below then samples, so it steps here — before the
   // world pass, and after every camera update this frame.
   if(wretchExtra.length){ T.begin(TID.drift); try{ stepHorrificDrift(dt); }catch(e){ if(!window._hwErr){ window._hwErr=String(e&&e.stack||e); console.error('[horrific] drift step crashed — caught so the game keeps running:', e); } } T.end(TID.drift); }
@@ -18000,7 +18090,14 @@ const skyBirdGroup=new THREE.Group(); scene.add(skyBirdGroup); const skyBirds=[]
 // direction, and that their wings flap" / "these weird black lines in the sky" — one set of faults behind all three).
 // The body's long axis is Z and it was a bare box, so there was no front to see and nothing to contradict a wrong heading;
 // head and tail are what make "the proper direction" a visible claim rather than an invisible one.
-function makeBird(){ const g=new THREE.Group(); const bm=new THREE.MeshBasicMaterial({color:0x191920});
+// ONE MATERIAL FOR THE WHOLE FLOCK, and its value follows the hour. MeshBasicMaterial takes no light, so a bird was the same
+// near-black at every hour: measured at night from 57 blocks, it rendered at luminance 0 against a sky of 34 — the darkest
+// thing in the frame, which is what makes a distant bird read as an ink stroke instead of a silhouette (Ben 08-04, "these
+// weird black lines in the sky"). By DAY that is right: a bird against a bright sky is a dark shape. At night it has to sit
+// just under the air behind it, so it is mixed toward the horizon-air colour the sky and the pines already share — the same
+// treatment _uPine and _uFolNight get, for the same reason. It was also a new material per bird, five meshes deep.
+const _BIRD_DARK=new THREE.Color(0x191920), _birdMat=new THREE.MeshBasicMaterial({color:0x191920});
+function makeBird(){ const g=new THREE.Group(); const bm=_birdMat;
   g.add(new THREE.Mesh(new THREE.BoxGeometry(0.16,0.12,0.5),bm));
   g.add(new THREE.Mesh(new THREE.BoxGeometry(0.11,0.10,0.14),bm)).position.z=0.30;                      // head, on +Z — the forward end
   { const t=new THREE.Mesh(new THREE.BoxGeometry(0.14,0.035,0.24),bm); t.position.z=-0.34; g.add(t); }   // and a tail fan on the other, so the silhouette has a direction at any distance
@@ -18017,6 +18114,12 @@ function updateSkyBirds(dt){
   // free to fly through the ceiling of a sealed hall.
   if(typeof BR!=='undefined' && BR.inside){ if(skyBirdGroup.visible) skyBirdGroup.visible=false; return; }
   if(!skyBirdGroup.visible) skyBirdGroup.visible=true;
+  // A FRACTION OF THE AIR AT NIGHT, THE OLD CONSTANT BY DAY. Written the other way round first — lerp from the dark constant
+  // TOWARD the air by 0.30*(1-day) — and it did the opposite of the intent: the factor is largest at night but the air it aims
+  // at is five times brighter at noon, so the flock came out lighter at midday (0.070) than at midnight (0.056), lifting the
+  // silhouette exactly where a silhouette belongs and leaving the night hole alone. This form pins the day end to the value
+  // that shipped and only lifts the night end, to 32% of the air behind it — dark enough to read as a bird, not a hole in the sky.
+  _birdMat.color.copy(_uSky.value).multiplyScalar(0.32).lerp(_BIRD_DARK, globalU.uDay.value);
   _birdT-=dt;
   if(_birdT<=0){ _birdT=28+Math.random()*50; const n=3+(Math.random()*5|0), ang=Math.random()*6.283, dist=110;
     const cx=player.pos.x+Math.cos(ang)*dist, cz=player.pos.z+Math.sin(ang)*dist, hy=player.pos.y+42+Math.random()*28;
@@ -20870,6 +20973,46 @@ window.__hc={
       // the top has no name, so count PLACED cells to prove the run exists at all rather than trusting an empty traverse
       for(let i=0;i<n;i++){ const bx=ax==='x'?x+i:x, bz=ax==='x'?z:z+i; if(getBlock(bx,y,bz)===BID.metal_bench)tops++; }
       return { n, axis:ax, benches:tops, legs, spokes, vices, span, maxGap:+maxGap.toFixed(4), tops:spans.length }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: everything about the sandbag that can be read WITHOUT a screenshot — the block's four masks, the pile's real
+  // triangle count and footprint, and how broken its crest is. The crest number is the one that matters: a cube's spread is
+  // exactly 0, so "is it actually modelled" becomes a number instead of a judgement about a picture.
+  sandbagInfo(){ try{ const id=BID.sandbag, g0=_sandbagPileGeo(0), g1=_sandbagPileGeo(1);
+      const psum=g=>{ const p=g.attributes.position; let s=0; for(let i=0;i<p.count;i++) s+=p.getX(i)*1.7+p.getY(i)*2.3+p.getZ(i)*3.1; return +s.toFixed(2); };
+      g0.computeBoundingBox(); const bb=g0.boundingBox;
+      const p=g0.attributes.position, N=6, top=new Float32Array(N*N).fill(-9);
+      for(let i=0;i<p.count;i++){ const bx=Math.min(N-1,Math.max(0,Math.floor((p.getX(i)+0.5)*N))), bz=Math.min(N-1,Math.max(0,Math.floor((p.getZ(i)+0.5)*N)));
+        const k=bx+bz*N, y=p.getY(i); if(y>top[k]) top[k]=y; }
+      let mn=9,mx=-9,sum=0; for(let i=0;i<N*N;i++){ mn=Math.min(mn,top[i]); mx=Math.max(mx,top[i]); sum+=top[i]; }
+      return { id, cat:blockCat[id], opaque:isOpaque[id], solid:isSolid[id], occludesSky:occludesSky[id], h:+blockH[id].toFixed(2),
+        tris:p.count/3, variantsDiffer:psum(g0)!==psum(g1), hasItemBuilder:!!MODEL_ITEM_BUILDERS.sandbag,
+        span:{x:+(bb.max.x-bb.min.x).toFixed(3), y:+(bb.max.y-bb.min.y).toFixed(3), z:+(bb.max.z-bb.min.z).toFixed(3)},
+        base:+bb.min.y.toFixed(3), crown:+bb.max.y.toFixed(3),
+        crest:{min:+mn.toFixed(3), max:+mx.toFixed(3), spread:+(mx-mn).toFixed(3)},
+        // APPEND-ONLY, asserted the way the brief says to: bound what is ABOVE it, never "is it last" — the moment another
+        // tile is appended below, "is it last" goes red on working code, which is how assert-pastel-pack failed.
+        tile:TILEIDX.sandbag_cloth, aboveLastPastel:TILEIDX.sandbag_cloth>TILEIDX.pastel_shell,
+        indSandbagKept:TILEIDX.ind_sandbag!=null, atlas:ATLAS_COUNT }; }catch(e){ return {err:String(e.message||e)}; } },
+  sandbagWall(x,y,z,n,axis){ try{ n=Math.max(1,n|0||1); const ax=(axis==='z')?'z':'x';
+      for(let i=0;i<n;i++) setBlockWorld(ax==='x'?x+i:x, y, ax==='x'?z:z+i, BID.sandbag, true);
+      return { n, axis:ax }; }catch(e){ return {err:String(e.message||e)}; } },
+  // THE COST CHECK. A wall of any length must cost a FLAT number of meshes per chunk, which is the whole reason this block
+  // is instanced instead of cloned. Counting clones separately matters: if the instanced branch is ever removed the block
+  // falls through to the MODEL_ITEM_BUILDERS clone path and still LOOKS right while costing a draw call per cell.
+  sandbagWallCount(x,y,z,n,axis){ try{ n=Math.max(1,n|0||1); const ax=(axis==='z')?'z':'x';
+      let placed=0; const chunks=new Set();
+      for(let i=0;i<n;i++){ const bx=ax==='x'?x+i:x, bz=ax==='x'?z:z+i;
+        if(getBlock(bx,y,bz)===BID.sandbag){ placed++; chunks.add((bx>>4)+','+(bz>>4)); } }
+      let meshes=0, instances=0, clones=0;
+      world.forEach(c=>{ if(!c.group)return; c.group.traverse(o=>{ if(o.name!=='sandbagPile')return;
+        if(o.isInstancedMesh){ meshes++; instances+=o.count; } else clones++; }); });
+      return { n, axis:ax, placed, chunks:chunks.size, meshes, instances, clones,
+        solidHere:!!isSolid[getBlock(ax==='x'?x:x, y, ax==='x'?z:z)] }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: does a sandbag ROOF actually shade the cell under it? htop is what _ssky/aSky bake from, so this reads the
+  // stored column top rather than a screenshot — the fault it guards is a bunker whose roof bakes as open sky.
+  sandbagRoof(x,y,z){ try{ const c=getChunk(x>>4,z>>4); if(!c||!c.generated) return {err:'nochunk'};
+      const col=(x&15)+(z&15)*CK, before=c.htop[col];
+      setBlockWorld(x,y,z,BID.sandbag,true);
+      return { before, after:getChunk(x>>4,z>>4).htop[col], y, occludes:occludesSky[BID.sandbag] }; }catch(e){ return {err:String(e.message||e)}; } },
   lampSeeBelow(x,y,z,drop,ox,oz){ try{ const o=new THREE.Vector3(x+0.5+(+ox||0),(y|0)-(drop==null?1.2:+drop),z+0.5+(+oz||0));
       const rc=new THREE.Raycaster(o,new THREE.Vector3(0,1,0),0,4); rc.firstHitOnly=false;
       const hits=[]; world.forEach(c=>{ if(c.group) hits.push(...rc.intersectObject(c.group,true)); });
@@ -21241,13 +21384,22 @@ window.__hc={
   // Both have to be numbers: "flying sideways" and "wings not flapping" are claims about a heading and about a moving vertex,
   // and a screenshot of a 3-metre black silhouette 110 blocks up cannot settle either.
   hits(x,y,z){ try{ return aabbHits(+x,+y,+z); }catch(e){ return {err:String(e.message||e)}; } },   // QA: does the player's AABB collide at this exact point? A collision claim tested by walking into something is really a claim about physics, friction and step-up as well
+  // The flock's shared material against the air colour it is mixed toward. Reported as numbers because "the birds are black
+  // lines" is a claim about a VALUE, and segmenting a 2-block silhouette out of a night sky by luminance catches the clouds
+  // and the terrain instead — measured, it returned a 300x204 region of 15,903 pixels and called it the bird.
+  birdTone(){ try{ const c=_birdMat.color, s=_uSky.value;
+      return { bird:[+c.r.toFixed(4),+c.g.toFixed(4),+c.b.toFixed(4)], air:[+s.r.toFixed(4),+s.g.toFixed(4),+s.b.toFixed(4)],
+               birdLum:+(0.2126*c.r+0.7152*c.g+0.0722*c.b).toFixed(4), airLum:+(0.2126*s.r+0.7152*s.g+0.0722*s.b).toFixed(4),
+               darkLum:+(0.2126*_BIRD_DARK.r+0.7152*_BIRD_DARK.g+0.0722*_BIRD_DARK.b).toFixed(4),   // the value that shipped before the tone follow — the day end must still land here
+               day:+globalU.uDay.value.toFixed(3) }; }catch(e){ return {err:String(e.message||e)}; } },
   skyFlock(o){ try{ if(o&&o.spawn){ _birdT=0; return {armed:true, live:skyBirds.length}; }
       return skyBirds.map(b=>{ const f=new THREE.Vector3(0,0,1).applyQuaternion(b.m.getWorldQuaternion(new THREE.Quaternion()));
         const vel=new THREE.Vector3(Math.sin(b.dir),0,Math.cos(b.dir));
         const tip=b.m.userData.wl.localToWorld(new THREE.Vector3(-0.62,0,0));
         return { dir:+b.dir.toFixed(3), rotY:+b.m.rotation.y.toFixed(3), facesVel:+f.dot(vel).toFixed(4),
                  tipDY:+(tip.y-b.m.position.y).toFixed(4), flap:+b.m.userData.wl.rotation.z.toFixed(4),
-                 scale:+b.m.scale.x.toFixed(2), y:+b.m.position.y.toFixed(1) }; });
+                 scale:+b.m.scale.x.toFixed(2), x:+b.m.position.x.toFixed(1), y:+b.m.position.y.toFixed(1), z:+b.m.position.z.toFixed(1),
+                 dist:+Math.hypot(b.m.position.x-player.pos.x, b.m.position.z-player.pos.z).toFixed(1) }; });
     }catch(e){ return {err:String(e.message||e)}; } },
   crow(type){ try{ type=type||'crow'; const yaw=player.yaw||0, fx=-Math.sin(yaw), fz=-Math.cos(yaw);   // QA: drop birds ahead on the ground; report body-origin y vs ground (float check)
     for(let k=0;k<3;k++){ const x=player.pos.x+fx*(4+k*1.4)+(k-1)*1.2, z=player.pos.z+fz*(4+k*1.4); spawnFromEgg(type, {x:Math.floor(x), z:Math.floor(z), y:groundYAt(x,z)}); }
