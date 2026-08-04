@@ -22,8 +22,8 @@
   #xh { position:fixed; left:50%; top:50%; width:16px; height:16px; transform:translate(-50%,-50%);
         border:2px solid #fff; border-radius:50%; box-sizing:border-box;
         mix-blend-mode:difference; z-index:5; opacity:.85; }
-  #xh::after{ content:''; position:absolute; left:50%; top:50%; width:2px; height:2px;
-        transform:translate(-50%,-50%); background:#fff; border-radius:50%; }
+  /* NO CENTRE DOT (Ben 08-04) — the ring alone. A dot in the middle of a ring that describes spread is a lie: it says
+     "the shot goes exactly here" while the ring says "somewhere in this circle". */
   #hud { position:fixed; left:0; right:0; bottom:8px; z-index:5; display:flex; flex-direction:column;
          align-items:center; gap:6px; pointer-events:none; }
   #bars { display:flex; gap:120px; align-items:flex-end; height:22px; }
@@ -2540,6 +2540,7 @@ canvas.addEventListener('webglcontextlost',(e)=>{ e.preventDefault(); try{ (type
 renderer.setPixelRatio(Math.min(devicePixelRatio, CFG.quality==='Ultra'?2:1.25));
 renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = !Q.get('noshadow');   // real-time sun shadow (directional). ?noshadow disables for diagnostics.
+renderer.localClippingEnabled = true;              // per-MATERIAL clipping planes: only the holosight reticle uses them (it is sliced by the sight's own window), and a material without them compiles exactly as before
 let _softShadows=(()=>{ try{ return localStorage.getItem('hollowcraft_softsh')!=='0'; }catch(e){ return true; } })();   // POSTFX setting: soft (PCF) vs hard shadows
 renderer.shadowMap.type = _softShadows ? THREE.PCFSoftShadowMap : THREE.BasicShadowMap;
 // AgX (r160) preserves shadow detail in dark scenes where ACES crushes/desaturates it
@@ -5725,6 +5726,30 @@ function updateSky(dt){
   // lands near #0b0c10. The hair of blue is still deliberate and still the reason there IS a floor: with none at all the
   // far chunks read as void-black HOLES punched in the horizon rather than as unlit mass.
   fc.setRGB(Math.max(0.0018,dcol), Math.max(0.0022,dcol*1.005), Math.min(1, Math.max(0.0034,dcol*1.04)));
+  // THE HAZE TAKES THE SUN'S GRAZING WARMTH (plan Tier 1 item 3). At a low sun the sky above the horizon is orange and the land
+  // faded into a dead neutral grey: measured at 0.8 degrees of elevation, sky rgb(220,189,167) — warmth (R-B)/(R+B) of +0.138 —
+  // against a fog colour of #aaabad, warmth -0.009. Distant forest dissolving into grey under an orange sky is the drift.
+  //
+  // NOT FROM _uSky, which is what the plan proposed. _uSky is a straight value ramp on `day` — lerp(0.12,0.60), lerp(0.15,0.68),
+  // lerp(0.20,0.78) — so it holds no dawn hue to inherit, and its NIGHT value of 0.12/0.15/0.20 against this ramp's 0.0018 floor
+  // would have brightened night by two orders of magnitude, which is the one thing Ben has objected to four separate times.
+  // The warmth comes instead from the same grazing term the key light already uses (see gz below), so the haze and the light
+  // landing on the terrain cannot drift apart — they are computed from one number.
+  //
+  // AND IT ONLY ROTATES HUE. The target is renormalised to the fog's own luminance before the mix, so every one of the four
+  // rounds of value tuning above survives untouched: at night `day` is 0 and this is a no-op, and at noon the grazing term is 0.
+  // THE SAME CURVE THE SKY'S OWN DUSK TERM USES — pow(clamp(1-|sunH|/0.22),1.6), copied from skyMat rather than approximated, so
+  // the haze and the orange band above it fade out together. A smoothstep of the same width was tried first and decays too
+  // slowly: at 7.7 degrees the sky had already returned to neutral (warmth 0.010) while the fog still carried 0.041.
+  { const gzf=Math.pow(Math.max(0,Math.min(1, 1-Math.abs(elev)/0.22)), 1.6);
+    // GATED ON ELEVATION, NOT ON `day`. `day` is smooth(-0.46,0.46,elev), so it measures 0.5 at the exact moment the sun sits on
+    // the horizon — it throttled the tint to 28% precisely where the sky is at its most orange, and the gap only closed from
+    // 0.146 to 0.091. This is the sunglade's gate: alive to a shade under the horizon, gone by the time the sun is properly set,
+    // so the night floor is still never touched.
+    const amt=0.72*gzf*smooth(-0.10,0.02,elev);
+    if(amt>0.01){ const L=0.2126*fc.r+0.7152*fc.g+0.0722*fc.b;
+      const wr=1.00, wg=0.62, wb=0.42, wl=0.2126*wr+0.7152*wg+0.0722*wb, k=L/Math.max(1e-5,wl);
+      _fogGrey.setRGB(wr*k, wg*k, wb*k); fc.lerp(_fogGrey, amt); } }
   if(oc>0.01) fc.lerp(_fogGrey.setRGB(lerp(0.008,0.28,day),lerp(0.009,0.30,day),lerp(0.013,0.34,day)), oc*0.6);   // rainy grey haze rolls the horizon in — day end unchanged, night end taken down with the night fog floor above, or rain re-lit the dark it was just made to have
   const _under=(typeof inDungeon==='function' && inDungeon(Math.floor(camera.position.x),Math.floor(camera.position.y),Math.floor(camera.position.z))) || (typeof playerRoofed==='function' && playerRoofed());
   const wf=_under?0:weather.fog;                                                    // FOG WEATHER: thickens the haze + pales the air — but it NEVER seeps underground/into the dungeon, so the lantern & room stay readable in fog
@@ -7055,6 +7080,13 @@ addEventListener('keydown',e=>{ if(e.code==='Space')e.preventDefault();
   // overlay is the rarer of the two and third person is a thing you flip constantly.
   if(e.code==='F3' && e.shiftKey){ prof.style.display=prof.style.display==='none'?'block':'none'; return; }
   if(e.code==='F3'){ e.preventDefault(); _tpsOn=!_tpsOn; _tpsReset(); flashName(_tpsOn?'third person':'first person'); return; }
+  // SHOULDER SWAP, ON THE ARROW KEYS ONLY (Ben 08-04). Deliberately not WASD: those are movement, and a camera control that
+  // also walks you is a camera control you cannot use while walking. Pressing the side you are already on centres the boom, so
+  // two keys reach all three positions. Left is the default, which is why _tpsShoulder starts at -1.
+  if(_tpsOn && (e.code==='ArrowLeft'||e.code==='ArrowRight')){ e.preventDefault();
+    const want=(e.code==='ArrowLeft')?-1:1;
+    _tpsShoulder=(_tpsShoulder===want)?0:want;
+    flashName(_tpsShoulder<0?'left shoulder':(_tpsShoulder>0?'right shoulder':'centred')); return; }
   if(e.code==='F4'){ e.preventDefault(); _tpsOn=!_tpsOn; _tpsReset(); flashName(_tpsOn?'third person':'first person'); return; }   // kept: F4 was the shortcut before F3 took over, and muscle memory is cheap to honour
   if(e.code==='F8'){ dbg.style.display=dbg.style.display==='none'?'block':'none'; updateDbg&&updateDbg(); return; }
   if(e.code==='KeyC' && (!openUI||openUI==='creative') && !player.grabbed){ if(!window._allowCreative){ flashName('creative is locked in survival'); return; } toggleCreative(); return; }   // creative all-items menu (open from play, close from the menu) — SURVIVAL locks it; NOTHING opens while it has you
@@ -8119,9 +8151,13 @@ let _tpsOn=false; const _TPS_D=3.6, _tpsPos=new THREE.Vector3();
 //    tries a fan of yaw offsets and takes the smallest one that clears, so it swings AROUND the obstruction instead of
 //    through it; the chosen offset is itself damped, which is what makes that read as the camera walking round a corner.
 //    Indoors — anything solid overhead — it stops fighting the walls and comes in close by default.
-const _TPS_OFFS=[0,-0.3,0.3,-0.62,0.62,-1.0,1.0], _TPS_MIN=0.85, _TPS_IN=1.9;
-let _tpsInit=false, _tpsDist=_TPS_D, _tpsYawOff=0; const _tpsAnchor=new THREE.Vector3();
-function _tpsReset(){ _tpsInit=false; _tpsYawOff=0; _tpsDist=_TPS_D; _tpsPos.set(0,0,0); }
+// OVER THE SHOULDER, LEFT BY DEFAULT (Ben 08-04). The offset moves the PIVOT sideways rather than sliding the finished camera
+// position: a shifted pivot is still a boom pointing exactly where you look, so the aim stays honest and the clearance march
+// starts from the shoulder it is actually looking past. Sliding the end point instead would aim the camera off-axis and let the
+// offset push through a wall the march had already cleared.
+const _TPS_OFFS=[0,-0.3,0.3,-0.62,0.62,-1.0,1.0], _TPS_MIN=0.85, _TPS_IN=1.9, _TPS_SHOULDER=0.62;
+let _tpsInit=false, _tpsDist=_TPS_D, _tpsYawOff=0, _tpsShoulder=-1, _tpsSide=-1; const _tpsAnchor=new THREE.Vector3();
+function _tpsReset(){ _tpsInit=false; _tpsYawOff=0; _tpsDist=_TPS_D; _tpsSide=_tpsShoulder; _tpsPos.set(0,0,0); }
 function _tpsSolid(x,y,z){ return (typeof solidAt==='function') && solidAt(Math.floor(x),Math.floor(y),Math.floor(z)); }
 // How far the boom can go along (yaw,pitch) before it would put the camera in something. Samples the CENTRE plus the two
 // horizontal flanks, so the camera keeps a body's width of clearance instead of kissing the wall and clipping through it.
@@ -8144,7 +8180,14 @@ function updateTpsCamera(dt, p){
   if(!_tpsInit){ _tpsAnchor.set(ax,ay,az); _tpsDist=_TPS_D; _tpsYawOff=0; _tpsInit=true; }
   const ka=Math.min(1, dt*14);                                              // the pivot is damped — this is the whole of the smoothing
   _tpsAnchor.x+=(ax-_tpsAnchor.x)*ka; _tpsAnchor.y+=(ay-_tpsAnchor.y)*ka; _tpsAnchor.z+=(az-_tpsAnchor.z)*ka;
-  const px0=_tpsAnchor.x, py0=_tpsAnchor.y, pz0=_tpsAnchor.z;
+  _tpsSide += (_tpsShoulder-_tpsSide)*Math.min(1, dt*8);                    // the swap glides across rather than cutting
+  // The shoulder offset needs room of its own: against a wall on that side there is nowhere to stand, so it gives way rather
+  // than pushing the camera into the stone, and the boom simply centres until the wall is behind you again.
+  let side=_tpsSide*_TPS_SHOULDER;
+  if(side!==0){ const rx=Math.cos(p.yaw), rz=-Math.sin(p.yaw), s=Math.sign(side);
+    if(_tpsSolid(_tpsAnchor.x+rx*s*0.75, _tpsAnchor.y, _tpsAnchor.z+rz*s*0.75)) side*=0.25; }
+  const srx=Math.cos(p.yaw)*side, srz=-Math.sin(p.yaw)*side;
+  const px0=_tpsAnchor.x+srx, py0=_tpsAnchor.y, pz0=_tpsAnchor.z+srz;
   const want=_tpsRoofed(p)?_TPS_IN:_TPS_D;
   let bestOff=0, bestDist=-1;                                               // straight back if it clears, else swing around
   for(const off of _TPS_OFFS){ const c=_tpsClear(px0,py0,pz0, p.yaw+off, p.pitch, want);
@@ -8201,7 +8244,9 @@ function updateTpsBody(dt){
   // mean anything: holding a rifle raises the right arm to point it down the look direction instead of letting it swing.
   const hs=inv[selSlot], hid=hs?hs.id:null;
   if(P.held!==hid){ P.held=hid; try{ setAvatarHeld(P,hid); }catch(e){} }
-  const it=hid?ITEMS[hid]:null;
+  const oid=(armor[EQ_OFF]&&armor[EQ_OFF].id)||null;                            // BOTH HANDS (Ben 08-04): the offhand carries too
+  if(P.offHeld!==oid){ P.offHeld=oid; try{ _tpsSetOff(P,oid); }catch(e){} }
+  const it=hid?ITEMS[hid]:null, oit=oid?ITEMS[oid]:null;
   // A TOOL IS HELD OUT IN FRONT, IN THE RIGHT HAND, AND IT SWINGS (Ben 08-04: "tools should be held in the right hand in 3rd
   // person, and held tools should be held out in front of the player arm up, also hitting/using tools animations arent there").
   // P.hand has always hung off armR, which IS the right arm — with the model facing +z and the group turned by yaw+PI, its local
@@ -8213,16 +8258,34 @@ function updateTpsBody(dt){
   // what guarantees the third-person body strikes on the same frame the hit lands — a separately timed animation would drift.
   const loopArc = (view.swingPhase>0) ? Math.max(0, Math.sin(view.swingPhase)) : 0;
   const swArc = Math.max((view.swing||0)*Math.sin((view.swing||0)*Math.PI), loopArc);
-  if(it&&it.gun) P.armR.rotation.x = -1.45 - player.pitch*0.6;                  // rifle up, tracking where you look
-  else {
-    const carry = it ? (-1.15 - player.pitch*0.45) : P.armR.rotation.x;         // held out in front, arm up, angled with your look
-    P.armR.rotation.x = carry - swArc*1.35;                                     // …and the strike arcs from there, down and through
-    if(it) P.armR.rotation.z = -swArc*0.28;                                     // a real swing comes across the body, not straight down
-    else P.armR.rotation.z = 0;
-    if(!it) P.armR.rotation.x = P.armR.rotation.x - swArc*1.5;                  // empty-handed punch still throws the arm
-  }
+  // THE FIST KEEPS ITS OWN ORIENTATION (Ben 08-04: "items are still facing the floor in the hand"). The grip poses in
+  // setAvatarHeld were authored for the peer avatar, whose arm HANGS — so once the arm is raised to carry, every one of them
+  // rotated forward with it and pointed at the ground. The hand node therefore cancels the arm's CARRY angle and keeps only the
+  // grip: total rotation = grip + swing, so the item sits level in front of you and still arcs when you strike.
+  const carry = it ? (-1.15 - player.pitch*0.45) : -0.15;
+  P.armR.rotation.x = carry - swArc*(it?1.35:1.5);
+  P.armR.rotation.z = it ? -swArc*0.28 : 0;                                     // a swing comes across the body, not straight down
+  if(it&&it.gun){ P.armR.rotation.x = -1.45 - player.pitch*0.6;                 // rifle up, tracking where you look…
+    P.hand.rotation.x = player.pitch - P.armR.rotation.x; }                     // …and the barrel ends up exactly on the look axis
+  else P.hand.rotation.x = TPS_GRIP - carry;                                    // tool/block/torch: forward and slightly up, never down
+  // The offhand mirrors it, minus the swing: a shield or a torch is CARRIED, and the left arm only lifts when it has something.
+  if(oit){ const oc = oit.gun ? (-1.35 - player.pitch*0.5) : -0.95;
+    P.armL.rotation.x = oc; P.handOff.rotation.x = (oit.gun ? player.pitch : TPS_GRIP) - oc; }
+  else P.handOff.rotation.x = 0;
   P.hand.getWorldPosition(_tpsHandW);                                           // where the held light must come from this frame
 }
+const TPS_GRIP=-0.42;   // how the fist itself is cocked: a shade forward of level, the angle a person carries a tool at
+// The offhand's item, built by the same resolver as everything else (itemModel) so a shotgun is a shotgun in every hand. Its own
+// function rather than a second argument to setAvatarHeld, because that one is the NETWORK avatar's and is called per peer.
+function _tpsSetOff(P,id){
+  if(P.offMesh){ P.handOff.remove(P.offMesh); try{ _disposeView(P.offMesh); }catch(e){} P.offMesh=null; }
+  if(!id||!ITEMS[id]) return; const it=ITEMS[id]; let m; try{ m=itemModel(id); }catch(e){ return; }
+  const w=new THREE.Group(); w.add(m);
+  if(it.gun){ m.scale.setScalar(0.8); w.position.set(-0.02,-0.04,-0.1); }
+  else if(it.block!=null){ m.scale.setScalar(0.85); w.position.set(0,0.02,0); }
+  else { m.scale.setScalar(0.55); w.rotation.set(0,0,-0.2); w.position.set(0,0.04,-0.02); }
+  w.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
+  P.handOff.add(w); P.offMesh=w; }
 function updateHighlight(){ const h=locked?raycastVoxel():null; if(h){ hlMesh.visible=true; hlMesh.position.set(h.x+0.5,h.y+0.5,h.z+0.5); } else hlMesh.visible=false; }
 // SUBMERGED view: when the eye is in water, murky overlay + heavy fog so you can barely see around you
 let _submerged=false; const _waterOverlay=document.getElementById('water');
@@ -11467,11 +11530,16 @@ function buildPlayerModel(){ const g=new THREE.Group();
   // player). Shoulder at 1.58, hip at 0.94, every mesh offset so its REST pose is voxel-for-voxel where it was when these were
   // meshes on the body group -- the inventory paperdoll must look untouched, because nothing there ever rotates a limb.
   const joint=(x,y)=>{ const j=new THREE.Group(); j.position.set(x,y,0); g.add(j); return j; };
-  const armL=joint(-0.29,1.58), armR=joint(0.29,1.58), legL=joint(-0.11,0.94), legR=joint(0.11,0.94);
+  // WHICH ARM IS THE RIGHT ARM (Ben 08-04: "items are still not held in the proper hand"). The model is built facing +z and the
+  // world group is turned by yaw+PI, so local +x maps to world -x: a person facing north (-z) has their right hand to the EAST
+  // (+x), which is the joint at local -0.29, NOT the one at +0.29. The first naming took the model's own +x for its right and put
+  // every held item in the left hand. The geometry is symmetric, so the fix is which pivot each name refers to.
+  const armR=joint(-0.29,1.58), armL=joint(0.29,1.58), legL=joint(-0.11,0.94), legR=joint(0.11,0.94);
   mk(0.15,0.84,0.17,skin,0,-0.42,0,armL); mk(0.15,0.84,0.17,skin,0,-0.42,0,armR);   // long arms
   mk(0.18,0.82,0.22,pants,0,-0.41,0,legL); mk(0.18,0.82,0.22,pants,0,-0.41,0,legR); // long legs (textured)
   mk(0.20,0.14,0.30,shoe,0,-0.87,0.04,legL); mk(0.20,0.14,0.30,shoe,0,-0.87,0.04,legR); // feet (fwd), swinging with the leg they are on
-  const hand=new THREE.Group(); hand.position.set(0,-0.80,0.04); armR.add(hand);   // the right fist: where a held item is rendered in third person
+  const hand=new THREE.Group(); hand.position.set(0,-0.80,0.04); armR.add(hand);      // the RIGHT fist — the main hand
+  const handOff=new THREE.Group(); handOff.position.set(0,-0.80,0.04); armL.add(handOff);   // …and the left, for whatever is in the offhand
   const lea=()=>new THREE.MeshLambertMaterial({color:0x7a4a24});
   // ARMOUR THAT COVERS A LIMB RIDES THAT LIMB. A sleeve or a boot parented to the body group would stay behind when the limb
   // swings, so those pieces hang off the pivots and are listed in userData.extra: the visibility/tint pass walks the group AND
@@ -11544,7 +11612,7 @@ function buildPlayerModel(){ const g=new THREE.Group();
   hazmat.visible=false; g.add(hazmat);
   for(const grp of [helm,chest,legs,boots,hazmat]) _wornVis(grp,false);
   return {group:g, armorMesh:[helm,chest,legs,boots], strawHat:straw, hazmat, pack:packG,
-          armL, armR, legL, legR, hand, heldMesh:null, gait:0}; }
+          armL, armR, legL, legR, hand, handOff, heldMesh:null, offMesh:null, gait:0}; }
 // A worn piece is its group PLUS the parts of it that had to be parented to a swinging limb. One helper so visibility and
 // tinting cannot end up disagreeing about which of those two lists they act on.
 function _wornVis(grp,on){ if(!grp) return; grp.visible=on; const ex=grp.userData&&grp.userData.extra; if(ex) for(const o of ex) o.visible=on; }
@@ -12062,6 +12130,10 @@ function itemModel(id){ const it=ITEMS[id];
   if(it.gun==='bolt') return buildBoltRifle(it.suppressed,it.dot);
   if(it.gun==='auto') return buildMinigun(it.dot,it.suppressed);
   if(it.gun==='revolver') return buildRevolver(it.suppressed);
+  // THE 12 GAUGE IS NOT AN AR (Ben 08-04: "when the shotgun is dropped and held in the offhand it looks like an ar-15"). The main
+  // hand branched to buildShotgun but THIS resolver -- which serves the drop, the 3D icon, the offhand, a peer's hand and the
+  // third-person body -- fell through to the generic `it.gun` case, so the pump-action wore an AR-15 everywhere except one hand.
+  if(it.gun==='shotgun') return buildShotgun(it.suppressed);
   if(it.gun) return buildAR15(it.dot,it.suppressed);
   if(id==='handcuffs') return buildHandcuffs();
   if(it.block===BID.torch_unlit) return buildHeldTorch(false);
@@ -12324,6 +12396,7 @@ const view={ group:new THREE.Group(), mesh:null, id:'__none__', swing:0, bob:0, 
   scopeFov:(()=>{ try{ const z=localStorage.getItem('hollowcraft_zoom'); return z?clamp(+z,4,16):7; }catch(e){ return 7; } })() };
 camera.add(view.group);
 const muzzleLight=new THREE.PointLight(0xffcc88,0,9,2); scene.add(muzzleLight);   // AR-15 muzzle flash lights the world briefly
+let _flashHold=false;   // QA only (__hc.flashHold) — see the flash-decay block in updateView
 // shared MUZZLE-FLASH sprite: a canvas-drawn radial starburst (bright core + orange spikes, transparent bg) on a camera-facing plane — reads as a real flash, not a ball
 let _muzzleTex=null;
 function muzzleFlashTex(){ if(_muzzleTex)return _muzzleTex; const c=document.createElement('canvas'); c.width=c.height=64; const x=c.getContext('2d'); x.translate(32,32);
@@ -12741,11 +12814,19 @@ function buildShotgun(suppressed){ const g=new THREE.Group();
   tube(0.0115,0.50,blk,       0,0.030,-0.30, 10);               // bore liner, a shade proud of the muzzle so the hole reads dark
   tube(0.0135,0.34,steel,     0,-0.004,-0.21);                  // MAGAZINE TUBE under the barrel: five shells, and the reason the gun is this long
   { const pump=new THREE.Mesh(new THREE.BoxGeometry(0.044,0.040,0.155),wood); pump.position.set(0,-0.006,-0.20); pump.castShadow=true; g.add(pump);
-    for(let i=0;i<5;i++){ const rib=new THREE.Mesh(new THREE.BoxGeometry(0.047,0.006,0.010),wood); rib.position.set(0,-0.006,-0.26+i*0.030); g.add(rib); pump.add(rib); }   // ribbed grip channels; parented so they travel with the rack
+    // RIBS IN THE FOREND'S OWN SPACE (Ben 08-04: "the foregrip pad is placed too far forward"). These were positioned in the
+    // GUN's space and then re-parented to the pump — three.js reparents on add, so the pump's own -0.20 z was added on top and
+    // the whole ribbed pad sat 0.2 out along the barrel, ahead of the wood it is supposed to be cut into. Local coordinates now.
+    for(let i=0;i<5;i++){ const rib=new THREE.Mesh(new THREE.BoxGeometry(0.047,0.006,0.010),wood); rib.position.set(0,0,-0.06+i*0.030); pump.add(rib); }   // ribbed grip channels; parented so they travel with the rack
     g.userData.pump=pump; g.userData.pumpZ=pump.position.z; }   // the forend the reload racks back and forward
   box(0.0075,0.014,0.012,blk, 0,0.0455,-0.545);                 // front BEAD post
   { const bead=new THREE.Mesh(new THREE.SphereGeometry(0.0055,8,8),new THREE.MeshBasicMaterial({color:0xffd66a})); bead.position.set(0,0.054,-0.545); g.add(bead); }   // brass bead, unlit so it still reads at night
   g.userData.dotY=0.052;                                        // the bead sits 0.052 over the bore: the ADS pose centres THIS, not the barrel
+  // LENGTH OF PULL (Ben 08-04: "the shotguns buttstock is coming through the viewport when ADS"). The shared iron-sight pose
+  // brings a gun to z=-0.30, which suits the AR's stock — but this gun's recoil pad is at +0.312, so at that pose the butt
+  // landed at +0.01: behind the 0.08 near plane, i.e. through the screen. A 12 gauge has a longer pull than a carbine and the
+  // eye genuinely sits further back from its receiver, so the gun holds further out. adsZ overrides the shared pose per model.
+  g.userData.adsZ=-0.46;
   if(suppressed) tube(0.026,0.15,blk, 0,0.030,-0.60);           // a threaded can, like every other gun in the game
   box(0.012,0.032,0.016,blk,  0,-0.020,0.055);                  // trigger
   { const tg=new THREE.Mesh(new THREE.TorusGeometry(0.024,0.005,6,14,Math.PI*1.3),blk); tg.rotation.y=Math.PI/2; tg.rotation.z=0.35; tg.position.set(0,-0.040,0.055); g.add(tg); }
@@ -13085,22 +13166,42 @@ function _hideOffHand(){ offView.group.visible=false; offArm.group.visible=false
 // AIMING SHRINKS IT TO ALMOST NOTHING. In first person a raised sight replaces it, so it still fades out under the holosight or
 // the scope — but in THIRD person there is no sight to hand over to, so instead of fading it collapses to a tiny hard circle
 // (Ben: "when aiming in 3rd person it should get very small"), which is the only aiming reference the over-shoulder view has.
-let _xhEl=null, _xhCur=16, _xhLastD=-1, _xhLastOp=-1;
-const XH_REST=16, XH_AIM_TPS=6;
+let _xhEl=null, _xhCur=16, _xhLastD=-1, _xhLastOp=-1, _xhFire=0, _xhSpread=0;
+const XH_REST=16, XH_AIM_TPS=6, XH_TRUE=9;
+// The ring's diameter in pixels, converted to the cone a shot may land in. Derived from the LIVE fov and viewport rather than a
+// tuned constant, so the circle on screen and the scatter in the world stay the same thing when the fov kicks on a sprint or the
+// window is resized. Half-angle, because the diameter describes the full cone.
+function aimSpreadRad(){ if(_xhSpread<=0.5) return 0;
+  const H=Math.max(1, innerHeight||720);
+  return Math.atan((_xhSpread/H) * Math.tan(camera.fov*0.5*Math.PI/180)); }
+// A SHOT THROWS THE RING WIDE (Ben 08-04: "the aim reticle should expand when a gun is fired"). Set from fireGun rather than
+// inferred from view.swing: the swing decays in ~0.1 s, which is too short to see, and a spear throw or a pickaxe swing is not a
+// gunshot. This is its own decay so the bloom lasts long enough to read and stacks while you hold down full-auto.
+function crosshairFireKick(mag){ _xhFire=Math.min(2.2, _xhFire + (mag||1)); }
 function updateCrosshair(dt, isGun){
   const xh=_xhEl||(_xhEl=document.getElementById('xh')); if(!xh) return;
   const p=player, ads=isGun?(view.adsT||0):0;
   const spd=Math.hypot(p.vel.x,p.vel.z);
+  _xhFire=Math.max(0, _xhFire - dt*2.6);                                       // ~0.4 s to shed one shot's worth of bloom
   const kick=Math.max(0, Math.min(1, view.swing||0));
-  let d = XH_REST
+  const move = XH_REST
         + Math.min(1, spd/7.2)*10                    // walking opens it, sprinting opens it fully
         + (p.onGround?0:8)                           // airborne: you have no business being accurate
         + (p.sneak?-4:0)                             // crouched and steady
-        + kick*12;                                   // a swing or a shot throws it wide, then it recovers
-  if(ads>0.01){ const t=Math.min(1,ads); d = d*(1-t) + (_tpsOn?XH_AIM_TPS:XH_REST*0.5)*t; }
-  const rate = d>_xhCur ? 0.18 : 0.5;                // out fast, back slow
-  _xhCur += (d-_xhCur)*Math.min(1, dt/rate);
-  const px=Math.round(_xhCur);
+        + kick*10;                                   // a swing throws it wide, then it recovers
+  const rate = move>_xhCur ? 0.18 : 0.5;             // out fast, back slow — only the MOVEMENT ring is eased
+  _xhCur += (move-_xhCur)*Math.min(1, dt/rate);
+  // THE SHRINK IS THE RAISE (Ben 08-04: "aiming in 3rd person should take the same amount of time as it takes to raise the iron
+  // sights to the face"). view.adsT IS that raise — the same 0..1 curve the viewmodel's cheek-weld interpolates on — so blending
+  // by it directly, OUTSIDE the easing above, makes the two identical by construction rather than by two matched constants.
+  let d=_xhCur;
+  if(ads>0.01) d = d*(1-ads) + (_tpsOn?XH_AIM_TPS:XH_REST*0.5)*ads;
+  d += _xhFire*14;                                   // a gunshot blooms it AFTER the aim shrink, so aiming never hides recoil
+  // THE RING IS THE SPREAD, NOT A PICTURE OF IT (Ben 08-04: "when jumping reticle aim should be less accurate"). fireGun reads
+  // this and scatters the shot inside exactly the circle you are looking at, so the HUD cannot lie about where a bullet may go.
+  // XH_TRUE is the diameter at which the gun is dead-on: at a full cheek weld the ring is smaller than it, so aiming is exact.
+  _xhSpread=Math.max(0, d - XH_TRUE);
+  const px=Math.round(d);
   if(px!==_xhLastD){ _xhLastD=px; xh.style.width=px+'px'; xh.style.height=px+'px'; }
   // Third person keeps its ring at full strength however far the sight is raised; first person hands over to the optic.
   const op = _tpsOn ? 0.85 : 0.85*(1-clamp((ads-0.3)/0.4,0,1));
@@ -13226,8 +13327,8 @@ function updateView(dt){ updateRecoil(dt);                                      
                 : isRev  ? {dy:0.084, z:-0.36}         // the PYTHON'S IRONS: rear notch + front blade, arms extended
                 : isIronAR ? {dy:0.118, z:-0.30}       // the AR'S A2 IRONS (bare/suppressed alike): rear aperture + front post
                 : null;
-    if(optic){ const dy=(view.mesh&&view.mesh.userData&&view.mesh.userData.dotY)||optic.dy;
-      aPx=swx*SWAY_POS; aPy=-dy + swy*SWAY_POS + b*0.12; aPz=optic.z; aRx=swy*SWAY_ROT; aRy=swx*SWAY_ROT; aRz=0; }
+    if(optic){ const UD=(view.mesh&&view.mesh.userData)||{}, dy=UD.dotY||optic.dy;
+      aPx=swx*SWAY_POS; aPy=-dy + swy*SWAY_POS + b*0.12; aPz=(UD.adsZ!=null?UD.adsZ:optic.z); aRx=swy*SWAY_ROT; aRy=swx*SWAY_ROT; aRz=0; }   // adsZ: a per-model length of pull, so a long stock is not driven through the near plane
     view.group.position.set(hPx+(aPx-hPx)*e, hPy+(aPy-hPy)*e, hPz+(aPz-hPz)*e);
     view.group.rotation.set(hRx+(aRx-hRx)*e, hRy+(aRy-hRy)*e, hRz+(aRz-hRz)*e);
     if(view.gunKick){ view.group.position.z+=view.gunKick*0.09; view.group.rotation.x-=view.gunKick*0.5; }   // viewmodel bucks: rearward shove + muzzle rise, springs back independent of the camera (the glass climbing off the camera-locked reticle is what carries the dot out of the glass — the reticle is now clipped to the aperture so it VANISHES at the rim, see holoRet below)
@@ -13276,24 +13377,43 @@ function updateView(dt){ updateRecoil(dt);                                      
   { const on=isGun && isDotG && (view.adsT||0)>0.28 && !(view.reloadT>0);
     view.holoRet.visible=on;
     if(on){ const o=clamp(((view.adsT||0)-0.35)/0.5,0,1);                                   // alignment fade — off-axis shows glass, no floating reticle
-      // CLIP TO THE GLASS: the reticle only shows where the camera's forward axis still passes THROUGH the sight's aperture.
-      // Under recoil the glass climbs off the camera-locked dot → the dot fades out AT THE RIM (you "lose the dot") instead of
-      // floating out of bounds on-screen. (Ben 07-21)
-      let apFade=1;
+      // IT SLIDES OFF THE GLASS, IT DOES NOT DIM (Ben 08-04: "holosight reticle fades away close to the edge of its sight, it
+      // shouldnt do this it should just slide off the plane"). The old version scaled the WHOLE reticle's opacity by how close the
+      // aim axis was to the rim, so the ring dimmed as a unit — which is not what losing the dot looks like. A real hologram is
+      // cut off by the window frame: the part still behind glass is at full brightness, the part past the rim is simply not there.
+      //
+      // Four clipping planes do that exactly, and they have to pass through the EYE, not sit on the sight: the reticle hangs at
+      // 0.5 m and the aperture is a ~3 cm window at 0.3 m, so what masks one against the other is the pyramid from the eye
+      // through the four edges of the window. Each plane is built from the camera position and one aperture edge, oriented so the
+      // window's centre is on the kept side. Clipping is per fragment, so the ring is sliced where the frame crosses it.
       if(view._holoFor!==view.mesh){ view._holoFor=view.mesh; view._holoHs=null; if(view.mesh)view.mesh.traverse(ch=>{ if(ch.userData&&ch.userData.rearGlass)view._holoHs=ch; }); }
       const hs=view._holoHs, ap=hs&&hs.userData.rearGlass;
-      if(ap){ const wp=view._apWP||(view._apWP=new THREE.Vector3()), cp=view._camWP||(view._camWP=new THREE.Vector3());
-        ap.getWorldPosition(wp); camera.getWorldPosition(cp); wp.sub(cp); const q=camera.quaternion;
-        const fwd=(view._fwd||(view._fwd=new THREE.Vector3())).set(0,0,-1).applyQuaternion(q);
-        const up =(view._up ||(view._up =new THREE.Vector3())).set(0,1,0).applyQuaternion(q);
-        const rt =(view._rt ||(view._rt =new THREE.Vector3())).set(1,0,0).applyQuaternion(q);
-        const f=wp.dot(fwd);
-        if(f>0.05){ const oy=wp.dot(up)/f, ox=wp.dot(rt)/f, hy=hs.userData.apHalf.y/f, hx=hs.userData.apHalf.x/f;
-          const edge=Math.max(Math.abs(ox)/hx, Math.abs(oy)/hy); apFade=clamp((1-edge)/0.18,0,1); }   // full inside the aperture; fades to 0 across the last 18% up to the rim
-        else apFade=0; }
-      view.holoRet.material.opacity=o*o*(0.92+Math.sin(clock.elapsedTime*47)*0.03)*apFade; } }   // faint holographic flicker, gated by the aperture clip
+      let vis=1;
+      if(ap && hs.userData.apHalf){
+        const P=view._holoPl||(view._holoPl=[new THREE.Plane(),new THREE.Plane(),new THREE.Plane(),new THREE.Plane()]);
+        const C=view._camWP||(view._camWP=new THREE.Vector3()); camera.getWorldPosition(C);
+        const hx=hs.userData.apHalf.x, hy=hs.userData.apHalf.y;
+        const cor=view._holoCor||(view._holoCor=[new THREE.Vector3(),new THREE.Vector3(),new THREE.Vector3(),new THREE.Vector3()]);
+        cor[0].set(-hx,-hy,0); cor[1].set(hx,-hy,0); cor[2].set(hx,hy,0); cor[3].set(-hx,hy,0);
+        hs.updateWorldMatrix(true,false);
+        for(let i=0;i<4;i++) cor[i].applyMatrix4(hs.matrixWorld);
+        const mid=view._holoMid||(view._holoMid=new THREE.Vector3());
+        mid.copy(cor[0]).add(cor[1]).add(cor[2]).add(cor[3]).multiplyScalar(0.25);
+        const a=view._hA||(view._hA=new THREE.Vector3()), b=view._hB||(view._hB=new THREE.Vector3()), n=view._hN||(view._hN=new THREE.Vector3());
+        for(let i=0;i<4;i++){ a.copy(cor[i]).sub(C); b.copy(cor[(i+1)&3]).sub(C);
+          n.copy(a).cross(b).normalize();
+          if(n.dot(mid)-n.dot(C) < 0) n.negate();                                          // keep the side the window's centre is on
+          P[i].setFromNormalAndCoplanarPoint(n, C); }
+        view.holoRet.material.clippingPlanes=P;
+        // Behind the glass entirely (the sight swung past the eye during a reload or a heavy buck) → nothing to see through.
+        const wp=view._apWP||(view._apWP=new THREE.Vector3()); wp.copy(mid).sub(C);
+        const fwd=(view._fwd||(view._fwd=new THREE.Vector3())).set(0,0,-1).applyQuaternion(camera.quaternion);
+        if(wp.dot(fwd)<=0.05) vis=0;
+      } else view.holoRet.material.clippingPlanes=null;
+      view.holoRet.material.opacity=o*o*(0.92+Math.sin(clock.elapsedTime*47)*0.03)*vis; } }   // faint holographic flicker; the RIM is a clip, not a fade
   // muzzle flash decay (gun): show the sprite + pulse the world light for ~0.06s after firing
   view.flashT=Math.max(0,view.flashT-dt);
+  if(_flashHold) view.flashT=0.06;   // QA only (__hc.flashHold): a flash lasts 0.06s, which is far too short to photograph or to measure a luminance delta against
   const fl=view.mesh&&view.mesh.userData.flash;
   if(fl){ fl.visible=view.flashT>0; if(fl.visible){ const bs=fl.userData.base||1; fl.scale.set(bs*(1+Math.random()*0.7), bs*(1+Math.random()*0.7), 1); fl.rotation.z=Math.random()*6.28; } }   // flicker size + spin so each shot's flash looks different
   if(view.flashT>0){ const d=lookDir(); muzzleLight.position.set(camera.position.x+d.x*1.1, camera.position.y+d.y*1.1-0.08, camera.position.z+d.z*1.1); muzzleLight.intensity=10*(view.flashT/0.06); }
@@ -13375,8 +13495,18 @@ function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id
   const KP=(bolt?0.056 : rev?0.049 : (it.gun==='auto'?0.006 : it.gun==='shotgun'?0.062 : 0.019))*5;   // the 12 gauge kicks hardest of all — a cylinder-bore pump against the shoulder                            // camera recoil per shot ×5 (Ben 07-20): rifle 16° / Python 14° / AR 5.4° / minigun 1.7° — the gun OWNS your aim
   kickRecoil(KP, KP*0.32);                                                                        // every shot climbs the aim for keeps — manage your muzzle
   view.gunKick=Math.min(1.3,(view.gunKick||0)+(bolt?1.0 : rev?1.0 : it.gun==='auto'?0.18 : it.gun==='shotgun'?1.25 : 0.45));  // viewmodel buck against the shoulder
+  crosshairFireKick(bolt?0.9 : rev?0.7 : it.gun==='auto'?0.28 : it.gun==='shotgun'?1.0 : 0.5);   // the ring blooms by what the gun actually kicks — the 12 gauge widest, the AR least per round
   const d=lookDir(), o={x:player.pos.x,y:player.pos.y+EYE,z:player.pos.z};
-  view.flashT=0.06;                                                                               // trigger the muzzle-flash sprite + light (see updateView)
+  // SCATTER THE SHOT INSIDE THE RING. Jittered in place, so every consumer downstream — the hit trace, the tracer, the impact
+  // decal, the packet peers see — uses the direction the bullet ACTUALLY took. The aim itself (pitch/yaw) is untouched: your
+  // point of aim is still where you pointed, and the difference between that and where the round went is the inaccuracy.
+  { const sp=aimSpreadRad();
+    if(sp>1e-4){ const a=Math.random()*6.2832, r=Math.sqrt(Math.random())*sp;   // sqrt → uniform over the disc, not clustered in the middle
+      let ux=-d.z, uz=d.x; const ul=Math.hypot(ux,uz)||1; ux/=ul; uz/=ul;       // a horizontal right-vector perpendicular to the shot
+      const vx=-uz*d.y, vy=uz*d.x-ux*d.z, vz=ux*d.y;                            // and up' = right x dir
+      const s=Math.sin(r), c=Math.cos(r), ca=Math.cos(a), sa=Math.sin(a);
+      d.set(d.x*c+(ux*ca+vx*sa)*s, d.y*c+(vy*sa)*s, d.z*c+(uz*ca+vz*sa)*s).normalize(); } }
+  view.flashT=0.06;                                                                             // trigger the muzzle-flash sprite + light (see updateView)
   scareAnimals(o.x, o.z, sup?24:46);                                                              // the GUNSHOT panics wild animals nearby (independent of the Wretch's earshot); a suppressor scares a smaller radius
   if(NET.on && typeof netSend==='function')netSend({t:'shot',x:+o.x.toFixed(2),y:+o.y.toFixed(2),z:+o.z.toFixed(2),dx:+d.x.toFixed(3),dy:+d.y.toFixed(3),dz:+d.z.toFixed(3),g:bolt?'r':(rev?'v':'a')});   // peers see the tracer + hear the shot
   const _gunRange = (200 - 50*(typeof weather!=='undefined'?(weather.rain||0):0)) * (sup?0.6:1);   // a GUNSHOT carries 200 blocks (150 in a downpour) — a suppressor cuts that heard-range by 40%
@@ -15413,7 +15543,7 @@ function brMinimapStatic(dt){ if(!_mm){ if(typeof buildMinimap==='function')buil
 
 // ---- AUDIO (Ben 07-24): NO music. Silence, footsteps (engine), occasional drips + distant screams. That's it. ----
 function brStartAudio(){ brStopAudio(); try{ if(typeof _gameMusicEl!=='undefined'&&_gameMusicEl&&!_gameMusicEl.paused)_gameMusicEl.pause();
-    if(typeof _introMusicEl!=='undefined'&&_introMusicEl&&!_introMusicEl.paused)_introMusicEl.pause(); }catch(e){}   // kill the world's music (either track) → dead silence
+    if(typeof _rainMusicEl!=='undefined'&&_rainMusicEl&&!_rainMusicEl.paused)_rainMusicEl.pause(); }catch(e){}   // kill the world's music (either track) → dead silence
   if(typeof AC==='undefined'||!AC)return;
   BR.dripIv=setInterval(()=>{ if(!AC||!BR.inside)return; if(Math.random()<0.55){ const a=Math.random()*6.283,r=4+Math.random()*12,x=player.pos.x+Math.cos(a)*r,z=player.pos.z+Math.sin(a)*r; if(typeof playSample==='function')playSample('drip',{x,y:player.pos.y+2,z},0.45+Math.random()*0.4); } },2400);   // a distant drip every ~2-4s
   BR.screamIv=setInterval(()=>{ if(!AC||!BR.inside)return; if(Math.random()<0.30){ const a=Math.random()*6.283,r=24+Math.random()*34,x=player.pos.x+Math.cos(a)*r,z=player.pos.z+Math.sin(a)*r; if(typeof playSample==='function')playSample('scream',{x,y:player.pos.y+1,z},0.32+Math.random()*0.3); } },13000);   // a far-off scream now and then
@@ -19892,36 +20022,46 @@ function playSample(base,pos,vol){ if(!AC)return false;
 // The clock starts when the WORLD does, not when the page loads — audioResume fires on the first click at the menu, and counting
 // the two minutes from there would spend the silence on the main menu, where there is no music anyway.
 //
-// A MISSING OPENING TRACK IS NOT A BROKEN GAME. If intro_music.ogg is absent the element errors, the intro is marked done and the
-// silence hands straight over to the existing loop — the schedule degrades to "two minutes of quiet, then as before".
-const MUSIC_SILENCE=120, MUSIC_INTRO='./sounds/intro_music.ogg';
-let _musicT0=null, _musicSkew=0, _introMusicEl=null, _introState='pending';   // pending → playing → done
+// THE ADDED TRACK IS THE RAIN'S (Ben 08-04: "the music we added, play it only when its raining"). It began life as an opening
+// track played once after the silence; it is now weather-driven, which is a smaller rule and a better one — the silence still owns
+// the first two minutes, the existing soundtrack owns ordinary weather, and this track owns the rain. One switch, three states.
+//
+// HYSTERESIS ON THE RAIN, not a threshold. weather.rain drifts toward its target continuously, so a single cut-off would flip the
+// track on and off every few frames while a shower builds. It starts at 0.25 and only stops below 0.12.
+//
+// IT RESUMES, IT DOES NOT RESTART. A shower that returns picks the track up where the last one left it; restarting a 33-minute
+// piece from the top for every drizzle would mean only ever hearing its first minute.
+//
+// A MISSING FILE IS NOT A BROKEN GAME. If rain_music.ogg is absent the element errors, the flag latches, and rain simply plays the
+// ordinary soundtrack as it always did.
+const MUSIC_SILENCE=120, MUSIC_RAIN='./sounds/rain_music.ogg', RAIN_MUSIC_ON=0.25, RAIN_MUSIC_OFF=0.12;
+let _musicT0=null, _musicSkew=0, _rainMusicEl=null, _rainMusicDead=false, _rainMusicOn=false;
 function musicElapsed(){ return (_musicT0==null?0:(performance.now()/1000)-_musicT0)+_musicSkew; }
+function rainMusicWanted(){ if(_rainMusicDead) return false;
+  const r=(typeof weather!=='undefined' && weather) ? (weather.rain||0) : 0;
+  _rainMusicOn = _rainMusicOn ? (r>RAIN_MUSIC_OFF) : (r>=RAIN_MUSIC_ON);
+  return _rainMusicOn; }
 function _ensureMusicEls(){ if(_gameMusicEl||!AC)return;
   _musicBus=AC.createGain(); _musicBus.gain.value=1; _musicBus.connect(master);   // routed through master so the Volume slider governs music too
   _gameMusicEl=new Audio('./sounds/game_music.ogg'); _gameMusicEl.loop=true; _gameMusicEl.preload='auto'; _gameMusicEl.volume=_musicVol;
-  _introMusicEl=new Audio(MUSIC_INTRO); _introMusicEl.loop=false; _introMusicEl.preload='auto'; _introMusicEl.volume=_musicVol;
-  _introMusicEl.addEventListener('ended',()=>{ _introState='done'; startGameMusic(); });     // opening track over → the soundtrack takes it from here
-  _introMusicEl.addEventListener('error',()=>{ _introState='done'; });                       // no such file → skip it rather than stall the soundtrack forever
-  try{ AC.createMediaElementSource(_introMusicEl).connect(_musicBus); }catch(e){}
+  _rainMusicEl=new Audio(MUSIC_RAIN); _rainMusicEl.loop=true; _rainMusicEl.preload='auto'; _rainMusicEl.volume=_musicVol;
+  _rainMusicEl.addEventListener('error',()=>{ _rainMusicDead=true; startGameMusic(); });   // no such file → rain keeps the ordinary soundtrack
+  try{ AC.createMediaElementSource(_rainMusicEl).connect(_musicBus); }catch(e){}
   _bossMusicEls=[new Audio('./sounds/boss_music2.ogg'), new Audio('./sounds/boss_music1.ogg')];   // boss_music2 now plays FIRST → boss_music1 (Ben 07-24, swapped order)
   for(const a of _bossMusicEls){ a.loop=false; a.preload='auto'; a.volume=_bossMusicVol; }
   _bossMusicEls[0].addEventListener('ended',()=>{ if(_bossMusicOn){ _bossMusicIdx=1; try{ _bossMusicEls[1].currentTime=0; _bossMusicEls[1].play().catch(()=>{}); }catch(e){} } });   // song1 → song2; song2 end → silence
   try{ AC.createMediaElementSource(_gameMusicEl).connect(_musicBus); for(const a of _bossMusicEls)AC.createMediaElementSource(a).connect(_musicBus); }catch(e){} }
 function startGameMusic(){ _ensureMusicEls(); if(!_gameMusicEl)return;
   if(_musicT0==null && typeof started!=='undefined' && started) _musicT0=performance.now()/1000;   // the world began — start counting the silence
-  if(musicElapsed()<MUSIC_SILENCE) return;                                                        // the opening silence: nothing is playing, and nothing starts
-  if(_introMusicEl && _introState!=='done'){
-    if(_introMusicEl.ended) _introState='done';                                                   // belt and braces: never wait forever on an 'ended' that already fired
-    else { _gameMusicEl.volume=0;                                                                 // the loop must not come up underneath the opening track
-      _introMusicEl.volume=_bossMusicOn?0:_musicVol;
-      if(_introMusicEl.paused){ _introState='playing'; _introMusicEl.play().catch(()=>{ _introState='done'; }); }
-      return; } }
-  _gameMusicEl.volume=_bossMusicOn?0:_musicVol; if(_gameMusicEl.paused)_gameMusicEl.play().catch(()=>{}); }
-// The schedule has two moments no user gesture is guaranteed to coincide with — the silence ending and the opening track ending —
-// so it is polled twice a second rather than waiting to be asked. startGameMusic only ever plays something that is paused, which
-// is what makes calling it on a timer safe. Boss music and the Backrooms own the mix while they are up, and both restore through
-// startGameMusic, so the schedule is still honoured when they hand it back.
+  if(musicElapsed()<MUSIC_SILENCE){ _musicPause(_gameMusicEl); _musicPause(_rainMusicEl); return; }   // the opening silence: nothing plays, and nothing starts
+  const rain=rainMusicWanted();
+  const play=rain?_rainMusicEl:_gameMusicEl, hush=rain?_gameMusicEl:_rainMusicEl;
+  _musicPause(hush);
+  if(play){ play.volume=_bossMusicOn?0:_musicVol; if(play.paused) play.play().catch(()=>{}); } }
+function _musicPause(a){ if(a && !a.paused){ try{ a.pause(); }catch(e){} } }   // pause WITHOUT rewinding — see "it resumes" above
+// The schedule changes at moments no user gesture coincides with — the silence ending, and the rain starting or stopping — so it
+// is polled twice a second rather than waiting to be asked. startGameMusic only ever plays something already paused, which is what
+// makes calling it on a timer safe. Boss music and the Backrooms own the mix while they are up and both restore through it.
 let _musicPoll=0;
 function updateMusicSchedule(dt){ if(!AC || _bossMusicOn) return;
   if(typeof BR!=='undefined' && BR && BR.inside) return;                    // the Backrooms are deliberately silent
@@ -19929,14 +20069,12 @@ function updateMusicSchedule(dt){ if(!AC || _bossMusicOn) return;
   _musicPoll-=dt; if(_musicPoll>0) return; _musicPoll=0.5;
   startGameMusic(); }
 function startBossMusic(){ _ensureMusicEls(); if(!_bossMusicEls)return; _bossMusicOn=true; _bossMusicIdx=0;
-  if(_gameMusicEl)_gameMusicEl.volume=0;                                          // duck the soundtrack under the boss track
-  if(_introMusicEl)_introMusicEl.volume=0;                                        // …and the opening track, if the fight starts during it
+  if(_gameMusicEl)_gameMusicEl.volume=0;                                          // duck whichever world track is up
+  if(_rainMusicEl)_rainMusicEl.volume=0;
   try{ _bossMusicEls[1].pause(); _bossMusicEls[0].currentTime=0; _bossMusicEls[0].volume=_bossMusicVol; _bossMusicEls[0].play().catch(()=>{}); }catch(e){} }
 function stopBossMusic(){ _bossMusicOn=false; if(_bossMusicEls)for(const a of _bossMusicEls){ try{ a.pause(); a.currentTime=0; }catch(e){} }
-  if(_introMusicEl)_introMusicEl.volume=_musicVol;
-  startGameMusic(); }   // the boss track does NOT loop; whatever the schedule says comes back — opening track or soundtrack
-function applyMusicVol(){ if(_gameMusicEl&&!_bossMusicOn)_gameMusicEl.volume=(_introState==='playing'?0:_musicVol);
-  if(_introMusicEl&&!_bossMusicOn)_introMusicEl.volume=_musicVol;
+  startGameMusic(); }   // the boss track does NOT loop; whatever the weather calls for comes back
+function applyMusicVol(){ if(!_bossMusicOn){ if(_gameMusicEl)_gameMusicEl.volume=_musicVol; if(_rainMusicEl)_rainMusicEl.volume=_musicVol; }   // whichever of the two is paused simply keeps the new level for when it comes back
   if(_bossMusicEls)for(const a of _bossMusicEls)a.volume=_bossMusicVol; }
 // HYPERREALISTIC HEARTBEAT (Ben 07-21) — a lub-dub pulse. Fires on adrenaline (racing pulse) and when the creature RUNS BY.
 let _hbActive=false, _hbEnd=0, _hbBpm=100, _hbBus=null;
@@ -21241,12 +21379,12 @@ window.__hc={
   // and musicIntroEnd stands in for the opening track finishing (a 0.5s stand-in file ends before a probe can catch it playing).
   musicProbe(){ try{ _ensureMusicEls();
       return { elapsed:+musicElapsed().toFixed(1), silence:MUSIC_SILENCE, started:(typeof started!=='undefined'?!!started:null), clockRunning:_musicT0!=null,
-        intro:_introState, introPlaying:!!(_introMusicEl&&!_introMusicEl.paused), introErr:!!(_introMusicEl&&_introMusicEl.error),
-        introVol:_introMusicEl?+_introMusicEl.volume.toFixed(2):null,
+        rain:+((typeof weather!=='undefined'&&weather.rain)||0).toFixed(2), rainWanted:_rainMusicOn, rainDead:_rainMusicDead,
+        rainPlaying:!!(_rainMusicEl&&!_rainMusicEl.paused), rainVol:_rainMusicEl?+_rainMusicEl.volume.toFixed(2):null,
         loopPlaying:!!(_gameMusicEl&&!_gameMusicEl.paused), loopVol:_gameMusicEl?+_gameMusicEl.volume.toFixed(2):null,
         boss:!!_bossMusicOn }; }catch(e){ return {err:String(e.message||e)}; } },
   musicSkew(sec){ try{ _musicSkew=+sec||0; startGameMusic(); return this.musicProbe(); }catch(e){ return {err:String(e.message||e)}; } },
-  musicIntroEnd(){ try{ if(_introMusicEl){ try{ _introMusicEl.pause(); }catch(e){} } _introState='done'; startGameMusic(); return this.musicProbe(); }catch(e){ return {err:String(e.message||e)}; } },
+  musicRain(v){ try{ if(typeof weather!=='undefined'){ weather.rain=+v||0; weather.rainTgt=+v||0; } startGameMusic(); return this.musicProbe(); }catch(e){ return {err:String(e.message||e)}; } },   // QA: set the rain and read which track the schedule picked
   vaultTick(n,dt){ try{ for(let i=0;i<(n|0||1);i++) updateVaultDoors(dt||0.016); return Object.keys(_vaultFx).length; }catch(e){ return {err:String(e.message||e)}; } },
   // Are any surface decorations standing on nothing? Scans the columns around the player at their own ground level, which is the
   // only band worldgen puts sulfur/pebbles in. floating must be 0.
@@ -21381,6 +21519,29 @@ window.__hc={
   // QA/bench: how many meshes the CURRENTLY HELD viewmodel is made of. An extruded pixel sprite is a single mesh; a real
   // model is many. This exists because buckshot's drop and its hand come from two different dispatches, and the hand kept
   // the flat sprite long after the drop was a proper shell — a probe on itemModel alone would have called that done.
+  // spriteOff pins the LIGHT on while hiding the sprite. Without that separation a luminance reading cannot tell the two
+  // apart: the sprite is a big additive plane across the middle of the frame, so it dominates any sample window the light
+  // would also brighten, and "the flash lights the world" goes green on a flash that emits nothing at all.
+  flashHold(on,spriteOff){ try{ _flashHold=!!on; if(!on)view.flashT=0; updateView(0.0001);
+      const fl=view.mesh&&view.mesh.userData&&view.mesh.userData.flash; if(fl&&spriteOff) fl.visible=false;
+      return { hold:_flashHold, spriteHidden:!!(fl&&spriteOff&&!fl.visible) }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: WHERE the muzzle flash actually is, in screen space, and what its light is doing. Ben 08-04: the shotgun's
+  // flash cannot be seen in ADS. A flash you cannot see is either off screen, behind the near plane, or occluded by the
+  // gun's own receiver, and only NDC coordinates tell you which — a screenshot only tells you it is missing.
+  flashProbe(){ try{ const fl=view.mesh&&view.mesh.userData&&view.mesh.userData.flash;
+      const out={ id:view.id, ads:!!view.ads, adsT:+(view.adsT||0).toFixed(3), flashT:+(view.flashT||0).toFixed(4),
+        hasFlash:!!fl, lightInt:+muzzleLight.intensity.toFixed(3),
+        lightDist:muzzleLight.distance, lightPos:[+muzzleLight.position.x.toFixed(2),+muzzleLight.position.y.toFixed(2),+muzzleLight.position.z.toFixed(2)] };
+      if(fl){ const w=new THREE.Vector3(); fl.getWorldPosition(w);
+        const n=w.clone().project(camera);
+        const cl=w.clone().applyMatrix4(camera.matrixWorldInverse);   // camera space: z must be NEGATIVE to be in front of the eye
+        out.visible=!!fl.visible; out.world=[+w.x.toFixed(2),+w.y.toFixed(2),+w.z.toFixed(2)];
+        out.ndc=[+n.x.toFixed(3),+n.y.toFixed(3),+n.z.toFixed(3)];
+        out.camZ=+cl.z.toFixed(4); out.near=camera.near;
+        out.onScreen=(Math.abs(n.x)<=1 && Math.abs(n.y)<=1 && n.z>-1 && n.z<1 && cl.z<0);
+        out.beyondNear=(-cl.z)>camera.near;
+        out.scale=[+fl.scale.x.toFixed(2),+fl.scale.y.toFixed(2)]; }
+      return out; }catch(e){ return {err:String(e.message||e)}; } },
   heldParts(){ try{ let n=0, sprite=false; if(view.mesh) view.mesh.traverse(o=>{ if(o.isMesh){ n++; if(o.userData&&o.userData.extruded) sprite=true; } });
       return { id:view.id, meshes:n, sprite }; }catch(e){ return {err:String(e.message||e)}; } },
   chainlinkRun(x,y,z,n,axis){ try{ n=Math.max(1,n|0||1); const ax=(axis==='z')?'z':'x';
