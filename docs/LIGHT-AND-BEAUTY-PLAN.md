@@ -144,7 +144,19 @@ judges the whole look at once instead of five times.
 2. **Exposure curve per hour** — `toneMappingExposure` is fixed at 1.05.
 3. **Fog colour from `_uSky`**, the same source the ambient now reads, so sky/fog/water stop drifting apart
    at dawn and dusk.
-4. **Shadow penumbra** — `sunLight.shadow.radius` is untouched with a 46-block frustum.
+4. ~~**Shadow penumbra** — `sunLight.shadow.radius` is untouched with a 46-block frustum.~~
+   **DEAD LEVER, measured 2026-08-04.** `renderer.shadowMap.type` is `PCFSoftShadowMap` (`setSoftShadows`,
+   and `BasicShadowMap` when soft shadows are off). three.js honours `shadow.radius` for `PCFShadowMap`
+   and VSM only; PCFSoft uses a fixed tap pattern and ignores it. `__hc.shadowSoft()` reports
+   `honoursRadius:false`, and dialling radius 1 → 25 changed nothing. **Radius is untouched because it
+   does nothing here, not because nobody got to it.**
+   Buying real penumbra means changing the FILTER — PCF with a radius, or VSM with its blur passes — and
+   that is a GPU cost, at a moment when the correction in §0 puts the GPU at 4.83 ms of a 7.14 ms budget
+   at the shore. So it needs its own priced A/B and it is Ben's call, not a quiet swap. `__hc.shadowSoft({type})`
+   exists to price it. Do not "just set radius".
+   `bench/tmp-shadow-radius.mjs` holds the probe; note its penumbra-width metric is NOT trustworthy — it
+   returns the sharpest edge anywhere in the crop (a block boundary, a leaf), which is why it read 1–2 px
+   for every setting including ones that do work. The `honoursRadius` reading is the finding.
 5. **God-ray strength by sun elevation** — the pass is gated by quality only; shafts should be strongest at
    low sun, absent at noon.
 
