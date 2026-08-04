@@ -69,11 +69,14 @@ const ok=(n,c,d)=>{ checks++; if(!c){fails++; console.log('  FAIL  '+n+'   '+JSO
     // store numbers, and a later insert above them is exactly what this would catch.
     const ids=names.map(n=>info[n].bid).sort((a,b)=>a-b);
     ok('their ids are contiguous', ids[ids.length-1]-ids[0]===23, {first:ids[0], last:ids[ids.length-1]});
-    // AGAINST N_BLOCKS, not Object.keys(BID).length. Several blocks in this game are declared twice — the second declaration
-    // overwrites the BID key but still consumes an id — so the key count is 158 while the id count is 161, and comparing against
-    // it failed a pack that was correctly at the end.
+    // NOTHING WAS INSERTED ABOVE THEM — which is the invariant that actually protects a saved world, and is NOT the same as
+    // "they are last". This first asserted last-in-the-list and went red the moment the CCTV pack was appended below them, which
+    // is the safe thing to do: appending cannot renumber anything, inserting can. So the bound is on the FIRST id.
+    //   (When it did compare against a total, it had to be N_BLOCKS and not Object.keys(BID).length: several blocks in this game
+    //   are declared twice, and the second declaration overwrites the BID key while still consuming an id, so the key count read
+    //   158 against 161 ids and failed a pack that was placed correctly.)
     const tbl=await page.evaluate('__hc.pastelTable()');
-    ok('and sit at the end of the block list', ids[ids.length-1]===tbl.blocks-1, {last:ids[ids.length-1], blocks:tbl.blocks});
+    ok('nothing was inserted above them', ids[0]===137, {first:ids[0], expected:137, blocksNow:tbl.blocks});
     // THE TABLE, before anything is rendered. A hand-picked palette put ten pairs inside 25 and two inside 15; 32 is the ceiling
     // a search over the pastel gamut can reach, so 28 leaves a little room to edit a hue without instantly failing.
     console.log('  closest pair in the table: '+JSON.stringify(tbl.closest));
