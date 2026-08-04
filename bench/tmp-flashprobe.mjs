@@ -44,6 +44,8 @@ const meanLum=(buf)=>{ const im=decodePNG(buf); const W=im.w,H=im.h,CH=im.ch; le
       await page.evaluate('__hc.aim(false)'); await sleep(500);
       await page.evaluate('__hc.flashHold(false)'); await sleep(350);
       const offShot=await page.screenshot(); const offL=meanLum(offShot);
+      await page.evaluate('__hc.flashHold(true,true)'); await sleep(350);
+      const lightOnly=meanLum(await page.screenshot());
       await page.evaluate('__hc.flashHold(true)'); await sleep(350);
       const hip=await page.evaluate('__hc.flashProbe()');
       const hipBuf=await page.screenshot(); const onL=meanLum(hipBuf);
@@ -55,7 +57,7 @@ const meanLum=(buf)=>{ const im=decodePNG(buf); const W=im.w,H=im.h,CH=im.ch; le
       const adsBuf=await page.screenshot(); const adsL=meanLum(adsBuf);
       fs.writeFileSync('D:/code/Minecraft/bench/results/flash-'+g+'-ads.png', adsBuf);
       await page.evaluate('__hc.flashHold(false)'); await page.evaluate('__hc.aim(false)');
-      console.log(`  ${g.padEnd(15)} lum dark=${offL} hipFlash=${onL} adsFlash=${adsL}  light=${hip.lightInt}`);
+      console.log(`  ${g.padEnd(15)} lum dark=${offL} LIGHTONLY=${lightOnly} hipFlash=${onL} adsFlash=${adsL}  int=${hip.lightInt}`);
       console.log(`      hip  onScreen=${hip.onScreen} ndc=${JSON.stringify(hip.ndc)} camZ=${hip.camZ} beyondNear=${hip.beyondNear} vis=${hip.visible} scale=${JSON.stringify(hip.scale)}`);
       console.log(`      ads  onScreen=${ads.onScreen} ndc=${JSON.stringify(ads.ndc)} camZ=${ads.camZ} beyondNear=${ads.beyondNear} vis=${ads.visible} adsT=${ads.adsT}`);
     }
