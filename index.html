@@ -2567,7 +2567,45 @@ const FAR = CFG.RD_MAX*CK;   // horizon/fog/pine-backdrop are sized to the MAX r
 // FogExp2 hides the far clip; fog color === background to avoid the cyan-creep artifact
 scene.fog = new THREE.FogExp2(BG.clone(), 1.6/FAR);
 
+// =====================================================================
+//  CLOUD SHADOWS ON THE GROUND  (plan §1.7 / Tier 2 item 6)
+// =====================================================================
+// Ben: "clouds blocking the sun". The plan calls this the best value per millisecond on the list, and it is also what makes the
+// god rays honest — shafts belong where the cover breaks.
+//
+// A TEXTURE, not an fBm. The plan's sketch was "one noise sample in a fragment shader", and the sky's own cloud field is five
+// octaves of 3D value noise sampled twice per fragment. That is affordable on a sky dome, which is a few hundred pixels of a
+// frame; on every lit terrain fragment it is not, and §0's licence for free fragment work was withdrawn today after the GPU
+// measured 4-7 ms of a 7.14 ms budget. So the coverage field is baked ONCE into a tiling 256x256 texture here, and the shader
+// pays one fetch. Same shaping as the sky's clouds — fBm, then a smoothstep straddling the field's mean — so the two read as one
+// weather system even though the sky's is a dome and this is a plane.
+const _cloudShadowTex = (()=>{
+  const S=256, cv=document.createElement('canvas'); cv.width=cv.height=S; const g=cv.getContext('2d');
+  const im=g.createImageData(S,S), d=im.data;
+  // TILING value noise: the lattice wraps at every octave's own period, so the texture repeats seamlessly however far the world
+  // runs. A non-wrapping fBm would put a visible seam across the ground every 256 blocks.
+  const hash=(x,y,p)=>{ const n=Math.sin(((x%p)+p)%p*127.1 + (((y%p)+p)%p)*311.7)*43758.5453; return n-Math.floor(n); };
+  const nz=(x,y,p)=>{ const xi=Math.floor(x), yi=Math.floor(y), xf=x-xi, yf=y-yi;
+    const sx=xf*xf*(3-2*xf), sy=yf*yf*(3-2*yf);
+    const a=hash(xi,yi,p), b=hash(xi+1,yi,p), c=hash(xi,yi+1,p), e=hash(xi+1,yi+1,p);
+    return (a+(b-a)*sx) + ((c+(e-c)*sx) - (a+(b-a)*sx))*sy; };
+  for(let y=0;y<S;y++) for(let x=0;x<S;x++){
+    let v=0, amp=0.5, per=4;
+    for(let o=0;o<5;o++){ v += amp*nz(x/S*per, y/S*per, per); amp*=0.5; per*=2; }
+    // The sky uses smoothstep(0.38,0.62) on a field that clusters near 0.48 — a typical fragment lands mid-ramp, which is what
+    // makes the sky read as weather rather than as two wisps. Same window here, so gaps and cover are the same size.
+    const t=Math.max(0,Math.min(1,(v-0.38)/(0.62-0.38))), s=t*t*(3-2*t);
+    const i=(y*S+x)*4; d[i]=d[i+1]=d[i+2]=Math.round(255*(1-s)); d[i+3]=255;   // stored as LIGHT: 1 in a gap, 0 under thick cover
+  }
+  g.putImageData(im,0,0);
+  const t=new THREE.CanvasTexture(cv); t.wrapS=t.wrapT=THREE.RepeatWrapping; t.minFilter=THREE.LinearMipmapLinearFilter;
+  t.magFilter=THREE.LinearFilter; t.generateMipmaps=true; t.needsUpdate=true; return t; })();
 const globalU = {
+  uCloudTex:{ value:_cloudShadowTex },
+  // Strength, set per frame in updateSky from the live cloud cover and the sun's own elevation. 0 disables the whole term, which
+  // is the A/B flag §5 asks for — one flag per change, toggled inside a single page through __hc.cloudShadow().
+  uCloudShadow:{ value:1 },
+  uCloudScroll:{ value:new THREE.Vector2(0,0) },
   uWhiteTile:{ value:(typeof TILEIDX!=='undefined'&&TILEIDX.vantawhite!=null)?TILEIDX.vantawhite:-1 },   // SHARED vantawhite-glow uniform (Ben 07-21): one reference every chunk material + clone points at, so the unlit-white override can never go stale across recompiles / composer rebuilds / VFX-setting toggles
   uTime:   { value:0 },
   uSunDir: { value:new THREE.Vector3(0.3,0.9,0.2) },
@@ -2600,18 +2638,24 @@ function injectAtlas(mat, opts={}){
     sh.uniforms.uLight3D = { value: _emptyLight3D };   // per-chunk block-light volume — a per-chunk material clone overrides this at compile (see _chunkMat)
     if(globalU.uWhiteTile.value<0 && typeof TILEIDX!=='undefined' && TILEIDX.vantawhite!=null) globalU.uWhiteTile.value=TILEIDX.vantawhite;   // latch the real tile index the first time it's known
     if(opts.nightFoliage && !_NO_FOL_NIGHT){ sh.uniforms.uDayF = globalU.uDay; sh.uniforms.uFolNight = _uFolNight; }   // SHARED refs, so per-chunk material clones all track the same live value
+    // SHARED refs, same reason as uWhiteTile: the A/B flag has to move every chunk clone at once or half the world keeps its
+    // cloud shadows and the measurement is of nothing.
+    sh.uniforms.uCloudTex = globalU.uCloudTex; sh.uniforms.uCloudShadow = globalU.uCloudShadow;
+    sh.uniforms.uCloudScroll = globalU.uCloudScroll; sh.uniforms.uSunDirC = globalU.uSunDir;
     sh.uniforms.uWhiteTile = globalU.uWhiteTile;   // SHARED ref → the vantawhite glow survives every material clone / recompile / composer rebuild / VFX toggle (was a fresh per-material uniform that a pre-tile-index recompile could latch at -1)
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>',
         '#include <common>\nattribute float aTile;\nattribute float aSky;\nattribute vec2 aBlockUV;'+
         (opts.wind?'\nattribute float aWind;':'')+
-        '\nuniform float uTime;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;')
+        '\nuniform float uTime;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;')
       .replace('#include <begin_vertex>',
-        '#include <begin_vertex>\nvTile=aTile; vSky=aSky; vBUV=aBlockUV; vLP=position; vObjN=normal;'+   // vLP = chunk-local position; vObjN = object-space face normal (for the block-light air-cell offset)
+        // vWPos = WORLD position. vLP is chunk-local, so it cannot address a world-scale cloud field: every chunk would sample
+        // the same patch and the shadows would tile visibly at the chunk grid. modelMatrix carries the chunk group's offset.
+        '#include <begin_vertex>\nvTile=aTile; vSky=aSky; vBUV=aBlockUV; vLP=position; vObjN=normal; vWPos=(modelMatrix*vec4(transformed,1.0)).xyz;'+   // vLP = chunk-local position; vObjN = object-space face normal (for the block-light air-cell offset)
         (opts.wind?'\nfloat wsw = sin(uTime*1.6 + transformed.x*0.6 + transformed.z*0.5)*0.10*aWind; transformed.x += wsw; transformed.z += cos(uTime*1.3 + transformed.x*0.4)*0.07*aWind;':''));
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>',
-        '#include <common>\nprecision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;')
+        '#include <common>\nprecision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
       // ---- NIGHT VOLUMETRIC DARKNESS ON REAL FOLIAGE (Ben 07-29) ----
       // "volumetric darkness at night is applied to horizon pines, but not to forest trees." Correct, and the two fade to
       // different targets. The horizon backdrop fades to _uPineFog, which is scene.fog.color pulled toward storm blue and
@@ -2650,7 +2694,21 @@ function injectAtlas(mat, opts={}){
         'float _fl = 0.90 + 0.10*sin(uTime*7.3 + vLP.x*1.7 + vLP.z*1.3);\n'+   // cheap warm flicker
         'irradiance += vec3(3.6,1.95,0.80) * pow(_bl,1.45) * _fl;')   // warm torch glow added to indirect — falloff SOFTENED from _bl² (Ben 07-20: in truly dark chunks the squared curve collapsed the glow to an invisible puddle; ^1.45 carries the light to its full flood radius) + peak brightened ~16%
       .replace('#include <aomap_fragment>',
-        '#include <aomap_fragment>\nreflectedLight.directDiffuse *= (0.17 + 0.83*smoothstep(0.16,0.9,vSky));');   // the SUN can't reach where the sky can't: kills direct light leaking into interiors/caves (and beyond the 46-block shadow radius), so enclosed spaces read genuinely dark. Floor 0.12→0.17 and the knee pulled in (Ben 07-27) so a canopy gap still lets a little sun onto the forest floor.
+        '#include <aomap_fragment>\nreflectedLight.directDiffuse *= (0.17 + 0.83*smoothstep(0.16,0.9,vSky));\n'+
+        // ---- CLOUDS BLOCKING THE SUN (Ben's note 7) ----
+        // Multiplying directDiffuse at the same point vSky already scales it, exactly as the plan specifies: a cloud is an
+        // occluder of the KEY light and nothing else, so ambient, block light and the sky term are all untouched and a shaded
+        // hillside does not get darker still when a cloud crosses it.
+        // PROJECTED ALONG THE SUN, not sampled straight down. A shadow lands where the sun's ray through the cloud deck meets
+        // the ground, so the sample point slides with the sun's azimuth and runs out to the horizon as it sets — which is what
+        // ties this to the god rays: both are the same geometry, and shafts appear where this mask breaks.
+        // uSunDirC.y is floored so the projection cannot blow up as the sun approaches the horizon (the offset would go to
+        // infinity), and the whole term is gated on vSky so caves and interiors never see weather.
+        '{ float _cdeck = 190.0 - vWPos.y;\n'+
+        '  vec2 _cuv = (vWPos.xz + uSunDirC.xz*(_cdeck/max(uSunDirC.y,0.28)))*0.0026 + uCloudScroll;\n'+
+        '  float _clight = texture2D(uCloudTex, _cuv).r;\n'+
+        '  float _camt = uCloudShadow*smoothstep(0.10,0.55,vSky);\n'+
+        '  reflectedLight.directDiffuse *= mix(1.0, 0.20+0.80*_clight, _camt); }');   // the SUN can't reach where the sky can't: kills direct light leaking into interiors/caves (and beyond the 46-block shadow radius), so enclosed spaces read genuinely dark. Floor 0.12→0.17 and the knee pulled in (Ben 07-27) so a canopy gap still lets a little sun onto the forest floor.
     sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>',
       '#include <dithering_fragment>\nif(uWhiteTile>=0.0 && abs(vTile-uWhiteTile)<0.5){ gl_FragColor=vec4(1.0,1.0,1.0,gl_FragColor.a); }');   // VANTAWHITE: overwrite the FINAL pixel to pure white AFTER lighting/tonemap/fog → genuinely unlit, no shadow/AO/surface-detail, a hole of pure white (Ben 07-21)
     if(Q.get('albedo')) sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\ngl_FragColor=vec4(_tex.rgb,1.0);');   // DIAGNOSTIC ?albedo: flat raw texture, NO lighting
@@ -6339,14 +6397,26 @@ let offUse=false;
 // of the file is written against (bench/assert-offhand-state): heldSlot() is what mining, firing, the ammo readout and the
 // reload all read, so with a shield in the offhand and a gun in the right hand, FIRING resolved to the shield.
 function offUseActive(){ return offUse && !!armor[EQ_OFF] && !inv[selSlot]; }
-function heldSlot(){ return offUseActive() ? armor[EQ_OFF] : inv[selSlot]; }
+// ONE HAND AT A TIME, NAMED (Ben 08-04: "right click should fire the item in the main hand, and left click should fire the item in
+// the left hand, this applies to ALL items when F has been toggled on and two items are in the hands").
+//
+// Every act in the game -- placing, eating, mining, striking a light, reading a page -- reaches its item through heldSlot() or
+// mainSlot(), which resolve by MODE rather than by which button you pressed. So with both hands full, a left click ran the main
+// hand's place/use path and a right click could only reach a gun: the wrong item acted, and the wrong hand animated.
+//
+// Rather than thread a slot argument through doPlace and the dozen paths under it, the resolvers take a binding for the duration
+// of one act. That is the same shape the creature code already uses for `wretch` (bind, run, restore in a finally), and it means
+// a path added later is routed correctly without knowing this exists.
+let _actSlot=null;
+function withSlot(slot, fn){ const p=_actSlot; _actSlot=slot; try{ return fn(); } finally{ _actSlot=p; } }
+function heldSlot(){ return _actSlot || (offUseActive() ? armor[EQ_OFF] : inv[selSlot]); }
 // THE MODE IS ABOUT THE LEFT MOUSE BUTTON, not about what counts as held (Ben 08-03: "a loaded gun should still work in the
 // offhand, right now it becomes unloaded and unusable"). It used to switch itself off the instant you picked anything up,
 // which is what made an offhand gun go dead — so this predicate, which only the click paths use, ignores the main hand,
 // while heldSlot() above keeps its narrow rule. A left click acts with the offhand; the main hand keeps the right button.
 function offActing(){ return offUse && !!armor[EQ_OFF]; }
 // The hand a RIGHT click belongs to: your own, unless it is empty and the offhand is standing in for it.
-function mainSlot(){ return inv[selSlot] || (offUseActive() ? armor[EQ_OFF] : null); }
+function mainSlot(){ return _actSlot || inv[selSlot] || (offUseActive() ? armor[EQ_OFF] : null); }
 // starter kit lives in a CHEST at spawn (see buildSpawnChest) — you begin empty-handed and open it
 defItem('field_guide',{name:'Field Guide',max:1,icon:{t:'book',c:'#6a4a28'},book:true});   // held open like the notebook — right-click turns the page (no menus)
 const STARTER_ITEMS=[['field_guide',1],['apple',2],['wood_axe',1],['rifle_ammo',2],['torch',4]];
@@ -7081,7 +7151,10 @@ function _onMouseDown(e){ if(!locked)return;
     // TWO GUNS FIRE FROM TWO BUTTONS (Ben 08-03: "when left click mode is enabled for a gun both should fire with left and
     // right click"). Left click already fires the offhand in this mode; the main hand's gun has no button left, because
     // right-click is its aim — and aiming is suppressed anyway while the offhand is full, so nothing is lost by spending it.
-    if(offActing() && inv[selSlot] && ITEMS[inv[selSlot].id] && ITEMS[inv[selSlot].id].gun){ fireGun(inv[selSlot]); rmbHeld=true; nextAct=performance.now()+120; return; }
+    // BOTH HANDS FULL IN OFFHAND-USE MODE: the right button belongs to the MAIN hand, for every kind of item and not just a gun.
+    // It used to catch only guns, so a torch or a block in the right hand fell through to the shared path below and acted with
+    // whichever slot the MODE resolved to -- the offhand's -- which is the other half of "it interacts with the main hand, or both".
+    if(offActing() && inv[selSlot]){ mainHandRightClick(); rmbHeld=true; nextAct=performance.now()+180; return; }
     const hs=mainSlot();
     // SHIFT + right-click WEARS what you are holding (Ben): armour to its own slot, a backpack to the pack slot, a shield
     // to the offhand. eqTarget already encodes exactly that routing for shift-click in the inventory, so this reuses it
@@ -7099,14 +7172,19 @@ function _onMouseDown(e){ if(!locked)return;
 // mine, wind up a throw -- and everything else runs the USE path, which is where placing a block and eating live. Named
 // rather than inline so a probe can call the exact thing the mouse calls; the first version of this test could not tell
 // whether a failure to place was in the click plumbing or in doPlace, because there was nothing to call but the mouse.
+// WHAT AN ITEM IS FOR, done with the named hand. A gun fires from its own slot (GUNMAG is keyed on the uid branded there, so
+// this is also what keeps two guns' magazines apart); a tool or a spear swings; everything else runs the USE path, which is where
+// placing a block, eating, striking a light and turning a page all live. The swing lands on the hand that acted -- that is the
+// half of this Ben could see: an offhand click used to play the RIGHT arm's animation.
+function actWithSlot(slot, hand){
+  const it=slot&&ITEMS[slot.id]; if(!it) return {no:'empty'};
+  if(it.gun){ const f=fireGun(slot); return {did:'fire', id:slot.id, fired:!!f}; }
+  if(it.tool||it.spear){ if(hand==='off') offView.swing=1; else view.swing=1;
+    withSlot(slot, ()=>meleeAttack()); return {did:'swing', id:slot.id}; }
+  withSlot(slot, ()=>doPlace()); return {did:'use', id:slot.id}; }
 function offhandLeftClick(){ if(!offActing()) return {no:'mode off'};
-  const o=armor[EQ_OFF], it=ITEMS[o.id];
-  // A GUN IS FIRED FROM ITS OWN SLOT. doSwing() routes through heldSlot(), which is the MAIN hand whenever that hand is
-  // full — so with a block in the right hand this fired nothing and mined instead. Passing the slot is what makes the
-  // offhand gun keep its own magazine, since GUNMAG is keyed off the uid branded on that object.
-  if(it && it.gun){ const f=fireGun(o); return {did:'fire', id:o.id, fired:!!f}; }
-  if(it && (it.tool||it.spear)){ doSwing(); return {did:'swing', id:o.id}; }
-  doPlace(); return {did:'use', id:o.id}; }
+  return actWithSlot(armor[EQ_OFF], 'off'); }
+function mainHandRightClick(){ return actWithSlot(inv[selSlot], 'main'); }
 document.addEventListener('mouseup',e=>{ if(spearCharge.active){ const hs=heldSlot(); if(hs&&ITEMS[hs.id]&&ITEMS[hs.id].spear) throwSpear(hs.id, spearPower()); spearCharge.active=false; } if(e.button===0)lmbHeld=false; else if(e.button===2)rmbHeld=false; });
 document.addEventListener('contextmenu',e=>e.preventDefault());
 addEventListener('wheel',e=>{ if(!locked)return;
@@ -8018,6 +8096,7 @@ let _editShadowT=-1;   // >=0 → a block was just edited; the loop forces a sha
 // motion-blur reprojection state
 const _curVP=new THREE.Matrix4(), _prevVP=new THREE.Matrix4(), _mbW=new THREE.Vector3(), _prevMbW=new THREE.Vector3(), _mbV4=new THREE.Vector4(), _mbPV4=new THREE.Vector4();
 const _sunProj=new THREE.Vector3();   // scratch: sun sky-direction projected to NDC for the god-ray origin
+let _cloudShadowOn=true;   // A/B flag for the ground cloud shadows (plan §5: one flag per change, togglable in one page via __hc.cloudShadow)
 let _godraysOn=true;                   // adaptive quality can shed god rays (then bloom) under heavy load to hold framerate
 // structure builders, polled ONE per frame round-robin (each early-returns until its chunks exist / when done)
 const _BUILDERS=[buildSpawnChest, buildMine, buildVillage, buildTowers, buildGraveyard, buildStandingStones, buildWell, buildCamp, buildFarm, buildApiary, buildBlind, buildShrine, buildWoodcutter, buildLighthouse, buildDock, buildTunnels, buildValley, buildGolgotha, buildChurch, buildPeakTowers, buildCathedral, buildSilo];
@@ -8373,8 +8452,10 @@ function updateTpsBody(dt){
   else P.hand.rotation.x = TPS_GRIP - carry;                                     // tool/block/torch: forward and slightly up, never down
   // The offhand mirrors it, minus the swing: a shield or a torch is CARRIED, and the left arm only lifts when it has something.
   if(oit){ const okick = oit.gun ? Math.min(1.3, offView.gunKick||0) : 0;       // the left hand's own gun kicks on its own buck
-    const oc = (oit.gun ? -1.35 : -0.95) + okick*0.18;
-    P.armL.rotation.x = oc; P.handOff.rotation.x = ((oit.gun ? -okick*0.30 : TPS_GRIP)) - oc; }
+    const oArc = offView.swing ? offView.swing*Math.sin(offView.swing*Math.PI) : 0;   // …and swings when the left hand is what acted
+    const oc = (oit.gun ? -1.35 : -0.95) + okick*0.18 - oArc*1.35;
+    P.armL.rotation.x = oc; P.armL.rotation.z = oArc*0.28;
+    P.handOff.rotation.x = ((oit.gun ? -okick*0.30 : TPS_GRIP)) - oc; }
   else P.handOff.rotation.x = 0;
   P.hand.getWorldPosition(_tpsHandW);                                           // where the held light must come from this frame
 }
@@ -8385,7 +8466,7 @@ function _tpsSetOff(P,id){
   if(P.offMesh){ P.handOff.remove(P.offMesh); try{ _disposeView(P.offMesh); }catch(e){} P.offMesh=null; }
   if(!id||!ITEMS[id]) return; const it=ITEMS[id]; let m; try{ m=itemModel(id); }catch(e){ return; }
   const w=new THREE.Group(); w.add(m); w.rotation.y=Math.PI;   // see setAvatarHeld: viewmodel models face -z, the body faces +z
-  if(it.gun){ m.scale.setScalar(1.0); w.position.set(-0.02,-0.05,0.12); }
+  if(it.gun){ m.scale.setScalar(1.0); w.position.set(-0.02,0.07,0.12); }
   else if(it.block!=null){ m.scale.setScalar(0.85); w.position.set(0,0.02,0); }
   else { m.scale.setScalar(0.55); w.rotation.z=-0.2; w.position.set(0,0.04,-0.02); }
   w.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
@@ -8534,7 +8615,7 @@ function setAvatarHeld(a,id){ if(a.heldMesh){ a.hand.remove(a.heldMesh); _dispos
   w.rotation.y=Math.PI;
   // AND AT ITS REAL SIZE (Ben: "guns are still not their proper size in 3rd person hands"). A viewmodel gun is authored at about
   // a metre, which is what a rifle is; 0.8 was shrinking it to a carbine-sized prop in a full-height body's hands.
-  if(it.gun){ m.scale.setScalar(1.0); w.position.set(0.02,-0.05,0.12); }                                        // rifle at low-ready, barrel down the body's forward
+  if(it.gun){ m.scale.setScalar(1.0); w.position.set(0.02,0.07,0.12); }                                         // rifle at low-ready, barrel down the body's forward — carried at chest height, not slung by the knee (Ben: "guns are too low")
   else if(it.block===BID.torch||it.block===BID.lantern||it.block===BID.candle){ m.scale.setScalar(0.6); w.position.set(0,0.12,0.02); }   // upright torch/lantern in the fist
   else if(it.block!=null){ m.scale.setScalar(0.85); w.position.set(0,0.02,0); }                                 // a block cube gripped
   else { m.scale.setScalar(0.5); w.rotation.set(-0.4,0,0.25); w.position.set(0,0.04,-0.02); }                   // tools/materials: canted up out of the grip like the viewmodel
@@ -8771,7 +8852,15 @@ function loop(){ try{
     //
     // The elevation gate rather than `day`, for that reason, and it outlives the geometric horizon by a shade so the effect is
     // alive through the minutes either side of sunset — the same lesson the water sunglade paid for (plan §7).
-    const _sy=globalU.uSunDir.value.y;
+    // CLOUD SHADOWS: drift, and how deep they bite. The scroll matches the sky's own cloud drift (uvc += uTime*0.006, 0.002 there)
+  // scaled by the ground field's own metres-per-uv, so a cloud crossing overhead and its shadow crossing the ground move
+  // together rather than at two different speeds — the tell that would give the trick away instantly.
+  // Depth follows the live cover and dies with a low sun: with the sun on the horizon its light is already reddened and diffuse
+  // and there is no crisp shadow to cast, and hard-edged cloud shadows raking a sunset read as dirt on the lens.
+  { const _cs=globalU.uCloudScroll.value; _cs.set(worldTime*0.006*0.55, worldTime*0.002*0.55);
+    const _cov=Math.min(1.6,(typeof _uCloud!=='undefined'?_uCloud.value:1));
+    globalU.uCloudShadow.value = _cloudShadowOn ? 0.85*Math.min(1,_cov)*smooth(0.02,0.30,globalU.uSunDir.value.y)*(1-0.5*(weather.overcast||0)) : 0; }
+  const _sy=globalU.uSunDir.value.y;
     const _above=smooth(-0.05,0.06,_sy);                    // 0 once the sun is properly down, full just above the horizon
     const _low=1-smooth(0.10,0.62,_sy);                     // 1 at grazing → 0 with the sun high; same shape the sunglade uses
     // A FLOOR AT NOON RATHER THAN NOTHING. The plan says "absent at noon"; 0.22 of full is kept instead, because a canopy with a
@@ -12559,6 +12648,10 @@ let _flashHold=false;   // QA only (__hc.flashHold) — see the flash-decay bloc
 // How much room the held gun must keep in front of the near plane. One constant, because the fault it fixes was 14 of 16
 // gun variants having their stock at or behind the eye while aimed; per-gun tuning is what let them drift apart.
 const VIEW_NEAR_CLEAR=0.10;
+// GUN BLOCK-OUT (#62). Two distances, not one: the latch sets at 0.62 and only clears past 0.86, so the click cannot
+// chatter as a probe step crosses in and out. TILT is radians at full press — 1.35 is ~77 degrees, muzzle near vertical,
+// where the old bend*0.6 was ~34 and left a long barrel inside the block.
+const BLOCKOUT_IN=1.00, BLOCKOUT_OUT=1.22, BLOCKOUT_TILT=1.35, BLOCKOUT_PULL=0.34;
 const _vmM=new THREE.Matrix4(), _vmV=new THREE.Vector3();   // hoisted: this runs every frame a gun is held
 // The viewmodel's bounds in ITS OWN local space. Box3.setFromObject returns WORLD space, which is useless here because the
 // group hangs off the camera and moves every frame; this walks the descendants relative to the root instead, once per item.
@@ -13196,8 +13289,8 @@ function setOffItem(id){ if(offView.id===id)return; offView.id=id;
     if(ITEMS[id].gun){
       m.traverse(o=>{ if(o.isMesh&&o.material){ const L=Array.isArray(o.material)?o.material:[o.material]; for(const mm of L) mm.side=THREE.DoubleSide; } });
       const mir=new THREE.Group(); mir.scale.x=-1; mir.add(m);
-      offView.group.position.set(-0.34,-0.235,-0.62); offView.group.rotation.set(0,0,0);   // the fist branch of updateView, x negated and lifted (Ben: "a little too low")
-      offView.baseY=-0.235; offView.mesh=mir; offView.group.add(mir); applyViewFog(mir);
+      offView.group.position.set(-0.34,-0.14,-0.62); offView.group.rotation.set(0,0,0);   // the fist branch of updateView, x negated and lifted twice (Ben: "a little too low", then "too low")
+      offView.baseY=-0.14; offView.baseZ=-0.62; offView.baseRX=0; offView.mesh=mir; offView.group.add(mir); applyViewFog(mir);
       return; }
     const _bd = ITEMS[id].block!=null ? B[ITEMS[id].block] : null;
     const _fit = ITEMS[id].gun ? _gunOffFit
@@ -13207,11 +13300,11 @@ function setOffItem(id){ if(offView.id===id)return; offView.id=id;
     m.scale.setScalar(s); m.position.set(-ctr.x*s,-ctr.y*s,-ctr.z*s);
     m.userData.offFit=+(mx*s).toFixed(4);   // the achieved longest side. A world-space AABB of this fist is rotated, so it is NOT the object's size — measuring that reported a 21% spread across guns that are all fitted to the same length.
     const P=OFF_POSE.hand; offView.group.position.set(P.p[0],P.p[1],P.p[2]); offView.group.rotation.set(P.r[0],P.r[1],P.r[2]);
-    offView.baseY=P.p[1];
+    offView.baseY=P.p[1]; offView.baseZ=P.p[2]; offView.baseRX=P.r[0];
     offView.mesh=m; offView.group.add(m); applyViewFog(m);
     return;
   }
-  { const P=OFF_POSE.shield; offView.group.position.set(P.p[0],P.p[1],P.p[2]); offView.group.rotation.set(P.r[0],P.r[1],P.r[2]); offView.baseY=P.p[1]; }
+  { const P=OFF_POSE.shield; offView.group.position.set(P.p[0],P.p[1],P.p[2]); offView.group.rotation.set(P.r[0],P.r[1],P.r[2]); offView.baseY=P.p[1]; offView.baseZ=P.p[2]; offView.baseRX=P.r[0]; }
   // BEN'S NUMBERS, off the three-scale frames in bench/results/offarm-scale-*.png: he picked 0.75, then called it still too
   // small, so this is 1.05 -- the middle frame of that same strip, not a fresh guess. 1.55 is the known-bad end: it covered
   // 80% of the lower-left corner of a 1280x720 frame.
@@ -13463,9 +13556,27 @@ function updateView(dt){ updateRecoil(dt);                                      
     const latV=player.vel.x*Math.cos(player.yaw)+player.vel.z*(-Math.sin(player.yaw));   // + = strafing right
     view.gunLat=(view.gunLat||0)+((clamp(latV,-6,6)/6)-(view.gunLat||0))*Math.min(1,dt*5);   // eased smoother
     // WALL BEND — probe straight ahead; if a block is close, pull the muzzle back toward the player and tilt it up so it never clips through
+    // WALL BEND — probe ahead; if a block is close, pull the muzzle back AND rotate it up so a long barrel cannot clip through.
+    // THREE HEIGHTS, not one. A single ray at eye level missed a waist-high ledge and the lower half of a doorframe entirely,
+    // so the gun happily buried itself in things the probe could not see. Nearest hit of the three wins.
     { const fx=-Math.sin(player.yaw), fz=-Math.cos(player.yaw); let near=1.6;
-      for(let d=0.5; d<=1.55; d+=0.22){ if(solidAt(player.pos.x+fx*d, player.pos.y+EYE, player.pos.z+fz*d)){ near=d; break; } }
-      const bt=clamp((1.5-near)/1.0,0,1); view.gunBend=(view.gunBend||0)+(bt-(view.gunBend||0))*Math.min(1,dt*10); }
+      for(const hy of [EYE, EYE-0.55, EYE+0.25]){
+        for(let d=0.5; d<=1.55; d+=0.22){ if(solidAt(player.pos.x+fx*d, player.pos.y+hy, player.pos.z+fz*d)){ if(d<near)near=d; break; } } }
+      const bt=clamp((1.5-near)/1.0,0,1); view.gunBend=(view.gunBend||0)+(bt-(view.gunBend||0))*Math.min(1,dt*10);
+      // THE CLICK IS LATCHED, AND IT NEEDS HYSTERESIS TO BE (Ben: a mechanical click, once per block-out, not per frame).
+      // A bare threshold on this signal is exactly the mistake the Backrooms portal made with a frustum edge: it flapped
+      // while turning and took the median frame from 8.79 to 12.74 ms with a 243 ms worst frame. Two different distances
+      // mean the latch cannot oscillate — it takes 0.62 to set and has to come back out past 0.86 to clear, so strafing
+      // along a wall through several probe steps cannot chatter. Never collapse these to one number.
+      const wasOut=!!view._blockOut;
+      if(!wasOut && near<=BLOCKOUT_IN) view._blockOut=true;
+      else if(wasOut && near>=BLOCKOUT_OUT) view._blockOut=false;
+      if(view._blockOut && !wasOut){ view._blockOutN=(view._blockOutN||0)+1;   // counted so a harness can prove it fired ONCE
+        if(typeof playSample==='function') playSample('click', null, 0.55); } }
+    // Rotate the muzzle UP toward vertical, not the ~34 degrees bend*0.6 used to give: retraction alone cannot clear a
+    // 0.58-long bolt-rifle barrel, which is the whole reason this item exists. Driven off the SAME eased signal — one
+    // proximity test in this function, never a second one that can disagree with it.
+    const bendUp=view.gunBend*BLOCKOUT_TILT;
     const lat=view.gunLat, bend=view.gunBend;
     // ===== SCOPE RAISE-TO-EYE: adsT eases 0..1 toward the aim INTENT; it drives the pose blend, PiP fade, FOV & sensitivity =====
     const aimGoal=view.ads?1:0, prevAdsT=view.adsT||0;
@@ -13508,9 +13619,9 @@ function updateView(dt){ updateRecoil(dt);                                      
     view.swayX=swx; view.swayY=swy;   // the final drift, published for __hc.swayMag — a probe that recomputed it would be testing its own arithmetic
     // ---- POSE BLEND: hip(ready) ↔ scope(aimed), a REAL interpolation by smoothstep(adsT) — no hard flip ----
     const sPx=swx*SWAY_POS + lat*0.010, sPy=-0.10 + b*0.3 + swy*SWAY_POS + bend*0.05, sPz=-0.38 + bend*0.16;   // scope (cheek-weld) pose — flipped + tamed strafe lean
-    const sRx=view.swing*0.4 + swy*SWAY_ROT + bend*0.35, sRy=swx*SWAY_ROT + lat*0.022, sRz=-lat*0.028;
-    const hPx=0.17 + lat*0.024, hPy=-0.20+b + bend*0.06, hPz=-0.5 + bend*0.26;                             // hip (ready) pose — flipped + tamed strafe lean
-    const hRx=view.swing*0.55 + bend*0.6, hRy=0.05 + lat*0.05, hRz=-lat*0.055;
+    const sRx=view.swing*0.4 + swy*SWAY_ROT + bendUp*0.58, sRy=swx*SWAY_ROT + lat*0.022, sRz=-lat*0.028;
+    const hPx=0.17 + lat*0.024, hPy=-0.20+b + bend*0.06, hPz=-0.5 + bend*BLOCKOUT_PULL;   // the tilt pivots near the receiver, so a long barrel swings up AND FORWARD — measured with the muzzle still inside the block at 1.05 rad, so the retraction has to carry its share                             // hip (ready) pose — flipped + tamed strafe lean
+    const hRx=view.swing*0.55 + bendUp, hRy=0.05 + lat*0.05, hRz=-lat*0.055;
     const e=adsT*adsT*(3-2*adsT);                                                                          // smoothstep so the raise starts & lands gently
     view.group.visible=true;
     let aPx=sPx,aPy=sPy,aPz=sPz,aRx=sRx,aRy=sRy,aRz=sRz;                                                   // aimed target = scope cheek-weld…
@@ -13649,8 +13760,16 @@ function updateView(dt){ updateRecoil(dt);                                      
   offView.flashT=Math.max(0,(offView.flashT||0)-dt);
   { const ofl=offView.mesh&&_findFlash(offView.mesh);
     if(ofl){ ofl.visible=offView.flashT>0; if(ofl.visible){ const bs=ofl.userData.base||1; ofl.scale.set(bs*(1+Math.random()*0.7), bs*(1+Math.random()*0.7), 1); ofl.rotation.z=Math.random()*6.28; } } }
-  if(offView.gunKick){ offView.gunKick=Math.max(0, offView.gunKick-dt*5.5);       // the left hand bucks and settles on its own clock
-    offView.group.position.z+=offView.gunKick*0.09; offView.group.rotation.x=(offView.group.rotation.x||0)-offView.gunKick*0.5; }
+  // THE BUCK IS REBASED, NOT ACCUMULATED (Ben 08-04: "firing a gun in the offhand makes it spin out"). The main hand rewrites its
+  // whole transform from the pose every frame and then adds the kick, so a += there is spent and gone. This group only ever had
+  // its .y rewritten, so a += on z and rotation.x compounded frame after frame: one shot walked the gun forward and span it. Both
+  // components are now written from the stored rest pose, which is captured whenever setOffItem lays one down.
+  offView.gunKick=Math.max(0,(offView.gunKick||0)-dt*5.5);                        // the left hand bucks and settles on its own clock
+  offView.swing=Math.max(0,(offView.swing||0)-dt*9);                             // …and swings on the same curve the right one does
+  { const oswArc=offView.swing?offView.swing*Math.sin(offView.swing*Math.PI):0;
+    const bz=(offView.baseZ!=null?offView.baseZ:offView.group.position.z), brx=(offView.baseRX!=null?offView.baseRX:0);
+    offView.group.position.z = bz + offView.gunKick*0.09;
+    offView.group.rotation.x = brx - offView.gunKick*0.5 - oswArc*1.2; }
   if(view.flashT>0 || offView.flashT>0){ const f=Math.max(view.flashT,offView.flashT)/0.06;
     const _lit = (view.flashT>0 ? fl : null) || (offView.mesh?_findFlash(offView.mesh):null);
     if(_lit) _lit.getWorldPosition(muzzleLight.position);
@@ -21764,6 +21883,31 @@ window.__hc={
         look:[+L.x.toFixed(3),+L.y.toFixed(3),+L.z.toFixed(3)],
         offDeg:+(Math.acos(Math.max(-1,Math.min(1,d.dot(L))))*57.29578).toFixed(1),
         arm:+P.armR.rotation.x.toFixed(3), hand:+P.hand.rotation.x.toFixed(3) }; }catch(e){ return {err:String(e.message||e)}; } },
+  // The offhand viewmodel's transform after firing it: a buck that is rebased every frame stays bounded, one that accumulates walks off.
+  offFire(n,id){ try{ id=id||'ar15'; armor[EQ_OFF]={id,n:1}; setOffItem(id); if(typeof updateArmorView==='function')updateArmorView();
+      const before={ z:+offView.group.position.z.toFixed(3), rx:+offView.group.rotation.x.toFixed(3) };
+      for(let i=0;i<(n|0||6);i++){ try{ fireGun(armor[EQ_OFF]); }catch(e){} updateView(0.033); }
+      const peak={ z:+offView.group.position.z.toFixed(3), rx:+offView.group.rotation.x.toFixed(3) };
+      for(let i=0;i<60;i++) updateView(0.033);                                   // let the buck settle
+      return { id, before, peak, after:{ z:+offView.group.position.z.toFixed(3), rx:+offView.group.rotation.x.toFixed(3) },
+               baseZ:offView.baseZ, baseRX:offView.baseRX, kick:+(offView.gunKick||0).toFixed(3),
+               mainKick:+(view.gunKick||0).toFixed(3), mainFlash:+(view.flashT||0).toFixed(3), offFlash:+(offView.flashT||0).toFixed(3) }; }catch(e){ return {err:String(e.message||e)}; } },
+  // BOTH HANDS FULL, ONE BUTTON EACH. Sets a block in the right hand and a gun in the left, then runs the two click paths the
+  // mouse runs and reports which item acted and which viewmodel moved.
+  handSplit(mainId, offId){ try{ mainId=mainId||'planks'; offId=offId||'ar15';
+      invAdd(mainId,8); for(let i=0;i<9;i++) if(inv[i]&&inv[i].id===mainId){ selSlot=i; break; }
+      setViewItem(mainId); armor[EQ_OFF]={id:offId,n:1}; offUse=true; setOffItem(offId);
+      if(typeof updateArmorView==='function')updateArmorView();
+      view.swing=0; offView.swing=0; view.gunKick=0; offView.gunKick=0; view.flashT=0; offView.flashT=0;
+      const left=offhandLeftClick();
+      const afterLeft={ mainSwing:+(view.swing||0).toFixed(2), offSwing:+(offView.swing||0).toFixed(2),
+                        mainKick:+(view.gunKick||0).toFixed(2), offKick:+(offView.gunKick||0).toFixed(2),
+                        mainFlash:+(view.flashT||0).toFixed(3), offFlash:+(offView.flashT||0).toFixed(3) };
+      view.swing=0; offView.swing=0; view.gunKick=0; offView.gunKick=0; view.flashT=0; offView.flashT=0;
+      const right=mainHandRightClick();
+      const afterRight={ mainSwing:+(view.swing||0).toFixed(2), offSwing:+(offView.swing||0).toFixed(2),
+                         mainKick:+(view.gunKick||0).toFixed(2), offKick:+(offView.gunKick||0).toFixed(2) };
+      return { offActing:offActing(), main:mainId, off:offId, left, afterLeft, right, afterRight }; }catch(e){ return {err:String(e.message||e)}; } },
   tpsShoulder(s){ try{ if(s!=null)_tpsShoulder=(s|0); return this.tpsCam(); }catch(e){ return {err:String(e.message||e)}; } },
   // The ring's live size, and the cone a shot may actually land in. spreadDeg is what "less accurate when jumping" has to move.
   xhProbe(){ try{ const el=document.getElementById('xh'), cs=el?getComputedStyle(el):null;
@@ -21978,6 +22122,15 @@ window.__hc={
         wretchDist:(wretch&&wretch.active)?+Math.hypot(wretch.pos.x-player.pos.x,wretch.pos.z-player.pos.z).toFixed(2):null }; }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: force the ramp so a probe does not have to walk a Wretch across the map to see the music duck.
   dreadSet(v){ try{ _dread=clamp(+v||0,0,1); if(typeof applyMusicVol==='function')applyMusicVol(); return +_dread.toFixed(4); }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: the block-out state. The CLICK COUNT is the point — the fault this guards against is a click per frame or a
+  // click that chatters as a probe step crosses, and neither is visible in a screenshot or audible in a headless run.
+  blockOut(){ try{ const fl=view.mesh&&view.mesh.userData&&view.mesh.userData.flash; const w=new THREE.Vector3();
+      if(fl) fl.getWorldPosition(w);
+      return { id:view.id, bend:+(view.gunBend||0).toFixed(4), out:!!view._blockOut, clicks:view._blockOutN||0,
+        tiltRx:+view.group.rotation.x.toFixed(4), inD:BLOCKOUT_IN, outD:BLOCKOUT_OUT, tiltMax:BLOCKOUT_TILT,
+        muzzle:fl?[+w.x.toFixed(3),+w.y.toFixed(3),+w.z.toFixed(3)]:null,
+        muzzleInBlock:fl?!!(isOpaque[getBlock(Math.floor(w.x),Math.floor(w.y),Math.floor(w.z))]):null }; }catch(e){ return {err:String(e.message||e)}; } },
+  blockOutReset(){ try{ view._blockOutN=0; return 0; }catch(e){ return {err:String(e.message||e)}; } },
   heldParts(){ try{ let n=0, sprite=false; if(view.mesh) view.mesh.traverse(o=>{ if(o.isMesh){ n++; if(o.userData&&o.userData.extruded) sprite=true; } });
       return { id:view.id, meshes:n, sprite }; }catch(e){ return {err:String(e.message||e)}; } },
   chainlinkRun(x,y,z,n,axis){ try{ n=Math.max(1,n|0||1); const ax=(axis==='z')?'z':'x';
@@ -22387,6 +22540,11 @@ window.__hc={
   // item 4 assumes radius is a lever, so which filter is live has to be readable before that assumption is spent.
   // QA/bench: the god-ray pass's live state. `on` also forces it off, which is what prices a full-screen pass — the composer
   // skips a disabled pass entirely, so enabled/disabled is a real A/B rather than a uniform set to zero that still pays.
+  cloudShadow(o){ try{ if(o&&o.on!=null) _cloudShadowOn=!!o.on;
+      return { on:_cloudShadowOn, amt:+globalU.uCloudShadow.value.toFixed(4), scroll:[+globalU.uCloudScroll.value.x.toFixed(3),+globalU.uCloudScroll.value.y.toFixed(3)],
+               cover:+(typeof _uCloud!=='undefined'?_uCloud.value:-1).toFixed(2), sunY:+globalU.uSunDir.value.y.toFixed(4),
+               elevDeg:+(Math.asin(Math.max(-1,Math.min(1,globalU.uSunDir.value.y)))*57.29578).toFixed(2), overcast:+(weather.overcast||0).toFixed(2) };
+    }catch(e){ return {err:String(e.message||e)}; } },
   godrays(o){ try{ if(o&&o.on!=null) _godraysOn=!!o.on;
       // THE THREE TERMS OF _grActive, each on its own, because "enabled:false" does not say which one said no.
       return { pass:!!godrayPass, on:_godraysOn, enabled:!!(godrayPass&&godrayPass.enabled),
