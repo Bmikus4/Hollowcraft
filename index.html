@@ -5383,8 +5383,15 @@ function invRemove(id,n){ for(let i=0;i<INV_N&&n>0;i++){ const s=inv[i]; if(s&&s
 // `if(h.n<=0) inv[selSlot]=null` is then nulling a slot that is already empty, so it cannot destroy anything. A spent
 // offhand item is cleared where the viewmodel is updated, which is the one place that runs every frame.
 let offUse=false;
-function offUseActive(){ return offUse && !!armor[EQ_OFF] && !inv[selSlot]; }
+// A FULL MAIN HAND NO LONGER CANCELS THE MODE (Ben 08-03: "a loaded gun should still work in the offhand, right now it
+// becomes unloaded and unusable"). The `!inv[selSlot]` clause meant picking up a single cartridge switched the offhand back
+// off: heldSlot() stopped resolving to it, the ammo readout went blank — which is what "unloaded" looked like — and R,
+// left-click and the reload all addressed the main hand instead. The mode is opt-in from an empty hand and stays on until
+// you turn it off. Which hand a RIGHT click acts with is mainSlot()'s job, so the main hand still acts with itself there.
+function offUseActive(){ return offUse && !!armor[EQ_OFF]; }
 function heldSlot(){ return offUseActive() ? armor[EQ_OFF] : inv[selSlot]; }
+// The hand a RIGHT click belongs to: your own, unless it is empty and the offhand is standing in for it.
+function mainSlot(){ return inv[selSlot] || (offUseActive() ? armor[EQ_OFF] : null); }
 // starter kit lives in a CHEST at spawn (see buildSpawnChest) — you begin empty-handed and open it
 defItem('field_guide',{name:'Field Guide',max:1,icon:{t:'book',c:'#6a4a28'},book:true});   // held open like the notebook — right-click turns the page (no menus)
 const STARTER_ITEMS=[['field_guide',1],['apple',2],['wood_axe',1],['rifle_ammo',2],['torch',4]];
@@ -5976,12 +5983,19 @@ function _onMouseDown(e){ if(!locked)return; if(e.button===0){ lmbHeld=true;
   else if(e.button===2){ if(typeof brTryPullCord==='function'&&brTryPullCord())return;        // BACKROOMS: right-click a hanging bulb's cord → switch it on/off
     if(typeof brTryEat==='function'&&brTryEat())return;                 // BACKROOMS: right-click a plate of food on a laid table → eat it
     if(typeof brTryToggleDoor==='function'&&brTryToggleDoor())return;   // BACKROOMS: right-click a door you're facing → open/close it
-    const hs=heldSlot();
+    // TWO GUNS FIRE FROM TWO BUTTONS (Ben 08-03: "when left click mode is enabled for a gun both should fire with left and
+    // right click"). Left click already fires the offhand in this mode; the main hand's gun has no button left, because
+    // right-click is its aim — and aiming is suppressed anyway while the offhand is full, so nothing is lost by spending it.
+    if(offUseActive() && inv[selSlot] && ITEMS[inv[selSlot].id] && ITEMS[inv[selSlot].id].gun){ fireGun(inv[selSlot]); rmbHeld=true; nextAct=performance.now()+120; return; }
+    const hs=mainSlot();
     // SHIFT + right-click WEARS what you are holding (Ben): armour to its own slot, a backpack to the pack slot, a shield
     // to the offhand. eqTarget already encodes exactly that routing for shift-click in the inventory, so this reuses it
     // rather than inventing a second rule that could drift from the first.
     if(e.shiftKey && hs && typeof eqTarget==='function'){ const t=eqTarget(hs.id);
-      if(t>=0){ armor[t]={id:hs.id,n:1}; hs.n--; if(hs.n<=0)inv[selSlot]=null;
+      // uid TRAVELS (Ben 08-03: "a loaded gun should still work in the offhand, right now it becomes unloaded"). The F swap
+      // carries the per-instance brand and this route did not, so shift-equipping a half-empty gun orphaned its magazine in
+      // GUNMAG and handed the offhand an unbranded copy. Same one-line omission at the inventory's own shift-click.
+      if(t>=0){ armor[t]={id:hs.id,n:1,uid:hs.uid}; hs.n--; if(hs.n<=0)inv[selSlot]=null;
         flashName(ITEMS[armor[t].id].name+' equipped'); refreshHotbar();
         if(typeof updateArmorView==='function')updateArmorView(); if(typeof renderInvUI==='function')renderInvUI(); return; } }
     if(hs&&ITEMS[hs.id]&&ITEMS[hs.id].spear){ spearCharge.active=true; spearCharge.t=0; }   // SPEAR: right-hold winds up a throw; release looses it (rmbHeld stays false so repeat-place never fires)
@@ -6060,7 +6074,17 @@ addEventListener('keydown',e=>{ if(e.code==='Space')e.preventDefault();
     return; }
   if(e.code==='KeyQ'){ const s=heldSlot(); if(s){ tossOne(s.id);                                  // drop ONE of the held item, tossed forward, with a 1.8s no-pickup window
     s.n--; if(s.n<=0)inv[selSlot]=null; refreshHotbar(); } }
-  if(e.code==='KeyR'){ const _rs=heldSlot(), _rg=_rs&&ITEMS[_rs.id]; if(_rg&&_rg.gun&&isFinite(magCap(_rg))){ startReload(_rs); return; } respawn(); }   // R = RELOAD when holding a mag-fed gun; respawn otherwise
+  // R = RELOAD; respawn only when neither hand holds a mag-fed gun. MAIN HAND FIRST, then the offhand on a second press
+  // (Ben 08-03: "if both a main hand AND offhand gun, reload main hand gun first, when and if its loaded, then load the off
+  // hand gun with a consecutive R"). The order falls out of asking which gun is short of a full magazine, so it needs no
+  // latch and no memory of the last press: the main hand answers yes until it is full, and then stops answering.
+  if(e.code==='KeyR'){ const _m=inv[selSlot], _o=armor[EQ_OFF];
+    const _isG=(s)=>{ const g=s&&ITEMS[s.id]; return !!(g&&g.gun&&isFinite(magCap(g))); };
+    const _short=(s)=>_isG(s) && magGet(gunKey(s),ITEMS[s.id])<magCap(ITEMS[s.id]);
+    if(_isG(_m)||_isG(_o)){ const pick=_short(_m)?_m:(_short(_o)?_o:null);
+      if(pick) startReload(pick); else flashName('both loaded');   // never fall through to respawn with a gun in hand
+      return; }
+    respawn(); }
   if(e.code==='KeyN' && !e.repeat){ toggleNVG(); return; }   // flip the night-vision goggles up/down (when worn)
   if(e.code==='KeyK'){ if(!window._allowCreative){ flashName('the wood does not answer'); return; }   // SURVIVAL: no dev-summon — K is a creative/debug tool only
     HORROR._firstNight=true; wretch._summoned=true;   // SUMMON — anytime, day or night; it persists and CHOOSES what to do right now
@@ -7669,6 +7693,14 @@ const HW_SIZE=1.25;               // 1.25x the ordinary Wretch. Everything that 
 function _driftBoot(){ if(_driftOn) return; _driftOn=true;
   driftInit({ THREE, renderer, worldScene:scene, camera, solidAt:(x,y,z)=>solidAt(x,y,z),
     daylight:()=>globalU.uDay.value, sunDir:()=>globalU.uSunDir.value }); }
+// IT IS ANGRIER THAN THE THING IT WAS MADE OF (Ben 08-03: "2.5x angrier", "takes 130 damage to run away", "likes to get
+// closer to the player, and likes to stalk more often"). Four dials, not one multiplier, because anger is not a single
+// quantity in this brain: how often the anger roll fires, how much damage it eats before it breaks, how close it settles
+// when it circles, and whether being SEEN sends it away. Every one of them is read through `wretch.horrific`, so the
+// ordinary Wretch's numbers are untouched — this creature shares its whole behaviour tree with her.
+const HW_ANGER=2.5;          // the anger roll re-arms 2.5x sooner, so the deterministic commit window opens 2.5x as often
+const HW_ROUT_DMG=130;       // damage in one encounter before it routs (the ordinary Wretch breaks at 100)
+const HW_STANDOFF=0.45;      // multiplies the stalk stand-off radius: it circles at under half her distance
 function hwKey(inst){ return 'hw'+inst._hid; }
 function spawnHorrific(x,z){
   _driftBoot();
@@ -8213,7 +8245,7 @@ function updateWretch(dt){
   wretch._wasSeen=s.seen;
   // ---- DETERMINISTIC HUNT/COMMIT (not Opus-gated): hungry · anger roll · hurt · bored(pacing) · stalked-well ----
   const canReach=near<30 && s.seen, stalkedWell=near<16 && !watched && s.conf>0.55;
-  wretch.angerT-=dt; const anger=wretch.angerT<=0; if(anger)wretch.angerT=16+Math.random()*28;
+  wretch.angerT-=dt; const anger=wretch.angerT<=0; if(anger)wretch.angerT=(16+Math.random()*28)/(wretch.horrific?HW_ANGER:1);   // the Horrific one re-arms 2.5x sooner (Ben)
   const bored=HORROR.sinceScare>75 && near<42 && s.seen;
   const fastReveal=brain.fast.reveal && s.seen && near<24;
   const wantHunt=reckless||anger||wretch.wound>0.4||bored||stalkedWell||fastReveal||(brain.mode==='HUNT_PLAYER'&&canReach)||brain.mode==='STARVING'||((HORROR.rage||0)>0.4 && near<40);   // later nights → far more willing to commit
@@ -8238,8 +8270,12 @@ function updateWretch(dt){
   if(wretch.routed){ st='FLEE'; }                                                       // took >100 dmg this encounter → terror rout (overrides the chase)
   else if(wretch.fleeing){ st='FLEE'; }                                                 // LATCH: once it bolts it commits to the FULL retreat — never reverts to a calm walk-back the instant you look away
   else if(wretch.committed){ st = s.seen ? (near<6?'HUNT':'CHASE') : 'TRACK'; }          // UNINTERRUPTIBLE chase once committed
-  else if(wretch.wound>0.5 || (day>0.64 && !hungry && s.seen && near<52)) st='FLEE';    // hurt, or caught in bright daylight WHILE it can see you
-  else if(watched) st='FLEE';                                                           // SPOTTED = GONE (Ben 07-20): any time your eyes land on it, it runs — no loom, no freeze, no stare contest. Only a terrorize performance (override below) or an already-committed chase (branch above) stands its ground
+  // THE HORRIFIC ONE DOES NOT LEAVE BECAUSE IT IS HURT OR BECAUSE THE SUN IS UP, and it does not leave because you looked
+  // at it — it stalks you instead (Ben: "likes to stalk more often"). Only the rout at HW_ROUT_DMG sends it away, which is
+  // what "takes 130 damage to run away" has to mean: the wound gate breaks at three hits of ANY size, so leaving it in
+  // place made the 130 unreachable with a fist or a blade. It is summoned and already persists through daylight.
+  else if(!wretch.horrific && (wretch.wound>0.5 || (day>0.64 && !hungry && s.seen && near<52))) st='FLEE';    // hurt, or caught in bright daylight WHILE it can see you
+  else if(watched) st = wretch.horrific ? 'STALK' : 'FLEE';                                                         // SPOTTED = GONE (Ben 07-20): any time your eyes land on it, it runs — no loom, no freeze, no stare contest. Only a terrorize performance (override below) or an already-committed chase (branch above) stands its ground
   else if(!watched && s.seen && near<26*fogAggro) st='HUNT';                            // close + unseen + in view → CHARGE (fog widens the pounce window)
   else if(!watched && s.seen && near<48*fogAggro) st='CHASE';                           // mid + unseen + in view → run it down
   else if(s.seenAge>3 && (s.scent||s.heard) && s.believedDist<80) st='TRACK';           // lost sight → follow scent/sound
@@ -8334,7 +8370,7 @@ function updateWretch(dt){
       wretch.yaw += clamp(d,-1,1)*dt*0.6;                                                 // ...but SLOWLY rotate the body to face you — the "it's looking right at me now" dread
     }
     else { wretch._treePeek=null; const rg=HORROR.rage||0; speed = (near>42 ? 4.6 : 3.0)*(1+rg*0.35);           // presses the gap faster on angry nights
-      if(reached() || wretch.repathT<=0){ const R=Math.max(5-rg*3, near*(0.6-rg*0.28)); const c=findCoverNear(cam.x,cam.z,R);   // spirals in TIGHTER each repath the angrier it is (closer stand-off)
+      if(reached() || wretch.repathT<=0){ const R=Math.max(5-rg*3, near*(0.6-rg*0.28))*(wretch.horrific?HW_STANDOFF:1); const c=findCoverNear(cam.x,cam.z,R);   // spirals in TIGHTER each repath the angrier it is (closer stand-off); the Horrific one settles at under half that (Ben: "likes to get closer to the player")
         if(c) wretch.target.set(c.x,c.gy,c.z);
         else { const nn=near||1; wretch.target.set(cam.x+(ex-cam.x)/nn*R, 0, cam.z+(ez-cam.z)/nn*R); }           // no cover found → still advance toward the player
         wretch.repathT=1.6+Math.random()*1.4;
@@ -9916,7 +9952,7 @@ function slotClick(src,idx,btn,shift){
     else if(eqAccepts(idx,cursor.id)){ const old=cell; setSlot('armor',idx,cursor); cursor=old; }   // same swap the armour slots always did — everything equippable is max:1, so there is no partial stack to split
     updateCraftOut(); renderInvUI(); return; }
   if(shift){ if(cell){
-      if(src==='inv' && eqTarget(cell.id)>=0){ const t=eqTarget(cell.id); armor[t]={id:cell.id,n:1}; cell.n--; if(cell.n<=0)inv[idx]=null; updateArmorView(); }   // shift-click to auto-equip — armour to its own slot, a shield to the offhand, the pack to the pack slot
+      if(src==='inv' && eqTarget(cell.id)>=0){ const t=eqTarget(cell.id); armor[t]={id:cell.id,n:1,uid:cell.uid}; cell.n--; if(cell.n<=0)inv[idx]=null; updateArmorView(); }   // shift-click to auto-equip — armour to its own slot, a shield to the offhand, the pack to the pack slot
       else if(src==='craft'||src==='chest'){ const left=invAdd(cell.id,cell.n); if(left<=0)setSlot(src,idx,null); else cell.n=left; }
       else if(openUI==='chest'&&curChest){ const left=addTo(curChest,cell.id,cell.n); if(left<=0)inv[idx]=null; else cell.n=left; }
       else moveWithin(idx);
@@ -11424,7 +11460,12 @@ function magGet(key,it){ if(GUNMAG[key]==null)GUNMAG[key]=magCap(it); return GUN
 function startReload(slot){ if(!view || view.reloadT>0 || !slot) return; const it=ITEMS[slot.id]; if(!it) return;
   const cap=magCap(it); if(!isFinite(cap)) return; const key=gunKey(slot); const cur=magGet(key,it); if(cur>=cap) return;
   if(invCount('rifle_ammo')<=0){ flashName('no cartridges to load'); if(AC)burst(master,0.35,0.04,700,0.4,200); return; }
-  view.reloadT=(it.gun==='bolt'?2.8 : it.gun==='revolver'?2.6 : it.gun==='auto'?4.5 : 1.8);   // a 100-round belt takes longer to feed than a magazine view.reloadDur=view.reloadT; view.reloadKey=key; view.reloadDef=it;   // reload THIS instance (not just this gun type)
+  // THE COMMENT GOES LAST ON THE LINE. Adding the minigun's 4.5 s belt feed put a `//` in the MIDDLE of this line, which
+  // ate the three assignments that used to follow it. reloadDur is what the reload ANIMATION divides by, so guns lost
+  // their reload motion entirely; reloadKey/reloadDef are what updateView checks the held gun against, so with both null
+  // every reload cancelled itself on the next frame and no cartridge was ever transferred. It reported as cosmetic.
+  view.reloadT=(it.gun==='bolt'?2.8 : it.gun==='revolver'?2.6 : it.gun==='auto'?4.5 : 1.8);   // a 100-round belt takes longer to feed than a magazine
+  view.reloadDur=view.reloadT; view.reloadKey=key; view.reloadDef=it;   // reload THIS instance (not just this gun type)
   if(AC){ burst(master,0.4,0.03,1300,0.4,500); } flashName('reloading'); }
 function finishReload(){ const key=view.reloadKey, it=view.reloadDef; view.reloadT=0; view.reloadKey=null; view.reloadDef=null; if(!it||!key) return;
   const cap=magCap(it), cur=GUNMAG[key]||0, take=Math.min(cap-cur, invCount('rifle_ammo'));
@@ -11461,11 +11502,22 @@ function updateView(dt){ updateRecoil(dt);                                      
   // torch gripped in the fist do not sit at the same height. Reading the constant here pinned every non-shield item to the
   // shield's height and undid the pose that setOffItem had just applied.
   offView.group.position.y=(offView.baseY!=null?offView.baseY:OFF_VIEW_Y)+b; offArm.group.position.y=OFF_ARM_Y+b;   // the left hand rides the same walk bob; a pinned shield beside a bobbing tool reads as a HUD sprite
+  // THE HAND THAT IS RELOADING IS THE HAND THAT MOVES. The reload animation lives on the main viewmodel, so reloading the
+  // offhand's gun waggled whatever the RIGHT hand happened to be holding. Only position.y is touched here, and only because
+  // it is the one component rewritten from a base every frame — dipping the group's rotation would accumulate, since
+  // setOffItem writes that once at build time and nothing restores it.
+  view._rlOff=false;
+  if(view.reloadT>0 && view.reloadDur && armor[EQ_OFF] && ITEMS[armor[EQ_OFF].id] && ITEMS[armor[EQ_OFF].id].gun && gunKey(armor[EQ_OFF])===view.reloadKey){
+    const _u=clamp(1-view.reloadT/view.reloadDur,0,1); offView.group.position.y-=Math.sin(_u*Math.PI)*0.09; view._rlOff=true; }
   const gunKind=ITEMS[view.id]&&ITEMS[view.id].gun, isGun=!!gunKind, isBolt=gunKind==='bolt';
   // bolt cycle animation + fire-gating clock
   view.boltT=Math.max(0,(view.boltT||0)-dt); view.gunKick=Math.max(0,(view.gunKick||0)-dt*7);   // viewmodel kick decays (every gun bucks against the shoulder on fire)
-  if(view.reloadT>0){ const _hs=heldSlot(), _hk=(_hs&&ITEMS[_hs.id]&&ITEMS[_hs.id].gun)?gunKey(_hs):null;
-    if(view.reloadKey!==_hk){ view.reloadT=0; view.reloadKey=null; view.reloadDef=null; }        // swapped to a DIFFERENT gun instance mid-reload → cancel, no rounds transferred
+  // EITHER HAND'S GUN MAY BE THE ONE RELOADING. This compared the running reload against heldSlot() alone, so with a gun in
+  // each hand the offhand's reload was cancelled on its first frame and no cartridge ever transferred. The cancel still has
+  // to exist — putting the gun away mid-reload must not feed it — so the test is "is that instance still in a hand".
+  if(view.reloadT>0){ const _kOf=(s)=>(s&&ITEMS[s.id]&&ITEMS[s.id].gun)?gunKey(s):null;
+    const _hk=_kOf(inv[selSlot]), _ok=_kOf(armor[EQ_OFF]);
+    if(view.reloadKey!==_hk && view.reloadKey!==_ok){ view.reloadT=0; view.reloadKey=null; view.reloadDef=null; }   // that gun instance left both hands mid-reload → cancel, no rounds transferred
     else { view.reloadT-=dt; if(view.reloadT<=0) finishReload(); } }
   const isDotG=!!(ITEMS[view.id]&&ITEMS[view.id].dot), isRev=gunKind==='revolver', isIronAR=(gunKind===true&&!isDotG)||gunKind==='auto';   // the minigun aims over its own irons too (Ben) — it was the one gun with no ADS at all   // a gun with a crafted Holosun; the Python + bare AR aim over their irons (Ben 07-20)
   // NO AIMING WITH A FULL LEFT HAND (Ben: "guns are no exception to that rule, and cannot be aimed when equipped with
@@ -11541,7 +11593,7 @@ function updateView(dt){ updateRecoil(dt);                                      
     view.group.rotation.set(hRx+(aRx-hRx)*e, hRy+(aRy-hRy)*e, hRz+(aRz-hRz)*e);
     if(view.gunKick){ view.group.position.z+=view.gunKick*0.09; view.group.rotation.x-=view.gunKick*0.5; }   // viewmodel bucks: rearward shove + muzzle rise, springs back independent of the camera (the glass climbing off the camera-locked reticle is what carries the dot out of the glass — the reticle is now clipped to the aperture so it VANISHES at the rim, see holoRet below)
     // ---- RELOAD ANIMATION (minimal realism): gun drops toward the chest + tilts inward while the hands work the action ----
-    if(view.reloadT>0 && view.reloadDur){ const u=clamp(1-view.reloadT/view.reloadDur,0,1), ez=Math.sin(u*Math.PI);
+    if(view.reloadT>0 && view.reloadDur && !view._rlOff){ const u=clamp(1-view.reloadT/view.reloadDur,0,1), ez=Math.sin(u*Math.PI);
       view.group.position.y-=ez*0.07; view.group.position.z+=ez*0.05; view.group.position.x-=ez*0.03;
       view.group.rotation.z+=ez*0.38; view.group.rotation.x+=ez*0.18;
       const M=view.mesh&&view.mesh.userData;
@@ -11659,7 +11711,7 @@ function anyWretch(fn){ const prev=wretch;
 function doSwing(){ return withNearestWretch(_doSwing); }
 function _doSwing(){ const h=heldSlot(); if(h&&ITEMS[h.id]&&ITEMS[h.id].gun){ if(fireGun())view.swing=1.4; return; } view.swing=1; meleeAttack(); }
 // hitscan down the look ray → first block/entity/animal hit. Muzzle flash + crack + tracer + recoil. Returns true if a shot was actually fired.
-function fireGun(){ const held=heldSlot(), it=held?ITEMS[held.id]:null, bolt = it&&it.gun==='bolt', rev = it&&it.gun==='revolver', sup = !!(it&&it.suppressed);
+function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id]:null, bolt = it&&it.gun==='bolt', rev = it&&it.gun==='revolver', sup = !!(it&&it.suppressed);
   if(it&&it.gun)achUnlock('armed');   // sup = the suppressed rifle: 40% quieter (sound + heard-range + emitted-noise) and -20 damage; rev = the .357 revolver (handgun)
   if(view.reloadT>0) return false;                                                                // hands are busy with the reload
   if(bolt && (view.boltT||0)>0) return false;                                                     // still cycling the bolt → can't fire
@@ -11761,11 +11813,13 @@ function hurtWretch(dmg){ if(wretch.hp==null){ wretch.hpMax=2700; wretch.hp=2700
   mind.model.timesHitMe=(mind.model.timesHitMe||0)+1;
   wretch.encDmg=(wretch.encDmg||0)+dmg; wretch.lastHitT=0;                                // damage taken THIS encounter (decays if it's left alone — see updateWretch)
   if(_freshEnc) HORROR.shotEnc=(HORROR.shotEnc||0)+1;                                     // count distinct encounters where you've shot it
-  if(wretch.encDmg>100 && !wretch.routed && !wretch._dunRetreat && !wretch.boss){   // the boss NEVER flees — it fights to the death
+  if(wretch.encDmg>(wretch.horrific?HW_ROUT_DMG:100) && !wretch.routed && !wretch._dunRetreat && !wretch.boss){   // the boss NEVER flees — it fights to the death; the Horrific one eats 130 first (Ben)
     if(wretch._dunHunt){ wretch._dunRetreat=true; wretch.committed=false; wretch.encDmg=0; wretch._fleeScream=false; wretchVoice&&wretchVoice('scream',wretch.pos); wretch.thought='Stung! Back to the heart of my dark — I will come at you again.'; }   // in its lair it NEVER flees to the woods — it withdraws to the main room, then hunts anew
     else { wretch.routed=true; SKILL.routs++; wretch.committed=false; wretch.state='FLEE'; wretch._fleeScream=false; if(wretch.dragging&&typeof endDrag==='function')endDrag(false); wretchVoice&&wretchVoice('scream',wretch.pos); wretchVoice&&wretchVoice('shriek',wretch.pos); } }   // out in the world: 100+ damage in one encounter → it breaks and BOLTS — and it REMEMBERS being beaten (skill ledger)
   const _gun=wretch._gunHit; wretch._gunHit=false;
-  if(_gun && !wretch.boss && HORROR.tier<=2 && (wretch.committed||wretch.state==='HUNT'||wretch.state==='CHASE')){   // NIGHTS 1-2 (Ben 07-20): a single firearm hit mid-charge BREAKS the charge — the young hunt has no stomach for gunfire yet
+  // …and NOT the Horrific one, whatever the night. A single bullet breaking its charge would make HW_ROUT_DMG dead code:
+  // it charges constantly and one AR hit is 50 of the 130 it is supposed to eat.
+  if(_gun && !wretch.boss && !wretch.horrific && HORROR.tier<=2 && (wretch.committed||wretch.state==='HUNT'||wretch.state==='CHASE')){   // NIGHTS 1-2 (Ben 07-20): a single firearm hit mid-charge BREAKS the charge — the young hunt has no stomach for gunfire yet
     wretch.routed=true; SKILL.routs++; wretch.committed=false; wretch.state='FLEE'; wretch._fleeScream=false;
     if(wretch.dragging&&typeof endDrag==='function')endDrag(false); wretchVoice&&wretchVoice('shriek',wretch.pos); }
   if(!wretch.boss && !wretch.dragging){                                                   // BULLETS (and blades) END THEATER — v2, universal: ANY performative display breaks on the FIRST hit,
@@ -15264,6 +15318,18 @@ function _stage2Sky(dt){
 // x 0.34..0.72 and y 0.15..0.53 from the top-left, so a 0.38 square centred at (0.53, 0.34). v is flipped, hence
 // offset.y = 1 - 0.15 - 0.38 = 0.47.
 const PALE_FACE={ u:0.34, v:0.47, s:0.38 };
+// WHERE THE HEAD IS CUT, as a fraction of its height (Ben 08-03: "move its mouth slit down to the bottom 1/5th of its
+// head"). It was 0.46, a jaw hinged just under the middle of the face. The GIF crop is split at the SAME fraction, or the
+// two halves of the face stop meeting at the seam -- that is the one thing this number must stay in step with.
+const PALE_SPLIT=0.20;
+// The jaw is ajar at all times (Ben: "its head should open all the time too"), and lifts the rest of the way when it is
+// violent. Nothing else may set the resting gape to zero -- a shut mouth is now only ever a transient on the way here.
+const PALE_GAPE_IDLE=0.32;
+// Above this gape the tongue comes out (Ben 08-03: "its tounge should ONLY be out when its mouth is open"). It has to sit
+// clear of PALE_GAPE_IDLE, since the mouth is now ajar permanently and a tongue lolling out of a resting face is what he
+// was looking at. Below it the whole chain is hidden rather than merely straightened: unrotated segments still reach
+// forward out of the slit from wherever their root sits.
+const PALE_TONGUE_GAPE=0.55;
 let _paleFaceImg=null, _paleFaceMats=null, _paleFaceTexs=null;
 function brPaleFaceMat(part){
   if(!_paleFaceImg){ _paleFaceImg=new Image(); _paleFaceImg.src='./assets/backrooms/slendermem.gif'; }   // an animated GIF keeps running inside an <img>; we just re-upload the frame each tick
@@ -15274,9 +15340,9 @@ function brPaleFaceMat(part){
       _paleFaceImg.addEventListener('load',()=>{ t.needsUpdate=true; }); _paleFaceTexs.push(t);
       const m=new THREE.MeshBasicMaterial({map:t, transparent:true, toneMapped:false, fog:false, side:THREE.DoubleSide, depthWrite:false});
       m.userData.tex=t; return m; };
-    const F=PALE_FACE, h=F.s/2;
+    const F=PALE_FACE, h=F.s*PALE_SPLIT;            // the CUT, not the middle: the jaw keeps the bottom fifth of the face
     _paleFaceMats.full=mk(F.s,F.s, F.u,F.v);
-    _paleFaceMats.top =mk(F.s,h,   F.u,F.v+h);      // upper half of the crop (v increases upward → the higher offset is the TOP of the image)
+    _paleFaceMats.top =mk(F.s,F.s-h, F.u,F.v+h);    // everything above the cut (v increases upward → the higher offset is the TOP of the image)
     _paleFaceMats.bot =mk(F.s,h,   F.u,F.v); }
   return _paleFaceMats[part||'full']; }
 function brPaleFaceTick(){ if(_paleFaceTexs) for(const t of _paleFaceTexs) t.needsUpdate=true; }   // pull the GIF's current frame into every crop
@@ -15287,7 +15353,21 @@ function brPaleMesh(){ const g=new THREE.Group(); const S=1.5;                  
   const box=(w,h,d,y,parent,z)=>{ const b=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mat); b.position.set(0,y,z||0); parent.add(b); return b; };
   const thigh=0.62*S, shin=0.62*S, torso=1.02*S, neck=0.16*S, headH=0.30*S, hipY=thigh+shin;
   const hips=grp('hips',0,hipY,0); g.add(hips);
-  const spine=grp('spine',0,0,0); hips.add(spine); box(0.34*S,torso,0.20*S, torso/2, spine);       // torso rises from the hips
+  const spine=grp('spine',0,0,0); hips.add(spine);
+  // AN EMACIATED TORSO, NOT A BLOCK (Ben: "make its body more torso like, not just a rectangular blob. Make him look
+  // emaciated" -- then, when nothing had shipped, "the pales body/torso looks unchanged"). One 0.34-wide box became four
+  // stacked volumes: a wide shallow ribcage over a waist pinched to half the chest's width, on a narrow pelvis, with the
+  // ribs and the vertebrae standing out of the surface. Starvation reads as the RATIO between chest and waist, so the
+  // ribcage keeps the old box's full 0.34 -- widening it would only read as bulk. It is the waist that is cut, to 0.17.
+  { const T=torso, out=0.008*S;                     // ribs and spine stand this far off the surface: enough to catch a rim light, not enough to silhouette as spikes
+    box(0.26*S, T*0.20, 0.170*S, T*0.10,  spine);                     // pelvis
+    box(0.17*S, T*0.30, 0.125*S, T*0.34,  spine);                     // waist — half the chest's width and shallower again
+    box(0.32*S, T*0.40, 0.185*S, T*0.71,  spine);                     // ribcage
+    box(0.35*S, T*0.07, 0.115*S, T*0.945, spine);                     // clavicle bar across the shoulders
+    for(let i=0;i<4;i++){ const y=T*(0.575+i*0.085);                  // four rib pairs sprung off the cage's flanks
+      for(const sx of [-1,1]){ const rb=box(0.035*S,0.022*S,0.195*S, y, spine); rb.position.x=sx*(0.16*S+out); rb.rotation.z=sx*0.12; } }
+    for(let i=0;i<6;i++) box(0.045*S,0.030*S,0.035*S, T*(0.26+i*0.10), spine, -(0.075*S+out));     // vertebrae showing through the back
+    for(const sx of [-1,1]){ const hb=box(0.045*S,0.050*S,0.100*S, T*0.20, spine); hb.position.x=sx*0.135*S; } }   // hip points
   const chest=grp('chest',0,torso,0); spine.add(chest);
   const neckJ=grp('neck',0,0,0); chest.add(neckJ); box(0.09*S,neck,0.09*S, neck/2, neckJ);
   // ---- THE HEAD SPLITS (Ben 07-27) ----
@@ -15295,7 +15375,7 @@ function brPaleMesh(){ const g=new THREE.Group(); const S=1.5;                  
   // the middle of the face. The lower jaw keeps the bottom of the image; the CRANIUM above it is hinged and swings back,
   // revealing bright red flesh, white teeth on both cut faces, and one long voxel tongue that flails like the Wretch's.
   const headJ=grp('head',0,neck,0); neckJ.add(headJ);
-  const HW=0.22*S, HD=0.20*S, SPLIT=headH*0.46, fw=HW*0.98, fz=HD/2+0.004;
+  const HW=0.22*S, HD=0.20*S, SPLIT=headH*PALE_SPLIT, fw=HW*0.98, fz=HD/2+0.004;
   box(HW,SPLIT,HD, SPLIT/2, headJ);                                                       // lower jaw block
   const cran=grp('cranium',0,SPLIT,0); headJ.add(cran); box(HW,headH-SPLIT,HD, (headH-SPLIT)/2, cran);   // hinged upper skull
   { const fb=new THREE.Mesh(new THREE.PlaneGeometry(fw, SPLIT), brPaleFaceMat('bot'));    // bottom half of the image → the lower jaw
@@ -15304,31 +15384,43 @@ function brPaleMesh(){ const g=new THREE.Group(); const S=1.5;                  
     ft.position.set(0, (headH-SPLIT)/2, fz); cran.add(ft); g.userData.face=ft;
     for(const sx of [-1,1]){ const wrap=new THREE.Mesh(new THREE.PlaneGeometry(fw*0.26, headH-SPLIT), brPaleFaceMat('top'));   // wraps the cranium's corners so the crop bends round the skull
       wrap.position.set(sx*(fw/2 + fw*0.112), (headH-SPLIT)/2, fz - fw*0.066); wrap.rotation.y=sx*0.95; cran.add(wrap); } }
-  { const gum=new THREE.MeshBasicMaterial({color:0xb1121b, fog:false, side:THREE.DoubleSide});   // red flesh filling the head volume — shows the instant the lid lifts
-    const mouth=new THREE.Mesh(new THREE.BoxGeometry(HW*0.9,headH*0.52,HD*0.9),gum); mouth.position.set(0,SPLIT,0); headJ.add(mouth);
+  // NO RED LIPS (Ben 08-03: "remove the pales red lips"). The maw was a bright 0xb1121b box as wide and deep as the head,
+  // so with the jaw ajar its front edge framed the whole slit in scarlet and read as a painted mouth. It is now a dark
+  // throat, inset on every axis and pushed back off the face, so what shows through the gap is depth rather than a rim.
+  { const gum=new THREE.MeshBasicMaterial({color:0x3a0e12, fog:false, side:THREE.DoubleSide});
+    const mouth=new THREE.Mesh(new THREE.BoxGeometry(HW*0.70,headH*0.44,HD*0.66),gum); mouth.position.set(0,SPLIT+headH*0.06,-HD*0.10); headJ.add(mouth);
     const teethM=new THREE.MeshBasicMaterial({color:0xf4f1e6, fog:false});
     for(const row of [{p:headJ,d:1,b:SPLIT},{p:cran,d:-1,b:0}]){                          // a row of teeth on each cut face, pointing into the gap
       for(let i=0;i<7;i++){ const th2=(i%2?0.055:0.078)*S;
         const tt=new THREE.Mesh(new THREE.BoxGeometry(HW*0.10,th2,HD*0.10),teethM);
         tt.position.set((-3+i)*HW*0.135, row.b + row.d*th2/2, HD*0.24); row.p.add(tt); } }
     const tng=new THREE.MeshBasicMaterial({color:0x8e2530, fog:false});                   // ONE long voxel tongue, 5 tapering segments in a chain
-    let node=grp('tng0', 0, SPLIT+0.01*S, HD*0.16); headJ.add(node); const tsegs=[];
+    // ROOTED IN THE BACK OF THE THROAT (Ben 08-03: "its tounge needs to be positioned in th eback of its throat"). It grew
+    // from HD*0.16 — in FRONT of the teeth, past the lip line — so its first segment was already outside the face and it
+    // read as a tongue stuck to the chin rather than one coming up out of the gullet. It now starts behind the back teeth
+    // and travels the depth of the head on its way out, which is also what makes hiding it below PALE_TONGUE_GAPE work.
+    let node=grp('tng0', 0, SPLIT+0.02*S, -HD*0.26); headJ.add(node); const tsegs=[];
     for(let i=0;i<4;i++){ const L=0.085*S, seg=new THREE.Mesh(new THREE.BoxGeometry((0.050-i*0.007)*S, (0.034-i*0.005)*S, L), tng);
       seg.position.set(0,0,L/2); node.add(seg);
       const nx=grp('tng'+(i+1), 0, 0, L); node.add(nx); tsegs.push(node); node=nx; }
     // NOTE on the sign: rotating a node about X by +θ swings its +z child DOWN, so a positive base pitch draped the
     // tongue over the chest. It sits slightly UP and lashes about that.
-    g.userData.tongue=tsegs; }
+    g.userData.tongue=tsegs; g.userData.tngRoot=tsegs[0]; }
   for(const sd of [['L',-1],['R',1]]){ const n=sd[0], sx=sd[1];                                    // long arms, hang slightly forward — shoulder / elbow / WRIST, so a flail can break at three points
     const sh=grp('sh'+n, sx*0.20*S, -0.04*S, 0.02*S); chest.add(sh); box(0.08*S,0.62*S,0.09*S, -0.31*S, sh);
     const el=grp('el'+n,0,-0.62*S,0); sh.add(el); box(0.07*S,0.44*S,0.08*S, -0.22*S, el);
     const wr=grp('wr'+n,0,-0.44*S,0); el.add(wr); box(0.055*S,0.14*S,0.065*S, -0.07*S, wr);               // forearm shortened to make room for a long hand
+    // PALMS TURNED IN TOWARD THE BODY (Ben 08-03). The hand's palm normal ran along ±Z, so both hands faced squarely
+    // forward and the fingers splayed across the view like a pair of rakes. A quarter turn about Y maps that normal onto
+    // ∓X, which is inward on each side. It goes on a PALM group under the wrist, not on the wrist itself, because
+    // brPaleAnim drives every wrist toward rotation.y = 0 each frame and would unwind a yaw set here.
+    const pw=grp('pw'+n,0,0,0); wr.add(pw); pw.rotation.y=-sx*Math.PI/2;
     // REALLY LONG, SKINNY FINGERS (Ben 07-27) — four of them, splayed, each a two-knuckle chain, plus a thumb
     for(let f=0; f<4; f++){ const fx=(f-1.5)*0.030*S;
-      const k1=grp('fg'+n+f, fx, -0.14*S, 0); wr.add(k1); box(0.017*S,0.20*S,0.020*S, -0.10*S, k1);
+      const k1=grp('fg'+n+f, fx, -0.14*S, 0); pw.add(k1); box(0.017*S,0.20*S,0.020*S, -0.10*S, k1);
       k1.rotation.z=(f-1.5)*0.10; k1.rotation.x=-0.12-f*0.04;
       const k2=grp('fk'+n+f, 0, -0.20*S, 0); k1.add(k2); box(0.014*S,0.17*S,0.017*S, -0.085*S, k2); k2.rotation.x=-0.30; }
-    { const th=grp('th'+n, sx*0.045*S, -0.13*S, 0.012*S); wr.add(th); box(0.018*S,0.15*S,0.020*S, -0.075*S, th); th.rotation.z=sx*0.85; } }
+    { const th=grp('th'+n, sx*0.045*S, -0.13*S, 0.012*S); pw.add(th); box(0.018*S,0.15*S,0.020*S, -0.075*S, th); th.rotation.z=sx*0.85; } }
   for(const sd of [['L',-1],['R',1]]){ const n=sd[0], sx=sd[1];                                    // long thin legs
     const hp=grp('hip'+n, sx*0.11*S, 0, 0); hips.add(hp); box(0.10*S,thigh,0.12*S, -thigh/2, hp);
     const kn=grp('kn'+n,0,-thigh,0); hp.add(kn); box(0.09*S,shin,0.10*S, -shin/2, kn); }
@@ -15342,11 +15434,14 @@ function brPaleAnim(p, dt){ const m=p.mesh; if(!m||!m.userData.joints)return; co
   brPaleFaceTick();                                                                                // pull the GIF's current frame into every face crop
   // ---- THE CRANIUM HINGE + TONGUE (Ben 07-27): the lid is shut while it stalks and thrown right back when it is
   //      violent — the flail, the lunge, the death-thrash. The tongue only flails while the mouth is open.
-  { const wantGape = (A==='flail'||A==='lunge') ? 1 : (A==='run' ? 0.18 : 0);
+  { const wantGape = (A==='flail'||A==='lunge') ? 1 : (A==='run' ? 0.62 : PALE_GAPE_IDLE);
     p.gape = (p.gape||0) + (wantGape-(p.gape||0)) * Math.min(1, dt*(wantGape>p.gape?14:6));
     if(J.cranium) J.cranium.rotation.x = -1.55*p.gape;                                              // swings BACK off the hinge
-    const T=m.userData.tongue;
-    if(T){ const open=p.gape>0.12, f=26;
+    const T=m.userData.tongue, TR=m.userData.tngRoot;
+    if(T){ const open=p.gape>PALE_TONGUE_GAPE, f=26;
+      // HIDDEN, not merely straightened, while the mouth is only ajar. Straightening left four segments reaching forward
+      // out of the slit, which with a permanently-ajar jaw is a tongue permanently hanging out.
+      if(TR) TR.visible=open;
       for(let i=0;i<T.length;i++){ const n=T[i];
         if(!open){ n.rotation.x += (0-n.rotation.x)*bl; n.rotation.y += (0-n.rotation.y)*bl; n.rotation.z += (0-n.rotation.z)*bl; continue; }
         n.rotation.x = (i===0? -0.22 : 0.05) + 0.34*Math.sin(t*f + i*1.35) * p.gape;                 // whips out and lashes, each segment a beat behind the last
@@ -15938,6 +16033,28 @@ if(typeof window!=='undefined'){ window.__hcBR={ door:()=>brSpawnDoorNearPlayer(
   anim:(a)=>{ if(!BR.inside)brEnter(); if(!BR.pale||!BR.pale.mesh)brSpawnPale(); const p=BR.pale; const yaw=player.yaw, D=5.5;   // place it right in front, facing the camera
     p.x=player.pos.x-Math.sin(yaw)*D; p.z=player.pos.z-Math.cos(yaw)*D; p.phase='hunt'; p.state='qa'; p.anim=a||'idle'; p.animT=0;
     if(!p.setAnim)p.setAnim=(x)=>{ if(p.anim!==x){ p.anim=x; p.animT=0; } }; if(p.mesh){ p.y=brPaleFloorY(p.x,p.z); if(p.y==null)p.y=BR_WY0; p.mesh.position.set(p.x,p.y,p.z); p.mesh.visible=true; brPaleAnim(p,0.016); } return a||'idle'; },   // QA: force a named clip (idle/crouch/hide/rise/stand/walk/run/peek/flail/glide/lunge/turn/banish)
+  // QA/bench: the Pale's HEAD, HANDS and TORSO as built, so Ben's four requirements are numbers rather than opinions.
+  // Read off the live mesh, not off the constants: the constants are what I typed, the mesh is what he sees.
+  paleProbe:()=>{ const p=BR.pale, m=p&&p.mesh; if(!m||!m.userData.joints) return {err:'no pale mesh'};
+    const J=m.userData.joints, TR=m.userData.tngRoot;
+    const isBox=c=>c.isMesh&&c.geometry&&c.geometry.type==='BoxGeometry';   // the face crops are Planes and also carry a .height — filtering on parameters alone measures the GIF, not the skull
+    const jaw=J.head&&J.head.children.find(isBox), cran=J.cranium;
+    const cranBox=cran&&cran.children.find(isBox);
+    const jh=jaw?jaw.geometry.parameters.height:null, ch=cranBox?cranBox.geometry.parameters.height:null;
+    const spineBoxes=(J.spine?J.spine.children:[]).filter(isBox)
+      .map(c=>({w:+c.geometry.parameters.width.toFixed(3), h:+c.geometry.parameters.height.toFixed(3), y:+c.position.y.toFixed(3)}));
+    const wide=spineBoxes.length?Math.max(...spineBoxes.map(b=>b.w)):0;
+    // the WAIST is the narrowest box in the middle third of the torso, not simply the narrowest — the ribs and vertebrae are
+    // slimmer than any body volume and would otherwise answer this question with a rib.
+    const topY=spineBoxes.length?Math.max(...spineBoxes.map(b=>b.y)):1;
+    const mids=spineBoxes.filter(b=>b.y>topY*0.25 && b.y<topY*0.55 && b.h>topY*0.15);
+    let lip=null; if(J.head) J.head.traverse(o=>{ if(!lip && o.isMesh && o.material && o.material.color && !o.material.map){ const c=o.material.color; if(c.r>0.3&&c.r>c.g*2) lip='#'+c.getHexString(); } });
+    return { anim:p.anim, gape:+(p.gape||0).toFixed(3), cranRx:cran?+cran.rotation.x.toFixed(3):null,
+             splitFrac:(jh!=null&&ch!=null)?+(jh/(jh+ch)).toFixed(3):null,
+             tongueVisible:TR?!!TR.visible:null, tongueRootZ:TR?+TR.position.z.toFixed(3):null,
+             torsoBoxes:spineBoxes.length, chestW:+wide.toFixed(3), waistW:mids.length?Math.min(...mids.map(b=>b.w)):null,
+             palmYawL:J.pwL?+J.pwL.rotation.y.toFixed(3):null, palmYawR:J.pwR?+J.pwR.rotation.y.toFixed(3):null,
+             brightRedInHead:lip }; },
   rooms:()=>{ const R=BR.rooms||[], W=BR.walls||[]; const areas=R.map(r=>((r.x1-r.x0)*(r.z1-r.z0))|0); const angled=W.filter(w=>Math.abs(w.x1-w.x0)>0.01 && Math.abs(w.z1-w.z0)>0.01).length;
     return {rooms:R.length, walls:W.length, angledWalls:angled, halfWalls:W.filter(w=>w.half).length, crawls:(BR.crawls||[]).length, doors:(BR.doors||[]).length, pillars:(BR.pillars||[]).length, fixtures:(BR.fixtures||[]).length, avgDoors:R.length?+(R.reduce((s,r)=>s+(r.doors||0),0)/R.length).toFixed(2):0, maxDoors:R.length?Math.max(0,...R.map(r=>r.doors||0)):0, minArea:areas.length?Math.min(...areas):0, maxArea:areas.length?Math.max(...areas):0}; },
   seed:(v)=>{ BR.seed=(v>>>0)||1; BR.rooms=[]; BR.gen=null; BR._cgx=null; brEnvCacheClear(); if(BR.inside){ try{ if(BR.infinite) brxStream(true); else brBuildEnvAll(); }catch(e){ return 'ERR:'+(e&&e.message); } } return BR.seed; },   // QA: force a maze seed + rebuild
