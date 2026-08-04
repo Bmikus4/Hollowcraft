@@ -3875,6 +3875,7 @@ const waterMat = new THREE.ShaderMaterial({
   uniforms:Object.assign({
     uTime:globalU.uTime, uSunDir:globalU.uSunDir, uMoonDir:globalU.uMoonDir,
     uDay:globalU.uDay, uCamPos:globalU.uCamPos, uFogColor:{value:scene.fog.color},
+    uGladeAfter:{value:1}, uGladeAmt:{value:1},   // where the sun/moon track is added (after the ring landing) and its overall strength — see the glade block
     uFogDensity:{value:scene.fog.density}, uDeep:_uWaterDeep, uRing:_uWater, uRingFade:{value:2400},   // the far-sea annulus's outer radius, set per frame in updateHorizon
     // THE CURVE LIVES AT THE FAR END NOW (Ben 08-04: "i just want the ocean to look like its going on forever, and to have an
     // ever so slight world curve out at its end"). It used to be the opposite shape: R=20, k=0.0022 spends the whole fall by
@@ -3885,7 +3886,11 @@ const waterMat = new THREE.ShaderMaterial({
     // blocks), where 8 blocks is a 0.22-degree dip. At 1000 blocks it is 1.3 blocks. That is the "ever so slight" part, and
     // because the water has already faded to the ring colour by ~250 blocks, the sea beyond that is one continuous value
     // running to a horizon that sits at eye level — which is what reads as forever.
-    uWx:{value:0}, uCurveR:{value:300.0}, uCurveK:{value:0.0000026}, uCurveClamp:{value:1}, uCurveCap:{value:8.0}   // THE WORLD CURVE — flat to 20 blocks, then k*(d-20)^2. k is small on purpose: at 40 blocks that is 0.9 down, at 96 it is 12.6, so the tip-over is gentle where you can see detail and only steepens where it reads as the sea falling away. "Subtle."
+    // …AND INSIDE THE FAR PLANE, or nobody sees it. camera.far is 326.4 blocks while the disc's rim is 2048, so R=300 with
+    // k=2.6e-6 put the entire bend outside the clip: measured, drop at camera.far was 0.00 and the visible sea was dead flat.
+    // R=170 still clears the render wall (128) so no chunk water curves and the shore stays safe by construction, and
+    // k=1.03e-4 reaches 2.5 blocks at the clip — 0.44 degrees of dip across the last 150 blocks of visible sea.
+    uWx:{value:0}, uCurveR:{value:170.0}, uCurveK:{value:0.000103}, uCurveClamp:{value:1}, uCurveCap:{value:8.0}   // THE WORLD CURVE — flat to 20 blocks, then k*(d-20)^2. k is small on purpose: at 40 blocks that is 0.9 down, at 96 it is 12.6, so the tip-over is gentle where you can see detail and only steepens where it reads as the sea falling away. "Subtle."
   }),
   vertexShader:`
     attribute float aTop; attribute float aDepth; attribute float aColD; varying float vTop; varying float vDepth; varying vec3 vW; varying vec3 vN; varying float vFog; varying float vCrest;
@@ -3957,6 +3962,7 @@ const waterMat = new THREE.ShaderMaterial({
     precision highp float;
     varying float vTop; varying float vDepth; varying vec3 vW; varying vec3 vN; varying float vFog; varying float vCrest;
     uniform vec3 uSunDir,uMoonDir,uCamPos; uniform float uDay,uTime; uniform vec3 uFogColor; uniform float uFogDensity, uDeep, uWx; uniform vec3 uRing; uniform float uRingFade;
+    uniform float uGladeAfter, uGladeAmt;
     float h2(vec2 p){ return fract(sin(dot(p,vec2(12.9,78.2)))*43758.5); }
     float vn2(vec2 x){ vec2 i=floor(x),f=fract(x); f=f*f*(3.0-2.0*f); return mix(mix(h2(i),h2(i+vec2(1,0)),f.x),mix(h2(i+vec2(0,1)),h2(i+vec2(1,1)),f.x),f.y); }
     void main(){
@@ -4003,13 +4009,25 @@ const waterMat = new THREE.ShaderMaterial({
       // this was copied from — the result points DOWN into the water, dot(Rs,V) is negative for any camera above the surface,
       // and max(...,0.0) makes the whole term exactly zero at every hour and every angle. That is why the first three frames
       // showed a sun sitting on the horizon over perfectly flat water.
+      // THE GLADES GET THEIR OWN ACCUMULATOR (Ben 08-04: "water does not effect the sun and moon enough, it needs to be upped
+      // dramatically and from a distance it should show too"). The second half of that is the important one and it is not a
+      // strength problem: everything added to col here is erased further down by the ring landing, which forces the far sea
+      // onto a flat colour REGARDLESS of angle — deliberately, because that is what stops the sea line disagreeing with what
+      // stands beyond it. So the glade could not exist past about 250 blocks at any amplitude. It is accumulated separately
+      // and added AFTER that landing, which is the only way a specular track survives at distance.
+      vec3 glade = vec3(0.0);
       if(dayl*above > 0.02){ vec3 Rs = reflect(-normalize(uSunDir), N);
         float low = 1.0 - smoothstep(0.10, 0.65, uSunDir.y);              // 1 with the sun on the horizon, 0 overhead
-        float tight = pow(max(dot(Rs, V), 0.0), mix(220.0, 90.0, low));   // the path broadens as the sun sinks
-        float wide  = pow(max(dot(Rs, V), 0.0), 12.0) * 0.16;             // a low haze around it, so the track sits in glare rather than on black
+        // BROADER, so it reads as a track on water rather than a pinpoint: the lobe was 220 falling to 90, which at any
+        // distance is thinner than a pixel on most facets. 130 -> 48 is the same shape an order of magnitude wider.
+        float tight = pow(max(dot(Rs, V), 0.0), mix(130.0, 48.0, low));   // the path broadens as the sun sinks
+        // The GLARE around the track, and it is the term that decides whether this reads as a sun track or as a white pool.
+        // 12/0.16 was invisible; 7/0.40 flooded the near water (88% of the near crop above luminance 90, and the frame reads
+        // as a blown highlight rather than a reflection). 9/0.25 keeps the track sitting in glare without becoming it.
+        float wide  = pow(max(dot(Rs, V), 0.0), 9.0) * 0.25;               // a low haze around it, so the track sits in glare rather than on black
         float track = smoothstep(0.50, 1.0, abs(N.x)+abs(N.z));           // the same broken-facet term the moonglade uses
         vec3 sunCol = mix(vec3(1.0,0.94,0.82), vec3(1.0,0.60,0.32), low); // white-warm overhead, orange at the horizon
-        col += sunCol * (tight*(0.45+0.55*track) + wide) * dayl * above * (0.55 + 1.25*low);
+        glade += sunCol * (tight*(0.45+0.55*track) + wide) * dayl * above * (1.65 + 3.75*low);   // x3 on both ends of the elevation ramp
       }
       // MOONGLADE — the same term for the moon, and the two faults it carried are the two the sunglade's comments above
       // describe, which is unsurprising since one was copied from the other. It sat ABOVE the absorption, which mixes 97% of
@@ -4023,12 +4041,17 @@ const waterMat = new THREE.ShaderMaterial({
       // has already set. Same shape as the sun's, starting under the horizon so it outlives the geometric moonrise.
       float mAbove = smoothstep(-0.06, 0.05, uMoonDir.y);
       if(night*mAbove > 0.02){ vec3 Rm = reflect(-normalize(uMoonDir), N);
-        float glint = pow(max(dot(Rm, V), 0.0), 60.0);                    // tight lobe = a coherent shimmering track, not a wash
+        float glint = pow(max(dot(Rm, V), 0.0), 34.0);                    // tight lobe = a coherent shimmering track, not a wash (60 -> 34: wider, so it survives at distance)
+        float halo  = pow(max(dot(Rm, V), 0.0), 6.0) * 0.22;              // …and the moon gets the same low glare the sun has, which is most of what makes a track read as one
         float track = smoothstep(0.55, 1.0, abs(N.x)+abs(N.z));           // only the tilted ripple faces catch it → broken, watery path
-        col += vec3(0.28,0.34,0.42) * glint * night * mAbove * (0.35 + 0.65*track);
+        glade += vec3(0.28,0.34,0.42) * (glint*(0.35 + 0.65*track) + halo) * night * mAbove * 3.4;
       }
       float alpha = clamp(0.72 + 0.26*absorb + 0.08*F, 0.0, 0.99);    // NOT glass: even shallow water is mostly opaque so you never see through it to infinity; deep = solid
       if(vTop<0.5) alpha = max(alpha, 0.95);                          // side faces stay solid-looking
+      // THE OLD PATH, kept as a flag so the distance claim can be measured rather than argued: at uGladeAfter 0 the glade is
+      // added here, before the fog mix and before the ring landing, exactly as it was — and the landing then erases it past
+      // about 250 blocks. __hc.glade({after:0}) is the frame before.
+      col += glade * uGladeAmt * (1.0 - uGladeAfter);
       float fd=uFogDensity*vFog; float ff=clamp(1.0-exp(-fd*fd),0.0,1.0);
       // WATER IS AFFECTED BY FOG (Ben 07-29). uFogColor was passed into this shader and never used: the surface fogged
       // to uRing at every hour and in every weather, so in rain or a fog bank the sea stayed blue while the terrain,
@@ -4052,6 +4075,13 @@ const waterMat = new THREE.ShaderMaterial({
       // reading 189, a navy line surviving a bank that had erased the terrain. fogTo IS uRing washed by the weather, so in
       // clear air (uWx 0) this is bit-identical to landing on uRing and the sea line Ben signed off cannot move.
       col=mix(col, fogTo, smoothstep(uRingFade*0.45, uRingFade*0.97, length(vW.xz-uCamPos.xz)));
+      // THE GLADE, ON TOP OF THE LANDING. It is added rather than mixed, so the flat far colour the ring landing insists on is
+      // still what the water IS, and the sun's or moon's track is light sitting on it — which is what makes the reflection
+      // visible all the way to the horizon instead of stopping where the landing begins.
+      // (1.0-ff) is not decoration: Ben also asked that this surface and the far-sea disc take weather and volumetric fog the
+      // same way, and ff is exactly the term the rest of the water fogs by. A specular highlight that survived a fog bank
+      // would be the one part of the sea the weather could not touch — which is the bug that was fixed here on 07-29.
+      col += glade * uGladeAmt * uGladeAfter * (1.0 - ff);
       gl_FragColor=vec4(col,alpha);
     }`
 });
@@ -5975,8 +6005,13 @@ function physics(dt){
         // and this clamp puts that back in one frame — an instant upward jolt of the camera at the exact moment you land. The
         // body still snaps, because collision must be exact; the correction is recorded and the EYE is walked down through it over
         // about a tenth of a second, so what you see is the ground arriving rather than the camera being shoved.
+        // ONLY A REAL ARRIVAL COUNTS (Ben 08-04: "player bounces when standing still just a bit on the ground"). Resting on the
+        // ground is not a static state: every frame gravity moves you about 6 mm down and this clamp puts it back, which is a
+        // correction of exactly the size a landing produces — so the eye was being told to walk down through a 7 mm step on every
+        // single frame, forever. Measured standing still: _landCorr pinned at 0.0074 and never decaying. A landing is a frame you
+        // arrive on (you were airborne) with real speed behind it; the resting nudge is neither.
         const _corr=(Math.floor(ny)+topH)-ny;
-        if(_corr>0.004) p._landCorr=Math.min(0.34, Math.max(p._landCorr||0, _corr));
+        if(_corr>0.004 && !p._wasGround && p.vel.y<-1.5) p._landCorr=Math.min(0.34, Math.max(p._landCorr||0, _corr));
         p.pos.y=Math.floor(ny)+topH; p.onGround=true; p._impactVy=p.vel.y; } else { p.pos.y=Math.floor(ny+PH)-PH-0.001; }   // land ON a corner-step/slab top or a full block; else clamp head below the ceiling
       p.vel.y=0;
     } else p.pos.y=ny;
@@ -6169,7 +6204,20 @@ function updateSky(dt){
   // The BASE is the night value, not the floors below it. dcol at day=0 was 0.006, above every floor, so lowering the
   // floors alone changed nothing and the fog colour stayed #121218 -- measured, not assumed. The day end is preserved to
   // three decimals (0.0018+0.764 = 0.7658 against 0.006+0.76 = 0.766), so only night moves.
-  const fc=scene.fog.color; const dcol=0.0018+0.764*day;
+  // THE FOG'S OWN DAY BLEND, AND IT IS NOT `day` (Ben 08-04: "daytime white fog to night time dark black fog should be a smooth
+  // transition through dusk"). Ramping the colour LINEARLY in `day` is smooth in arithmetic and lands like a corner on screen,
+  // because the tonemap is compressive near black: measured over dusk, the land under a bank fell -16, -20, -23, -25, -26 levels
+  // per 0.01 of the clock and then -10 and stopped dead. The fall was ACCELERATING right up to the moment it hit the floor, which
+  // is the opposite of easing into night.
+  // A SMOOTHSTEP, and day^1.8 was tried first and rejected on measurement. The exponent does ease the landing (the worst
+  // on-screen kink fell from 15.8 to 7.3) but it darkens the whole upper half of the curve with it: mid-afternoon fog went from
+  // 157 to 130 on screen, which walks straight back into "volumetric fog isnt bright enough" from an hour earlier. A smoothstep
+  // has a zero derivative at BOTH ends, so it eases into night AND holds the daylight end bright, and it leaves the midpoint
+  // exactly where it was (0.5 maps to 0.5) so nothing in the middle of the day shifts at all.
+  // ENDPOINTS ARE EXACT: 1 maps to 1 and 0 to 0. Noon fog and night fog are still the colours they were tuned to — four separate
+  // rulings that night fog must read as blackness are untouched, and this only changes HOW the curve arrives there.
+  const fogDay=day*day*(3-2*day);
+  const fc=scene.fog.color; const dcol=0.0018+0.764*fogDay;
   // BLACK AT NIGHT (Ben, again: "nighttime fog, is still not blackness"). The floor was 0.028/0.042/0.072 -- a deep blue that
   // never let the far distance go dark, which is what he keeps seeing. It was put there because with no floor at all distant
   // chunks read as void-black HOLES rather than as mass; 0.005/0.006/0.009 keeps a hair of blue for that, at a fifth of the
@@ -6204,7 +6252,7 @@ function updateSky(dt){
     if(amt>0.01){ const L=0.2126*fc.r+0.7152*fc.g+0.0722*fc.b;
       const wr=1.00, wg=0.62, wb=0.42, wl=0.2126*wr+0.7152*wg+0.0722*wb, k=L/Math.max(1e-5,wl);
       _fogGrey.setRGB(wr*k, wg*k, wb*k); fc.lerp(_fogGrey, amt); } }
-  if(oc>0.01) fc.lerp(_fogGrey.setRGB(lerp(0.008,0.28,day),lerp(0.009,0.30,day),lerp(0.013,0.34,day)), oc*0.6);   // rainy grey haze rolls the horizon in — day end unchanged, night end taken down with the night fog floor above, or rain re-lit the dark it was just made to have
+  if(oc>0.01) fc.lerp(_fogGrey.setRGB(lerp(0.008,0.28,fogDay),lerp(0.009,0.30,fogDay),lerp(0.013,0.34,fogDay)), oc*0.6);   // the rainy haze rides the same eased blend, or it would step where the clear air glides   // rainy grey haze rolls the horizon in — day end unchanged, night end taken down with the night fog floor above, or rain re-lit the dark it was just made to have
   const _under=(typeof inDungeon==='function' && inDungeon(Math.floor(camera.position.x),Math.floor(camera.position.y),Math.floor(camera.position.z))) || (typeof playerRoofed==='function' && playerRoofed());
   const wf=_under?0:weather.fog;                                                    // FOG WEATHER: thickens the haze + pales the air — but it NEVER seeps underground/into the dungeon, so the lantern & room stay readable in fog
   _vfogAmt.value=Math.min(1,wf*1.4);                                                // held-item fog follows WEATHER FOG only (Ben 07-20): crisp viewmodel in clear air
@@ -6224,7 +6272,7 @@ function updateSky(dt){
   // THE NIGHT END IS UNTOUCHED, and that is not caution, it is four separate rulings from Ben that night fog must read as
   // blackness — "a fog bank at night is not grey air, it is not being able to see". Night measures 65.5 clear against 14.2 with a
   // bank and must keep doing so. `day` is what separates the two ends, so never replace this ramp with one number.
-  if(wf>0.01){ fc.lerp(_fogGrey.setRGB(lerp(0.008,0.88,day), lerp(0.009,0.90,day), lerp(0.013,0.94,day)), Math.min(0.88,wf*0.95)); }
+  if(wf>0.01){ fc.lerp(_fogGrey.setRGB(lerp(0.008,0.88,fogDay), lerp(0.009,0.90,fogDay), lerp(0.013,0.94,fogDay)), Math.min(0.88,wf*0.95)); }   // fogDay, not day — see the exponent above; the bank is the case Ben was watching
   if(scene.background&&scene.background.isColor)scene.background.copy(fc);   // guard: a skybox CubeTexture background isn't a Color — don't call .copy on it
   // DAY 3x FARTHER, NIGHT CLOSER (Ben 07-28). Density is inverse to reach, so the day end is divided by three (0.85 -> 0.283)
   // and the night end pushed up (1.10 -> 1.70, the bank about a third nearer). The day/night SPLIT is now wide: clear air to
@@ -22928,13 +22976,14 @@ window.__hc={
   jumpArc(hold){ try{ hold=(hold==null?0.6:+hold);
       const wasL=locked, wasUI=openUI; locked=true; openUI=null;                 // physics suppresses input while a menu is up
       player.vel.set(0,0,0); player._jumpBuf=0; player._coyote=0.11; player._jumpCd=0; player._eyeOff=0; player._eyeVel=0;
-      const y0=player.pos.y; let peak=y0, t=0, air=false;
+      const y0=player.pos.y; let peak=y0, t=0, air=false, corr=0;
       keys.Space=true;
       for(let i=0;i<240;i++){ const dt=1/60; t+=dt; if(t>=hold) delete keys.Space;
         physics(dt); if(player.pos.y>peak)peak=player.pos.y;
+        if((player._landCorr||0)>corr) corr=player._landCorr;   // the landing's own correction, caught on the frame it is armed
         if(!player.onGround) air=true; else if(air && i>4) break; }
       delete keys.Space; locked=wasL; openUI=wasUI;
-      return { hold, rise:+(peak-y0).toFixed(3), y0:+y0.toFixed(2), peak:+peak.toFixed(2) }; }
+      return { hold, rise:+(peak-y0).toFixed(3), y0:+y0.toFixed(2), peak:+peak.toFixed(2), landCorr:+corr.toFixed(4) }; }
     catch(e){ delete keys.Space; return {err:String(e.message||e)}; } },
   // The two new gauges: what the ring is showing and what it is showing it FROM.
   vitalRing(){ try{ return { stam:+(player.stam||0).toFixed(1), stamMax:player.stamMax, winded:!!player._stamOut,
@@ -22980,6 +23029,37 @@ window.__hc={
       return { main:{ id:view.id, mesh:!!view.mesh, drawn:!!view.group.visible, arm:!!(mainArm.mesh&&mainArm.group.visible), gunHand:gunHandOf(view.mesh) },
                off:{ id:offView.id, mesh:!!offView.mesh, drawn:!!offView.group.visible, arm:!!(offArm.mesh&&offArm.group.visible), gunHand:gunHandOf(offView.mesh) },
                armX:{ main:+mainArm.group.position.x.toFixed(2), off:+offArm.group.position.x.toFixed(2) } }; }catch(e){ return {err:String(e.message||e)}; } },
+  // STANDING STILL: how much does the eye actually move? Reports the peak-to-peak of camera.y and of the two things that can move
+  // it while the body is stationary — the landing spring and the collision-correction it walks down through.
+  // The first half is a SETTLE and is thrown away: called right after anything else has moved the player, the opening frames
+  // still carry that motion, which is not what "standing still" means.
+  // skip: how many opening frames to discard. Defaults to half — called after something else has moved the player, the opening
+  // frames still carry that motion. Pass 0 to measure a landing, where those frames ARE the thing being measured.
+  eyeStill(n, skipArg){ try{ n=(n|0)||90; const ys=[], offs=[], corrs=[], skip=(skipArg==null)?Math.floor(n/2):(skipArg|0);
+      for(let i=0;i<n;i++){ physics(1/60); updateCamera(1/60);
+        if(i<skip) continue;
+        ys.push(camera.position.y); offs.push(player._eyeOff||0); corrs.push(player._landCorr||0); }
+      const mn=Math.min(...ys), mx=Math.max(...ys);
+      return { peakToPeak:+(mx-mn).toFixed(4), y:+camera.position.y.toFixed(3),
+        eyeOff:{ min:+Math.min(...offs).toFixed(4), max:+Math.max(...offs).toFixed(4) },
+        landCorr:{ min:+Math.min(...corrs).toFixed(4), max:+Math.max(...corrs).toFixed(4) },
+        onGround:!!player.onGround, vy:+player.vel.y.toFixed(3), landT:+((player.landT||0)).toFixed(3) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // THE DUNGEON ROOF, from inside: what the block data says is up there, and what the renderer has built for it. Separates "the
+  // ceiling was never made" from "the ceiling is there and not being drawn", which look identical from the floor.
+  dunRoof(){ try{ const L=wretch.lair; if(!L||L.fy==null) return {err:'no lair yet'};
+      const cx=L.cx, cz=L.cz, fy=L.fy, H=L.dunH||11, surf=surfaceH(cx,cz);
+      const col=[]; for(let y=fy+H-3; y<=surf+1; y++){ const b=getBlock(cx,y,cz);
+        col.push({y, b, name:(B[b]?B[b].name:b), solid:!!isSolid[b], opaque:!!isOpaque[b]}); }
+      const ch=getChunk(cx>>4,cz>>4);
+      const grp=ch&&ch.group;
+      let meshes=0, tris=0; if(grp) grp.traverse(o=>{ if(o.isMesh){ meshes++; const g=o.geometry; if(g&&g.attributes&&g.attributes.position) tris+=g.attributes.position.count/3; } });
+      return { cx, cz, fy, H, ceilingY:fy+H-1, surf, roofBlock:(B[getBlock(cx,fy+H-1,cz)]||{}).name,
+        solidAbove:col.filter(c=>c.y>fy+H-1 && c.solid).length, airAbove:col.filter(c=>c.y>fy+H-1 && !c.solid).length,
+        column:col, chunk:{ exists:!!ch, generated:!!(ch&&ch.generated), meshed:!!(ch&&ch.meshed), group:!!grp,
+          visible:!!(grp&&grp.visible), meshes, tris:Math.round(tris),
+          htop:ch?ch.htop[(cx&15)+(cz&15)*CK]:null } }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   tpsShoulder(s){ try{ if(s!=null)_tpsShoulder=(s|0); return this.tpsCam(); }catch(e){ return {err:String(e.message||e)}; } },
   // The ring's live size, and the cone a shot may actually land in. spreadDeg is what "less accurate when jumping" has to move.
   xhProbe(){ try{ const el=document.getElementById('xh'), cs=el?getComputedStyle(el):null;
@@ -23731,9 +23811,16 @@ window.__hc={
   // The sea's fake world curve, and the clamp that stops it sinking under the terrain. clamp:0 is the pre-fix behaviour.
   // clamp:0 restores the WHOLE pre-fix behaviour, cap included — a 58-block fall with no seabed clamp. Toggling only the
   // per-column clamp measured nothing, because the cap is what the far sea actually hits.
+  // QA/bench: the sun's and moon's track on the water. `after` 0 restores the pre-08-04 path (added before the ring landing,
+  // so erased past ~250 blocks); `amt` scales the whole thing.
+  glade(o){ try{ const u=waterMat.uniforms;
+      if(o){ if(o.after!=null)u.uGladeAfter.value=o.after?1:0; if(o.amt!=null)u.uGladeAmt.value=+o.amt; }
+      return { after:u.uGladeAfter.value, amt:u.uGladeAmt.value, ringFade:+u.uRingFade.value.toFixed(0),
+               sunY:+globalU.uSunDir.value.y.toFixed(3), moonY:+globalU.uMoonDir.value.y.toFixed(3), day:+globalU.uDay.value.toFixed(3) };
+    }catch(e){ return {err:String(e.message||e)}; } },
   seaCurve(o){ try{ const u=waterMat.uniforms;
       if(o){ if(o.clamp!=null){ u.uCurveClamp.value=o.clamp?1:0; u.uCurveCap.value=o.clamp?8.0:58.0;
-                                 u.uCurveR.value=o.clamp?300.0:20.0; u.uCurveK.value=o.clamp?0.0000026:0.0022; }
+                                 u.uCurveR.value=o.clamp?170.0:20.0; u.uCurveK.value=o.clamp?0.000103:0.0022; }
              if(o.cap!=null)u.uCurveCap.value=+o.cap; if(o.r!=null)u.uCurveR.value=+o.r; if(o.k!=null)u.uCurveK.value=+o.k; }
       const at=d=>{ const over=Math.max(0,d-u.uCurveR.value); return Math.min(u.uCurveK.value*over*over, u.uCurveCap.value); };
       // THE LEDGE AT THE RENDER WALL, which is the fault itself: the far-sea disc has no seabed to clamp against, so it takes
@@ -23742,7 +23829,10 @@ window.__hc={
       return { clamp:u.uCurveClamp.value, cap:u.uCurveCap.value, r:u.uCurveR.value, k:u.uCurveK.value,
                dropAt:{ 40:+at(40).toFixed(2), 96:+at(96).toFixed(2), 182:+at(182).toFixed(2),
                         300:+at(300).toFixed(2), 1000:+at(1000).toFixed(2), 2048:+at(2048).toFixed(2) },
-               wall:CFG.RENDER_DIST*CK, discRim:16*CFG.RENDER_DIST*CK,
+               wall:CFG.RENDER_DIST*CK, discRim:16*CFG.RENDER_DIST*CK, camFar:+camera.far.toFixed(1),
+               // WHERE THE SEA ACTUALLY ENDS ON SCREEN. The disc's rim is 16 render walls out, but the far PLANE clips long
+               // before that, so the visible horizon is the clip — and any curve beyond it is geometry nobody ever sees.
+               dropAtFar:+at(camera.far).toFixed(2),
                ledgeAtWall:{ shelf3:ledge(182,3), shelf6:ledge(182,6), deep20:ledge(182,20) } };
     }catch(e){ return {err:String(e.message||e)}; } },
   godrays(o){ try{ if(o&&o.on!=null) _godraysOn=!!o.on;
@@ -23867,6 +23957,14 @@ window.__hc={
     return { on:VOID.on, morph:+VOID.morph.toFixed(2), fractal:!!VOID.fmat, chain:!!VOID.chain, bound:!!player.bound, meter:+VOID.meter.toFixed(2), teased:VOID.teased, hp:wretch.hp, phase:wretch._bossPhase,
       bgIsRT:!!(scene.background&&scene.background.isTexture), clouds:VOID.clouds?VOID.clouds.children.length:0 }; }catch(e){ return {err:e.message}; } },
   fog(v){ try{ if(v!=null){ weather.fog=v; weather.fogTgt=v; weather.fogHold=999; } return +weather.fog.toFixed(2); }catch(e){ return e.message; } },   // QA: force/read the weather fog bank
+  // QA/bench: the fog's own state, in LINEAR terms, beside the two numbers that drive it. A screenshot answers "how bright does
+  // it look"; only this answers "is the ramp behind it smooth", because a kink in the colour and a kink in the tonemap look
+  // identical on screen. scene is not on window, so a probe cannot read this without a hook.
+  fogState(){ try{ const c=scene.fog.color;
+      return { r:+c.r.toFixed(5), g:+c.g.toFixed(5), b:+c.b.toFixed(5),
+        lum:+(0.2126*c.r+0.7152*c.g+0.0722*c.b).toFixed(5), density:+scene.fog.density.toFixed(6),
+        day:+globalU.uDay.value.toFixed(5), wf:+((typeof weather!=='undefined'?(weather.fog||0):0)).toFixed(3),
+        frac:+(worldTime/CFG.DAY_LEN).toFixed(4) }; }catch(e){ return {err:String(e.message||e)}; } },
   spearTest(){ try{ invAdd('rusty_spear',1); for(let i=0;i<9;i++){ if(inv[i]&&inv[i].id==='rusty_spear'){ selSlot=i; break; } } refreshHotbar();   // QA: aim at the wretch and hurl a spear at full power
     this.look(); throwSpear('rusty_spear',1); return {flying:spears.length, stuck:stuckSpears.length}; }catch(e){ return {err:e.message}; } },
   riding(){ try{ return stuckSpears.map(st=>({onW:!!st.onWretch, x:+st.x.toFixed(1), y:+st.y.toFixed(1), z:+st.z.toFixed(1)})); }catch(e){ return {err:e.message}; } },   // QA: stuck-spear roster + live world positions
