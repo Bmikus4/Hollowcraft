@@ -45,7 +45,45 @@ export function driftAttach(id, object, opts){
   object.visible = true;
 
   const loop = createLoop(THREE, renderer, scene);
+  // THE BODY IS OCCLUDED PER PIXEL, NOT AS A PLANE (Ben 08-04: "we should not be able to see the wretchs body through
+  // blocks"). This is one camera-facing quad, so every fragment of it shared a single depth — the subject's CENTRE. The
+  // depth test then answered "is the centre behind that block" for the whole body at once, which is right for a creature
+  // squarely behind a wall and wrong for every case where it is partly inside the world: standing in a hillside, in a
+  // doorway, in a tunnel mouth, its embedded half drew over the rock in front of it.
+  //
+  // The clean render's depth buffer knows where each surface really is. Reconstructing a world position from (uv, depth)
+  // with the loop camera's inverse projection-view and re-projecting it through the WORLD camera gives that pixel its true
+  // depth, so the ordinary depth test hides exactly the parts that are behind something.
+  //
+  // Injected into MeshBasicMaterial rather than written as a ShaderMaterial: the map is an sRGB render target and this
+  // material's own chunks handle the decode, the fog and the tone mapping. A hand-written shader here shipped a body a
+  // stop too bright the last time that was tried.
   const mat = new THREE.MeshBasicMaterial({ map:loop.texture(), transparent:true, depthWrite:false, side:THREE.DoubleSide });
+  mat.extensions = { fragDepth:true };
+  mat.onBeforeCompile = (sh)=>{
+    sh.uniforms.tDriftDepth = { value: loop.depth() };
+    sh.uniforms.uDriftInvVP = { value: loop.freshInvVP };
+    // projectionMatrix and viewMatrix are VERTEX-stage uniforms in three. Naming them in a fragment shader is a compile
+    // error — "undeclared identifier" — after which the material draws NOTHING and the creature simply is not there. The
+    // world camera's projection*view is uploaded here instead, per frame, from driftStep.
+    sh.uniforms.uWorldToClip = { value: new THREE.Matrix4() };
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\nuniform sampler2D tDriftDepth;\nuniform mat4 uDriftInvVP;\nuniform mat4 uWorldToClip;')
+      // AFTER the colour is final, and at a chunk every build of this material has.
+      .replace('#include <dithering_fragment>', `
+      { float _dd = texture2D(tDriftDepth, vMapUv).x;
+        if(_dd < 0.99999){
+          vec4 _ndc = vec4(vMapUv*2.0-1.0, _dd*2.0-1.0, 1.0);
+          vec4 _wp = uDriftInvVP * _ndc; _wp /= _wp.w;
+          vec4 _cp = uWorldToClip * _wp;
+          gl_FragDepthEXT = clamp(_cp.z/_cp.w*0.5+0.5, 0.0, 1.0);
+        } else {
+          // No subject at this pixel in the clean render — this is drift smeared BEYOND the silhouette. It has no true
+          // depth of its own, so it keeps the quad's plane depth, which is what the whole body used to use.
+          gl_FragDepthEXT = gl_FragCoord.z;
+        } }
+      #include <dithering_fragment>`);
+    mat.userData.driftShader = sh; };
   const quad = new THREE.Mesh(new THREE.PlaneGeometry(1,1), mat);
   quad.frustumCulled = false;                                 // it is one quad; culling it costs more than drawing it
   // 5, ABOVE the chunk water meshes, which are renderOrder 3. At 3 the two tied, three fell back to depth sorting, and a
@@ -136,6 +174,13 @@ export function driftStep(id, dt, pos, show){
     eye:_eye, center:_center, span:H.span, fill:FILL, snap:H.age < SNAP_S });
 
   H.mat.map = H.loop.texture();
+  // The uniform holds the same Matrix4 instance the loop stamps, so nothing needs copying per frame; this only re-points it
+  // if a program rebuild handed the material a fresh uniform object.
+  { const sh=H.mat.userData.driftShader;
+    if(sh){ if(sh.uniforms.tDriftDepth.value!==H.loop.depth()) sh.uniforms.tDriftDepth.value=H.loop.depth();
+            if(sh.uniforms.uDriftInvVP.value!==H.loop.freshInvVP) sh.uniforms.uDriftInvVP.value=H.loop.freshInvVP;
+            cam.updateMatrixWorld();
+            sh.uniforms.uWorldToClip.value.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse); } }
   H.quad.position.set(cx, cy, cz);
   H.quad.scale.set(size, size, 1);
   H.quad.lookAt(cam.position);                                // the quad's normal IS the loop camera's axis
@@ -149,11 +194,22 @@ export function driftFlush(id){
   const H = subjects.get(id); if(!H) return false;
   H.loop.flush();
   const h = Math.random(), s = 0.10 + Math.random()*0.30, l = 0.66 + Math.random()*0.34;
-  H.tint.setHSL(h, s, l);
-  H.loop.uniforms.uTint.value.copy(H.tint);
+  if(!H.tintLock){ H.tint.setHSL(h, s, l); H.loop.uniforms.uTint.value.copy(H.tint); }   // a locked tint survives a context loss — see driftTintLock
   H.flushes++; H.lastFlush = performance.now();
   if(H.onFlush) H.onFlush(H.quad.position.x, H.quad.position.y, H.quad.position.z);
   return true;
+}
+
+// QA: PAINT THE BODY A COLOUR THE WORLD CANNOT PRODUCE, and stop the flush from changing it back. "Is any of it on screen"
+// is a diff between two frames otherwise, and two frames of this world 1.3 seconds apart already differ across 68,000
+// pixels of the middle of the screen on their own — the sea, the foliage and the sun all move. Against a locked magenta
+// there is no noise floor at all: nothing else in the game is that colour.
+export function driftTintLock(hex){
+  let n=0;
+  for(const H of subjects.values()){
+    if(hex==null){ H.tintLock=false; n++; continue; }
+    H.tintLock = true; H.tint.set(hex); H.loop.uniforms.uTint.value.copy(H.tint); n++; }
+  return n;
 }
 
 // QA: read the middle of both stages back off the GPU. A dark night screenshot cannot tell "the loop is producing nothing"

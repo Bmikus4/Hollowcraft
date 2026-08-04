@@ -130,7 +130,14 @@ export function setTuning(k, v, loops){
 // it is NOT the world scene, so the world's sun does not reach it.
 export function createLoop(THREE, renderer, subjectScene){
   const rtOpt = { minFilter:THREE.LinearFilter, magFilter:THREE.LinearFilter, generateMipmaps:false };
-  const fresh = new THREE.WebGLRenderTarget(RES, RES, { ...rtOpt, depthBuffer:true });
+  // THE CLEAN RENDER'S DEPTH IS KEPT, because the display quad needs it to be occluded per pixel rather than as one flat
+  // plane at the subject's centre (see index.js). It comes off the CLEAN pass and not the drifted one on purpose: the drift
+  // is a hallucination of the subject's appearance, and hallucinating where its surfaces ARE would put its legs through
+  // the floor. UnsignedInt, not the default UnsignedShort — 16 bits over a 240-unit frustum quantises the body to slabs.
+  const freshDepth = new THREE.DepthTexture(RES, RES);
+  freshDepth.type = THREE.UnsignedIntType;
+  freshDepth.minFilter = freshDepth.magFilter = THREE.NearestFilter;
+  const fresh = new THREE.WebGLRenderTarget(RES, RES, { ...rtOpt, depthBuffer:true, depthTexture:freshDepth });
   const a = new THREE.WebGLRenderTarget(RES, RES, { ...rtOpt, depthBuffer:false });
   const b = new THREE.WebGLRenderTarget(RES, RES, { ...rtOpt, depthBuffer:false });
   // Marking the targets sRGB makes three convert on the way IN, so a MeshBasicMaterial sampling them decodes correctly
@@ -154,7 +161,12 @@ export function createLoop(THREE, renderer, subjectScene){
   const L = {
     fresh, a, b, cur:a, prev:b, scene:subjectScene, cam, uniforms, quadMat, quadScene, quadCam,
     acc:0, t:0, burst:0, steps:0, lastAz:null, lastEl:null, flow:new THREE.Vector2(), quadSize:1, _v:new THREE.Vector3(),
+    // freshInvVP inverts the projection-view of the camera that produced freshDepth, so a consumer can turn a (uv, depth)
+    // pair back into a world position. Stamped at the moment fresh is rendered, not read live: the loop steps at 22Hz and
+    // the camera has moved by the time the world pass samples this.
+    freshDepth, freshInvVP:new THREE.Matrix4(),
     texture(){ return L.cur.texture; },
+    depth(){ return L.freshDepth; },
     flush(){ L.burst = 1.0; },
     // One render of each stage so both programs are compiled now rather than on the frame the subject first appears.
     // tHist is pointed at `b` first: it defaults to `a`, and warming the drift pass INTO `a` while sampling `a` is a
@@ -209,6 +221,7 @@ export function stepLoop(THREE, renderer, L, dt, o){
   renderer.setRenderTarget(L.fresh);
   renderer.clear(true, true, false);
   renderer.render(L.scene, L.cam);
+  L.freshInvVP.multiplyMatrices(L.cam.projectionMatrix, L.cam.matrixWorldInverse).invert();   // must be stamped HERE, beside the render whose depth it belongs to
 
   const U = L.uniforms;
   U.tFresh.value = L.fresh.texture;
