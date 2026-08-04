@@ -1632,6 +1632,12 @@ function getBlockC(c,wx,wy,wz){ // fast path when chunk known & in-range
 const _hmCache = new Map();     // "wx,wz" -> height (column cache, bounded)
 // SELF-CONTAINED ISLAND: land only within a finite disc (~960 across → inside a 1000×1000 box). Beyond the ring, it fades to open ocean.
 const ISLE_X=500, ISLE_Z=0, ISLE_R=470, ISLE_EDGE=130, ISLE_CORE=340;
+// SHALLOW SHELF — how far out the water stays wadeable. SHELF_K is the depth multiplier right at the waterline (0.35 = a column
+// that would be 4 deep comes out 1.6) and SHELF_W is where the compression has faded back to nothing, so nothing beyond it moves.
+// See the shelf term in surfaceH for why this cannot shift the coastline.
+// `let`, not const, so __hc.shelf can turn it off on a live page: SHELF_K=1 is the identity map, and comparing the two is the only
+// way to show experimentally — rather than by reading the arithmetic — that the coast does not move when the shelf changes.
+let SHELF_K=0.35, SHELF_W=14;
 function surfaceH(wx, wz){
   const kk = wx+','+wz; let h=_hmCache.get(kk); if (h!==undefined) return h;
   // domain warp
@@ -1649,6 +1655,22 @@ function surfaceH(wx, wz){
   const core=Math.max(0, 1-idist/ISLE_CORE); elev += core*core*54;                        // interior rises into real peaks
   const isle=1-smooth(ISLE_R-ISLE_EDGE, ISLE_R, idist);                                    // 1 inside → 0 past the ring
   elev = CFG.SEA + (elev-CFG.SEA)*isle - (1-isle)*14;                                       // fade the coast down and sink to open ocean beyond the island
+  // ---- THE SHALLOW SHELF (Ben: "shoreline looks good, but water on shore needs expanded") ----
+  // Measured before: the band of water no deeper than 2 ran min 8 / median 20 / mean 26 blocks over 24 bearings.
+  //
+  // CFG.SEA IS NOT THE DIAL and must not become one. Moving sea level moves every coast in the world and everything ever placed
+  // by surfaceH with it — the chapel picks the most distant dry beach, the dock and the lighthouse sit at fixed offsets, and the
+  // snail spawner wants sand. This instead compresses DEPTH and only depth: submarine columns are lifted toward the surface by a
+  // factor that reaches 1 again at SHELF_W, so the water gets shallower over a wider band and the seabed further out is untouched.
+  //
+  // THE COASTLINE IS BIT-IDENTICAL BY CONSTRUCTION. The branch cannot fire unless elev is already under the sea, and at d=0 the
+  // factor multiplies 0 — so no land column changes by any amount, no dry land becomes water, and no water becomes land. That is
+  // the whole reason it is written as a depth map rather than as a height offset.
+  //
+  // It sits BEFORE the river carve on purpose. Rivers set their own depth (SEA-3) and running them through this would leave them
+  // one block deep; carving after means they keep the depth they ask for.
+  if(elev < CFG.SEA){ const d=CFG.SEA-elev;
+    if(d < SHELF_W){ const t=d/SHELF_W; elev = CFG.SEA - d*(SHELF_K + (1-SHELF_K)*t*t); } }
   // rivers: carve narrow channels where a river field crosses zero
   const rv = Math.abs(fbm2(wxo*0.0020, wzo*0.0020, 91, 3));
   if (rv < 0.035){ const d=(0.035-rv)/0.035; elev = lerp(elev, CFG.SEA-3, d*d); }
@@ -19607,6 +19629,34 @@ window.__hc={
   horizonDbg(o,p){ try{ oceanLayer.visible=o!==false; pineLayer.visible=p!==false; return {ocean:oceanLayer.visible,pine:pineLayer.visible, fogShellVis:fogShell.visible, fogShellOp:+fogShell.material.opacity.toFixed(2), wfog:(typeof weather!=='undefined'?+(weather.fog||0).toFixed(2):null), fogCol:scene.fog.color.getHexString(), dens:+(scene.fog.density*1000).toFixed(3)}; }catch(e){ return {err:e.message}; } },   // QA: bisect the horizon layers + atmosphere state
   golgotha(){ try{ return _golgothaSpot?{x:_golgothaSpot.x,z:_golgothaSpot.z,done:_golgothaDone}:{done:_golgothaDone}; }catch(e){ return {err:e.message}; } },   // QA: where the crosses stand
   church(){ try{ return _churchSpot?{x:_churchSpot.x,z:_churchSpot.z,done:_churchDone,bless:+(player.blessT||0).toFixed(1)}:{done:_churchDone}; }catch(e){ return {err:e.message}; } },   // QA: chapel spot + live blessing timer
+  // THE SHORE PROFILE, read straight off the heightfield. surfaceH is module-scoped, and this is pure worldgen — no chunk needs
+  // to be streamed and no camera has to be anywhere, so a probe can measure every bearing of the coast in one call.
+  // Per bearing: the radius where the land last stands clear of the sea, the radius where it drops under it, and the width of
+  // the SHALLOW band (water no deeper than `deep`), which is the "water on the shore" Ben is asking to widen.
+  // Set the shelf and drop the height cache, so the next shoreProfile reads the new terrain. K=1 is the identity map — the
+  // proven-failing control for the shallow-band numbers, and the way to show the coast is unmoved by measuring both.
+  shelf(k,w){ try{ if(k!=null) SHELF_K=+k; if(w!=null) SHELF_W=+w; _hmCache.clear();
+      return { k:SHELF_K, w:SHELF_W }; }catch(e){ return {err:String(e.message||e)}; } },
+  shoreProfile(nBearings, deep){ const N=nBearings|0||16, D=(deep!=null?deep:4);
+    try{ const out=[];
+      for(let b=0;b<N;b++){ const th=b/N*Math.PI*2, cs=Math.cos(th), sn=Math.sin(th);
+        const H=r=>surfaceH(Math.round(ISLE_X+cs*r), Math.round(ISLE_Z+sn*r));
+        // THE COAST IS THE OUTERMOST LAND, NOT THE FIRST WATER. The first version of this walked outward and stopped at the
+        // first column under the sea, which on 8 of 24 bearings was an inland lake or a bay — bearing 0 reported water at
+        // r=226 while the land ran on to r=281, and the "shallow band" it then measured was a lake bottom.
+        let coast=null;
+        for(let r=Math.round(ISLE_CORE*0.55); r<ISLE_R+ISLE_EDGE; r++) if(H(r)>CFG.SEA) coast=r;
+        if(coast===null){ out.push({ bearing:Math.round(th*180/Math.PI), coast:null, shallowBlocks:0, beachToGrass:null }); continue; }
+        let shallow=0;
+        for(let r=coast+1; r<ISLE_R+ISLE_EDGE*2; r++){ if(CFG.SEA-H(r)<=D) shallow++; else break; }
+        let firstGrass=null;   // inward from the coast: how many blocks of sand (h<=SEA+1) before real ground
+        for(let k=0;k<60;k++) if(H(coast-k)>CFG.SEA+1){ firstGrass=k; break; }
+        out.push({ bearing:Math.round(th*180/Math.PI), coast, shallowBlocks:shallow, beachToGrass:firstGrass }); }
+      const sh=out.map(o=>o.shallowBlocks).sort((a,b)=>a-b);
+      return { sea:CFG.SEA, deepestCounted:D, perBearing:out,
+               shallow:{ min:sh[0], median:sh[sh.length>>1], max:sh[sh.length-1],
+                         mean:+(sh.reduce((a,b)=>a+b,0)/sh.length).toFixed(1) } }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   // ---- MONKS. `animals` is module-scoped, so a harness cannot read a monk without these. ----
   monks(){ try{ return { wrath:HORROR.monkWrath|0, gate:MONK_WRATH_KILLS, cap:MONK_CAP,
       shrine:_shrineSpot?{x:_shrineSpot.x,z:_shrineSpot.z}:null,
