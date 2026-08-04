@@ -1,7 +1,6 @@
 # Backlog — light, sky, water, horizon, atmosphere
 
 ## Open
-- Voxel hash lighting
 - Emitters visible from farther away
 - Directional skylight (vSky per-face scalar)
 - Coloured block light
@@ -18,6 +17,7 @@
 - `shore` at 7.70 ms, 805 draw calls, unattributed
 
 ## Awaiting Ben's eye (shipped)
+- Voxel hash lighting: unlit ground washes out to grey at night instead of collapsing onto red/green
 - Storm clouds: deck value/colour off overcast
 - Rain streaks take the air's value
 - Ocean not drawn from under the ground inland

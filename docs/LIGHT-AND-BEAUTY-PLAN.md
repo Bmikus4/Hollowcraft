@@ -113,7 +113,31 @@ which layer owns it.
 
 ---
 
-## 3. The black voxel speckle — the mechanism, and the fix to try
+## 3. The black voxel speckle — CORRECTED 2026-08-04: it is chroma, not black
+
+**This section's premise was wrong, and it is why the item stayed open for two sessions.** The artefact Ben calls "black
+voxeling / texture pixeling" is not black texels. `bench/assert-night-crush.mjs` hunted them at the one place the toe
+argument predicts them — lantern-lit ground at midnight — and measured **0% pure black**, so nothing below could be
+fixed because nothing below was happening.
+
+What is happening is a **chroma collapse**. Classifying the pixel set off a `?albedo` frame and reading that same set
+out of the graded frames (`bench/tmp-hash-repro.mjs`): dirt albedo (82,52,28) sat 0.66 → **night (22.7,3.5,1.0) sat
+0.937**; grass → (11.6,15.5,1.7) sat 0.896. AgX's log-domain toe takes the two lower channels to zero while the top one
+survives, so as the light falls every block lands on its **most saturated hue** — and a patchwork of dirt, grass and
+sand becomes a hash of red and green cubes. The value was always right; the colour was not.
+
+**SHIPPED**: a scotopic washout in `injectAtlas`, mixing the fragment toward its own 709 luma as the light on the face
+falls — `uScotAmt/uScotLo/uScotHi`, `__hc.scot()`, `bench/assert-night-chroma.mjs` 9/9. Night dirt sat 0.938 → 0.231
+with luminance held (7.42 → 8.73 of 255), daylight 0.704 → 0.703, the lantern's own puddle keeps its warmth (0.895 →
+0.78). Two things that cost a measurement each and are recorded in the source so they are not undone:
+- **Gate on the LIGHT reaching the face, not on the pixel's luminance.** A pixel gate is albedo-weighted: it washed the
+  dirt out and left the beach sand salmon-pink under the same moonlight. `max(_bl, vSky*uDay)` costs nothing extra —
+  both terms are already sampled in that shader.
+- **On the atlas materials, NOT in the grade pass.** The night sky sits at the same luminance as this ground (sky median
+  17.7 against grass 13.7), so no post pass can tell them apart, and a grey night sky is worse than the original bug.
+- Cost at `forest`, `perf-flag-ab --pairs 4`: paired median **−0.075 ms** with the sign split 2/2. Not resolvable.
+
+### The original (wrong) analysis, kept because its measurements are still true
 
 Ben's 09:58 screenshot: trunks and grass carry scattered PURE BLACK texels in a dither pattern at night
 under a lantern. It is not the texture. The chain is:
