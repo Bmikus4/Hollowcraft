@@ -1,8 +1,9 @@
 // ASSERTION: no two backrooms walls occupy the same line, at the same height, over the same span.
 //
-// THIS FAILS ON CURRENT CODE, deliberately. It is the reproducible form of a bug that was 90% fixed in d2a425f: the
-// within-chunk overlaps went away, and roughly twenty per region remain, all CROSS-CHUNK -- two chunks growing into each
-// other over a shared boundary, which neither chunk's own line buffer can see.
+// It was written to FAIL: the reproducible form of a bug 90% fixed in d2a425f, where the within-chunk overlaps went away and
+// roughly twenty per region remained, all CROSS-CHUNK -- two chunks growing into each other over a shared boundary, which
+// neither chunk's own line buffer can see. That is now fixed at the source (an end on a chunk's own perimeter never grows)
+// and this passes at 0 across all 8 regions. It stays as the regression guard for it.
 //
 // The count is only trustworthy because the query is proved capable of firing first: a control clones one wall, shifted
 // half its length along its own axis, which is by construction a collinear same-storey overlap. If that is not detected,
@@ -24,7 +25,12 @@ const ROOT = 'D:\\code\\Minecraft';
 const FLAGS = (process.argv[2] && !process.argv[2].startsWith('--')) ? ('&'+process.argv[2]) : '';
 const STARVED = process.argv.includes('--starve');   // skip the build wait, to prove the guard catches a starved region
 // MINIMUM WALLS PER REGION, from measurement rather than feel. Two independent runs reported 616-676 walls per region
-// across 8 regions, carrying 21-27 overlaps each, so 400 sits well below every real observation.
+// across 8 regions, carrying 21-27 overlaps each, so 400 sat well below every real observation.
+//
+// RECALIBRATED when the rooms were made vaster (Ben: "rooms should be more vast"): the same grid cut into bigger pieces has
+// fewer partitions in it, and the count fell to 370-434 per region on the same seeds — so the old 400 began ABORTING on a
+// perfectly built region. 250 is the new floor. It still sits far above the failure this guard exists for: an unbuilt region
+// reports near zero, not three hundred.
 //
 // The measurement also REVISED why this guard exists. It was added because a half-built region would report near-zero
 // overlaps, which is indistinguishable from a clean one -- a false pass. Running with --starve, which skips the build
@@ -32,7 +38,7 @@ const STARVED = process.argv.includes('--starve');   // skip the build wait, to 
 // cannot be produced by querying too early, and this harness was never actually at risk. The guard stays as a cheap
 // invariant in case walkTo ever becomes asynchronous, and --minwalls=N exists so it can be proved to FIRE rather than
 // merely to be present, because a guard never observed rejecting anything is not evidence either.
-const MIN_WALLS = (()=>{ const a=process.argv.find(x=>x.startsWith('--minwalls=')); return a?+a.slice(11):400; })();
+const MIN_WALLS = (()=>{ const a=process.argv.find(x=>x.startsWith('--minwalls=')); return a?+a.slice(11):250; })();
 function freePort(){ return new Promise((res, rej)=>{ const s=createServer(); s.listen(0,'127.0.0.1',()=>{ const p=s.address().port; s.close(()=>res(p)); }); s.on('error',rej); }); }
 function waitHttp(url, t=15000){ return new Promise((res,rej)=>{ const t0=Date.now();
   (function poll(){ const rq=http.get(url,r=>{r.resume();res();}); rq.on('error',()=>{ if(Date.now()-t0>t)rej(new Error('down')); else setTimeout(poll,250); }); })(); }); }
