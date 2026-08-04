@@ -68,6 +68,25 @@ function ok(label, cond, got){ checks++; if(!cond)fails++; console.log('  '+(con
         const i=(y*img.w+x)*img.ch, r=img.data[i], g=img.data[i+1], b=img.data[i+2]; t++;
         if(r>70 && Math.abs(r-g)<26 && Math.abs(g-b)<30 && b>55) n++; }   // near-neutral grey, not foliage green or dirt brown
       return {n,t,pct:+(100*n/t).toFixed(1)}; };
+    // FRAME IT BEFORE COUNTING. This check read 2.2% and looked like an unbuilt cathedral; it was a stale camera. The streaming
+    // flight above uses goCathedral(0,26,0), which hovers 26 blocks directly OVER the site at pitch -0.12 -- very nearly level --
+    // and that framed the building only while its base sat as high as min(_top+1, gy0+16). Ben had it lowered onto a 4-block
+    // plinth at gy0+1, so from up there the church is entirely below the view and the frame is treetops. The building moved on
+    // purpose; the aim had not. So stand back and aim AT it, by projection feedback, which cannot go stale with its height again.
+    const site = await page.evaluate('__hc.cathedralDiag()');
+    await page.evaluate('__hc.goCathedral(-96,44,0)'); await sleep(2600);
+    const framed = await page.evaluate(`(async()=>{ const f=()=>new Promise(r=>requestAnimationFrame(()=>r()));
+      const tx=${site.spot.x}+0.5, ty=${site.gy}+9, tz=${site.spot.z}+0.5;   // 9 up: the nave roof, not the plinth and not the dome
+      let best=null;
+      for(let i=0;i<48;i++){ const yaw=i/48*Math.PI*2;
+        for(const pit of [-0.20,-0.10,0.0,0.08]){ __hcBR.look(yaw,pit); await f(); await f();
+          const s=__hc.screenOf(tx,ty,tz);
+          if(s.onScreen){ const off=Math.hypot(s.px-s.w/2,s.py-s.h/2); if(!best||off<best.off) best={yaw:+yaw.toFixed(3),pit,off:+off.toFixed(0)}; } } }
+      if(best){ __hcBR.look(best.yaw,best.pit); await f(); await f(); }
+      return best; })()`);
+    console.log('  framed the cathedral from 96 blocks out and 44 up: '+JSON.stringify(framed));
+    ok('the cathedral could be framed at all', !!framed, framed);
+    await sleep(1400);
     const S = await stone('above');
     console.log('  neutral-grey pixels looking at the site: '+JSON.stringify(S));
     ok('cathedral masonry is on screen', S.pct>6, S.pct);
