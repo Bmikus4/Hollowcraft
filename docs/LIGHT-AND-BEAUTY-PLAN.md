@@ -41,6 +41,13 @@ draw 1.83, 323 draws**, unchanged. But the census sites are a different story:
 of a 7.14 ms budget is nearly seven times what the table above records, so *"a fragment effect costs
 hundredths"* must not be quoted as licence at any water site again. Price each one.
 
+Second site, independently: at `forest`, `perf-flag-ab` read **GPU 5.74 → 7.0 ms** across the same run. So the
+GPU sits in the 4–7 ms range at both sites, not 0.7.
+
+**The GPU timer on this box is not trustworthy per-pair.** Within one condition it swung 3.99 → 4.18 on one
+pair and 7.49 → 18.40 on the next. Use it to establish an order of magnitude, never to attribute a
+sub-millisecond cost; for that, use the paired FRAME median, which is stable.
+
 Two honest limits on that number: `nullFrag` also dropped draws 810 → 557, so the −1.74 ms frame delta
 is an upper bound on fragment cost rather than an isolation of it; and none of these sites has a
 pre-today baseline, so the `shore` figure is **not attributed** — several sessions have been adding
@@ -157,8 +164,20 @@ judges the whole look at once instead of five times.
    `bench/tmp-shadow-radius.mjs` holds the probe; note its penumbra-width metric is NOT trustworthy — it
    returns the sharpest edge anywhere in the crop (a block boundary, a leaf), which is why it read 1–2 px
    for every setting including ones that do work. The `honoursRadius` reading is the finding.
-5. **God-ray strength by sun elevation** — the pass is gated by quality only; shafts should be strongest at
-   low sun, absent at noon.
+5. ~~**God-ray strength by sun elevation**~~ — **DONE, and the pass was dead code.** "Gated by quality only"
+   was reading `buildComposer`'s gate and missing the runtime one: the sun proxy was projected from a point
+   **2000 blocks** along the sun direction while `camera.far` is **326.4** at rd=8, so `project()` returned
+   z = 1.001 at every hour and every angle, `front` (`z < 1.0`) was always false, and **`godrayPass.enabled`
+   was always false — the pass had never rendered a frame.** Fixed by placing the proxy at `camera.far*0.5`;
+   a perspective camera maps a whole ray onto one NDC x,y, so the screen position is unchanged and only the
+   z this test reads was ever affected. Now enabled at 8 of 10 sampled hours (the two are below the horizon).
+   Strength was `0.6*day`, peaking at noon — backwards, and only half strength at the horizon where `day`
+   measures 0.5. Now `0.62*above*(0.22+0.78*low)` off elevation: **0.62 at grazing, 0.136 at noon, 0 once the
+   sun is down.** Noon is a deliberate floor rather than the "absent" this item asked for — an overhead sun
+   through a canopy does still dapple — and the deviation is noted in the source.
+   Cost: `perf-flag-ab --site forest --pairs 4` reads frame 7.04 → 7.21 ms, paired median **+0.015 ms**: free
+   in frame-time terms. Its GPU column is NOT quotable on this box — it swung 3.99→4.18 in one pair and
+   7.49→18.40 in the next, within the same condition. `bench/assert-godray-elevation.mjs`, 6/6.
 
 **Tier 2, cheap, target <0.5 ms each, each behind its own PERF flag.**
 
