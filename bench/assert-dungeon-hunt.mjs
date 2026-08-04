@@ -67,6 +67,19 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
       `from ${track[0].dist.toFixed(1)} to ${track[track.length-1].dist.toFixed(1)} blocks`);
     const stuck = dists.slice(-6).every(d=>Math.abs(d-dists[dists.length-1])<0.15) && dists[dists.length-1]>6;
     check('it is not stuck at a fixed distance', !stuck, `last six samples ${dists.slice(-6).join(', ')}`);
+    // ON THE FLOOR, NOT THE CEILING. _dunSurf offers five wall/ceiling targets for every floor one, so a hunting
+    // creature used to spend most of its time clung above the room. This has to be sampled while the creature is
+    // actually INSIDE — the first version measured it walking overland to the entrance, where being 40 blocks
+    // above the hall floor is simply correct, and called that a ceiling bug. __hc.yank puts it beside the player.
+    const fy = await page.evaluate(`(__hc.lairInfo()||{}).fy`);
+    await page.evaluate(`__hc.yank();`);
+    await sleep(1200);
+    const inside=[];
+    for(let i=0;i<12;i++){ const s2=await sample(); inside.push(+(s2.wy-fy).toFixed(1)); await sleep(900); }
+    console.log(`  height above the hall floor, creature inside: [${inside.join(', ')}]`);
+    const airborne = inside.filter(h=>h>2.5).length;
+    check('it hunts on the floor rather than the ceiling', airborne<=2,
+      `${airborne} of ${inside.length} samples more than 2.5 blocks up (max ${Math.max(...inside)})`);
 
     // ---- CRYPT: it follows you down ----
     const crypt = await page.evaluate(`(()=>{ const L=__hc.lairInfo(); if(!L||L.fy==null) return null;
