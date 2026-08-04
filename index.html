@@ -1683,6 +1683,36 @@ function getBlockC(c,wx,wy,wz){ // fast path when chunk known & in-range
 const _hmCache = new Map();     // "wx,wz" -> height (column cache, bounded)
 // SELF-CONTAINED ISLAND: land only within a finite disc (~960 across → inside a 1000×1000 box). Beyond the ring, it fades to open ocean.
 const ISLE_X=500, ISLE_Z=0, ISLE_R=470, ISLE_EDGE=130, ISLE_CORE=340;
+// ---- NUCLEAR CRATERS ARE TERRAIN, NOT BLOCK EDITS ------------------------------------------------------------------------
+// This is the decision the whole ICBM hangs off, and the arithmetic forces it. Every explosion in this game goes through
+// bossBlast, which calls setBlockWorld(...,true) per block — recording an edit AND a net edit. Calibrated against the
+// codebase's own number, a landmine at r=3.4 carves ~165 blocks and its comment already calls that "a visible hitch":
+//
+//     r=12  ->   7,200 blocks  (~170 KB of save JSON)
+//     r=16  ->  17,200         (~410 KB)
+//     r=40  -> 268,000         (~6.4 MB)
+//
+// localStorage is about 5 MB per origin and saveGame already has a "storage is full" path, so an r=40 crater exceeds the
+// entire save budget on its own — before the frame cost of 268,000 writes and remeshing every affected column full height.
+//
+// So a crater is a WORLDGEN TERM. The save carries one record per crater, surfaceH subtracts a bowl, and the affected
+// chunks are simply evicted so the ordinary streaming budget rebuilds them at its own pace. Save cost is O(1) in the
+// radius, the crater regenerates identically forever, and it is cheaper than a landmine.
+//
+// The bowl: full depth at the centre, easing to nothing at the rim, with a low lip of ejecta just outside it. RIM is where
+// the ground is untouched again — anything sited by surfaceH outside RIM is unaffected by construction.
+const craters=[];                                   // {x,z,r,d} — PERSISTED (saveGame/applySave). No y: a crater is a bowl in the heightfield.
+// Returns how much to SUBTRACT from the column's elevation — so a negative return RAISES it (the ejecta lip).
+// Lowering and raising are accumulated separately and the lowering wins outright. Folding both into one running value with a
+// max for the bowl and a min for the lip lets the two branches fight: a column inside one crater's bowl and inside another's
+// lip ring would take whichever happened to be tested last.
+function craterDrop(wx,wz){ if(!craters.length) return 0;
+  let low=0, lip=0;
+  for(let i=0;i<craters.length;i++){ const c=craters[i], dx=wx-c.x, dz=wz-c.z, d=Math.sqrt(dx*dx+dz*dz);
+    if(d>=c.r*1.18) continue;                                                  // outside the ejecta lip: untouched
+    if(d<=c.r){ const t=d/c.r; low=Math.max(low, c.d*(1-t*t)); }               // parabolic bowl, deepest dead centre
+    else { const t=(d-c.r)/(c.r*0.18); lip=Math.max(lip, c.d*0.06*(1-t)); } }  // ejecta ring just outside the rim
+  return low>0 ? low : -lip; }
 // SHALLOW SHELF — how far out the water stays wadeable. SHELF_K is the depth multiplier right at the waterline (0.35 = a column
 // that would be 4 deep comes out 1.6) and SHELF_W is where the compression has faded back to nothing, so nothing beyond it moves.
 // See the shelf term in surfaceH for why this cannot shift the coastline.
@@ -1722,6 +1752,8 @@ function surfaceH(wx, wz){
   // one block deep; carving after means they keep the depth they ask for.
   if(elev < CFG.SEA){ const d=CFG.SEA-elev;
     if(d < SHELF_W){ const t=d/SHELF_W; elev = CFG.SEA - d*(SHELF_K + (1-SHELF_K)*t*t); } }
+  // NUCLEAR CRATERS, before the river carve so a river still cuts its own channel through a glassed bowl.
+  if(craters.length) elev -= craterDrop(wx,wz);
   // rivers: carve narrow channels where a river field crosses zero
   const rv = Math.abs(fbm2(wxo*0.0020, wzo*0.0020, 91, 3));
   if (rv < 0.035){ const d=(0.035-rv)/0.035; elev = lerp(elev, CFG.SEA-3, d*d); }
@@ -5910,8 +5942,8 @@ function saveGame(){
   const s={ v:1, seed:CFG.SEED, savedAt:Date.now(), worldTime, spawnX, spawnZ,
     player:{ x:player.pos.x, y:player.pos.y, z:player.pos.z, yaw:player.yaw, pitch:player.pitch,
       health:player.health, hunger:player.hunger, water:player.water, sat:player.sat,
-      creative:player.creative, blessT:player.blessT||0, sick:player.sick||0 },
-    selSlot, inv, armor, backpackStore, edits, chests, localChests:[...localChests], furnaces, campfires, screens,
+      creative:player.creative, blessT:player.blessT||0, sick:player.sick||0, rads:(typeof RADS!=='undefined'?RADS.level:0) },
+    selSlot, inv, armor, backpackStore, edits, chests, localChests:[...localChests], furnaces, campfires, screens, craters,
     drops: drops.filter(d=>d&&!d.dead).slice(0,150).map(d=>({id:d.id,n:d.n,x:+d.x.toFixed(2),y:+d.y.toFixed(2),z:+d.z.toFixed(2)})),
     horror:{ nightsSurvived:HORROR.nightsSurvived, tier:HORROR.tier, menace:HORROR.menace, monkWrath:HORROR.monkWrath|0 } };
   try{ localStorage.setItem(SAVE_KEY, JSON.stringify(s)); }
@@ -5932,12 +5964,16 @@ function applySave(s){
   (s.localChests||[]).forEach(k=>localChests.add(k));
   Object.assign(furnaces, s.furnaces||{}); Object.assign(campfires, s.campfires||{});
   Object.assign(screens, s.screens||{});   // camera codes and monitor tunings. A 4-digit id you had to re-enter every session would be pointless.
+  // CRATERS: one record each, however wide. Restored BEFORE the world streams, and _hmCache is dropped, or columns cached from
+  // the pre-blast heightfield would come back un-cratered and the bowl would appear only where you had not already walked.
+  if(Array.isArray(s.craters)){ craters.length=0; for(const c of s.craters) craters.push({x:+c.x,z:+c.z,r:+c.r,d:+c.d}); _hmCache.clear(); }
   setTimeout(()=>{ try{ scrRebuildAll(); }catch(e){} }, 1200);   // …and rebuild their screen quads once the chunks holding them exist; a monitor restored by applySave was never placed, so it never built one
   if(s.horror){ HORROR.nightsSurvived=s.horror.nightsSurvived|0; HORROR.tier=s.horror.tier||1; HORROR.menace=s.horror.menace||0; HORROR.monkWrath=s.horror.monkWrath|0; }   // the monk count MUST come back: it is a gate, and a gate that forgets is not one
   const P=s.player;
   player.pos.set(P.x,P.y,P.z); player.vel.set(0,0,0); player.yaw=P.yaw||0; player.pitch=P.pitch||0;
   player.health=Math.max(1,P.health!=null?P.health:20); player.hunger=P.hunger!=null?P.hunger:20;
   player.water=P.water!=null?P.water:20; player.sat=P.sat||0; player.blessT=P.blessT||0; player.sick=P.sick||0;
+  if(typeof RADS!=='undefined') RADS.level=+P.rads||0;   // the dose you already took survives a reload, like sick does
   player.creative=!!P.creative; window._allowCreative=!!P.creative;   // the save's mode wins on resume — survival worlds stay survival
   for(let i=0;i<INV_N;i++) inv[i]=(s.inv&&s.inv[i])||null;
   for(let i=0;i<6;i++) armor[i]=(s.armor&&s.armor[i])||null;   // 6, not EQ_N: a save written with the carry slots filled must not lose them just because this boot ran ?noequip2=1
@@ -7751,6 +7787,7 @@ function loop(){ try{
   assignPointLights();
   updateBlockFx(dt); updateCookingFx(dt); updateChimes(dt);
   scrUpdate();   // CCTV: point each monitor at its tile and re-render exactly ONE camera this frame (see SCR)
+  icbmUpdate(dt);   // mushroom cloud growth/fade + the radiation dose
   assignGlowPool();   // AFTER the producers (updateDrops ran earlier, updateCookingFx just above): 3 nearest glow sources win the fixed slots
   if((unloadTick=(unloadTick+1)%180)===0) unloadFar();
   drainUnloads();   // amortized: at most 3 chunk disposals per frame (unloadFar only queues)
@@ -12859,6 +12896,76 @@ function bossBlast(cx,cy,cz,r){ const R=Math.ceil(r), r2=r*r, fx=Math.floor(cx),
       if(cd){ for(const s of cd) if(s && typeof spawnDrop==='function') spawnDrop(s.id,s.n,x+0.5,y+0.6,z+0.5); delete chests[_ck]; } }
     setBlockWorld(x,y,z,AIR,true); if(typeof netEdit==='function')netEdit(x,y,z,AIR); n++; }
   if(n){ spawnParticles(cx,cy+0.5,cz,0xff5a20,26,4.2,1.0); spawnParticles(cx,cy+1.0,cz,0x3a3a3a,14,3.0,1.4); wretchVoice&&wretchVoice('sting',{x:cx,y:cy,z:cz}); } }
+// =====================================================================
+//  THE ICBM — detonation, crater, fallout
+// =====================================================================
+// The crater itself is a worldgen term (see craters[] and craterDrop). This is the event: record the bowl, drop the cached
+// heightfield, throw away the chunks it covers so the ordinary streaming budget rebuilds them, and put the light, the sound and
+// the cloud in the sky. No block writes at all — which is why an 80-block-wide crater costs less than a landmine.
+const NUKE_R=40, NUKE_DEPTH=15, NUKE_KILL=26, NUKE_HURT=64;   // bowl radius / centre depth / instant-death radius / hurt radius
+const RADS={ level:0, zone:[] };                              // player dose 0..1 and the fallout zones (the crater records, reused)
+function icbmDetonate(x,z,r,depth){
+  const R=(r!=null?+r:NUKE_R), D=(depth!=null?+depth:NUKE_DEPTH);
+  const gy=(typeof surfaceH==='function')?surfaceH(Math.round(x),Math.round(z)):CFG.SEA;
+  craters.push({ x:Math.round(x), z:Math.round(z), r:R, d:D });
+  _hmCache.clear();                                                          // the heightfield changed; every cached column inside the bowl is now a lie
+  // EVICT, DO NOT CARVE. Any chunk whose columns can be touched (the bowl plus its ejecta lip) is dropped, and the streamer
+  // regenerates it from the new heightfield on its own schedule. That is the whole delivery mechanism.
+  const reach=Math.ceil(R*1.18)+2, c0x=(Math.round(x)-reach)>>4, c1x=(Math.round(x)+reach)>>4, c0z=(Math.round(z)-reach)>>4, c1z=(Math.round(z)+reach)>>4;
+  let dropped=0;
+  for(let cx=c0x;cx<=c1x;cx++) for(let cz=c0z;cz<=c1z;cz++){ const kk=key(cx,cz), c=world.get(kk);
+    if(!c) continue; try{ disposeChunkMeshes(c); }catch(e){} world.delete(kk); dropped++; }
+  // EVERYTHING NEAR IT DIES. Routed through the existing 'blast' damage kind, so armour cuts it and a shield deliberately does
+  // not — the same rule the landmine and the seraph's beam already follow.
+  const pd=Math.hypot(player.pos.x-x, player.pos.z-z);
+  if(pd<NUKE_KILL && !player.dead && typeof damage==='function') damage(999,'a warhead found you','blast');
+  else if(pd<NUKE_HURT && !player.dead && typeof damage==='function') damage(Math.max(6,Math.round(40*(1-pd/NUKE_HURT))),'the shockwave',"blast");
+  if(typeof animals!=='undefined') for(let i=animals.length-1;i>=0;i--){ const a=animals[i];
+    if(!a.dead && Math.hypot(a.x-x,a.z-z)<NUKE_HURT && typeof killAnimal==='function') killAnimal(a,{carcassOnly:true}); }
+  icbmFlash(x,gy,z);
+  RADS.zone=craters;                                                         // the bowl IS the fallout zone; one list, so they cannot drift apart
+  if(typeof scareAnimals==='function') scareAnimals(x,z,180);
+  return { x:Math.round(x), z:Math.round(z), r:R, d:D, chunksDropped:dropped, craters:craters.length }; }
+// FLASH, CLOUD, SOUND. The cloud is a stack of expanding smoke billboards plus a stem — enough to read as a mushroom from a
+// distance, which is the only place you will ever see one from and survive.
+let _nukeCloud=null, _nukeT=0;
+function icbmFlash(x,gy,z){
+  if(typeof weather!=='undefined'){ weather.flash=1; weather.thunderT=0.1; }   // the sky goes white at once, thunder right behind it
+  if(typeof playSample==='function'){ playSample('thunder',null,1.0); setTimeout(()=>playSample('thunder',null,0.9),700); }
+  if(typeof AC!=='undefined'&&AC){ tone(master,{f:34,type:'sine',dur:9.0,vol:0.5,to:18,atk:0.05}); burst(master,0.6,4.0,70,0.4,26); }
+  if(typeof spawnParticles==='function'){ for(let i=0;i<6;i++) spawnParticles(x,gy+2+i*6,z,i<2?0xffe08a:0x555055,26,6.0,3.0); }
+  try{
+    if(_nukeCloud){ scene.remove(_nukeCloud); _nukeCloud.traverse(o=>{ if(o.geometry)o.geometry.dispose(); }); }
+    const g=new THREE.Group(); g.position.set(x,gy,z);
+    const smoke=new THREE.MeshBasicMaterial({color:0x6d6660, transparent:true, opacity:0.9, fog:false, depthWrite:false});
+    const hot=new THREE.MeshBasicMaterial({color:0xffcf7a, transparent:true, opacity:0.95, fog:false, depthWrite:false});
+    for(let i=0;i<7;i++){ const s=new THREE.Mesh(new THREE.SphereGeometry(6+i*1.6,10,8), i<2?hot:smoke);
+      s.position.y=6+i*7; s.scale.set(1,0.7,1); g.add(s); }                   // the stem
+    for(let i=0;i<5;i++){ const cap=new THREE.Mesh(new THREE.SphereGeometry(16+i*5,12,9), smoke);
+      cap.position.y=58+i*3.5; cap.scale.set(1,0.42,1); g.add(cap); }          // and the cap
+    g.scale.setScalar(0.05); scene.add(g); _nukeCloud=g; _nukeT=0;
+  }catch(e){}
+}
+// The cloud grows for ~8s, stands for a while, then fades. Driven from the frame loop like every other effect here.
+function icbmUpdate(dt){
+  if(_nukeCloud){ _nukeT+=dt;
+    const grow=Math.min(1, _nukeT/8);
+    _nukeCloud.scale.setScalar(0.05+grow*0.95);
+    _nukeCloud.position.y += dt*0.8;                                          // the column keeps rising
+    if(_nukeT>26){ const f=Math.max(0,1-(_nukeT-26)/18);
+      _nukeCloud.traverse(o=>{ if(o.material) o.material.opacity=0.9*f; });
+      if(f<=0){ scene.remove(_nukeCloud); _nukeCloud.traverse(o=>{ if(o.geometry)o.geometry.dispose(); }); _nukeCloud=null; } } }
+  // RADIATION. The dose rises inside a crater's fallout footprint and decays outside it, and it PERSISTS (see saveGame) the way
+  // player.sick does — walking out of the zone should not undo what you already took.
+  if(!craters.length){ if(RADS.level>0) RADS.level=Math.max(0,RADS.level-dt*0.02); return; }
+  let inZone=0;
+  for(const c of craters){ const d=Math.hypot(player.pos.x-c.x, player.pos.z-c.z), rz=c.r*2.2;
+    if(d<rz) inZone=Math.max(inZone, 1-d/rz); }                               // hottest dead centre, fading to nothing at 2.2x the rim
+  RADS.level = Math.max(0, Math.min(1, RADS.level + (inZone>0 ? dt*0.045*inZone : -dt*0.02)));
+  if(inZone>0 && RADS.level>0.35){ RADS._t=(RADS._t||0)+dt;
+    if(RADS._t>2.5){ RADS._t=0; if(!player.dead && typeof damage==='function') damage(Math.round(1+RADS.level*3),'radiation sickness','env');
+      if(typeof player!=='undefined') player.sick=Math.max(player.sick||0, 60); } }   // the existing sickness vignette carries the look
+}
 // ---- LANDMINES (Ben) ----------------------------------------------------------------------------------------------
 // "a feiry explosion that destroys the ground and everything around it. when a player walks over them, or walks over a
 // block that they are placed underneath, they should explode."
@@ -19779,6 +19886,30 @@ window.__hc={
   // the same byte, so a screenshot cannot answer this question at all.
   // The colour of the world just BESIDE the row, at the same screen height — the baseline a sampled block must differ from, or the
   // sampler is reading the backdrop and the whole rendered check is vacuous however green its ticks look.
+  // ---- THE ICBM. craters/RADS are module-scoped, and the crater is the whole point: it must be TERRAIN, so the check that
+  //      matters is that firing one adds no block edits at all.
+  icbm(){ try{ return { craters:craters.map(c=>({x:c.x,z:c.z,r:c.r,d:c.d})), rads:+RADS.level.toFixed(3),
+      edits:Object.keys(edits).length, cloud:!!_nukeCloud, nukeR:NUKE_R, nukeDepth:NUKE_DEPTH,
+      sick:+(player.sick||0).toFixed(0) }; }catch(e){ return {err:String(e.message||e)}; } },
+  icbmFire(dx,dz,r,depth){ try{ const x=Math.round(player.pos.x)+(dx|0), z=Math.round(player.pos.z)+(dz|0);
+      const before=Object.keys(edits).length;
+      const res=icbmDetonate(x,z,r,depth);
+      return Object.assign(res,{ editsBefore:before, editsAfter:Object.keys(edits).length }); }catch(e){ return {err:String(e.message||e)}; } },
+  // Terrain height at a point, so a probe can see the bowl in the heightfield without waiting for a chunk to stream.
+  icbmProfile(cx,cz,r,step){ try{ const R=(r!=null?+r:NUKE_R)*1.4, st=(step!=null?+step:4), out=[];
+      for(let d=0; d<=R; d+=st) out.push({ d, h:surfaceH(Math.round(cx+d), Math.round(cz)) });
+      return out; }catch(e){ return {err:String(e.message||e)}; } },
+  icbmRads(n){ try{ if(n!=null) RADS.level=Math.max(0,Math.min(1,+n)); return +RADS.level.toFixed(3); }catch(e){ return {err:String(e.message||e)}; } },
+  icbmClear(){ try{ craters.length=0; _hmCache.clear(); RADS.level=0; return true; }catch(e){ return {err:String(e.message||e)}; } },
+  icbmSaveRoundTrip(){ try{ const before=craters.map(c=>({x:c.x,z:c.z,r:c.r,d:c.d})), dose=RADS.level;
+      const snap={ seed:CFG.SEED, edits:{}, worldTime, player:{x:player.pos.x,y:player.pos.y,z:player.pos.z,yaw:player.yaw,pitch:player.pitch,rads:dose},
+                   inv:inv.slice(), armor:armor.slice(), craters:before };
+      craters.length=0; RADS.level=0; _hmCache.clear();
+      const cleared=craters.length;
+      applySave(snap);
+      const same=craters.length===before.length && before.every((c,i)=>craters[i].x===c.x&&craters[i].z===c.z&&craters[i].r===c.r&&craters[i].d===c.d);
+      return { n:before.length, cleared, restored:craters.length, same, rads:+RADS.level.toFixed(3), wroteRads:+dose.toFixed(3),
+               bytes:JSON.stringify(before).length }; }catch(e){ return {err:String(e.message||e)}; } },
   // ---- CCTV. `screens`, SCR and scrMeshes are all module-scoped. ----
   cctv(){ try{ return { entries:Object.keys(screens).length, screens:Object.keys(scrMeshes).length,
       pool:SCR_TILES*SCR_TILES, tile:SCR_TILE, live:SCR.live.slice(), renders:SCR.renders,
