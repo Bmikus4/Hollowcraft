@@ -61,15 +61,18 @@ const ok=(name,cond,got)=>{ if(!cond)fails++; console.log(`  ${cond?'ok  ':'FAIL
     const held = await page.evaluate(`(()=>{ return new Promise(r=>{
       __hc.tpExact(__hc.pos().x, __hc.pos().z, __hc.groundY(Math.floor(__hc.pos().x),Math.floor(__hc.pos().z))+1);
       setTimeout(()=>r(__hc.jumpProbe()),120); }); })()`);
-    // full jump: hold Space through the rise
-    await page.keyboard.down('Space'); await sleep(900);
-    const apexHeld = await page.evaluate(`__hc.jumpProbe()`);
-    await page.keyboard.up('Space'); await sleep(1400);
-    // tapped jump: release immediately
-    const y0 = await page.evaluate(`__hc.jumpProbe()`);
-    await page.keyboard.down('Space'); await sleep(60); await page.keyboard.up('Space'); await sleep(260);
-    const apexTap = await page.evaluate(`__hc.jumpProbe()`);
-    await sleep(1200);
+    // Both jumps are measured the same way: wait until the feet are down, note the ground, then poll the whole arc for its PEAK.
+    // A single sample at a fixed delay measures whenever the sleep happened to land, which is not the apex and is not comparable.
+    const settle = async()=>{ await page.waitForFunction(`(()=>{try{return __hc.jumpProbe().onGround===true;}catch(e){return false;}})()`,{timeout:15000}).catch(()=>{}); await sleep(250); };
+    const arcPeak = async(holdMs)=>{ await settle();
+      const g=(await page.evaluate(`__hc.jumpProbe()`)).y;
+      await page.keyboard.down('Space'); await sleep(holdMs); await page.keyboard.up('Space');
+      let peak=g; for(let i=0;i<22;i++){ const j=await page.evaluate(`__hc.jumpProbe()`); if(j.y>peak)peak=j.y; await sleep(40); }
+      return +(peak-g).toFixed(2); };
+    const heldRise = await arcPeak(700);      // held through the rise
+    const tapRise  = await arcPeak(50);       // let go immediately
+    const apexHeld={y:heldRise}, apexTap={y:tapRise}, y0={y:0};
+    await sleep(600);
     ok('holding the key jumps higher than tapping it', (apexHeld.y-y0.y) > (apexTap.y-y0.y), {held:+(apexHeld.y-y0.y).toFixed(2), tap:+(apexTap.y-y0.y).toFixed(2)});
     ok('coyote time exists while grounded', held.coyote>0, held.coyote);
 
@@ -107,6 +110,32 @@ const ok=(name,cond,got)=>{ if(!cond)fails++; console.log(`  ${cond?'ok  ':'FAIL
     const boxed2 = await page.evaluate(`__hc.tpsCam()`);
     ok('a roof overhead pulls the camera in close', boxed2.roofed===true && boxed2.dist<=2.0, {roofed:boxed2.roofed, dist:boxed2.dist});
     ok('and it is still not inside anything', boxed2.camInSolid===false, boxed2.camInSolid);
+    // …and a roof means FIRST person now (Ben: "force first person perspective inside of buildings"). The preference is untouched.
+    await sleep(600);
+    const inside = await page.evaluate(`__hc.tpsCam()`);
+    ok('being indoors forces first person', inside.on===true && inside.active===false && inside.indoors===true, {pref:inside.on, active:inside.active, indoors:inside.indoors});
+    // EVERY STEP BELOW NEEDS OPEN SKY: the box above is still standing, and third person is suppressed inside it.
+    // Teleport, WAIT for that chunk to exist, then re-snap: tpExact reads groundYAt, and a column that has not generated yet
+    // answers with the wrong height — which lands the player inside a hill, where nothing falls, no jump clears and the gun's
+    // wall-bend is pinned at maximum. Three later checks failed on exactly that before this wait was added.
+    await page.evaluate(`(()=>{ const P=__hc.pos(); __hc.tpExact(P.x+34, P.z+34); })()`);
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:60000});
+    await sleep(900);
+    // CARVE the spot rather than trusting the landing. Teleporting to an offset and snapping to groundYAt puts you inside a tree
+    // or a hillside often enough to matter, and an embedded player does not fall, cannot jump clear, and pins the gun's wall-bend
+    // at maximum — which is three "failures" that are really one bad spawn. A cleared pocket makes the rest of the run repeatable.
+    // A CLEARING, not a cell: 11x11 and 22 tall. Two later sections depend on it. [8] teleports 14 straight up and used to land
+    // inside a canopy (leaves_core is solid), which pins the player so nothing falls; and ADS is REFUSED when the muzzle is in a
+    // wall (view.gunBend), so a tight pocket makes the aim test measure a gun that was never raised. Five blocks of clearance in
+    // every direction is past the bend probe's reach.
+    const CLEAR = await page.evaluate(`(()=>{ const P=__hc.pos(), x=Math.floor(P.x), z=Math.floor(P.z), g=__hc.groundY(x,z);
+      for(let dx=-5;dx<=5;dx++)for(let dz=-5;dz<=5;dz++){ __hc.setBlockAt(x+dx,g,z+dz,'stone');
+        for(let dy=1;dy<=22;dy++) __hc.setBlockAt(x+dx,g+dy,z+dz,'air'); }
+      __hc.tpExact(x+0.5, z+0.5, g+1); return {x:x+0.5,z:z+0.5,y:g+1}; })()`);
+    await page.waitForFunction(`(()=>{try{return __hc.jumpProbe().onGround===true;}catch(e){return false;}})()`,{timeout:20000}).catch(()=>{});
+    await sleep(400);
+    const outside = await page.evaluate(`__hc.tpsCam()`);
+    ok('stepping outside gives it back', outside.active===true && outside.indoors===false, {active:outside.active, indoors:outside.indoors});
 
     console.log('\n[6] no camera-locked holosight in third person');
     const holoTps = await page.evaluate(`(()=>{ __hc.hold('ar15_dot'); return __hc.xhProbe(); })()`).catch(()=>null);
@@ -130,6 +159,7 @@ const ok=(name,cond,got)=>{ if(!cond)fails++; console.log(`  ${cond?'ok  ':'FAIL
     await page.keyboard.press('KeyE');   // inventory
     await sleep(120);
     const inUI1 = await page.evaluate(`__hc.jumpProbe()`);
+    console.log('    fall state:', JSON.stringify(await page.evaluate(`__hc.fallProbe()`)));
     await sleep(500);
     const inUI2 = await page.evaluate(`__hc.jumpProbe()`);
     await page.keyboard.up('KeyW');
@@ -157,6 +187,18 @@ const ok=(name,cond,got)=>{ if(!cond)fails++; console.log(`  ${cond?'ok  ':'FAIL
     console.log('\n[10] the gun in the third-person hand answers the aim');
     // The offhand still holds the shotgun from [7], and a full left hand DISABLES aiming by design (see view.ads) — clear it, or
     // this measures a gun that was never raised.
+    // BACK TO THE MIDDLE OF THE CLEARING FIRST. [9] leaves the player standing IN a doorway, and aiming is refused with the
+    // muzzle in a wall (view.gunBend) — which is the engine being right and the test standing in the wrong place.
+    await page.evaluate(`__hc.tpExact(${CLEAR.x}, ${CLEAR.z}, ${CLEAR.y})`);
+    await sleep(400);
+    // [8] left a menu open and the pointer unlocked; ADS needs both closed and locked (view.ads tests them), so this section
+    // re-establishes input before measuring. Without it the probe honestly reports adsT 0 and a level barrel.
+    // Escape only if something IS open — pressing it with nothing open OPENS the pause menu, which blocks aiming just as surely
+    // (that was this section's second failure). Then a click to re-acquire pointer lock, which rmbHeld is gated on.
+    if((await page.evaluate(`__hc.jumpProbe()`)).ui) { await page.keyboard.press('Escape'); await sleep(250); }
+    await page.mouse.click(640,360); await sleep(400);
+    const ready = await page.evaluate(`__hc.jumpProbe()`);
+    ok('input is live for the aim test', ready.locked===true && !ready.ui, {locked:ready.locked, ui:ready.ui});
     const aimed = await page.evaluate(`(()=>{ try{ __hc.eqPut(4,null); }catch(e){} __hc.tpsProbe(true); __hc.hold('ar15'); return __hc.tpsAim(0); })()`);
     await page.mouse.down({button:'right'}); await sleep(900);
     const up = await page.evaluate(`__hc.tpsAim(0.5)`);
@@ -169,6 +211,22 @@ const ok=(name,cond,got)=>{ if(!cond)fails++; console.log(`  ${cond?'ok  ':'FAIL
     ok('looking DOWN drops it', dn.barrelPitch<-0.15, {look:dn.lookPitch, barrel:dn.barrelPitch});
     ok('the barrel ends up near the look axis while aiming', up.offDeg<25 && dn.offDeg<25, {up:up.offDeg, dn:dn.offDeg});
     ok('and it stops tracking once the aim is lowered', Math.abs(hip.barrelPitch)<Math.abs(up.barrelPitch), {aimed:up.barrelPitch, hip:hip.barrelPitch});
+
+    console.log('\n[11] firing the offhand gun does not walk it off its pose');
+    const of1 = await page.evaluate(`__hc.offFire(8,'ar15')`);
+    console.log('   ', JSON.stringify(of1));
+    ok('the buck stays bounded while firing', Math.abs(of1.peak.rx-of1.before.rx)<0.9 && Math.abs(of1.peak.z-of1.before.z)<0.25, {before:of1.before, peak:of1.peak});
+    ok('and it returns to exactly where it started', Math.abs(of1.after.rx-of1.before.rx)<0.01 && Math.abs(of1.after.z-of1.before.z)<0.01, {before:of1.before, after:of1.after});
+    ok('the SHOW went to the offhand, not the main hand', of1.mainKick===0, {mainKick:of1.mainKick, offKick:of1.kick});
+
+    console.log('\n[12] with both hands full, each button belongs to one hand');
+    const hands = await page.evaluate(`__hc.handSplit('planks','ar15')`);
+    console.log('   ', JSON.stringify(hands));
+    ok('left click acts with the OFFHAND item', hands.left && hands.left.did==='fire' && hands.left.id==='ar15', hands.left);
+    ok('…and does not move the main hand', hands.afterLeft.mainSwing===0 && hands.afterLeft.mainKick===0 && hands.afterLeft.mainFlash===0, hands.afterLeft);
+    ok('…the buck and flash land on the offhand', hands.afterLeft.offKick>0 && hands.afterLeft.offFlash>0, hands.afterLeft);
+    ok('right click acts with the MAIN item, block and all', hands.right && hands.right.id==='planks', hands.right);
+    ok('…and does not move the offhand', hands.afterRight.offSwing===0 && hands.afterRight.offKick===0, hands.afterRight);
 
     ok('no page errors', errors.length===0, errors);
     await browser.close();

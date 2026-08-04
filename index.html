@@ -2815,7 +2815,16 @@ const skyMat = new THREE.ShaderMaterial({
   uniforms:{
     uSunDir:globalU.uSunDir, uMoonDir:globalU.uMoonDir, uDay:globalU.uDay, uTime:globalU.uTime,
     uMoonTex:{value:null}, uHasMoon:{value:0}, uFogCol:{value:scene.fog.color}, uHorizonBlend:_uHorizonBlend,
-    uSkyDark:_uSkyDark, uCloud:_uCloud, uStars:_uStars, uCamYaw:{value:0}
+    uSkyDark:_uSkyDark, uCloud:_uCloud, uStars:_uStars, uCamYaw:{value:0},
+    // DEBUG READOUT of the coverage field, for __hc.cloudProbe: with this at 1 the shader writes the three
+    // coverage terms instead of a colour, which is the only way to check the CPU port of fbmC (used by the sun
+    // overlay to know it is behind cloud) against the field the player actually sees. Never on in a real frame.
+    uCloudDbg:{value:0},
+    // THE SUN'S BRIGHTNESS AND ITS HALO, as three separate levers (Ben 08-04: "the sun is still too bright, and I see a
+    // halo around the sun clouds or not"). uSunGain is the disc's HDR gain — the bloom SEED, so it decides how wide and
+    // how strong the glow around the sun is far more than it decides how white the disc is; uSunHalo is the tight Mie ring
+    // on the limb; uSunSheen is the broad forward-scatter cushion, which is the one that is there in a clear sky.
+    uSunGain:{value:10.0}, uSunHalo:{value:0.30}, uSunSheen:{value:0.10}
   },
   vertexShader:`
     varying vec3 vDir;
@@ -2825,6 +2834,7 @@ const skyMat = new THREE.ShaderMaterial({
     varying vec3 vDir;
     uniform vec3 uSunDir, uMoonDir; uniform float uDay, uTime, uHasMoon; uniform vec3 uFogCol, uHorizonBlend; uniform float uSkyDark, uCloud, uStars; uniform float uCamYaw;
     uniform sampler2D uMoonTex;
+    uniform float uCloudDbg, uSunGain, uSunHalo, uSunSheen;
     // hash noise
     float h13(vec3 p){ p=fract(p*0.3183099+0.1); p*=17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
     float n3(vec3 x){ vec3 i=floor(x),f=fract(x); f=f*f*(3.0-2.0*f);
@@ -2884,7 +2894,10 @@ const skyMat = new THREE.ShaderMaterial({
       // a bright core inside a bright pillow and had no contrast to read against. pow(sd,34) is a tight sheen at the limb.
       // The broad pow(sd,3) term stays exactly as it was: that one is the whole sky brightening toward the sun, which is
       // atmosphere and is the reason a clear day does not read as a flat lid.
-      float fw = pow(sd,3.0)*0.30 + pow(sd,34.0)*0.26;
+      // The pow(sd,34) term is the HALO IN A CLEAR SKY (Ben 08-04). It lives in col, not add, so no cloud line touches it —
+      // only the cloud drawn on top of that same fragment can, and near the sun the coverage is usually mid-ramp. It is on
+      // uSunSheen now, cut from 0.26; the broad pow(sd,3) is the whole sky brightening toward the sun and stays.
+      float fw = pow(sd,3.0)*0.30 + pow(sd,34.0)*uSunSheen;
       col += mix(vec3(0.95,0.60,0.30), vec3(0.55,0.72,0.96), clamp(sunH*2.2,0.0,1.0)) * fw * uDay;
       // ---- GOLDEN HOUR, DIRECTIONAL ---- the warm band follows the sun's AZIMUTH instead of ringing the whole horizon, and
       // the opposite side goes violet, which is what makes the warm side read as warm rather than merely orange.
@@ -2924,8 +2937,12 @@ const skyMat = new THREE.ShaderMaterial({
       // measured: the interior varied 23 luminance across its inner half while the limb only fell 11 per pixel, which is the
       // profile of a blob, not a body. At 40 the whole interior saturates flat and the entire falloff happens in the limb,
       // which is what makes an edge. It costs nothing: everything above white is thrown away by the same tonemapper.
-      add += vec3(1.0,0.975,0.93)*sunDisc*40.0*step(-0.12,sunH);
-      add += vec3(1.0,0.90,0.72)*pow(sd,700.0)*0.45*step(-0.12,sunH)*uDay;   // halo TIGHTENED (260 -> 700) so it hugs the limb instead of becoming the shape
+      // 40 WAS THE HALO. The gain is the bloom seed, and UnrealBloomPass spreads energy, not colour: a disc 70px wide at
+      // forty times white blooms into a soft blob far larger than the sun, which is the halo Ben sees with no cloud in the
+      // frame, and it is also why the sun read as too bright. The disc no longer needs the gain to look like a body — the
+      // crisp overlay quad after the post chain is the body — so the seed only has to clip, and 10 clips.
+      add += vec3(1.0,0.975,0.93)*sunDisc*uSunGain*step(-0.12,sunH);
+      add += vec3(1.0,0.90,0.72)*pow(sd,700.0)*uSunHalo*step(-0.12,sunH)*uDay;   // halo TIGHTENED (260 -> 700) so it hugs the limb instead of becoming the shape
       add += vec3(0.95,0.42,0.16)*dusk*pow(sd,4.0)*(1.0-up)*0.9;
       // moon - a real disc with a cratered face: project the view ray onto the tangent plane at the
       // moon direction, so the texture maps ACROSS the disc (the old fract(muv*3) sampled ~one texel flat).
@@ -2954,7 +2971,7 @@ const skyMat = new THREE.ShaderMaterial({
       // ---- CLOUDS: two layers ---- low cumulus with a lit rim and a dark base, plus thin high cirrus. One layer gave the
       // whole sky a single texture at a single altitude; the difference in speed and shape between two is most of what makes
       // a sky read as weather rather than as a texture.
-      float cloud=0.0; vec3 cloudCol=vec3(0.0);
+      float cloud=0.0; vec3 cloudCol=vec3(0.0); float dbgD=0.0, dbgC2=0.0;
       if(dir.y>0.02){
         vec3 lightDir = mix(uMoonDir,uSunDir,uDay);
         float rim = pow(max(dot(dir,lightDir),0.0),3.0);
@@ -2982,16 +2999,19 @@ const skyMat = new THREE.ShaderMaterial({
           cloudCol = mix(cloudCol, lit, pow(clamp(1.0-shade,0.0,1.0),3.0)*0.35*uDay);  // and the sunlit crowns stay bright, which is the other half of the read
         }
         cloudCol = mix(cloudCol, vec3(1.0,0.62,0.34), dusk*rim*0.55);                 // gold on the sun side at dusk
-        cloud = d*0.92;
+        cloud = d*0.92; dbgD = d;
         if(dir.y>0.10){                                                               // CIRRUS: higher, faster, stretched into streaks
           vec2 uvh = cp.xz*0.22 + vec2(uTime*0.019, uTime*0.004);
           float c2 = fbm2(vec3(uvh.x*0.55, uvh.y*2.6, uTime*0.011));
           c2 = smoothstep(0.46,0.86,c2) * smoothstep(0.10,0.42,dir.y) * uCloud * 0.55;
           vec3 cc2 = mix(mix(vec3(0.10,0.12,0.16), vec3(1.0,0.99,0.98), uDay), vec3(1.0,0.72,0.45), dusk*rim*0.7);
           cloudCol = mix(cloudCol, cc2, clamp(c2-cloud,0.0,1.0));
-          cloud = clamp(cloud + c2*(1.0-cloud), 0.0, 1.0);
+          cloud = clamp(cloud + c2*(1.0-cloud), 0.0, 1.0); dbgC2 = c2;
         }
       }
+      // The probe's readout, before anything is mixed with it. R is the coverage the occlusion terms use, G the low
+      // cumulus term halved (it reaches 1.6 at full cover), B the cirrus. See __hc.cloudProbe.
+      if(uCloudDbg>0.5){ gl_FragColor = vec4(clamp(cloud,0.0,1.0), clamp(dbgD*0.5,0.0,1.0), clamp(dbgC2,0.0,1.0), 1.0); return; }
       col = mix(col, cloudCol, cloud);
       // A CLOUD ACTUALLY HIDES WHAT IS BEHIND IT (Ben 08-04: "when clouds cross the sun the sun should hide itself"). This was
       // (1.0 - cloud*0.92), which sounds like near-total occlusion and is not: the sun disc is added at FORTY times white, so the
@@ -3031,6 +3051,75 @@ const skyMat = new THREE.ShaderMaterial({
 });
 const skyDome = new THREE.Mesh(skyGeo, skyMat);
 skyDome.renderOrder = -10; skyDome.frustumCulled=false;
+// ---- IS THE SUN BEHIND CLOUD? A CPU PORT OF THE SKY'S OWN COVERAGE FIELD -----------------------------------------
+// The crisp disc below is drawn AFTER the post chain, so the sky shader's own "a cloud hides what is behind it" line
+// (add *= pow(1-cloud,1.8)) cannot touch it: that line dims the bloom SEED, and the disc the player looks at is a
+// separate quad whose only occlusion test was voxel rays. Swept across nine sun bearings the blown-out area around the
+// sun moved 3%, and this is why — the sun burned through solid cover, on top of the cloud, at full opacity.
+// The overlay runs on the CPU, so it needs the coverage number on the CPU: this is a float32 port of skyMat's
+// h13/n3/fbmC and the two coverage lines, and Math.fround at every step is not decoration — h13 multiplies fracts by
+// 17 and takes the fract of their product, so a float64 rounding difference in the third decimal comes out as a
+// different hash. __hc.cloudProbe() checks this against the GPU field through uCloudDbg; keep them agreeing or the
+// disc will hide behind cloud that is not drawn.
+const _f=Math.fround, _fr=x=>_f(x-Math.floor(x)), _mixf=(a,b,t)=>_f(a+_f(_f(b-a)*t));
+function _h13(x,y,z){
+  let px=_fr(_f(x*0.3183099+0.1)), py=_fr(_f(y*0.3183099+0.1)), pz=_fr(_f(z*0.3183099+0.1));
+  px=_f(px*17.0); py=_f(py*17.0); pz=_f(pz*17.0);
+  // LEFT TO RIGHT, exactly as GLSL evaluates p.x*p.y*p.z*(p.x+p.y+p.z). Grouping it as (px*py)*(pz*sum) instead is
+  // algebraically identical and numerically is not: measured against the GPU, that association agreed on the median
+  // direction to 0.001 and disagreed by 0.156 on the worst one, because this hash takes the fract of a product in the
+  // thousands — a difference in the last float32 bit of the product comes out as a different cloud.
+  return _fr(_f(_f(_f(px*py)*pz)*_f(_f(px+py)+pz)));
+}
+function _n3(x,y,z){
+  const ix=Math.floor(x), iy=Math.floor(y), iz=Math.floor(z);
+  let fx=_f(x-ix), fy=_f(y-iy), fz=_f(z-iz);
+  fx=_f(_f(fx*fx)*_f(3.0-_f(2.0*fx))); fy=_f(_f(fy*fy)*_f(3.0-_f(2.0*fy))); fz=_f(_f(fz*fz)*_f(3.0-_f(2.0*fz)));
+  const c=(a,b,d)=>_h13(ix+a,iy+b,iz+d);
+  return _mixf(_mixf(_mixf(c(0,0,0),c(1,0,0),fx), _mixf(c(0,1,0),c(1,1,0),fx), fy),
+               _mixf(_mixf(c(0,0,1),c(1,0,1),fx), _mixf(c(0,1,1),c(1,1,1),fx), fy), fz);
+}
+function _fbmC5(x,y,z){ let v=0,a=0.5; for(let i=0;i<5;i++){ v=_f(v+_f(a*_n3(x,y,z))); x=_f(x*2.02); y=_f(y*2.02); z=_f(z*2.02); a=_f(a*0.5);} return v; }
+function _fbm2j(x,y,z){ let v=0,a=0.6; for(let i=0;i<2;i++){ v=_f(v+_f(a*_n3(x,y,z))); x=_f(x*2.31); y=_f(y*2.31); z=_f(z*2.31); a=_f(a*0.5);} return v; }
+function _sstep(e0,e1,x){ const t=Math.min(1,Math.max(0,(x-e0)/(e1-e0))); return t*t*(3-2*t); }
+// The coverage at one direction, term for term as the shader computes it. Returns cloud plus its two parts so a
+// harness can say WHICH layer is over the sun.
+function cloudCoverAt(dx,dy,dz){
+  const L=Math.hypot(dx,dy,dz)||1; dx/=L; dy/=L; dz/=L;
+  if(dy<=0.02) return {cloud:0,d:0,cirrus:0};
+  const uT=globalU.uTime.value, cov=_uCloud.value;
+  const k=_f(dy*0.9+0.1), cpx=_f(dx/k), cpz=_f(dz/k);
+  const ux=_f(_f(cpx*0.55)+_f(uT*0.006)), uz=_f(_f(cpz*0.55)+_f(uT*0.002));
+  const d=_sstep(0.38,0.62,_fbmC5(_f(ux*1.3),_f(uz*1.3),_f(uT*0.02)))*_sstep(0.02,0.25,dy)*cov;
+  let cloud=d*0.92, c2=0;
+  if(dy>0.10){
+    const hx=_f(_f(cpx*0.22)+_f(uT*0.019)), hz=_f(_f(cpz*0.22)+_f(uT*0.004));
+    c2=_sstep(0.46,0.86,_fbm2j(_f(hx*0.55),_f(hz*2.6),_f(uT*0.011)))*_sstep(0.10,0.42,dy)*cov*0.55;
+    cloud=Math.min(1,cloud+c2*(1-cloud));
+  }
+  return {cloud:Math.min(1,cloud), d, cirrus:c2};
+}
+// THE PROBE: the same fragment source as the sky, on a 1x1 target, with the view direction fed in as a uniform
+// instead of coming from the dome's geometry. No screenshot, no post chain, no crop — the value itself.
+let _cloudProbe=null;
+function cloudProbeGPU(dx,dy,dz){
+  if(!_cloudProbe){
+    const u=Object.assign({}, skyMat.uniforms); u.uProbeDir={value:new THREE.Vector3()}; u.uCloudDbg={value:1};
+    const m=new THREE.ShaderMaterial({ uniforms:u, depthTest:false, depthWrite:false,
+      vertexShader:'uniform vec3 uProbeDir; varying vec3 vDir; void main(){ vDir=uProbeDir; gl_Position=vec4(position.xy,0.0,1.0); }',
+      fragmentShader:skyMat.fragmentShader });
+    const sc=new THREE.Scene(); sc.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), m));
+    _cloudProbe={ mat:m, scene:sc, cam:new THREE.OrthographicCamera(-1,1,1,-1,0,1),
+                  rt:new THREE.WebGLRenderTarget(1,1,{depthBuffer:false,stencilBuffer:false}), buf:new Uint8Array(4) };
+  }
+  const p=_cloudProbe, L=Math.hypot(dx,dy,dz)||1;
+  p.mat.uniforms.uProbeDir.value.set(dx/L,dy/L,dz/L);
+  const pt=renderer.getRenderTarget();
+  renderer.setRenderTarget(p.rt); renderer.render(p.scene,p.cam);
+  renderer.readRenderTargetPixels(p.rt,0,0,1,1,p.buf);
+  renderer.setRenderTarget(pt);
+  return { cloud:p.buf[0]/255, d:(p.buf[1]/255)*2, cirrus:p.buf[2]/255 };
+}
 // ---- THE SUN'S LIMB, DRAWN AFTER THE POST CHAIN ------------------------------------------------------------------
 // The disc in the sky shader is the bloom SEED and stays: it is what makes the glow, and it is occluded by terrain for
 // free because it is in the scene. What it cannot be is sharp, because the bloom pass blurs the very pixels it is drawn
@@ -3042,7 +3131,11 @@ skyDome.renderOrder = -10; skyDome.frustumCulled=false;
 // work on one machine and put the sun through a mountain on another. Instead the visibility is sampled the way the game
 // already knows how -- voxel rays. Nine rays across the disc, and the overlay's opacity is the fraction that reach the
 // sky, so a hillside eats the sun progressively at sunset instead of popping it out in one frame.
-const _sunOv={ scene:new THREE.Scene(), cam:new THREE.OrthographicCamera(-1,1,1,-1,0,1), mesh:null, mat:null, ndc:new THREE.Vector3(), vis:1 };
+const _sunOv={ scene:new THREE.Scene(), cam:new THREE.OrthographicCamera(-1,1,1,-1,0,1), mesh:null, mat:null, ndc:new THREE.Vector3(), vis:1, cloud:0, hide:1 };
+// How hard cloud puts the disc out, and how bright the disc is at all. Both are levers rather than constants because
+// "how much cloud should hide the sun" is a judgement about how the sky reads, not a measurement — __hc.sunDisc() sets
+// them so a pair of frames can be put in front of Ben.
+let _sunCloudK=1.8, _sunDiscAlpha=0.80;
 (function buildSunOverlay(){
   // A unit quad in NDC space with the disc cut out of it in the fragment shader: a circle from a polygon is a lot of
   // triangles for something two pixels of limb wide, and this way the edge is exactly as hard as the antialias allows.
@@ -3058,6 +3151,30 @@ const _sunOv={ scene:new THREE.Scene(), cam:new THREE.OrthographicCamera(-1,1,1,
   _sunOv.mesh.frustumCulled=false; _sunOv.scene.add(_sunOv.mesh);
 })();
 const SUN_ANG=0.0593;   // the disc's angular RADIUS in radians (3.4 degrees), the same body the sky shader draws — kept here so the two cannot drift apart
+// GRID TRAVERSAL toward the sun: visits every voxel the ray enters, in order, and cannot step over one. The fixed-stride
+// march this replaced is what put the sun through blocks. Returns true the moment an opaque voxel is entered.
+function _sunRayBlocked(ox,oy,oz,dx,dy,dz,maxT){
+  const L=Math.hypot(dx,dy,dz)||1; dx/=L; dy/=L; dz/=L;
+  let ix=Math.floor(ox), iy=Math.floor(oy), iz=Math.floor(oz);
+  const sx=dx>0?1:-1, sy=dy>0?1:-1, sz=dz>0?1:-1;
+  // Distance along the ray per whole voxel on each axis, and to the first boundary. A zero component gives Infinity, so
+  // that axis simply never wins the comparison.
+  const dtx=Math.abs(dx)<1e-9?Infinity:Math.abs(1/dx), dty=Math.abs(dy)<1e-9?Infinity:Math.abs(1/dy), dtz=Math.abs(dz)<1e-9?Infinity:Math.abs(1/dz);
+  let tx=dtx===Infinity?Infinity:((dx>0?(ix+1-ox):(ox-ix))*dtx),
+      ty=dty===Infinity?Infinity:((dy>0?(iy+1-oy):(oy-iy))*dty),
+      tz=dtz===Infinity?Infinity:((dz>0?(iz+1-oz):(oz-iz))*dtz);
+  let t=0;
+  // The eye's OWN voxel is skipped: standing inside a doorway or with the camera clipped into a block would otherwise
+  // report the sun blocked from everywhere.
+  while(t<maxT){
+    if(tx<ty && tx<tz){ ix+=sx; t=tx; tx+=dtx; }
+    else if(ty<tz){ iy+=sy; t=ty; ty+=dty; }
+    else { iz+=sz; t=tz; tz+=dtz; }
+    const b=getBlock(ix,iy,iz);
+    if(b && isOpaque[b]) return true;
+  }
+  return false;
+}
 const _sunAx=new THREE.Vector3(), _sunT1=new THREE.Vector3(), _sunT2=new THREE.Vector3();   // scratch: this runs every frame and must not allocate
 function drawSunOverlay(){
   try{
@@ -3087,33 +3204,60 @@ function drawSunOverlay(){
     _sunOv.ndc.set(nx,ny,0);
     // Angular radius -> NDC. Vertical is tan(fov/2) of NDC; horizontal divides by the aspect.
     const ry=Math.tan(SUN_ANG)/halfV, rx=ry/camera.aspect;
-    // VISIBILITY, by voxel ray: centre plus eight around the rim. Cast far enough to clear any terrain that could be in
-    // front, and treat leaves as blocking, because they do block the sun.
-    // raycastVoxel is no use here: it always casts from the player's eye along the LOOK direction, and these five rays go
-    // toward the sun. So this is its own coarse march -- one block per step, 100 blocks -- which is plenty to decide whether
-    // a hillside is in the way. isOpaque means the solid canopy core blocks the sun while the cutout leaf skin does not,
-    // which is the same distinction the lighting already makes.
+    // VISIBILITY, by voxel ray: centre plus four around the rim, so a hillside eats the sun progressively.
+    // THIS USED TO LET THE SUN THROUGH SOLID BLOCKS (Ben 08-04: "the sun is visible through blocks"), and the reason was
+    // the march, not the rays. It sampled POINTS one block apart starting at t=1.2 — so every block within 1.2 of the eye
+    // was never sampled at all, which is exactly the case that matters: a roof one block over your head, or a wall you are
+    // standing against. Sampling on a fixed stride also steps over anything it lands either side of.
+    // Now it is a real grid traversal (Amanatides-Woo): step to the next voxel BOUNDARY on whichever axis is nearest, so
+    // every voxel the ray passes through is tested exactly once and nothing between the eye and 120 blocks can be skipped.
+    // isOpaque, not isSolid: the solid canopy core blocks the sun while the cutout leaf skin does not, matching the lighting.
     let open=0;
-    const ex=camera.position.x, ey=camera.position.y+((typeof EYE!=='undefined')?0:0), ez=camera.position.z;
+    const ex=camera.position.x, ey=camera.position.y, ez=camera.position.z;
     const ax=Math.abs(sd.y)<0.9 ? _sunAx.set(0,1,0) : _sunAx.set(1,0,0);
     const t1=_sunT1.crossVectors(sd,ax).normalize(), t2=_sunT2.crossVectors(sd,t1).normalize();
     for(let i=0;i<5;i++){
       const a=i*Math.PI*0.5, rr=(i===0)?0:SUN_ANG*0.72;
       const dx=sd.x+(i?(t1.x*Math.cos(a)+t2.x*Math.sin(a))*rr:0), dy=sd.y+(i?(t1.y*Math.cos(a)+t2.y*Math.sin(a))*rr:0), dz=sd.z+(i?(t1.z*Math.cos(a)+t2.z*Math.sin(a))*rr:0);
-      const L=Math.hypot(dx,dy,dz)||1, ux=dx/L, uy=dy/L, uz=dz/L;
-      let blocked=false;
-      for(let t=1.2;t<100;t+=1.0){ const b=getBlock(ex+ux*t, ey+uy*t, ez+uz*t);
-        if(b && isOpaque[b]){ blocked=true; break; } }
-      if(!blocked) open++;
+      if(!_sunRayBlocked(ex,ey,ez,dx,dy,dz,120)) open++;
     }
     const target=open/5;
-    _sunOv.vis += (target-_sunOv.vis)*0.25;                        // eased, so a ray flicking on and off across a block edge does not strobe
-    if(_sunOv.vis<0.004) return;
+    _sunOv.open=open; _sunOv.eyeY=ey;
+    // Eased ON, near-immediate OFF. A disc that takes four frames to notice a hillside is a bright hole in the terrain for
+    // four frames, which is the artefact; a disc that takes four frames to come back is nothing.
+    _sunOv.vis += (target-_sunOv.vis)*(target<_sunOv.vis?0.75:0.25);
+    if(_sunOv.vis<0.004){ _sunOv.lastOpacity=0; return; }   // fully occluded: say so, rather than leaving the last drawn value for a hook to read as "still visible"
     _sunOv.mat.uniforms.uCentre.value.set(_sunOv.ndc.x,_sunOv.ndc.y);
     _sunOv.mat.uniforms.uRadius.value.set(rx,ry);
+    // A CLOUD IN FRONT OF THE SUN HIDES THE SUN (Ben 08-04: "when clouds cross the sun the sun should hide itself").
+    // The sky shader has said this since 069dda0 and it made almost no difference, because it only governs the bloom seed
+    // inside the dome — this quad is drawn after the whole post chain and was at full opacity through solid cover.
+    // Same curve as the shader's own (pow(1-cloud,1.8)) so the disc and its glow go out together rather than the glow
+    // fading off a disc that stays; _sunCloudK exists to price a thin-cloud response against a thick-only one.
+    // AVERAGED ACROSS THE DISC, not sampled at its centre, for two reasons. The sun is 6.8 degrees wide, so half-covered is
+    // a real state and one ray cannot report it. And h13 is chaotic — it takes the fract of a product in the thousands — so
+    // the CPU port and the GPU can land on completely different cloud at an isolated direction where their last float32 bit
+    // differs: measured, the median direction agreed to 0.001 and the worst disagreed by 0.11. Averaging the same five rays
+    // the visibility test uses makes an isolated divergence a fifth of itself, so it can never put the sun out on its own.
+    let _cc=0;
+    if(typeof cloudCoverAt==='function' && _uCloud.value>0){
+      for(let i=0;i<5;i++){
+        const a=i*Math.PI*0.5, rr=(i===0)?0:SUN_ANG*0.72;
+        _cc += cloudCoverAt(sd.x+(i?(t1.x*Math.cos(a)+t2.x*Math.sin(a))*rr:0),
+                            sd.y+(i?(t1.y*Math.cos(a)+t2.y*Math.sin(a))*rr:0),
+                            sd.z+(i?(t1.z*Math.cos(a)+t2.z*Math.sin(a))*rr:0)).cloud;
+      }
+      _cc/=5;
+    }
+    _sunOv.cloud = _cc;
+    _sunOv.hide = Math.pow(Math.max(0,1-_cc), _sunCloudK);
     // Fades out as the sun sets so the hard disc does not sit on top of the sunset's own soft glow, and with daylight so
     // it never appears at night if uDay and the sun direction ever disagree.
-    _sunOv.mat.uniforms.uOpacity.value = _sunOv.vis * clamp((sd.y+0.14)/0.22,0,1) * clamp(globalU.uDay.value*1.6,0,1) * 0.92;
+    _sunOv.mat.uniforms.uOpacity.value = _sunOv.vis * clamp((sd.y+0.14)/0.22,0,1) * clamp(globalU.uDay.value*1.6,0,1) * _sunDiscAlpha * _sunOv.hide;
+    // RECORDED BEFORE THE EARLY RETURN. It used to be set only on the frames that drew, so every hook reading it while the
+    // disc was hidden got the last value from when it was visible — the sweep that proved cloud puts the sun out reported
+    // "hide 0.000, opacity 0.8000" on the same line, which reads as the feature not working.
+    _sunOv.lastOpacity=_sunOv.mat.uniforms.uOpacity.value;
     if(_sunOv.mat.uniforms.uOpacity.value<=0.004) return;
     // setRenderTarget(null) EXPLICITLY. EffectComposer leaves its own target bound after the chain, so without this the
     // overlay is drawn correctly into an off-screen buffer nobody looks at -- which is exactly what the first version did,
@@ -3121,7 +3265,7 @@ function drawSunOverlay(){
     const pAC=renderer.autoClear; renderer.autoClear=false; renderer.setRenderTarget(null);
     renderer.render(_sunOv.scene, _sunOv.cam);
     renderer.autoClear=pAC;
-    _sunOv.drawn=(_sunOv.drawn||0)+1; _sunOv.lastOpacity=_sunOv.mat.uniforms.uOpacity.value;
+    _sunOv.drawn=(_sunOv.drawn||0)+1;
   }catch(e){ _sunOv.err=String(e&&e.message||e); }
 }
 // PROCEDURAL MOON FACE — bake a cratered/maria disc to a canvas (the spec's fallback for the NASA LRO texture,
@@ -4758,11 +4902,20 @@ MODEL_ITEM_BUILDERS.furnace=(bd)=>{ const g=new THREE.Group();
   const fb=new THREE.Mesh(box(0.56,0.4,0.05),dk); fb.position.set(0,0.34,0.45); g.add(fb);   // firebox on +z
   return g; };
 // campfire — crossed (#) logs on the ground + glowing squashed ember core
-MODEL_ITEM_BUILDERS.campfire=(bd)=>{ const g=new THREE.Group();
+MODEL_ITEM_BUILDERS.campfire=(bd,nb)=>{ const g=new THREE.Group();
   const wood=new THREE.MeshLambertMaterial({color:0x3a2a1a}); const logGeo=cyl(0.06,0.06,0.86,6);
   const put=(x,z,alongZ)=>{ const l=new THREE.Mesh(logGeo,wood); l.rotation.z=Math.PI/2; if(alongZ) l.rotation.y=Math.PI/2; l.position.set(x,0.08,z); g.add(l); };
   put(0,-0.16,false); put(0,0.16,false); put(-0.16,0,true); put(0.16,0,true);
   const ember=new THREE.Mesh(sphereG(0.28),new THREE.MeshBasicMaterial({color:0xff5a1e})); ember.scale.set(1,0.34,1); ember.position.y=0.1; g.add(ember);
+  // A CAMPFIRE IS ON FIRE (Ben 08-04: "the campfire inventory item is not the actual campfire"). In the world the flame is added
+  // by the chunk's own flame pass, so this builder never carried one — and the icon, the held item and the ground drop all come
+  // from this builder, which is why they were four logs and a coal. The mask argument is the signal: chunk meshing always passes a
+  // neighbour mask, every icon/held/drop path calls the builder with nothing, so a missing mask means "you are the whole object,
+  // draw the fire yourself" and the placed block still gets exactly one flame from the pass that owns it.
+  if(!nb){ const hot=new THREE.MeshBasicMaterial({color:0xffb347}), core=new THREE.MeshBasicMaterial({color:0xfff0a8});
+    for(const [x,z,h,r] of [[0,0,0.46,0.16],[-0.1,0.06,0.3,0.1],[0.09,-0.07,0.26,0.09]]){
+      const f=new THREE.Mesh(new THREE.ConeGeometry(r,h,7), hot); f.position.set(x,0.16+h/2,z); g.add(f); }
+    const c=new THREE.Mesh(new THREE.ConeGeometry(0.07,0.22,6), core); c.position.set(0,0.24,0); g.add(c); }
   return g; };
 // LANDMINE — a CIRCULAR mine (Ben), not a cube: a shallow olive-steel drum lying flat, a red warning ring around its
 // shoulder, eight bolt heads, and a dark pressure plunger standing proud of the lid. The lid carries the same painted
@@ -12708,7 +12861,16 @@ const VIEW_NEAR_CLEAR=0.10;
 // GUN BLOCK-OUT (#62). Two distances, not one: the latch sets at 0.62 and only clears past 0.86, so the click cannot
 // chatter as a probe step crosses in and out. TILT is radians at full press — 1.35 is ~77 degrees, muzzle near vertical,
 // where the old bend*0.6 was ~34 and left a long barrel inside the block.
-const BLOCKOUT_IN=1.00, BLOCKOUT_OUT=1.22, BLOCKOUT_TILT=1.35, BLOCKOUT_PULL=0.34;
+// TILT IS 1.50 (86 deg), NOT 1.35, AND THE REASON IS GEOMETRY, NOT TASTE. Against a floor-to-ceiling wall the tilt buys
+// nothing by itself — the wall goes up as well — so what clears the muzzle is how little of the gun is left IN FRONT of the
+// eye, which is butt + length*cos(tilt). The near-plane guard will not let the butt come closer than 0.18, and the longest
+// suppressed rifle is ~1.4: at 1.35 rad that leaves 0.18+0.32 = 0.50 forward, which is more than the 0.45 a player can
+// stand from a wall face, and the measured muzzle was inside the block. At 1.50 it is 0.18+0.10. The distance is the number
+// to reason about; the angle is just what produces it.
+// PULL_MAIN is deliberately larger than PULL: in the right hand the retraction, not the angle, is doing the work, and the
+// near-plane guard (which runs after it) is what stops the item from being pulled into the eye. The OFFHAND has no such
+// guard, so it keeps the smaller pull — its items are short enough that the angle alone clears them (measured).
+const BLOCKOUT_IN=1.00, BLOCKOUT_OUT=1.22, BLOCKOUT_TILT=1.75, BLOCKOUT_PULL=0.34, BLOCKOUT_PULL_MAIN=0.50;
 const _vmM=new THREE.Matrix4(), _vmV=new THREE.Vector3();   // hoisted: this runs every frame a gun is held
 // The viewmodel's bounds in ITS OWN local space. Box3.setFromObject returns WORLD space, which is useless here because the
 // group hangs off the camera and moves every frame; this walks the descendants relative to the root instead, once per item.
@@ -12734,13 +12896,64 @@ function blockOutHand(v, bend, tilt, pull){
   const g=v.group, m=v.mesh; if(!m || !(bend>0.002)) return 0;
   let bb=m.userData._vbb; if(!bb){ bb=_viewLocalBox(m); m.userData._vbb=bb; }
   m.updateMatrix();
+  // ONLY THINGS THAT STICK OUT FORWARD GET STOOD UP. A held tool is an extruded SPRITE — a flat card in the xy plane with
+  // almost no depth — so tilting it does not raise a barrel out of the way, it turns the card's HEIGHT into depth and points
+  // it at the wall: measured, a pickaxe's tip went from 0.55 to 0.72 in front of the eye, the wrong way. Depth is what needs
+  // clearing, so depth is what earns the angle; a flat item keeps its facing and is dealt with by retraction alone.
+  let ex=m.userData._vext;
+  if(!ex){ let x0=1e9,x1=-1e9,y0=1e9,y1=-1e9,z0=1e9,z1=-1e9;
+    m.updateMatrix();
+    for(let i=0;i<8;i++){ _boV.set((i&1)?bb.max.x:bb.min.x,(i&2)?bb.max.y:bb.min.y,(i&4)?bb.max.z:bb.min.z).applyMatrix4(m.matrix);
+      if(_boV.x<x0)x0=_boV.x; if(_boV.x>x1)x1=_boV.x; if(_boV.y<y0)y0=_boV.y; if(_boV.y>y1)y1=_boV.y; if(_boV.z<z0)z0=_boV.z; if(_boV.z>z1)z1=_boV.z; }
+    ex=m.userData._vext={ z:z1-z0, xy:Math.max(x1-x0,y1-y0) }; }
+  const deep=clamp((ex.z-0.12)/0.25,0,1);       // 0 for a card, 1 for anything with a barrel's worth of reach
   _boV.set((bb.min.x+bb.max.x)*0.5,(bb.min.y+bb.max.y)*0.5,bb.max.z).applyMatrix4(m.matrix);   // the butt = rearmost point, since a held item points down -z
   _boW.copy(_boV).applyQuaternion(_boQ.setFromEuler(g.rotation));                             // where the butt sits untilted…
-  const a=bend*tilt; g.rotation.x+=a;
+  const a=bend*tilt*deep; g.rotation.x+=a;
   _boV.applyQuaternion(_boQ.setFromEuler(g.rotation));                                        // …and where the tilt alone would throw it
   g.position.add(_boW.sub(_boV));                                                             // put it back — the rotation now turns about it
   g.position.z+=bend*pull;                                                                    // the item still retracts toward the chest as well
+  // AND THE RETRACTION IS SOLVED, NOT GUESSED. A constant cannot serve a revolver and a 1.4 m suppressed rifle at once, and
+  // the fault this item exists for is exactly a barrel longer than the constant assumed: every version of this that shipped
+  // with a hand-picked pull left the longest gun inside the wall. So pull back until the front-most corner is inside the
+  // distance the probe actually measured — bend is that distance (near = 1.5 - bend), with 0.12 of margin for the eased lag.
+  // Camera space is the group's own space, so the same eight corners answer it. Forward is -z, and it is the camera's forward
+  // rather than the probe's horizontal one; looking steeply up or down at a wall therefore constrains slightly off-axis,
+  // which errs toward retracting more, never less.
+  const lim=Math.max(0.14,(1.5-bend)-0.12);
+  g.updateMatrix();
+  const MM=_vmM.multiplyMatrices(g.matrix, m.matrix);
+  let front=1e9;
+  for(let i=0;i<8;i++){ _vmV.set((i&1)?bb.max.x:bb.min.x,(i&2)?bb.max.y:bb.min.y,(i&4)?bb.max.z:bb.min.z).applyMatrix4(MM);
+    if(_vmV.z<front) front=_vmV.z; }
+  if(-front>lim) g.position.z+=(-front)-lim;
   return a; }
+// THE HELD ITEM MUST FIT IN FRONT OF THE EYE. Seeing the INSIDE of a mesh means the near plane has cut through it (Ben 08-04:
+// "i can still see inside the shotgun's stock when it is ads"). MEASURED across all 16 gun variants while aimed: the AR sat
+// 0.065 BEHIND the near plane, the minigun 0.010 behind, and the bolt rifle's stock reached camera-space z=+0.08 — behind the
+// eye entirely. The shotgun was not clipped at all; it had 0.053 of clearance, which at a 0.08 near plane puts the eye inside
+// the stock's shell, so you look past its outer surface into the hollow. It is also why a muzzle flash "cannot be seen" while
+// aiming: a stock cut open across the middle of the frame is what the flash is behind.
+// Fixed as a CLASS, because 14 of 16 variants were affected and a hand-tuned z per gun is 16 numbers to get wrong again.
+// Call it LAST: every pose term, gunKick, the reload dip and the block-out can all push the item back toward the eye.
+// view.group is a CHILD OF THE CAMERA, so its local space IS camera space: eight bounding-box corners through one matrix
+// answers the question, and nothing has to walk the mesh per frame.
+// THE GUARD BAND SHRINKS UNDER A FULL BLOCK-OUT, because the two guards pull opposite ways and for the thickest guns they
+// cannot both be satisfied: the band wants the rearmost corner 0.10 in FRONT of the near plane, the block-out wants the
+// front-most corner BACK inside the 0.45 a player can stand from a wall, and a shotgun's z extent once stood up exceeds the
+// 0.27 that leaves. The band gives, and it can afford to: the fault it was bought to fix is an AIMED one, and the aim is now
+// refused while bent, so it cannot occur in the state that relaxes the band. 0.03 still keeps the mesh out of the near plane.
+function nearPlaneClear(v, band){
+  const m=v.mesh; if(!m) return 0;
+  let bb=m.userData._vbb; if(!bb){ bb=_viewLocalBox(m); m.userData._vbb=bb; }
+  v.group.updateMatrix(); m.updateMatrix();
+  const M=_vmM.multiplyMatrices(v.group.matrix, m.matrix);
+  let rear=-1e9;
+  for(let i=0;i<8;i++){ _vmV.set((i&1)?bb.max.x:bb.min.x, (i&2)?bb.max.y:bb.min.y, (i&4)?bb.max.z:bb.min.z).applyMatrix4(M);
+    if(_vmV.z>rear) rear=_vmV.z; }
+  const over=rear + camera.near + band;                                        // >0 = the rearmost corner is inside the guard band
+  if(over>0){ v.group.position.z-=over; v.group.updateMatrix(); }               // push the whole item forward along the eye axis
+  return +Math.max(0,over).toFixed(4); }
 // shared MUZZLE-FLASH sprite: a canvas-drawn radial starburst (bright core + orange spikes, transparent bg) on a camera-facing plane — reads as a real flash, not a ball
 let _muzzleTex=null;
 function muzzleFlashTex(){ if(_muzzleTex)return _muzzleTex; const c=document.createElement('canvas'); c.width=c.height=64; const x=c.getContext('2d'); x.translate(32,32);
@@ -13379,11 +13592,11 @@ function setOffItem(id){ if(offView.id===id)return; offView.id=id;
     m.scale.setScalar(s); m.position.set(-ctr.x*s,-ctr.y*s,-ctr.z*s);
     m.userData.offFit=+(mx*s).toFixed(4);   // the achieved longest side. A world-space AABB of this fist is rotated, so it is NOT the object's size — measuring that reported a 21% spread across guns that are all fitted to the same length.
     const P=OFF_POSE.hand; offView.group.position.set(P.p[0],P.p[1],P.p[2]); offView.group.rotation.set(P.r[0],P.r[1],P.r[2]);
-    offView.baseY=P.p[1]; offView.baseZ=P.p[2]; offView.baseRX=P.r[0];
+    offView.baseX=P.p[0]; offView.baseY=P.p[1]; offView.baseZ=P.p[2]; offView.baseRX=P.r[0];
     offView.mesh=m; offView.group.add(m); applyViewFog(m);
     return;
   }
-  { const P=OFF_POSE.shield; offView.group.position.set(P.p[0],P.p[1],P.p[2]); offView.group.rotation.set(P.r[0],P.r[1],P.r[2]); offView.baseY=P.p[1]; offView.baseZ=P.p[2]; offView.baseRX=P.r[0]; }
+  { const P=OFF_POSE.shield; offView.group.position.set(P.p[0],P.p[1],P.p[2]); offView.group.rotation.set(P.r[0],P.r[1],P.r[2]); offView.baseX=P.p[0]; offView.baseY=P.p[1]; offView.baseZ=P.p[2]; offView.baseRX=P.r[0]; }
   // BEN'S NUMBERS, off the three-scale frames in bench/results/offarm-scale-*.png: he picked 0.75, then called it still too
   // small, so this is 1.05 -- the middle frame of that same strip, not a fresh guess. 1.55 is the known-bad end: it covered
   // 80% of the lower-left corner of a 1280x720 frame.
@@ -13614,9 +13827,13 @@ function updateView(dt){ updateRecoil(dt);                                      
   // IT RUNS FOR EVERY HELD ITEM, not just guns (Ben 08-04: "any held item, and for offhand items"), which is why it sits out
   // here above the isGun branch: one proximity test per frame, one eased signal, and the right hand, the left hand and a
   // pickaxe can never disagree about whether you are against a wall.
+  // THE STEP GRID MUST COVER THE RANGE IT CLAIMS. It stepped 0.22 from 0.5, so its last sample was 1.38 while the loop's
+  // bound says 1.55: a wall between those two distances was invisible, and the suppressed hunting rifle is exactly long
+  // enough to have its muzzle inside such a wall with the bend still reading 0. Measured — two of the sixteen variants sat
+  // in that blind ring. 0.12 steps from 0.40 leave no gap a barrel fits through.
   { const fx=-Math.sin(player.yaw), fz=-Math.cos(player.yaw); let near=1.6;
     for(const hy of [EYE, EYE-0.55, EYE+0.25]){
-      for(let d=0.5; d<=1.55; d+=0.22){ if(solidAt(player.pos.x+fx*d, player.pos.y+hy, player.pos.z+fz*d)){ if(d<near)near=d; break; } } }
+      for(let d=0.40; d<=1.56; d+=0.12){ if(solidAt(player.pos.x+fx*d, player.pos.y+hy, player.pos.z+fz*d)){ if(d<near)near=d; break; } } }
     const bt=clamp((1.5-near)/1.0,0,1); view.gunBend=(view.gunBend||0)+(bt-(view.gunBend||0))*Math.min(1,dt*10);
     // THE CLICK IS LATCHED, AND IT NEEDS HYSTERESIS TO BE (Ben: a mechanical click, once per block-out, not per frame).
     // A bare threshold on this signal is exactly the mistake the Backrooms portal made with a frustum edge: it flapped
@@ -13644,7 +13861,12 @@ function updateView(dt){ updateRecoil(dt);                                      
   // something in an offhand"). Bringing a rifle to the eye is a two-handed act, and the left one is holding a shield or a
   // torch. Because this is recomputed every frame rather than latched on the click, it also DROPS an aim already up the
   // instant something enters that hand -- no need for a second path to cancel it.
-  view.ads = !!((isBolt||isDotG||isRev||isIronAR) && rmbHeld && locked && !openUI && !armor[EQ_OFF] && !(view.reloadT>0) && !(isBolt && (view.boltT||0)>0));   // right-hold aims; firing never breaks ADS EXCEPT the bolt rifle — working the bolt drops the sight, then it re-raises (rmb still held)
+  // AND NO AIMING WITH THE MUZZLE IN A WALL. Measured: pressed against a wall at full bend the aimed pose put the tip 0.9 to
+  // 1.24 in front of the eye — a metre of barrel through the brickwork — because the cheek-weld pose extends the gun toward
+  // the sight line and relaxes the tilt, undoing the block-out exactly when it is needed. You cannot aim down a sight with
+  // the muzzle against a wall, so the aim is REFUSED rather than fought: same recompute-every-frame shape as the offhand rule
+  // above, so pressing into a wall also drops an aim already up, and backing off re-raises it with rmb still held.
+  view.ads = !!((isBolt||isDotG||isRev||isIronAR) && rmbHeld && locked && !openUI && !armor[EQ_OFF] && !(view.reloadT>0) && !(isBolt && (view.boltT||0)>0) && !((view.gunBend||0)>0.55));   // right-hold aims; firing never breaks ADS EXCEPT the bolt rifle — working the bolt drops the sight, then it re-raises (rmb still held)
   if(scopeEl) scopeEl.style.display='none';                          // old black surround retired — the PiP scope (renderScope) draws the glass without blacking the screen
   view.group.visible = true;   // viewmodel is ALWAYS drawn — the magnified sight lives on the rifle's rear lens (PiP), so we keep the whole optic on-screen and let adsT drive the raise/zoom/fade
   if(isBolt && view.mesh && view.mesh.userData.bolt){ const bh=view.mesh.userData.bolt, bz=view.mesh.userData.boltZ||0.12;
@@ -13738,30 +13960,10 @@ function updateView(dt){ updateRecoil(dt);                                      
     // there is one gun in one place, and before the near-plane guard below so that guard sees where the gun really ended up.
     // The tilt relaxes to 0.58 of full as the sight comes to the eye, exactly as the old pose terms did: a rifle already at
     // the shoulder has less room to swing, and the retraction relaxes with it from the hip's 0.34 to 0.16.
-    view._boTilt=+blockOutHand(view, bend, BLOCKOUT_TILT*(1-0.42*e), BLOCKOUT_PULL+(0.16-BLOCKOUT_PULL)*e).toFixed(4);
-    // ---- NEAR-PLANE CLEARANCE: the gun must FIT in front of the eye (Ben 08-04: "i can still see inside the shotgun's
-    // stock when it is ads") ----
-    // Seeing the INSIDE of a mesh means the near plane has cut through it. MEASURED across all 16 gun variants while aimed:
-    // the AR sat 0.065 BEHIND the near plane, the minigun 0.010 behind, and the bolt rifle's stock reached camera-space
-    // z=+0.08 — behind the eye entirely. The shotgun was not actually clipped; it had 0.053 of clearance, which at a 0.08
-    // near plane means the eye sits inside the stock's shell, so you look past its outer surface into the hollow. Same
-    // cause, and it is also why a muzzle flash "cannot be seen" while aiming: a stock cut open across the middle of the
-    // frame is what the flash is behind.
-    // Fixed as a CLASS rather than by nudging one pose, because 14 of 16 variants were affected and a hand-tuned z per gun
-    // is 16 numbers to get wrong again. This runs LAST because every pose term above — and gunKick, and the reload dip —
-    // can push the gun back toward the eye.
-    // view.group is a CHILD OF THE CAMERA, so its local space IS camera space: eight bounding-box corners through one
-    // matrix answers the question, and nothing has to walk the mesh per frame.
+    view._boTilt=+blockOutHand(view, bend, BLOCKOUT_TILT*(1-0.42*e), BLOCKOUT_PULL_MAIN+(0.16-BLOCKOUT_PULL_MAIN)*e).toFixed(4);
+    // ---- NEAR-PLANE CLEARANCE (see nearPlaneClear): runs last, after every term that can push the gun back toward the eye.
     if(view.mesh){
-      let bb=view.mesh.userData._vbb; if(!bb){ bb=_viewLocalBox(view.mesh); view.mesh.userData._vbb=bb; }
-      view.group.updateMatrix();
-      const M=_vmM.multiplyMatrices(view.group.matrix, view.mesh.matrix);
-      let rear=-1e9;
-      for(let i=0;i<8;i++){ _vmV.set((i&1)?bb.max.x:bb.min.x, (i&2)?bb.max.y:bb.min.y, (i&4)?bb.max.z:bb.min.z).applyMatrix4(M);
-        if(_vmV.z>rear) rear=_vmV.z; }
-      const over=rear + camera.near + VIEW_NEAR_CLEAR;                 // >0 means the rearmost corner is inside the guard band
-      if(over>0){ view.group.position.z-=over; view.group.updateMatrix(); }   // push the whole gun forward along the eye axis
-      view._nearPush=+Math.max(0,over).toFixed(4);
+      view._nearPush=nearPlaneClear(view, VIEW_NEAR_CLEAR*(1-0.7*clamp(bend,0,1)));
     } }
   else if(ITEMS[view.id]&&ITEMS[view.id].spear){
     // carried COCKED BEHIND THE RIGHT SHOULDER: butt high behind, tip angled up-forward. Charging winds it
@@ -13788,7 +13990,11 @@ function updateView(dt){ updateRecoil(dt);                                      
   // version above; this is the else — a torch, a pickaxe, a spear all come back and stand up against a wall. Each of those
   // branches assigns position and rotation outright every frame, which is the precondition blockOutHand states.
   // The empty fist is excluded on purpose: nothing to clip, and see the latch above.
-  if(!isGun && view.id!=null) blockOutHand(view, view.gunBend||0, BLOCKOUT_TILT, BLOCKOUT_PULL);
+  // It gets the gun's retraction and the gun's near-plane guard, but ONLY while bent: those poses are Ben's, settled by eye,
+  // and a guard running on them at rest would re-author a shipped look. Bent, there is no authored look to preserve.
+  if(!isGun && view.id!=null && (view.gunBend||0)>0.002){
+    blockOutHand(view, view.gunBend, BLOCKOUT_TILT, BLOCKOUT_PULL_MAIN);
+    nearPlaneClear(view, 0); }   // band 0, not the gun's: a tool is short, and pushing it FORWARD to earn a comfort band is what put a pickaxe back through the wall (0.55 -> 0.75 measured)
   updateCrosshair(dt, isGun);   // the ring's size and its fade under a raised sight — one owner (see below)
   // ---- HOLOGRAPHIC RETICLE — parented to the CAMERA on the true aim axis (parallax-free, exactly the point of impact;
   //      the gun/window wobble AROUND it, and recoil moves reticle+aim together). Fades in as the eye comes on-axis. ----
@@ -13859,7 +14065,14 @@ function updateView(dt){ updateRecoil(dt);                                      
   { const oswArc=offView.swing?offView.swing*Math.sin(offView.swing*Math.PI):0;
     const bz=(offView.baseZ!=null?offView.baseZ:offView.group.position.z), brx=(offView.baseRX!=null?offView.baseRX:0);
     offView.group.position.z = bz + offView.gunKick*0.09;
-    offView.group.rotation.x = brx - offView.gunKick*0.5 - oswArc*1.2; }
+    offView.group.rotation.x = brx - offView.gunKick*0.5 - oswArc*1.2;
+    // .x IS NOW REBASED TOO, for the same reason the paragraph above rebases z: the block-out pivot correction below adds an
+    // offset on all three axes (the group carries yaw and roll, so a tilt about its x axis does not stay in the yz plane), and
+    // x was the one component nothing else assigned. baseX is captured wherever setOffItem lays a pose down.
+    if(offView.baseX!=null) offView.group.position.x = offView.baseX;
+    // THE LEFT HAND BENDS TOO (Ben 08-04: "for offhand items"). Same probed signal as the right, same pivot arithmetic, at full
+    // strength: the offhand never aims, so there is no cheek-weld to relax the tilt toward.
+    blockOutHand(offView, view.gunBend||0, BLOCKOUT_TILT, BLOCKOUT_PULL); }
   if(view.flashT>0 || offView.flashT>0){ const f=Math.max(view.flashT,offView.flashT)/0.06;
     const _lit = (view.flashT>0 ? fl : null) || (offView.mesh?_findFlash(offView.mesh):null);
     if(_lit) _lit.getWorldPosition(muzzleLight.position);
@@ -21962,12 +22175,15 @@ window.__hc={
   // WHERE THE GUN IN THE THIRD-PERSON HAND IS ACTUALLY POINTING, in world space, against where you are looking. barrelPitch must
   // follow lookPitch while aiming — the sign of that relationship is the whole of the "the gun does not listen to the arm" bug.
   tpsAim(pitch){ try{ if(pitch!=null) player.pitch=+pitch;
+      try{ updateView(0.016); }catch(e){ return {err:'updateView threw: '+(e&&e.message||e)}; }   // the aim state is computed there; if the loop's copy is failing this says so
       updateTpsBody(0.016); const P=_tpsBody; if(!P) return {err:'no body'};
       const m=P.heldMesh; if(!m) return {err:'nothing held'};
       m.updateWorldMatrix(true,false);
       const d=new THREE.Vector3(0,0,-1).applyQuaternion(m.getWorldQuaternion(new THREE.Quaternion())).normalize();   // the model's own barrel axis
       const L=lookDir();
-      return { adsT:+((view&&view.adsT)||0).toFixed(2), lookPitch:+player.pitch.toFixed(3),
+      return { adsT:+((view&&view.adsT)||0).toFixed(2), ads:!!(view&&view.ads), rmb:!!rmbHeld, offFull:!!armor[EQ_OFF],
+        reloadT:+((view&&view.reloadT)||0).toFixed(2), ui:openUI||null, locked:!!locked, held:view.id, bend:+((view&&view.gunBend)||0).toFixed(2),
+        lookPitch:+player.pitch.toFixed(3),
         barrelPitch:+Math.asin(Math.max(-1,Math.min(1,d.y))).toFixed(3),
         barrel:[+d.x.toFixed(3),+d.y.toFixed(3),+d.z.toFixed(3)],
         look:[+L.x.toFixed(3),+L.y.toFixed(3),+L.z.toFixed(3)],
@@ -21975,6 +22191,9 @@ window.__hc={
         arm:+P.armR.rotation.x.toFixed(3), hand:+P.hand.rotation.x.toFixed(3) }; }catch(e){ return {err:String(e.message||e)}; } },
   // The offhand viewmodel's transform after firing it: a buck that is rebased every frame stays bounded, one that accumulates walks off.
   offFire(n,id){ try{ id=id||'ar15'; armor[EQ_OFF]={id,n:1}; setOffItem(id); if(typeof updateArmorView==='function')updateArmorView();
+      // Settle FIRST, so `before` already contains the wall-bend block-out for wherever the player is standing. Comparing a
+      // post-shot pose against the raw rest pose measured that bend, not the recoil, and failed in any room with a wall in front.
+      for(let i=0;i<40;i++) updateView(0.033);
       const before={ z:+offView.group.position.z.toFixed(3), rx:+offView.group.rotation.x.toFixed(3) };
       for(let i=0;i<(n|0||6);i++){ try{ fireGun(armor[EQ_OFF]); }catch(e){} updateView(0.033); }
       const peak={ z:+offView.group.position.z.toFixed(3), rx:+offView.group.rotation.x.toFixed(3) };
@@ -22019,6 +22238,10 @@ window.__hc={
       return { id, main, off, mirrored:!!(offView.mesh&&offView.mesh.scale.x<0),
                scaleMatch:!!(main&&off&&Math.abs(main.scale[0]-off.scale[0])<0.01&&Math.abs(main.scale[1]-off.scale[1])<0.01),
                ratio:(main&&off)?+(off.longest/main.longest).toFixed(3):null }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA: does the world still simulate with a menu up? Reports the y over a handful of ticks driven by the loop itself.
+  fallProbe(){ try{ return { y:+player.pos.y.toFixed(2), vy:+player.vel.y.toFixed(2), onGround:!!player.onGround,
+      locked:!!locked, ui:openUI||null, feet:getBlock(Math.floor(player.pos.x),Math.floor(player.pos.y),Math.floor(player.pos.z)),
+      hits:aabbHits(player.pos.x,player.pos.y,player.pos.z), resumeHold:!!_resumeHold, seat:!!player.seat, riding:!!player.riding }; }catch(e){ return {err:String(e.message||e)}; } },
   jumpProbe(){ try{ return { vy:+player.vel.y.toFixed(2), onGround:!!player.onGround, y:+player.pos.y.toFixed(2),
       coyote:+((player._coyote||0)).toFixed(3), buf:+((player._jumpBuf||0)).toFixed(3), landT:+((player.landT||0)).toFixed(2),
       vx:+player.vel.x.toFixed(2), vz:+player.vel.z.toFixed(2), spd:+Math.hypot(player.vel.x,player.vel.z).toFixed(2),
@@ -22216,10 +22439,29 @@ window.__hc={
   // click that chatters as a probe step crosses, and neither is visible in a screenshot or audible in a headless run.
   blockOut(){ try{ const fl=view.mesh&&view.mesh.userData&&view.mesh.userData.flash; const w=new THREE.Vector3();
       if(fl) fl.getWorldPosition(w);
+      // THE TIP OF WHATEVER IS HELD, not just a gun's muzzle: the item now bends in both hands and for anything, so the
+      // measurement has to generalise with it. Front-most point of the viewmodel's own bounds (items point down -z), through
+      // the mesh and group matrices into the world — the same box the near-plane guard uses, so the two cannot disagree.
+      const tip=(v)=>{ if(!v.mesh) return null;
+        let bb=v.mesh.userData._vbb; if(!bb){ bb=_viewLocalBox(v.mesh); v.mesh.userData._vbb=bb; }
+        v.mesh.updateMatrix(); v.group.updateMatrix(); v.group.updateMatrixWorld(true);
+        const p=new THREE.Vector3((bb.min.x+bb.max.x)*0.5,(bb.min.y+bb.max.y)*0.5,bb.min.z).applyMatrix4(v.mesh.matrix).applyMatrix4(v.group.matrixWorld);
+        // HOW FAR IN FRONT OF THE EYE THE TIP REACHES, along the facing. This is the number the block-out actually has to
+        // beat — against a floor-to-ceiling wall the tilt buys nothing on its own (the wall goes up too), so what clears the
+        // muzzle is how little of it is left in front of you. Reported so the constants are measured against a distance
+        // instead of chosen by eye.
+        const C=new THREE.Vector3(); camera.getWorldPosition(C);
+        const fx=-Math.sin(player.yaw), fz=-Math.cos(player.yaw);
+        const ex=v.mesh.userData._vext;
+        return { id:v.id, pos:[+p.x.toFixed(3),+p.y.toFixed(3),+p.z.toFixed(3)], rx:+v.group.rotation.x.toFixed(4),
+                 fwd:+((p.x-C.x)*fx+(p.z-C.z)*fz).toFixed(3), ext:ex?[+ex.z.toFixed(3),+ex.xy.toFixed(3)]:null,
+                 push:v._nearPush!=null?v._nearPush:null,
+                 inBlock:!!isOpaque[getBlock(Math.floor(p.x),Math.floor(p.y),Math.floor(p.z))] }; };
       return { id:view.id, bend:+(view.gunBend||0).toFixed(4), out:!!view._blockOut, clicks:view._blockOutN||0,
         tiltRx:+view.group.rotation.x.toFixed(4), inD:BLOCKOUT_IN, outD:BLOCKOUT_OUT, tiltMax:BLOCKOUT_TILT,
         muzzle:fl?[+w.x.toFixed(3),+w.y.toFixed(3),+w.z.toFixed(3)]:null,
-        muzzleInBlock:fl?!!(isOpaque[getBlock(Math.floor(w.x),Math.floor(w.y),Math.floor(w.z))]):null }; }catch(e){ return {err:String(e.message||e)}; } },
+        muzzleInBlock:fl?!!(isOpaque[getBlock(Math.floor(w.x),Math.floor(w.y),Math.floor(w.z))]):null,
+        tip:tip(view), off:tip(offView) }; }catch(e){ return {err:String(e.message||e)}; } },
   blockOutReset(){ try{ view._blockOutN=0; return 0; }catch(e){ return {err:String(e.message||e)}; } },
   heldParts(){ try{ let n=0, sprite=false; if(view.mesh) view.mesh.traverse(o=>{ if(o.isMesh){ n++; if(o.userData&&o.userData.extruded) sprite=true; } });
       return { id:view.id, meshes:n, sprite }; }catch(e){ return {err:String(e.message||e)}; } },
@@ -22634,6 +22876,40 @@ window.__hc={
       return { on:_cloudShadowOn, amt:+globalU.uCloudShadow.value.toFixed(4), scroll:[+globalU.uCloudScroll.value.x.toFixed(3),+globalU.uCloudScroll.value.y.toFixed(3)],
                cover:+(typeof _uCloud!=='undefined'?_uCloud.value:-1).toFixed(2), sunY:+globalU.uSunDir.value.y.toFixed(4),
                elevDeg:+(Math.asin(Math.max(-1,Math.min(1,globalU.uSunDir.value.y)))*57.29578).toFixed(2), overcast:+(weather.overcast||0).toFixed(2) };
+    }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: the coverage field at one direction, from BOTH sides — the GPU's own value through the sky's fragment shader
+  // (uCloudDbg, on a 1x1 target, so no post chain and no crop can lie about it) and the CPU port the sun overlay runs on.
+  // They must agree: the disc hides behind cloud the CPU says is there, and only the GPU draws cloud.
+  cloudProbe(o){ try{
+      const d=(o&&o.dir)||[globalU.uSunDir.value.x,globalU.uSunDir.value.y,globalU.uSunDir.value.z];
+      const g=cloudProbeGPU(d[0],d[1],d[2]), j=cloudCoverAt(d[0],d[1],d[2]);
+      return { dir:d.map(v=>+v.toFixed(4)), cover:+_uCloud.value.toFixed(2), uTime:+globalU.uTime.value.toFixed(3),
+               gpu:{cloud:+g.cloud.toFixed(3), d:+g.d.toFixed(3), cirrus:+g.cirrus.toFixed(3)},
+               js:{cloud:+j.cloud.toFixed(3), d:+j.d.toFixed(3), cirrus:+j.cirrus.toFixed(3)},
+               dCloud:+(j.cloud-g.cloud).toFixed(3) };
+    }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: the sun disc's four independent levers, and every term of its opacity. `k` is how hard cloud puts it out.
+  sunDisc(o){ try{
+      if(o){ if(o.k!=null)_sunCloudK=+o.k; if(o.alpha!=null)_sunDiscAlpha=+o.alpha;
+             if(o.gain!=null)skyMat.uniforms.uSunGain.value=+o.gain;
+             if(o.halo!=null)skyMat.uniforms.uSunHalo.value=+o.halo;
+             if(o.sheen!=null)skyMat.uniforms.uSunSheen.value=+o.sheen;
+             // The bloom pass is in here because the measured radial profile says the wide glow around the sun is mostly
+             // ITS spread, not the disc's gain: dropping the seed 40 -> 10 cut the saturated core threefold and moved the
+             // shoulder at 40-100 px by one luminance level. Attributing "the halo" needs it as a lever.
+             if(o.bloom!=null && typeof bloomPass!=='undefined' && bloomPass)bloomPass.strength=+o.bloom; }
+      const sd=globalU.uSunDir.value;
+      return { k:_sunCloudK, alpha:_sunDiscAlpha, gain:skyMat.uniforms.uSunGain.value, halo:skyMat.uniforms.uSunHalo.value,
+               sheen:skyMat.uniforms.uSunSheen.value, bloom:(typeof bloomPass!=='undefined'&&bloomPass)?bloomPass.strength:null, cloud:+(_sunOv.cloud||0).toFixed(3), hide:+(_sunOv.hide==null?1:_sunOv.hide).toFixed(3),
+               vis:+_sunOv.vis.toFixed(3), opacity:+(_sunOv.lastOpacity||0).toFixed(4), drawn:_sunOv.drawn||0,
+               openRays:_sunOv.open==null?-1:_sunOv.open, eyeY:+(_sunOv.eyeY||0).toFixed(2),
+               elevDeg:+(Math.asin(Math.max(-1,Math.min(1,sd.y)))*57.29578).toFixed(2) };
+    }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: does the sun ray reach the sky from here? The grid traversal the overlay uses, callable for one direction,
+  // so "the sun shows through this roof" is a number and not a screenshot.
+  sunRay(o){ try{ const sd=globalU.uSunDir.value, d=(o&&o.dir)||[sd.x,sd.y,sd.z];
+      const p=(o&&o.from)||[camera.position.x,camera.position.y,camera.position.z];
+      return { blocked:_sunRayBlocked(p[0],p[1],p[2],d[0],d[1],d[2],(o&&o.maxT)||120), from:p.map(v=>+v.toFixed(2)), dir:d.map(v=>+v.toFixed(3)) };
     }catch(e){ return {err:String(e.message||e)}; } },
   godrays(o){ try{ if(o&&o.on!=null) _godraysOn=!!o.on;
       // THE THREE TERMS OF _grActive, each on its own, because "enabled:false" does not say which one said no.
