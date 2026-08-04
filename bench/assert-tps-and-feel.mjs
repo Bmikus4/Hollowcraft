@@ -154,6 +154,22 @@ const ok=(name,cond,got)=>{ if(!cond)fails++; console.log(`  ${cond?'ok  ':'FAIL
     const again = await page.evaluate(`(()=>{ __hc.tpExact(${dx}+0.5, ${dz}+0.5, ${dy}); return __hc.doorPush(${dx},${dy},${dz}); })()`);
     ok('the same holds closing it on yourself', again.stuck===false, again);
 
+    console.log('\n[10] the gun in the third-person hand answers the aim');
+    // The offhand still holds the shotgun from [7], and a full left hand DISABLES aiming by design (see view.ads) — clear it, or
+    // this measures a gun that was never raised.
+    const aimed = await page.evaluate(`(()=>{ try{ __hc.eqPut(4,null); }catch(e){} __hc.tpsProbe(true); __hc.hold('ar15'); return __hc.tpsAim(0); })()`);
+    await page.mouse.down({button:'right'}); await sleep(900);
+    const up = await page.evaluate(`__hc.tpsAim(0.5)`);
+    const dn = await page.evaluate(`__hc.tpsAim(-0.5)`);
+    await page.mouse.up({button:'right'}); await sleep(300);
+    const hip = await page.evaluate(`__hc.tpsAim(0.5)`);
+    await page.evaluate(`__hc.tpsProbe(false)`);
+    console.log('    up:', JSON.stringify(up), '\n    dn:', JSON.stringify(dn));
+    ok('looking UP raises the barrel', up.barrelPitch>0.15, {look:up.lookPitch, barrel:up.barrelPitch});
+    ok('looking DOWN drops it', dn.barrelPitch<-0.15, {look:dn.lookPitch, barrel:dn.barrelPitch});
+    ok('the barrel ends up near the look axis while aiming', up.offDeg<25 && dn.offDeg<25, {up:up.offDeg, dn:dn.offDeg});
+    ok('and it stops tracking once the aim is lowered', Math.abs(hip.barrelPitch)<Math.abs(up.barrelPitch), {aimed:up.barrelPitch, hip:hip.barrelPitch});
+
     ok('no page errors', errors.length===0, errors);
     await browser.close();
   } finally { server.kill(); }
