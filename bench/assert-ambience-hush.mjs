@@ -84,10 +84,12 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     // ---- 2. THE ONE-SHOTS AND CRICKETS THIN OUT, RAMPED ----
     // Counted over a window, because density is a rate. The gaps are 3-9 s at rest, so 12 s is a handful of cues either way —
     // enough to tell "some" from "none", which is what the gate decides.
-    // MEASURED FROM OPEN SKY, and this is not a convenience. ambientOneShot returns early when anything opaque is more than 2
-    // blocks above the camera, and leaves_core IS opaque (it is drawn as a solid block on purpose, see the lighting work) — so
-    // under a forest canopy the one-shot bed never plays at all, and the first run of this harness counted 0 cues in the open
-    // world and called it a regression. Spawn is inside the wood. Perching above the trees is the only place the RATE exists.
+    // THE WINDOW HAS TO BE LONG ENOUGH TO CONTAIN THE PROCESS. The gaps are 3-9 s, so a 12 s sample reads zero by luck about one
+    // time in eight — which it did, and I wrote it up as "a canopy silences the ambient bed" with an explanation to match. It
+    // does not: ambientOneShot's early-out reads opaqueTop, which is built from occludesSky, and leaves are excluded from that on
+    // purpose (it was the fix for dark faces in the woods). MEASURED on the ground inside the wood: 16 one-shots and 5 crickets
+    // in 90 s, with that early-out false in 30 of 30 samples (bench/tmp-canopy-amb.mjs). The perch below is only for a stable
+    // vantage; it is not load-bearing, and 24 s windows are what stop this flaking.
     const perch=async()=>{ const g=await ev('__hc.probe()'); await ev(`__hc.tpAt(${g.x},${g.gyHere+45},${g.z})`); await sleep(400); };
     const rate=async(label,drive,secs)=>{
       await clear(); if(drive) await ev(drive); await perch(); await sleep(600);
@@ -98,15 +100,15 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
       console.log('     '+label.padEnd(26)+' hush '+String(c.hush).padStart(6)+'  one-shots '+String(c.oneShots).padStart(3)+'  crickets '+String(c.crickets).padStart(3)+'   over '+secs+'s');
       return c;
     };
-    const quiet=await rate('pressed (hush 1)','__hc.threatSet(1)',12);
-    const open =await rate('open world (hush 0)',null,12);
+    const quiet=await rate('pressed (hush 1)','__hc.threatSet(1)',24);
+    const open =await rate('open world (hush 0)',null,24);
     check('the ambient one-shots stop when the world is pressed', quiet.oneShots===0, `${quiet.oneShots} cues at hush 1`);
     check('and the crickets stop with them', quiet.crickets===0, `${quiet.crickets} chirps at hush 1`);
     check('while the open world still has ambience at all', open.oneShots+open.crickets>0,
       `${open.oneShots} one-shots + ${open.crickets} chirps in 12s`);
     // RAMPED, NOT A SWITCH (E2 is explicit). Half-way in, the world must be quieter but not silent — a hard flip would give
     // either the full rate or zero here, and this is the check that fails on one.
-    const mid=await rate('half-way (hush 0.5)','__hc.threatSet(0.5)',16);
+    const mid=await rate('half-way (hush 0.5)','__hc.threatSet(0.5)',28);
     check('half-way in it is thinner, not switched off', mid.oneShots+mid.crickets>0,
       `${mid.oneShots} one-shots + ${mid.crickets} chirps at hush 0.5`);
 
