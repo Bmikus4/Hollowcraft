@@ -7736,7 +7736,10 @@ function netMsg(m){
   else if(m.t==='hb'){ if(m.owner!==NET.id){ if(m.haunt){ herobrine.haunting=true; herobrine.owner=m.owner; NET.hbnet=m; }   // another player leads the haunt → mirror Herobrine
     else { herobrine.haunting=false; herobrine.owner=null; NET.hbnet=null; if(typeof despawnHerobrine==='function')despawnHerobrine(); } } }
   else if(m.t==='shot'){ const ox=m.x,oy=m.y,oz=m.z; for(let t=0.6;t<64;t+=1.2){ if((t%3)<1.2)spawnParticles(ox+m.dx*t,oy+m.dy*t,oz+m.dz*t,0xfff0b0,1,0.2,0.12); } if(typeof playSample==='function')playSample(m.g==='r'?'gun_rifle':'gun_ar',{x:ox,y:oy,z:oz},1.0); }   // a peer fired → tracer + report
-  else if(m.t==='hw'){ if(wretchOwner()===NET.id && wretch.active && typeof hurtWretch==='function'){ wretch._gunHit=true; hurtWretch(m.v||1); } }   // a peer's shot (hw = firearm hits) — I own the Wretch/boss, so I apply the damage
+  else if(m.t==='hw'){ if(wretchOwner()===NET.id && typeof hurtWretch==='function'){                                   // a peer's shot (hw = firearm hits) — I own the Wretch/boss, so I apply the damage
+      const _t=m.h?wretchExtra.find(w=>w._hid===m.h && w.active):null, _prev=wretch;                                   // the guest resolved WHICH creature its own ray struck and sent that creature's _hid; without it every guest bullet landed on the host's primary
+      if(_t) wretch=_t;
+      try{ if(wretch.active){ wretch._gunHit=true; hurtWretch(m.v||1); } } finally{ wretch=_prev; } } }                 // h absent (older peer, or the primary) → the current binding, which is what this used to do unconditionally
   else if(m.t==='seraphSay'){ if(typeof seraphSay==='function'&&m.id)seraphSay(String(m.id),true); }   // the voice of the seraph reaches every client
   else if(m.t==='eyeSeal'){ if(typeof seraphEyeClose==='function'&&m.i!=null)seraphEyeClose(m.i,90); }   // a peer sealed a side eye → mirror the 90s clamp on this screen
   else if(m.t==='han'){ if(NET.host && typeof hurtAnimal==='function'){ for(const a of animals){ if(a.nid===m.n && !a.dead){ hurtAnimal(a,m.v||1); break; } } } }   // a guest hit an animal → the host (authority) applies it
@@ -12631,10 +12634,13 @@ function updateView(dt){ updateRecoil(dt);                                      
 
 // ---- COMBAT (left-click swing → melee the wretch or an animal in front) ----
 function WEAPON_DMG(tool){ const base=({sword:3,axe:2,pickaxe:1,shovel:1,spear:3})[tool.kind]||1; const tierAdd=({wood:1,stone:2,iron:3})[tool.tier]||0; return base+tierAdd; }   // sword 4/5/6/8, spear 4 (wood) with reach, axe 3/4/5…
-// A swing/shot binds `wretch` to the NEAREST live creature before it resolves, so the Horrific Wretch is exactly as
-// hittable as the primary without the aim maths existing twice. Nearest-to-the-eye, not nearest-to-the-crosshair: two of
-// them close enough for the distinction to matter has not happened, and a second ray test would cost every swing.
-// (Thrown spears still resolve against the primary only — they are updated as projectiles, on another path.)
+// A MELEE swing binds `wretch` to the NEAREST live creature before it resolves, so the Horrific Wretch is exactly as
+// hittable as the primary without the aim maths existing twice. Nearest-to-the-eye is right for a swing: the reach is 3.6
+// blocks, so anything hittable is already at the camera, and a second ray test would cost every swing for nothing.
+// IT IS WRONG FOR A SHOT, and the shot no longer uses it — a bullet travels, so the creature it hits is the first one its
+// own line passes through, which _wretchRayHit resolves per step. Wrapping the gun here instead let a Horrific at your
+// elbow soak a bullet aimed at something forty blocks behind it.
+// (Thrown spears bind with anyWretch — their own position decides what they hit, and they update as projectiles.)
 function withNearestWretch(fn){
   if(!wretchExtra.length) return fn();
   let best = wretchPrime.active ? wretchPrime : null;
@@ -12653,7 +12659,11 @@ function anyWretch(fn){ const prev=wretch;
     for(const w of wretchExtra){ if(!w.active) continue; wretch=w; if(fn()) return true; }
     return false; }
   finally{ wretch=prev; } }
-function doSwing(){ return withNearestWretch(_doSwing); }
+// The binder used to sit HERE, around both branches, which quietly made it the gun's binder too — and then only for the two
+// call sites that came through doSwing at all. It now lives on each path that actually needs it: meleeAttack binds
+// camera-nearest, and the shot binds per ray step inside _wretchRayHit, so full-auto, the offhand and the act path (which
+// call fireGun directly and never touched this function) are correct by the same code.
+function doSwing(){ return _doSwing(); }
 function _doSwing(){ const h=heldSlot(); if(h&&ITEMS[h.id]&&ITEMS[h.id].gun){ if(fireGun())view.swing=1.4; return; } view.swing=1; meleeAttack(); }
 // hitscan down the look ray → first block/entity/animal hit. Muzzle flash + crack + tracer + recoil. Returns true if a shot was actually fired.
 function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id]:null, bolt = it&&it.gun==='bolt', rev = it&&it.gun==='revolver', sup = !!(it&&it.suppressed);
@@ -12714,28 +12724,7 @@ function _traceBullet(o,d,bolt,rev,sup,sg){
       if(tx>=ty && tx>=tz){ nx=-Math.sign(d.x); tEnter=tx; } else if(ty>=tz){ ny=-Math.sign(d.y); tEnter=ty; } else { nz=-Math.sign(d.z); tEnter=tz; }
       const fx=qx+d.x*tEnter, fy=qy+d.y*tEnter, fz=qz+d.z*tEnter;                  // exact point the ray pierced that face → seat the decal HERE (proud of the surface), never inside/under the block
       spawnParticles(px,py,pz,blockColor(b),9,1.7,0.5); addBulletHole(fx,fy,fz,nx,ny,nz); return true; }
-    if(wretch.active && wretch.boss){ for(const e of seraphEyeSpheres()){ const ex=px-e.x, ey=py-e.y, ez=pz-e.z;   // THE CERAPHIM: every eye = 100% damage (central = weak point); checked BEFORE wings so eyes set into wings still pay full
-      if(ex*ex+ey*ey+ez*ez < e.r*e.r){ const _wd=((sg?12:bolt?100:rev?68:65) - (sup?(sg?3:20):0)) * (e.central?1.5:1);
-        if(!NET.on||wretchOwner()===NET.id){ wretch._gunHit=true; hurtWretch(_wd); } else netSend({t:'hw',v:_wd});
-        spawnParticles(px,py,pz,0xf1e7d9,16,2.4,0.7); spawnParticles(px,py,pz,0x8a1010,10,1.8,0.6);
-        if(!e.central && !e.closed && typeof seraphEyeClose==='function'){ seraphEyeClose(e.i,90); flashName('eye SEALED — 90s'); if(NET.on)netSend({t:'eyeSeal',i:e.i}); }   // shoot a side eye → it clamps shut 90s (in stage 3 a sealed eye can't fire its burst laser) (Ben 07-21)
-        else flashName(e.central?'THE EYE':'eye hit');
-        if(typeof seraphSay==='function'&&Math.random()<0.4)seraphSay(e.central?'hitCentral':(Math.random()<0.5?'hit1':'hit2')); return true; } }
-      for(const wsp of seraphWingSpheres()){ const wx2=px-wsp.x, wy2=py-wsp.y, wz2=pz-wsp.z;                       // WINGS: big tempting targets — 10% chance a shot wounds (user spec 07-20); feathers soak the rest
-        if(wx2*wx2+wy2*wy2+wz2*wz2 < wsp.r*wsp.r){
-          if(Math.random()<0.10){ const _wd=((sg?12:bolt?100:rev?68:65) - (sup?(sg?3:20):0));
-            if(!NET.on||wretchOwner()===NET.id){ wretch._gunHit=true; hurtWretch(_wd); } else netSend({t:'hw',v:_wd});
-            spawnParticles(px,py,pz,0x8a1010,12,2,0.6); flashName('through the wing'); }
-          else { spawnParticles(px,py,pz,0xb03030,10,1.8,0.8); spawnParticles(px,py,pz,0xf1e7d9,4,1.2,0.5); }      // feather burst — the shot is EATEN
-          return true; } } }
-    if(wretch.active && !wretch.dragging){ const hx=px-wretch.pos.x, hz=pz-wretch.pos.z, hy=py-wretch.pos.y, r2=hx*hx+hz*hz;   // TIGHT capsule — precise aim required
-      const head = hy>3.2 && r2<0.85*0.85, body = hy>-0.3 && hy<4.8 && r2<1.1*1.1;
-      // A PELLET IS WORTH 12, so a whole shell is 108 on the body and 144 through the head — two shells rout even the
-      // Horrific one. The suppressor's flat -20 must never drive a pellet NEGATIVE (bullets that heal shipped once
-      // already, on animals): 3 is the same share of 12 that 20 is of 70.
-      if(head||body){ const _wd=(sg?(head?16:12):bolt?(head?100:70):rev?(head?68:45):(head?65:50)) - (sup?(sg?3:20):0);
-        if(!NET.on||wretchOwner()===NET.id){ wretch._gunHit=true; hurtWretch(_wd); } else netSend({t:'hw',v:_wd});   // AR 50 / Python 45 body (Ben 07-20), heads scaled; co-op: only the owner mutates HP; guests request the hit
-        spawnParticles(px,py,pz,head?0xff3020:0x3a0608,head?16:12,2,0.6); if(head)flashName('headshot'); return true; } }   // blood burst only — no lingering wound decal (Ben 07-21)
+    if(_wretchRayHit(px,py,pz,d,bolt,rev,sup,sg)) return true;   // eyes, wings, then body — resolved against whichever LIVE creature this point is inside, primary or Horrific (see _wretchRayHit)
     for(let bi=0;bi<skyBirds.length;bi++){ const b=skyBirds[bi]; if(b.dead)continue; const bp=b.m.position, br=0.9*b.m.scale.x;   // SKY BIRDS die to gunfire (Ben 07-20) — generous sphere, they're small and far
       const dxb=px-bp.x, dyb=py-bp.y, dzb=pz-bp.z; if(dxb*dxb+dyb*dyb+dzb*dzb < br*br){ b.dead=true; b.vy=1.5; b.spin=(Math.random()-0.5)*7;
         spawnParticles(bp.x,bp.y,bp.z,0x191920,14,2.2,0.9); flashName('bird down'); return true; } }
@@ -12744,6 +12733,47 @@ function _traceBullet(o,d,bolt,rev,sup,sg){
     if(NET.on && !NET.host){ for(const _k in _netAnimals){ const _e=_netAnimals[_k]; const _dx=px-_e.x,_dz=pz-_e.z,_dy=py-_e.y;   // GUEST: the real animals[] is empty here → hit the host's mirrored animals and request the damage
       if(_dx*_dx+_dz*_dz<0.9 && _dy>-0.25 && _dy<2.2){ const _n=+String(_k).replace(/^n/,''); if(_n===_n)netSend({t:'han',n:_n,v:animDmg}); spawnParticles(px,py,pz,0xcc2018,8,1.6,0.5); return true; } } } }
   return true; }
+// THE RAY DECIDES WHICH CREATURE IT HIT — not the camera. Called once per step of the bullet's walk, so stepping t outward
+// finds the FIRST creature along the line by construction, which is what a bullet does. withNearestWretch (the MELEE binder)
+// resolves nearest-to-the-eye: with it on the shot path you could aim at the primary forty blocks off and have a Horrific
+// standing beside you take the damage. Before this existed the shot bound nothing at all on three of six fireGun call sites —
+// full-auto, the offhand and the act path — so every bullet from a held trigger damaged wretchPrime whatever it struck.
+// DO NOT "simplify" this by wrapping fireGun in anyWretch instead. _traceBullet returns true for terrain, for an animal and
+// even for a clean miss, so anyWretch would stop after the primary every single time AND re-run the whole trace once per
+// creature — duplicating tracers, bullet holes and animal damage. The binding belongs at the capsule test, not at the caller.
+// Args ride on a scratch object because this runs ~600 times per bullet (×9 for a shell) and a closure per step is garbage
+// the frame budget does not have.
+let _wrp={x:0,y:0,z:0,d:null,bolt:false,rev:false,sup:false,sg:false};
+function _wretchRayHit(px,py,pz,d,bolt,rev,sup,sg){
+  _wrp.x=px; _wrp.y=py; _wrp.z=pz; _wrp.d=d; _wrp.bolt=bolt; _wrp.rev=rev; _wrp.sup=sup; _wrp.sg=sg;
+  return wretchExtra.length ? anyWretch(_wretchRayHit1) : _wretchRayHit1();   // no extras → skip the binder entirely rather than pay try/finally 600 times a bullet
+}
+function _wretchRayHit1(){
+  const px=_wrp.x, py=_wrp.y, pz=_wrp.z, bolt=_wrp.bolt, rev=_wrp.rev, sup=_wrp.sup, sg=_wrp.sg;
+  if(wretch.active && wretch.boss){ for(const e of seraphEyeSpheres()){ const ex=px-e.x, ey=py-e.y, ez=pz-e.z;   // THE CERAPHIM: every eye = 100% damage (central = weak point); checked BEFORE wings so eyes set into wings still pay full
+    if(ex*ex+ey*ey+ez*ez < e.r*e.r){ const _wd=((sg?12:bolt?100:rev?68:65) - (sup?(sg?3:20):0)) * (e.central?1.5:1);
+      if(!NET.on||wretchOwner()===NET.id){ wretch._gunHit=true; hurtWretch(_wd); } else netSend({t:'hw',v:_wd,h:wretch._hid||0});
+      spawnParticles(px,py,pz,0xf1e7d9,16,2.4,0.7); spawnParticles(px,py,pz,0x8a1010,10,1.8,0.6);
+      if(!e.central && !e.closed && typeof seraphEyeClose==='function'){ seraphEyeClose(e.i,90); flashName('eye SEALED — 90s'); if(NET.on)netSend({t:'eyeSeal',i:e.i}); }   // shoot a side eye → it clamps shut 90s (in stage 3 a sealed eye can't fire its burst laser) (Ben 07-21)
+      else flashName(e.central?'THE EYE':'eye hit');
+      if(typeof seraphSay==='function'&&Math.random()<0.4)seraphSay(e.central?'hitCentral':(Math.random()<0.5?'hit1':'hit2')); return true; } }
+    for(const wsp of seraphWingSpheres()){ const wx2=px-wsp.x, wy2=py-wsp.y, wz2=pz-wsp.z;                       // WINGS: big tempting targets — 10% chance a shot wounds (user spec 07-20); feathers soak the rest
+      if(wx2*wx2+wy2*wy2+wz2*wz2 < wsp.r*wsp.r){
+        if(Math.random()<0.10){ const _wd=((sg?12:bolt?100:rev?68:65) - (sup?(sg?3:20):0));
+          if(!NET.on||wretchOwner()===NET.id){ wretch._gunHit=true; hurtWretch(_wd); } else netSend({t:'hw',v:_wd,h:wretch._hid||0});
+          spawnParticles(px,py,pz,0x8a1010,12,2,0.6); flashName('through the wing'); }
+        else { spawnParticles(px,py,pz,0xb03030,10,1.8,0.8); spawnParticles(px,py,pz,0xf1e7d9,4,1.2,0.5); }      // feather burst — the shot is EATEN
+        return true; } } }
+  if(wretch.active && !wretch.dragging){ const hx=px-wretch.pos.x, hz=pz-wretch.pos.z, hy=py-wretch.pos.y, r2=hx*hx+hz*hz;   // TIGHT capsule — precise aim required
+    const head = hy>3.2 && r2<0.85*0.85, body = hy>-0.3 && hy<4.8 && r2<1.1*1.1;
+    // A PELLET IS WORTH 12, so a whole shell is 108 on the body and 144 through the head — two shells rout even the
+    // Horrific one. The suppressor's flat -20 must never drive a pellet NEGATIVE (bullets that heal shipped once
+    // already, on animals): 3 is the same share of 12 that 20 is of 70.
+    if(head||body){ const _wd=(sg?(head?16:12):bolt?(head?100:70):rev?(head?68:45):(head?65:50)) - (sup?(sg?3:20):0);
+      if(!NET.on||wretchOwner()===NET.id){ wretch._gunHit=true; hurtWretch(_wd); } else netSend({t:'hw',v:_wd,h:wretch._hid||0});   // AR 50 / Python 45 body (Ben 07-20), heads scaled; co-op: only the owner mutates HP; guests request the hit
+      spawnParticles(px,py,pz,head?0xff3020:0x3a0608,head?16:12,2,0.6); if(head)flashName('headshot'); return true; } }   // blood burst only — no lingering wound decal (Ben 07-21)
+  return false;
+}
 // A blow struck while it has hold of you. Being gripped is the capture ritual and the ritual is meant to be HELPLESS —
 // weaponing your way out mid-grab would turn dread into a damage race, and the co-op flee-on-100-damage path is the
 // intended escape because it makes rescue a second player's job. But a swing that produces nothing at all reads as a
@@ -12756,7 +12786,8 @@ function wretchBlowFails(){
   if(!(typeof playSample==='function' && playSample('grunt', p, 0.5)) && typeof sfxHurt==='function') sfxHurt(p);
   _blowFailN++;
 }
-function meleeAttack(){ const d=lookDir(), ox=player.pos.x, oy=player.pos.y+EYE, oz=player.pos.z;
+function meleeAttack(){ return withNearestWretch(_meleeAttack); }   // every caller gets the binding, not just the ones that came through doSwing
+function _meleeAttack(){ const d=lookDir(), ox=player.pos.x, oy=player.pos.y+EYE, oz=player.pos.z;
   const held=heldSlot(); const it=held?ITEMS[held.id]:null; const dmg=(it&&it.tool)?WEAPON_DMG(it.tool):1;   // empty hand = 1
   const reach=3.6 + ((it&&it.tool&&it.tool.kind==='spear')?1.8:0);   // the spear jabs from further out
   if(wretch.active){ const wx=wretch.pos.x-ox, wz=wretch.pos.z-oz, wd=Math.hypot(wx,wz); if(wd<reach && (d.x*wx+d.z*wz)/(wd||1)>0.4){
@@ -20147,7 +20178,9 @@ window.__hc={
     spawnFromEgg(it.egg, null); return { itemName:it.name, eggType:it.egg, extras:wretchExtra.length }; }catch(e){ return {err:String(e.message||e)}; } },
   hwState(){ try{ return wretchExtra.map(w=>({ hid:w._hid, active:w.active, state:w.state, form:w.form, gp:w.grabPhase,
       x:+w.pos.x.toFixed(1), y:+w.pos.y.toFixed(1), z:+w.pos.z.toFixed(1), dist:+(w.dist||0).toFixed(1),
-      hp:w.hp==null?null:Math.round(w.hp), crawl:+(w.crawl||0).toFixed(2), hunt:!!w.hunt, dragging:!!w.dragging,
+      hp:w.hp==null?null:Math.round(w.hp), hpMax:w.hpMax==null?null:Math.round(w.hpMax),
+      bound:(wretch===w), intim:!!w._intim, boss:!!w.boss, regenT:+(w._regenT||0).toFixed(2),   // the four states that were RULED OUT as causes of "cannot be damaged" — read them, do not re-theorise
+      crawl:+(w.crawl||0).toFixed(2), hunt:!!w.hunt, dragging:!!w.dragging,
       summoned:!!w._summoned, inWorldScene:w.group?(w.group.parent===scene):null, drift:driftState(hwKey(w)) }));
     }catch(e){ return {err:String(e.message||e)}; } },
   hwFlush(){ try{ return wretchExtra.map(w=>driftFlush(hwKey(w))); }catch(e){ return {err:String(e.message||e)}; } },
@@ -20178,6 +20211,9 @@ window.__hc={
   hwKill(){ try{ const n=wretchExtra.length; for(let i=wretchExtra.length-1;i>=0;i--) despawnHorrific(wretchExtra[i]); return n; }catch(e){ return {err:String(e.message||e)}; } },
   // QA: prove the AI instance is genuinely separate — the primary must be untouched by anything the extra does.
   hwPrime(){ try{ return { primeActive:wretchPrime.active, primeState:wretchPrime.state, bound:(wretch===wretchPrime),
+      // __hc.wretchHp() reads the CURRENT BINDING and will happily report an extra's health as the primary's. Any check on
+      // "did the damage land on the right creature" has to read the primary DIRECTLY, here, against hwState()'s per-extra hp.
+      primeHp:wretchPrime.hp==null?null:Math.round(wretchPrime.hp), primeHpMax:wretchPrime.hpMax==null?null:Math.round(wretchPrime.hpMax),
       extras:wretchExtra.length, grabbed:!!player.grabbed, day:+globalU.uDay.value.toFixed(3),
       err:window._hwErr||null }; }catch(e){ return {err:String(e.message||e)}; } },
   smelt(x,z){ try{ const bx=Math.floor(x), bz=Math.floor(z), by=surfaceH(bx,bz)+1; setBlockWorld(bx,by,bz,BID.furnace,true); furnaces[ckey(bx,by,bz)]={in:{id:'sand',n:2},t:2,out:null}; return {bx,by,bz}; }catch(e){ return {err:e.message}; } },   // QA: place a furnace mid-smelt at (x,z) — cooking-fx visual checks
