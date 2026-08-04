@@ -61,19 +61,12 @@ const ok=(name,cond,got)=>{ if(!cond)fails++; console.log(`  ${cond?'ok  ':'FAIL
     const held = await page.evaluate(`(()=>{ return new Promise(r=>{
       __hc.tpExact(__hc.pos().x, __hc.pos().z, __hc.groundY(Math.floor(__hc.pos().x),Math.floor(__hc.pos().z))+1);
       setTimeout(()=>r(__hc.jumpProbe()),120); }); })()`);
-    // Both jumps are measured the same way: wait until the feet are down, note the ground, then poll the whole arc for its PEAK.
-    // A single sample at a fixed delay measures whenever the sleep happened to land, which is not the apex and is not comparable.
-    const settle = async()=>{ await page.waitForFunction(`(()=>{try{return __hc.jumpProbe().onGround===true;}catch(e){return false;}})()`,{timeout:15000}).catch(()=>{}); await sleep(250); };
-    const arcPeak = async(holdMs)=>{ await settle();
-      const g=(await page.evaluate(`__hc.jumpProbe()`)).y;
-      await page.keyboard.down('Space'); await sleep(holdMs); await page.keyboard.up('Space');
-      let peak=g; for(let i=0;i<22;i++){ const j=await page.evaluate(`__hc.jumpProbe()`); if(j.y>peak)peak=j.y; await sleep(40); }
-      return +(peak-g).toFixed(2); };
-    const heldRise = await arcPeak(700);      // held through the rise
-    const tapRise  = await arcPeak(50);       // let go immediately
-    const apexHeld={y:heldRise}, apexTap={y:tapRise}, y0={y:0};
-    await sleep(600);
-    ok('holding the key jumps higher than tapping it', (apexHeld.y-y0.y) > (apexTap.y-y0.y), {held:+(apexHeld.y-y0.y).toFixed(2), tap:+(apexTap.y-y0.y).toFixed(2)});
+    // Fixed-step arcs: real key events measure the browser's frame rate as much as the physics, and headless runs slowly enough
+    // that a short tap can be under one frame — which is not a jump-cut failure, it is a sampling failure.
+    const heldArc = await page.evaluate(`__hc.jumpArc(0.6)`);
+    const tapArc  = await page.evaluate(`__hc.jumpArc(0.05)`);
+    console.log('    held', JSON.stringify(heldArc), 'tap', JSON.stringify(tapArc));
+    ok('holding the key jumps higher than tapping it', heldArc.rise > tapArc.rise + 0.15, {held:heldArc.rise, tap:tapArc.rise});
     ok('coyote time exists while grounded', held.coyote>0, held.coyote);
 
     console.log('\n[4] momentum: ramps up, and the air keeps what it was given');
@@ -227,6 +220,35 @@ const ok=(name,cond,got)=>{ if(!cond)fails++; console.log(`  ${cond?'ok  ':'FAIL
     ok('…the buck and flash land on the offhand', hands.afterLeft.offKick>0 && hands.afterLeft.offFlash>0, hands.afterLeft);
     ok('right click acts with the MAIN item, block and all', hands.right && hands.right.id==='planks', hands.right);
     ok('…and does not move the offhand', hands.afterRight.offSwing===0 && hands.afterRight.offKick===0, hands.afterRight);
+
+    console.log('\n[13] the boom does not judder when it is driven into the ground');
+    await page.evaluate(`__hc.tpsProbe(true)`);
+    await page.evaluate(`__hc.cam({pitch:1.1})`);          // look almost straight down: the boom goes into the floor
+    await sleep(700);
+    const samples=[];
+    for(let i=0;i<30;i++){ samples.push(await page.evaluate(`__hc.tpsCam()`)); await sleep(45); }
+    let worst=0, worstAt=null;
+    for(let i=1;i<samples.length;i++){ const a=samples[i-1].cam, b=samples[i].cam;
+      const d=Math.hypot(b[0]-a[0], b[1]-a[1], b[2]-a[2]); if(d>worst){ worst=d; worstAt=[a,b]; } }
+    const anyInSolid = samples.some(s=>s.camInSolid);
+    console.log('    worst frame-to-frame move:', worst.toFixed(3), 'lift', samples[samples.length-1].lift);
+    console.log('    dist track:', samples.slice(0,12).map(s=>s.dist).join(' '));
+    console.log('    lift track:', samples.slice(0,12).map(s=>s.lift).join(' '));
+    ok('no frame jumps while standing still and looking down', worst<0.12, {worst:+worst.toFixed(3), at:worstAt});
+    ok('and it still never sits inside the ground', anyInSolid===false, anyInSolid);
+    await page.evaluate(`__hc.cam({pitch:0})`); await page.evaluate(`__hc.tpsProbe(false)`);
+
+    console.log('\n[14] leaves that pile up, and rot a stage a day');
+    const p1 = await page.evaluate(`__hc.leafPile(null,null,null,3)`);
+    ok('three leaves are not a pile', p1.isPile===false && p1.pending===3, {pending:p1.pending, need:p1.need, block:p1.block});
+    const p3 = await page.evaluate(`__hc.leafPile(null,null,null,1)`);   // same cell as p1 — the hook resolves it the one way, so the counts add up
+    ok('the fourth makes one', p3.isPile===true, {block:p3.block, at:p3.at});
+    const d1 = await page.evaluate(`__hc.leafDay(1)`);
+    ok('a day turns it to decaying', d1.piles[0] && d1.piles[0].block==='leaf_pile_decay', d1.piles[0]);
+    const d2 = await page.evaluate(`__hc.leafDay(1)`);
+    ok('another turns it dead', d2.piles[0] && d2.piles[0].block==='leaf_pile_dead', d2.piles[0]);
+    const d3 = await page.evaluate(`__hc.leafDay(1)`);
+    ok('and the third clears it away', d3.tracked===0, {tracked:d3.tracked, piles:d3.piles});
 
     ok('no page errors', errors.length===0, errors);
     await browser.close();

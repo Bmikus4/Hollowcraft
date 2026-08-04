@@ -1656,6 +1656,14 @@ block('camera_x', {cat:'model', opaque:false, solid:false, hard:1.2, tool:'picka
 block('camera_z', {cat:'model', opaque:false, solid:false, hard:1.2, tool:'pickaxe', model:'camera',  dir:'z', use:'camera',  drop:'camera'});
 block('monitor_x',{cat:'model', opaque:false, solid:true,  hard:1.2, tool:'pickaxe', model:'monitor', dir:'x', use:'monitor', drop:'monitor'});
 block('monitor_z',{cat:'model', opaque:false, solid:true,  hard:1.2, tool:'pickaxe', model:'monitor', dir:'z', use:'monitor', drop:'monitor'});
+// ---- LEAF PILES (Ben 08-04): "if more than 3 leaves fall on a single block within the span of 1m then a leaf pile should be
+// created, which has 3 stages, alive decaying and dead, then it disappears, changes one per day."
+// Three ids rather than one block with a state, because the stage has to survive a save and the world file stores block numbers
+// and nothing else. Appended at the END of the list for the same reason: inserting above here renumbers every saved world.
+// Non-solid and nearly free to break — a drift of leaves is scenery you walk through, not a step you climb.
+block('leaf_pile',      {cat:'model', model:'leaf_pile', col:0x6f8f3a, opaque:false, solid:false, hard:0.1, drop:null});   // fresh fall: still green
+block('leaf_pile_decay',{cat:'model', model:'leaf_pile', col:0xa9752c, opaque:false, solid:false, hard:0.1, drop:null});   // a day on: gone over to brown
+block('leaf_pile_dead', {cat:'model', model:'leaf_pile', col:0x6b5334, opaque:false, solid:false, hard:0.1, drop:null});   // two days on: grey-brown litter, gone by the third
 
 // defaults + fast lookup arrays
 const N_BLOCKS = _bid;
@@ -2824,7 +2832,13 @@ const skyMat = new THREE.ShaderMaterial({
     // halo around the sun clouds or not"). uSunGain is the disc's HDR gain — the bloom SEED, so it decides how wide and
     // how strong the glow around the sun is far more than it decides how white the disc is; uSunHalo is the tight Mie ring
     // on the limb; uSunSheen is the broad forward-scatter cushion, which is the one that is there in a clear sky.
-    uSunGain:{value:10.0}, uSunHalo:{value:0.30}, uSunSheen:{value:0.10}
+    // Ben picked "minimal" off bench/results/sun-halo-{before,after,minimal}.png: the tight Mie ring down to 0.12 and the
+    // clear-sky sheen out altogether. The broad pow(sd,3)*0.30 term is NOT one of these — it is the whole sky brightening
+    // toward the sun, and taking that out is what makes a clear day a flat blue lid.
+    // The frame he chose also had the bloom pass at 0.34. That one is deliberately NOT adopted: bloomPass.strength is
+    // global — it is the boss's vantawhite glow and every light in the game — and it was worth only four luminance levels
+    // of the sun's shoulder, so the same look comes out of the two terms above at the project's own 0.55.
+    uSunGain:{value:10.0}, uSunHalo:{value:0.12}, uSunSheen:{value:0.0}, uSunWide:{value:0.20}
   },
   vertexShader:`
     varying vec3 vDir;
@@ -2834,7 +2848,7 @@ const skyMat = new THREE.ShaderMaterial({
     varying vec3 vDir;
     uniform vec3 uSunDir, uMoonDir; uniform float uDay, uTime, uHasMoon; uniform vec3 uFogCol, uHorizonBlend; uniform float uSkyDark, uCloud, uStars; uniform float uCamYaw;
     uniform sampler2D uMoonTex;
-    uniform float uCloudDbg, uSunGain, uSunHalo, uSunSheen;
+    uniform float uCloudDbg, uSunGain, uSunHalo, uSunSheen, uSunWide;
     // hash noise
     float h13(vec3 p){ p=fract(p*0.3183099+0.1); p*=17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
     float n3(vec3 x){ vec3 i=floor(x),f=fract(x); f=f*f*(3.0-2.0*f);
@@ -2897,7 +2911,14 @@ const skyMat = new THREE.ShaderMaterial({
       // The pow(sd,34) term is the HALO IN A CLEAR SKY (Ben 08-04). It lives in col, not add, so no cloud line touches it —
       // only the cloud drawn on top of that same fragment can, and near the sun the coverage is usually mid-ramp. It is on
       // uSunSheen now, cut from 0.26; the broad pow(sd,3) is the whole sky brightening toward the sun and stays.
-      float fw = pow(sd,3.0)*0.30 + pow(sd,34.0)*uSunSheen;
+      // AND THE BROAD TERM IS WHY THE CORNER HALO LOOKS HUGE (Ben 08-04). Nothing screen-space was doing it: measured by
+      // binning luminance against the true ANGLE from the sun, the glow 3-10 degrees out reads 187 with the sun centred and
+      // 170 with it 45 degrees off-axis — dimmer, not brighter — and the god-ray pass changes it by 0.0. A perspective
+      // projection turns equal angles into more pixels away from the axis, so a wide ANGULAR glow is always a huge CORNER
+      // glow, and the only real lever is the angle. pow(sd,3) is 0.30 at the sun and still 0.13 forty degrees away: that
+      // gradient across tens of degrees IS the halo. 0.30 -> 0.20 on uSunWide keeps the gradient — which is what stops a
+      // clear day reading as a flat blue lid — and takes a third off its peak.
+      float fw = pow(sd,3.0)*uSunWide + pow(sd,34.0)*uSunSheen;
       col += mix(vec3(0.95,0.60,0.30), vec3(0.55,0.72,0.96), clamp(sunH*2.2,0.0,1.0)) * fw * uDay;
       // ---- GOLDEN HOUR, DIRECTIONAL ---- the warm band follows the sun's AZIMUTH instead of ringing the whole horizon, and
       // the opposite side goes violet, which is what makes the warm side read as warm rather than merely orange.
@@ -3135,7 +3156,12 @@ const _sunOv={ scene:new THREE.Scene(), cam:new THREE.OrthographicCamera(-1,1,1,
 // How hard cloud puts the disc out, and how bright the disc is at all. Both are levers rather than constants because
 // "how much cloud should hide the sun" is a judgement about how the sky reads, not a measurement — __hc.sunDisc() sets
 // them so a pair of frames can be put in front of Ben.
-let _sunCloudK=1.8, _sunDiscAlpha=0.80;
+// k=0.8, Ben's pick off sun-cloud-{k08,k18,k32}.png: THIN cloud already dims the sun rather than the disc holding full
+// brightness until cover is thick. It is below 1, so the curve is concave — a wisp at cover 0.2 already takes 17% off.
+// alpha 0.70, not 0.80: measured, what was still blown out around the sun after the halo cuts was the overlay DISC, not its
+// glow — the seed gain from 10 down to 2.5 moved it 0.458 -> 0.466% of the crop, i.e. nothing. 0.70 lands on 0.156%, which is
+// exactly the frame Ben picked, and it does it locally instead of by turning down a bloom pass the whole game shares.
+let _sunCloudK=0.8, _sunDiscAlpha=0.70;
 (function buildSunOverlay(){
   // A unit quad in NDC space with the disc cut out of it in the fragment shader: a circle from a polygon is a lot of
   // triangles for something two pixels of limb wide, and this way the edge is exactly as hard as the antialias allows.
@@ -4902,6 +4928,18 @@ MODEL_ITEM_BUILDERS.furnace=(bd)=>{ const g=new THREE.Group();
   const fb=new THREE.Mesh(box(0.56,0.4,0.05),dk); fb.position.set(0,0.34,0.45); g.add(fb);   // firebox on +z
   return g; };
 // campfire — crossed (#) logs on the ground + glowing squashed ember core
+// A DRIFT OF LEAVES, not a cube of them: blades laid nearly flat in a shallow scatter, so it reads as something the wind put
+// there. The tint is the BLOCK's colour, which is the only difference between the three stages — one geometry, three ids.
+// Deterministic layout from a fixed table rather than Math.random: the piles are re-built on every chunk remesh, and a pile that
+// reshuffles itself every time you break a block nearby reads as a glitch.
+const _LEAF_PILE=[[0,0,0,0.9,0.0],[0.19,0.02,0.11,0.8,1.1],[-0.17,0.01,0.14,0.75,2.3],[0.13,0.03,-0.18,0.85,0.6],
+  [-0.2,0.0,-0.12,0.7,3.0],[0.05,0.05,0.22,0.65,1.7],[-0.06,0.04,-0.23,0.7,4.1],[0.24,0.01,-0.04,0.6,2.8],[-0.25,0.02,0.02,0.6,5.0]];
+MODEL_ITEM_BUILDERS.leaf_pile=(bd)=>{ const g=new THREE.Group();
+  const m=new THREE.MeshLambertMaterial({color:(bd&&bd.col!=null)?bd.col:0x6f8f3a, side:THREE.DoubleSide});
+  const geo=new THREE.PlaneGeometry(0.30,0.24);
+  for(const [x,y,z,sc,rot] of _LEAF_PILE){ const l=new THREE.Mesh(geo,m);
+    l.position.set(x,0.02+y,z); l.rotation.set(-Math.PI/2 + (y*2.2), rot, 0); l.scale.setScalar(sc); g.add(l); }
+  return g; };
 MODEL_ITEM_BUILDERS.campfire=(bd,nb)=>{ const g=new THREE.Group();
   const wood=new THREE.MeshLambertMaterial({color:0x3a2a1a}); const logGeo=cyl(0.06,0.06,0.86,6);
   const put=(x,z,alongZ)=>{ const l=new THREE.Mesh(logGeo,wood); l.rotation.z=Math.PI/2; if(alongZ) l.rotation.y=Math.PI/2; l.position.set(x,0.08,z); g.add(l); };
@@ -5905,12 +5943,14 @@ hlMesh.visible=false; scene.add(hlMesh);
 // =====================================================================
 //  DAY / NIGHT + SUN/MOON KEY LIGHT (texel-snapped shadow fit)
 // =====================================================================
-let worldTime = CFG.DAY_LEN*0.30;   // start morning
+let worldTime = CFG.DAY_LEN*0.30, _dayCount=0;   // start morning; _dayCount = how many full cycles have passed (see updateSky)
 if(Q.get('t')) worldTime=+Q.get('t');
 const _sunDir=new THREE.Vector3(), _keyDir=new THREE.Vector3(), _tmp=new THREE.Vector3();
 const _fogGrey=new THREE.Color();   // scratch tint for the fog-weather event (weather.fog is driven in the existing updateWeather)
 function updateSky(dt){
-  worldTime=(worldTime+dt)%CFG.DAY_LEN;
+  // COUNT THE DAYS, not just the time of day. worldTime wraps, so nothing in the game knew that a day had PASSED — which is what
+  // anything ageing over days (leaf piles, and whatever comes after them) has to key off.
+  { const _wt=worldTime+dt; if(_wt>=CFG.DAY_LEN) _dayCount++; worldTime=_wt%CFG.DAY_LEN; }
   const ang=worldTime/CFG.DAY_LEN*Math.PI*2;
   _sunDir.set(Math.cos(ang), Math.sin(ang), 0.35).normalize();
   const elev=_sunDir.y;
@@ -7584,12 +7624,21 @@ function _clipBuried(v){ return _clipSolidAt(v.x,v.y,v.z) && _clipSolidAt(v.x,v.
 // small and jointed, so losing one whole reads as the limb ending at the surface, while keeping it reads as the wall being made of
 // glass. The corners are transformed by the mesh's own matrix rather than by a world Box3, because a rotated box's AABB is much
 // larger than the part and would hide limbs that are nowhere near the wall.
-const _clipC=new THREE.Vector3();
+// HOW EAGER TO BE DEPENDS ON HOW BIG THE PART IS (Ben 08-04: "jesus and monks robe disappears when jumping / falling certain
+// blocks and stuff"). Hiding a whole mesh the moment ONE corner is buried is right for a hand, a boot or a limb segment — they are
+// small, so a buried corner means most of the part is in the wall. It is badly wrong for a robe or a torso: those are tall enough
+// to touch the floor and wide enough to graze a doorway at all times, and losing the whole garment is far more visible than a
+// centimetre of hem in a block. So big parts fall back to the centre test, which is the honest question for them: is this part
+// mostly inside the world?
+const _clipC=new THREE.Vector3(), _clipSz=new THREE.Vector3(), CLIP_BIG=0.62;
 function _meshBuried(o){
   o.getWorldPosition(_clipV); if(_clipBuried(_clipV)) return true;
   const g=o.geometry; if(!g) return false;
   if(!g.boundingBox) g.computeBoundingBox();
   const bb=g.boundingBox; if(!bb) return false;
+  bb.getSize(_clipSz);
+  const sc=o.getWorldScale(_clipC);                                        // a scaled part is as big as it LOOKS, not as it was authored
+  if(Math.max(_clipSz.x*Math.abs(sc.x), _clipSz.y*Math.abs(sc.y), _clipSz.z*Math.abs(sc.z)) > CLIP_BIG) return false;
   o.updateWorldMatrix(true,false);
   for(let i=0;i<8;i++){
     _clipC.set(i&1?bb.max.x:bb.min.x, i&2?bb.max.y:bb.min.y, i&4?bb.max.z:bb.min.z).applyMatrix4(o.matrixWorld);
@@ -8508,19 +8557,24 @@ function _tpsUpdateIndoors(dt){ const r=_tpsRoofOpaque(player);
 // starts from the shoulder it is actually looking past. Sliding the end point instead would aim the camera off-axis and let the
 // offset push through a wall the march had already cleared.
 const _TPS_OFFS=[0,-0.3,0.3,-0.62,0.62,-1.0,1.0], _TPS_MIN=0.85, _TPS_IN=1.9, _TPS_SHOULDER=0.62;
-let _tpsInit=false, _tpsDist=_TPS_D, _tpsYawOff=0, _tpsShoulder=-1, _tpsSide=-1; const _tpsAnchor=new THREE.Vector3();
-function _tpsReset(){ _tpsInit=false; _tpsYawOff=0; _tpsDist=_TPS_D; _tpsSide=_tpsShoulder; _tpsPos.set(0,0,0); }
+let _tpsInit=false, _tpsDist=_TPS_D, _tpsYawOff=0, _tpsShoulder=-1, _tpsSide=-1, _tpsLift=0; const _tpsAnchor=new THREE.Vector3();
+function _tpsReset(){ _tpsInit=false; _tpsYawOff=0; _tpsDist=_TPS_D; _tpsSide=_tpsShoulder; _tpsLift=0; _tpsPos.set(0,0,0); }
 function _tpsSolid(x,y,z){ return (typeof solidAt==='function') && solidAt(Math.floor(x),Math.floor(y),Math.floor(z)); }
 // How far the boom can go along (yaw,pitch) before it would put the camera in something. Samples the CENTRE plus the two
 // horizontal flanks, so the camera keeps a body's width of clearance instead of kissing the wall and clipping through it.
 function _tpsClear(ox,oy,oz, yaw, pitch, maxD){
   const cp=Math.cos(pitch), dx=-Math.sin(yaw)*cp, dy=Math.sin(pitch), dz=-Math.cos(yaw)*cp;
   const rx=Math.cos(yaw), rz=-Math.sin(yaw), R=0.28;                        // boom-relative right, for the flank samples
+  // A CONTINUOUS DISTANCE, not the last clear sample. The march step used to BE the answer's precision, so the value stepped by
+  // 0.09 as the camera moved and the boom stepped with it. Three bisections between the last clear sample and the first blocked
+  // one put the surface within a centimetre, which is smaller than anything the eye can follow.
+  const blocked=(s)=>{ const px=ox+dx*s, py=oy+dy*s, pz=oz+dz*s;
+    return _tpsSolid(px,py,pz) || _tpsSolid(px+rx*R,py,pz+rz*R) || _tpsSolid(px-rx*R,py,pz-rz*R) || _tpsSolid(px,py+0.22,pz); };
   let last=_TPS_MIN;
-  for(let s=_TPS_MIN; s<=maxD+1e-6; s+=0.18){
-    const px=ox+dx*s, py=oy+dy*s, pz=oz+dz*s;
-    if(_tpsSolid(px,py,pz) || _tpsSolid(px+rx*R,py,pz+rz*R) || _tpsSolid(px-rx*R,py,pz-rz*R)
-       || _tpsSolid(px,py+0.22,pz)) return Math.max(_TPS_MIN, last-0.14);
+  for(let s=_TPS_MIN; s<=maxD+1e-6; s+=0.09){
+    if(blocked(s)){ let lo=last, hi=s;
+      for(let k=0;k<3;k++){ const mid=(lo+hi)*0.5; if(blocked(mid)) hi=mid; else lo=mid; }
+      return Math.max(_TPS_MIN, lo-0.10); }
     last=s; }
   return maxD;
 }
@@ -8541,7 +8595,11 @@ function updateTpsCamera(dt, p){
   if(side!==0){ const rx=Math.cos(p.yaw), rz=-Math.sin(p.yaw), s=Math.sign(side);
     if(_tpsSolid(_tpsAnchor.x+rx*s*0.75, _tpsAnchor.y, _tpsAnchor.z+rz*s*0.75)) side*=0.25; }
   const srx=Math.cos(p.yaw)*side, srz=-Math.sin(p.yaw)*side;
-  const px0=_tpsAnchor.x+srx, py0=_tpsAnchor.y, pz0=_tpsAnchor.z+srz;
+  // THE LIFT IS PART OF THE PIVOT, NOT A CORRECTION AFTERWARDS. Applied after the clearance march, it moves the camera off the
+  // very ray that was measured: the next frame reads a clear line, pushes out, hits again, lifts again — a sawtooth of about a
+  // third of a block, which is exactly the "tweaking" against the ground. Raising the pivot instead means the ray we march IS the
+  // ray the camera sits on, so the measurement stays true and there is nothing to oscillate against.
+  const px0=_tpsAnchor.x+srx, py0=_tpsAnchor.y+_tpsLift, pz0=_tpsAnchor.z+srz;
   const want=_tpsRoofed(p)?_TPS_IN:_TPS_D;
   let bestOff=0, bestDist=-1;                                               // straight back if it clears, else swing around
   for(const off of _TPS_OFFS){ const c=_tpsClear(px0,py0,pz0, p.yaw+off, p.pitch, want);
@@ -8550,11 +8608,28 @@ function updateTpsCamera(dt, p){
   _tpsYawOff += (bestOff-_tpsYawOff)*Math.min(1, dt*7);                      // slide round the corner rather than snapping to it
   const yaw=p.yaw+_tpsYawOff, cp=Math.cos(p.pitch);
   const dx=-Math.sin(yaw)*cp, dy=Math.sin(p.pitch), dz=-Math.cos(yaw)*cp;
+  // SMOOTH BOTH WAYS (Ben 08-04: "when the 3rd person camera is pushed into the ground it tweaks, it should be smooth"). The
+  // pull-in used to be instantaneous, on the reasoning that the boom must never lag into stone — but the measurement it was
+  // tracking is quantised by the march step, so against the ground it flickers by a step every frame and the camera judders. The
+  // fix is not a slower pull-in, which would put the camera in the dirt; it is to smooth the DISTANCE and let the containment step
+  // below be the hard guarantee. Fast in (about 60 ms), slow out, and nothing snaps.
+  // IN INSTANTLY, OUT GENTLY. A smoothed pull-in reads as smoother right up until the boom is briefly longer than the clear line
+  // and the containment step below yanks it — which is a far bigger jump than the one the smoothing was hiding. Now that `hit` is
+  // continuous there is nothing to jitter against, so the clamp is both exact and quiet.
   const hit=_tpsClear(px0,py0,pz0, yaw, p.pitch, want), target=Math.min(want,hit);
-  if(target<_tpsDist) _tpsDist=target;                                      // in NOW: the boom must never lag into stone
-  else _tpsDist += (target-_tpsDist)*Math.min(1, dt*4.5);                   // out gently, so leaving a doorway is not a lurch
+  if(target<_tpsDist) _tpsDist=target;
+  else _tpsDist += (target-_tpsDist)*Math.min(1, dt*4.5);
   let cx=px0-dx*_tpsDist, cy=py0-dy*_tpsDist, cz=pz0-dz*_tpsDist;
-  for(let g=0; g<6 && _tpsSolid(cx,cy,cz); g++){ const s=_tpsDist*(1-(g+1)/6);   // containment: end up outside the world, never in it
+  // GROUND CLEARANCE, SMOOTHED. Looking down drives the boom into the floor, where shortening alone drags the camera through the
+  // surface and back out. Instead it FLOATS: the height needed to keep 0.45 above whatever is underneath is eased into, so the
+  // camera rises over a rock and settles again rather than stepping up and down with the blocks.
+  // NEXT frame's lift, measured against where the camera would be with NO lift — measuring under the lifted camera would report
+  // "clear", drop the lift, and put it straight back into the ground on the frame after. Fine steps so the value is continuous:
+  // a ladder of sample heights gives a ladder of lifts, which is the same judder moved from the boom's length into its height.
+  { const baseY=cy-_tpsLift; let need=0;
+    for(let h=0.05; h<=0.5; h+=0.05) if(_tpsSolid(cx,baseY-h,cz)){ need=0.5-h; break; }
+    _tpsLift += (need-_tpsLift)*Math.min(1, dt*(need>_tpsLift?14:6)); }
+  for(let g=0; g<24 && _tpsSolid(cx,cy,cz); g++){ const s=Math.max(_TPS_MIN*0.5, _tpsDist-0.06);   // containment: a last-resort guarantee, in centimetre steps so it is never the thing you see
     cx=px0-dx*s; cy=py0-dy*s; cz=pz0-dz*s; _tpsDist=s; }
   camera.position.set(cx,cy,cz);
 }
@@ -9020,7 +9095,7 @@ function loop(){ try{
   _bulkRun(buildCabin);   // build the cabin even on the menu so the cinematic's cabin shot has something to frame
   if(started){ const B=_BUILDERS; _builderIdx=(_builderIdx+1)%B.length; _bulkRun(B[_builderIdx]); }   // ONE builder per frame, in bulk-edit mode: a village fires as ~3ms of array writes + a deferred remesh wave instead of a 50-90ms frame; a 16-frame poll rotation delays a structure's appearance imperceptibly
   assignPointLights();
-  updateBlockFx(dt); updateCookingFx(dt); updateChimes(dt); updateVaultDoors(dt); updateCreatureClip(); updateMusicSchedule(dt);
+  updateBlockFx(dt); updateCookingFx(dt); updateChimes(dt); updateVaultDoors(dt); updateCreatureClip(); updateMusicSchedule(dt); updateLeafPiles();
   scrUpdate();   // CCTV: point each monitor at its tile and re-render exactly ONE camera this frame (see SCR)
   icbmUpdate(dt);   // mushroom cloud growth/fade + the radiation dose
   icbmFlight(dt);   // …and the rocket's arc, which ends by calling the same icbmDetonate the harness drives
@@ -12906,8 +12981,16 @@ function blockOutHand(v, bend, tilt, pull){
     for(let i=0;i<8;i++){ _boV.set((i&1)?bb.max.x:bb.min.x,(i&2)?bb.max.y:bb.min.y,(i&4)?bb.max.z:bb.min.z).applyMatrix4(m.matrix);
       if(_boV.x<x0)x0=_boV.x; if(_boV.x>x1)x1=_boV.x; if(_boV.y<y0)y0=_boV.y; if(_boV.y>y1)y1=_boV.y; if(_boV.z<z0)z0=_boV.z; if(_boV.z>z1)z1=_boV.z; }
     ex=m.userData._vext={ z:z1-z0, xy:Math.max(x1-x0,y1-y0) }; }
-  const deep=clamp((ex.z-0.12)/0.25,0,1);       // 0 for a card, 1 for anything with a barrel's worth of reach
+  // A WINDOW, NOT A RAMP: 0 for a card (nothing to clear), 1 for anything with a barrel's worth of reach, and 0 AGAIN above
+  // 1.5 because no viewmodel is really a metre and a half deep in the hand — a box that says so is a broken box, and driving
+  // a rotation off it is how the spear (bounds: 7.69) ended up metres behind the eye. Those it retracts and leaves alone.
+  const deep=(ex.z>1.5)?0:clamp((ex.z-0.12)/0.25,0,1);
   _boV.set((bb.min.x+bb.max.x)*0.5,(bb.min.y+bb.max.y)*0.5,bb.max.z).applyMatrix4(m.matrix);   // the butt = rearmost point, since a held item points down -z
+  // AND THE PIVOT IS KEPT WITHIN ARM'S REACH. It comes out of the same bounds, so when those lie the pivot lies with them: a
+  // held spear's box measures 7.69 deep, and rotating a group about a point seven metres behind the hand threw the whole
+  // viewmodel NINE METRES back — a spear that vanishes as you walk up to a wall. No hand holds anything further than about
+  // 0.6 from the eye, so that is the cap; it binds only where the bounds are already wrong.
+  if(_boV.length()>0.6) _boV.multiplyScalar(0.6/_boV.length());
   _boW.copy(_boV).applyQuaternion(_boQ.setFromEuler(g.rotation));                             // where the butt sits untilted…
   const a=bend*tilt*deep; g.rotation.x+=a;
   _boV.applyQuaternion(_boQ.setFromEuler(g.rotation));                                        // …and where the tilt alone would throw it
@@ -12920,13 +13003,28 @@ function blockOutHand(v, bend, tilt, pull){
   // Camera space is the group's own space, so the same eight corners answer it. Forward is -z, and it is the camera's forward
   // rather than the probe's horizontal one; looking steeply up or down at a wall therefore constrains slightly off-axis,
   // which errs toward retracting more, never less.
+  if(ex.z>1.5) return a;                        // …and a box that size cannot say where the front of the object is either
   const lim=Math.max(0.14,(1.5-bend)-0.12);
   g.updateMatrix();
   const MM=_vmM.multiplyMatrices(g.matrix, m.matrix);
   let front=1e9;
   for(let i=0;i<8;i++){ _vmV.set((i&1)?bb.max.x:bb.min.x,(i&2)?bb.max.y:bb.min.y,(i&4)?bb.max.z:bb.min.z).applyMatrix4(MM);
     if(_vmV.z<front) front=_vmV.z; }
-  if(-front>lim) g.position.z+=(-front)-lim;
+  // CLAMPED, because the box is not always the object. A wood pickaxe's viewmodel bounds measure 1.12 deep and a held
+  // spear's 7.69 — far larger than the thing on screen — so an unclamped solve retracted the spear NINE METRES behind the
+  // eye, which is a viewmodel that vanishes when you walk up to a wall. 0.35 is more than any gun's solve asks for (the
+  // worst measured is well inside it), so the clamp binds only where the bounds are already lying.
+  if(-front>lim) g.position.z+=Math.min(0.55,(-front)-lim);
+  // AND IT STAYS IN FRAME. Standing a gun up about its butt lifts the whole body with the muzzle, and photographed, the
+  // shotgun cleared the wall by leaving the top of the screen — every distance check above passed on a frame with no gun in
+  // it. A weapon at high ready has its butt down at the belt, so drop it until its centre is back inside the upper 55% of
+  // the frame. Solved rather than dialled in, because the amount depends on where each model's origin happens to sit: a
+  // constant that framed the bolt rifle left the shotgun in orbit.
+  g.updateMatrix();
+  const MC=_vmM.multiplyMatrices(g.matrix, m.matrix);
+  _boV.set((bb.min.x+bb.max.x)*0.5,(bb.min.y+bb.max.y)*0.5,(bb.min.z+bb.max.z)*0.5).applyMatrix4(MC);
+  const halfH=Math.abs(_boV.z)*Math.tan(camera.fov*Math.PI/360), high=_boV.y-0.55*halfH;
+  if(high>0) g.position.y-=high;
   return a; }
 // THE HELD ITEM MUST FIT IN FRONT OF THE EYE. Seeing the INSIDE of a mesh means the near plane has cut through it (Ben 08-04:
 // "i can still see inside the shotgun's stock when it is ads"). MEASURED across all 16 gun variants while aimed: the AR sat
@@ -13999,6 +14097,7 @@ function updateView(dt){ updateRecoil(dt);                                      
     // hand, so a guard keyed on that box pushes the tool 0.3 FORWARD and straight back into the wall (measured: tip 0.55 ->
     // 0.72). Why those boxes are that size is a question about the tool models, and it is not this item. Nothing was guarding
     // them before this change either, so leaving them unguarded is the state that shipped, not a new hole.
+  }
   updateCrosshair(dt, isGun);   // the ring's size and its fade under a raised sight — one owner (see below)
   // ---- HOLOGRAPHIC RETICLE — parented to the CAMERA on the true aim axis (parallax-free, exactly the point of impact;
   //      the gun/window wobble AROUND it, and recoil moves reticle+aim together). Fades in as the eye comes on-axis. ----
@@ -19185,12 +19284,56 @@ function updateLeaves(dt){ if(!_leafIM.instanceColor)return;
     const dx=_leafPos[b]-eye.x, dz=_leafPos[b+2]-eye.z;
     // NO PASS-THROUGH (Ben 07-21): if the leaf's cell is solid, it has landed on that block's top → rest flat, then disappear forever
     const gb=getBlock(Math.floor(_leafPos[b]), Math.floor(_leafPos[b+1]), Math.floor(_leafPos[b+2]));
-    if(gb!==AIR && gb!==undefined && isSolid[gb]){ _leafPos[b+1]=Math.floor(_leafPos[b+1])+1.02; _leafLand[i]=0.9+Math.random()*0.8; }   // settle on the surface for ~1-1.7s, then gone
+    if(gb!==AIR && gb!==undefined && isSolid[gb]){ _leafPos[b+1]=Math.floor(_leafPos[b+1])+1.02; _leafLand[i]=0.9+Math.random()*0.8;
+      leafFell(Math.floor(_leafPos[b]), Math.floor(_leafPos[b+1]), Math.floor(_leafPos[b+2])); }   // …and the cell it landed on counts it (see leafFell)
     else if(_leafPos[b+1] < eye.y-LEAF_BOT || dx*dx+dz*dz > (LEAF_R+4)*(LEAF_R+4)) _leafRespawn(i, eye.y+LEAF_TOP);   // drifted far out of range → recycle from the top
     _leafDummy.position.set(_leafPos[b],_leafPos[b+1],_leafPos[b+2]);
     _leafDummy.rotation.set(_leafRot[b],_leafRot[b+1],_leafRot[b+2]);
     _leafDummy.scale.setScalar(_leafSz[i]); _leafDummy.updateMatrix(); _leafIM.setMatrixAt(i,_leafDummy.matrix); }
   _leafIM.instanceMatrix.needsUpdate=true; if(_leafIM.instanceColor)_leafIM.instanceColor.needsUpdate=true; }
+// =====================================================================
+//  LEAF PILES (Ben 08-04) — "if more than 3 leaves fall on a single block within the span of 1m then a leaf pile should be
+//  created, which has 3 stages, alive decaying and dead, then it disappears, changes one per day"
+// =====================================================================
+// WHERE leaves land is already known — the fall loop settles each one on the surface it hits — so this is a counter on that
+// event and nothing more. Four landings on one cell inside a minute is a drift; the count is per CELL and it expires, so leaves
+// that trickle onto the same square all afternoon never add up to one.
+//
+// THE COUNTER IS BOUNDED. Leaves fall everywhere the player goes, so an unbounded map of cells would grow for the whole session:
+// entries older than the window are swept whenever the map gets large, which costs nothing and cannot leak.
+//
+// THE STAGE LIVES IN THE BLOCK ID, and the age lives in a registry keyed by cell. A save therefore keeps the stage for free, and
+// a pile loaded from a save simply starts its clock again — which is a day of extra life at worst, and needs no new save format.
+const LEAF_PILE_N=4, LEAF_PILE_WINDOW=60;                     // "more than 3" within "1m"
+const _leafHits=new Map(), _leafPiles=new Map();
+let _leafDay=-1;
+function leafFell(x,y,z){
+  if(typeof BID==='undefined' || BID.leaf_pile==null) return;
+  const ay=y+1;                                               // the cell ABOVE the surface it landed on — where a pile would sit
+  if(getBlock(x,ay,z)!==AIR) return;                          // something is already there (including a pile: it does not restack)
+  const k=x+','+ay+','+z, now=clock.elapsedTime;
+  let e=_leafHits.get(k);
+  if(!e || now-e.t0>LEAF_PILE_WINDOW){ e={n:0,t0:now}; _leafHits.set(k,e); }
+  e.n++;
+  if(e.n>=LEAF_PILE_N){ _leafHits.delete(k);
+    setBlockWorld(x,ay,z,BID.leaf_pile,true);
+    _leafPiles.set(k,{x,y:ay,z,day:leafDayNow()});
+    if(typeof netEdit==='function') netEdit(x,ay,z,BID.leaf_pile); }
+  if(_leafHits.size>512){ for(const [kk,vv] of _leafHits) if(now-vv.t0>LEAF_PILE_WINDOW) _leafHits.delete(kk); } }
+function leafDayNow(){ return _dayCount|0; }
+// One step per day, checked on the day rollover rather than on a timer, so a pile ages with the world's clock (including anything
+// that skips time) instead of with wall time. alive -> decaying -> dead -> gone.
+function updateLeafPiles(){
+  if(typeof BID==='undefined' || BID.leaf_pile==null) return;
+  const d=leafDayNow(); if(d===_leafDay) return;
+  const first=(_leafDay<0); _leafDay=d; if(first) return;      // the first frame of a session is not a day passing
+  for(const [k,pile] of _leafPiles){
+    const b=getBlock(pile.x,pile.y,pile.z);
+    if(b!==BID.leaf_pile && b!==BID.leaf_pile_decay && b!==BID.leaf_pile_dead){ _leafPiles.delete(k); continue; }   // someone cleared it
+    const nb = b===BID.leaf_pile ? BID.leaf_pile_decay : b===BID.leaf_pile_decay ? BID.leaf_pile_dead : AIR;
+    setBlockWorld(pile.x,pile.y,pile.z,nb,true);
+    if(typeof netEdit==='function') netEdit(pile.x,pile.y,pile.z,nb);
+    if(nb===AIR) _leafPiles.delete(k); } }
 const skyBirdGroup=new THREE.Group(); scene.add(skyBirdGroup); const skyBirds=[]; let _birdT=10;
 // A BIRD YOU CAN TELL THE FRONT OF, whose wings hinge where a wing hinges (Ben 08-04: "make sure birds fly in the proper
 // direction, and that their wings flap" / "these weird black lines in the sky" — one set of faults behind all three).
@@ -22173,7 +22316,7 @@ window.__hc={
   musicSkew(sec){ try{ _musicSkew=+sec||0; startGameMusic(); return this.musicProbe(); }catch(e){ return {err:String(e.message||e)}; } },
   // THE BOOM ITSELF: where it ended up, how long it is, which shoulder, and whether it is inside anything (it must never be).
   tpsCam(){ try{ const c=camera.position, P=player.pos;
-      return { on:_tpsOn, active:_tpsAct, indoors:_tpsIndoors, dist:+_tpsDist.toFixed(2), yawOff:+_tpsYawOff.toFixed(3), shoulder:_tpsShoulder, side:+_tpsSide.toFixed(2),
+      return { on:_tpsOn, active:_tpsAct, indoors:_tpsIndoors, dist:+_tpsDist.toFixed(2), lift:+_tpsLift.toFixed(3), yawOff:+_tpsYawOff.toFixed(3), shoulder:_tpsShoulder, side:+_tpsSide.toFixed(2),
         cam:[+c.x.toFixed(2),+c.y.toFixed(2),+c.z.toFixed(2)], camInSolid:_tpsSolid(c.x,c.y,c.z),
         fromPlayer:+Math.hypot(c.x-P.x,c.z-P.z).toFixed(2), roofed:_tpsRoofed(player) }; }catch(e){ return {err:String(e.message||e)}; } },
   // WHERE THE GUN IN THE THIRD-PERSON HAND IS ACTUALLY POINTING, in world space, against where you are looking. barrelPitch must
@@ -22221,6 +22364,31 @@ window.__hc={
       const afterRight={ mainSwing:+(view.swing||0).toFixed(2), offSwing:+(offView.swing||0).toFixed(2),
                          mainKick:+(view.gunKick||0).toFixed(2), offKick:+(offView.gunKick||0).toFixed(2) };
       return { offActing:offActing(), main:mainId, off:offId, left, afterLeft, right, afterRight }; }catch(e){ return {err:String(e.message||e)}; } },
+  // LEAF PILES: drop N leaves on one cell and watch a pile appear, then age it a day at a time.
+  leafPile(x,y,z,n){ try{ if(x==null){ const P=player.pos; x=Math.floor(P.x); z=Math.floor(P.z); y=groundYAt(P.x,P.z); }
+      x|=0; y|=0; z|=0; n=(n|0)||LEAF_PILE_N;
+      for(let i=0;i<n;i++) leafFell(x,y,z);
+      const b=getBlock(x,y+1,z);
+      return { at:[x,y+1,z], block:B[b]?B[b].name:b, isPile:(b===BID.leaf_pile), tracked:_leafPiles.size,
+               pending:(_leafHits.get(x+','+(y+1)+','+z)||{}).n||0, need:LEAF_PILE_N, windowSec:LEAF_PILE_WINDOW, day:_dayCount }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  leafDay(n){ try{ for(let i=0;i<((n|0)||1);i++){ _dayCount++; updateLeafPiles(); }
+      const out=[]; for(const [k,p] of _leafPiles){ const b=getBlock(p.x,p.y,p.z); out.push({at:k, block:B[b]?B[b].name:b}); }
+      return { day:_dayCount, piles:out.slice(0,8), tracked:_leafPiles.size }; }catch(e){ return {err:String(e.message||e)}; } },
+  // A JUMP MEASURED IN FIXED STEPS. Driving this from real key events measures the browser's frame rate as much as the physics:
+  // headless runs at 10-20 fps, so a "50 ms tap" is under one frame and the cut-short never gets a frame to act in. This steps
+  // physics itself at 1/60 and returns the apex, which is the same arithmetic the game does and is the same on any machine.
+  jumpArc(hold){ try{ hold=(hold==null?0.6:+hold);
+      const wasL=locked, wasUI=openUI; locked=true; openUI=null;                 // physics suppresses input while a menu is up
+      player.vel.set(0,0,0); player._jumpBuf=0; player._coyote=0.11; player._jumpCd=0; player._eyeOff=0; player._eyeVel=0;
+      const y0=player.pos.y; let peak=y0, t=0, air=false;
+      keys.Space=true;
+      for(let i=0;i<240;i++){ const dt=1/60; t+=dt; if(t>=hold) delete keys.Space;
+        physics(dt); if(player.pos.y>peak)peak=player.pos.y;
+        if(!player.onGround) air=true; else if(air && i>4) break; }
+      delete keys.Space; locked=wasL; openUI=wasUI;
+      return { hold, rise:+(peak-y0).toFixed(3), y0:+y0.toFixed(2), peak:+peak.toFixed(2) }; }
+    catch(e){ delete keys.Space; return {err:String(e.message||e)}; } },
   tpsShoulder(s){ try{ if(s!=null)_tpsShoulder=(s|0); return this.tpsCam(); }catch(e){ return {err:String(e.message||e)}; } },
   // The ring's live size, and the cone a shot may actually land in. spreadDeg is what "less accurate when jumping" has to move.
   xhProbe(){ try{ const el=document.getElementById('xh'), cs=el?getComputedStyle(el):null;
@@ -22457,8 +22625,13 @@ window.__hc={
         const C=new THREE.Vector3(); camera.getWorldPosition(C);
         const fx=-Math.sin(player.yaw), fz=-Math.cos(player.yaw);
         const ex=v.mesh.userData._vext;
+        // IS IT STILL ON SCREEN? A block-out that clears the wall by throwing the gun out of shot passes every distance
+        // check and is obviously wrong the moment you look — the shotgun did exactly that. The bounds' CENTRE, projected.
+        const ctr=new THREE.Vector3((bb.min.x+bb.max.x)*0.5,(bb.min.y+bb.max.y)*0.5,(bb.min.z+bb.max.z)*0.5)
+          .applyMatrix4(v.mesh.matrix).applyMatrix4(v.group.matrixWorld).project(camera);
         return { id:v.id, pos:[+p.x.toFixed(3),+p.y.toFixed(3),+p.z.toFixed(3)], rx:+v.group.rotation.x.toFixed(4),
                  fwd:+((p.x-C.x)*fx+(p.z-C.z)*fz).toFixed(3), ext:ex?[+ex.z.toFixed(3),+ex.xy.toFixed(3)]:null,
+                 ndc:[+ctr.x.toFixed(3),+ctr.y.toFixed(3)],
                  push:v._nearPush!=null?v._nearPush:null,
                  inBlock:!!isOpaque[getBlock(Math.floor(p.x),Math.floor(p.y),Math.floor(p.z))] }; };
       return { id:view.id, bend:+(view.gunBend||0).toFixed(4), out:!!view._blockOut, clicks:view._blockOutN||0,
@@ -22898,13 +23071,18 @@ window.__hc={
              if(o.gain!=null)skyMat.uniforms.uSunGain.value=+o.gain;
              if(o.halo!=null)skyMat.uniforms.uSunHalo.value=+o.halo;
              if(o.sheen!=null)skyMat.uniforms.uSunSheen.value=+o.sheen;
+             if(o.wide!=null)skyMat.uniforms.uSunWide.value=+o.wide;
              // The bloom pass is in here because the measured radial profile says the wide glow around the sun is mostly
              // ITS spread, not the disc's gain: dropping the seed 40 -> 10 cut the saturated core threefold and moved the
              // shoulder at 40-100 px by one luminance level. Attributing "the halo" needs it as a lever.
-             if(o.bloom!=null && typeof bloomPass!=='undefined' && bloomPass)bloomPass.strength=+o.bloom; }
+             if(o.bloom!=null && typeof bloomPass!=='undefined' && bloomPass)bloomPass.strength=+o.bloom;
+             // The bloom THRESHOLD is the one that decides whether the sky itself blooms. Measured by angle from the sun,
+             // the 3-10 degree shoulder falls 13 luminance levels when the bloom pass is neutered, and the disc's own gain
+             // moves it 0.6 from 10 down to 1.2 — so what is blooming is the bright sky around the sun, not the sun.
+             if(o.thresh!=null && typeof bloomPass!=='undefined' && bloomPass)bloomPass.threshold=+o.thresh; }
       const sd=globalU.uSunDir.value;
       return { k:_sunCloudK, alpha:_sunDiscAlpha, gain:skyMat.uniforms.uSunGain.value, halo:skyMat.uniforms.uSunHalo.value,
-               sheen:skyMat.uniforms.uSunSheen.value, bloom:(typeof bloomPass!=='undefined'&&bloomPass)?bloomPass.strength:null, cloud:+(_sunOv.cloud||0).toFixed(3), hide:+(_sunOv.hide==null?1:_sunOv.hide).toFixed(3),
+               sheen:skyMat.uniforms.uSunSheen.value, wide:skyMat.uniforms.uSunWide.value, bloom:(typeof bloomPass!=='undefined'&&bloomPass)?bloomPass.strength:null, thresh:(typeof bloomPass!=='undefined'&&bloomPass)?bloomPass.threshold:null, cloud:+(_sunOv.cloud||0).toFixed(3), hide:+(_sunOv.hide==null?1:_sunOv.hide).toFixed(3),
                vis:+_sunOv.vis.toFixed(3), opacity:+(_sunOv.lastOpacity||0).toFixed(4), drawn:_sunOv.drawn||0,
                openRays:_sunOv.open==null?-1:_sunOv.open, eyeY:+(_sunOv.eyeY||0).toFixed(2),
                elevDeg:+(Math.asin(Math.max(-1,Math.min(1,sd.y)))*57.29578).toFixed(2) };
