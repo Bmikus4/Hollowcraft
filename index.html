@@ -7261,7 +7261,14 @@ function netMsg(m){
   else if(m.t==='cmd'){ if(String(m.to)!==String(NET.id)) return;
     if(m.do==='give' && m.it && ITEMS[m.it]){ const n=Math.max(1,Math.min(999,m.n|0||1)); invAdd(m.it,n); refreshHotbar();
       if(typeof flashName==='function')flashName('received '+n+'x '+(ITEMS[m.it].name||m.it));
-      if(typeof cmdEcho==='function')cmdEcho('received '+n+'x '+m.it+' from another player','#cfe0b8'); } }
+      if(typeof cmdEcho==='function')cmdEcho('received '+n+'x '+m.it+' from another player','#cfe0b8'); }
+    // /tp AND /kill OVER THE WIRE. Both have to happen on the target's own client for the same reason /give does: a position and a
+    // death live in their simulation, not the sender's. px/py/pz rather than x/y/z out of the same caution as `it` above -- the
+    // relay stamps msg.id with the sender's numeric id, so a payload field must not collide with anything it writes.
+    else if(m.do==='tp' && isFinite(m.px) && isFinite(m.py) && isFinite(m.pz)){ player.pos.set(+m.px,+m.py,+m.pz); player.vel.set(0,0,0);
+      if(typeof cmdEcho==='function')cmdEcho('teleported by another player','#cfe0b8'); }
+    else if(m.do==='kill'){ if(!player.dead && typeof damage==='function'){ player.creative=false; damage(999,'the console','blast'); }
+      if(typeof cmdEcho==='function')cmdEcho('killed by the console','#e0b8b8'); } }
   else if(m.t==='dmg'){ if(m.to===NET.id && !player.dead && typeof damage==='function') damage(m.v||1, m.c||'struck down', m.k); }           // an authority (the boss / a peer) dealt damage to ME. m.k carries the kind so a remote blast is not shield-blockable either; absent = direct, which is what a peer's melee is
   else if(m.t==='bosscine'){ if(typeof bossCutscene==='function') bossCutscene(m.x,m.y,m.z,false); }                                          // a peer began the summon → every screen gets the rip + prebuilds the rig inside its own flash
   else if(m.t==='bossdead'){ wretch.boss=false; if(typeof applyBossVisual==='function')applyBossVisual(false);                                // the MEGA-WRETCH fell — tear the seraph down on every screen
@@ -10582,7 +10589,17 @@ const CMDS={
         const x=player.pos.x-Math.sin(player.yaw)*d+Math.cos(a2)*(n>1?1.8:0), z=player.pos.z-Math.cos(player.yaw)*d+Math.sin(a2)*(n>1?1.8:0);
         try{ spawnFromEgg(id,{x:Math.floor(x),y:Math.floor(groundYAt(x,z)),z:Math.floor(z)}); made++; }catch(e){ return 'could not spawn '+id+': '+(e&&e.message||e); } }
       return 'spawned '+made+'x '+id+' about '+d.toFixed(0)+' blocks ahead'; } },
-  tp:{ usage:'/tp <x> <y> <z> | /tp <player>', run:(a)=>{ if(!a.length) return CMDS.tp.usage;
+  tp:{ usage:'/tp <x> <y> <z> | /tp <player> | /tp <target> <x> <y> <z>', run:(a)=>{ if(!a.length) return CMDS.tp.usage;
+      // MOVING SOMEBODY ELSE. Four arguments with a target in front: the coordinates go to that player's client, because a
+      // position only exists there. Checked before the three-number form so that /tp bob 10 70 10 is not read as coordinates.
+      if(a.length>=4 && isFinite(+a[1]) && isFinite(+a[2]) && isFinite(+a[3])){
+        const who=_cmdResolveTargets(a[0]); if(!who.length) return 'no such player: '+a[0];
+        const x=+a[1], y=+a[2], z=+a[3]; let mine=0, sent=0;
+        for(const p of who){ if(p.self){ player.pos.set(x,y,z); player.vel.set(0,0,0); mine=1; }
+          else if(NET.on && typeof netSend==='function'){ netSend({t:'cmd',to:p.id,do:'tp',px:x,py:y,pz:z}); sent++; } }
+        if(!mine && !sent) return 'nobody to teleport';
+        return 'teleported '+(mine?'you':'')+(mine&&sent?' and ':'')+(sent?(sent+' other player'+(sent>1?'s':'')):'')
+               +' to '+x.toFixed(1)+' '+y.toFixed(1)+' '+z.toFixed(1); }
       if(a.length>=3 && isFinite(+a[0]) && isFinite(+a[1]) && isFinite(+a[2])){ player.pos.set(+a[0],+a[1],+a[2]); player.vel.set(0,0,0);
         return 'teleported to '+(+a[0]).toFixed(1)+' '+(+a[1]).toFixed(1)+' '+(+a[2]).toFixed(1); }
       const who=_cmdResolveTargets(a[0]).filter(p=>!p.self); if(!who.length) return 'no such player: '+a[0];
@@ -10597,7 +10614,14 @@ const CMDS={
   heal:{ usage:'/heal [amount]', run:(a)=>{ const n=a.length?Math.max(1,parseFloat(a[0])||20):20;
       player.health=Math.min(20,player.health+n); player.hunger=20; player.water=20; player.dead=false;
       return 'healed to '+player.health.toFixed(0)+'/20, hunger and thirst full'; } },
-  kill:{ usage:'/kill [self|mobs]', run:(a)=>{ const w=String(a[0]||'self').toLowerCase();
+  kill:{ usage:'/kill [self|mobs|@a]', run:(a)=>{ const w=String(a[0]||'self').toLowerCase();
+      // @a IS EVERY PLAYER, and it had no branch at all: `all` meant mobs, so /kill @a fell through to killing only the sender.
+      // Each peer dies on its own client; the sender dies here, last, so a dead sender cannot stop the messages going out.
+      if(w==='@a'||w==='players'){ let sent=0;
+        for(const p of _cmdResolveTargets('@a')){ if(p.self) continue;
+          if(NET.on && typeof netSend==='function'){ netSend({t:'cmd',to:p.id,do:'kill'}); sent++; } }
+        if(typeof damage==='function'){ player.creative=false; damage(999,'the console','blast'); }
+        return 'killed you'+(sent?(' and '+sent+' other player'+(sent>1?'s':'')):''); }
       if(w==='mobs'||w==='all'){ let n=0; if(typeof animals!=='undefined'&&typeof killAnimal==='function')
           for(const an of animals.slice()){ if(!an.dead){ try{ killAnimal(an); n++; }catch(e){} } } return 'killed '+n+' creature'+(n===1?'':'s'); }
       if(typeof damage==='function'){ player.creative=false; damage(999,'the console',' blast'.trim()); return 'you died'; }
@@ -19839,7 +19863,7 @@ window.__hc={
   // against the edge of its own array. Done in one hook because the alternative is ~10^6 round trips to the harness.
   // walls4 is the violation Ben reports; walls3 is reported beside it because a pit with one non-solid wall (another
   // plant, a slab, a fence) looks identical to a person and would slip past a rule that demands all four.
-  pitScan(){ try{ const out={ chunks:0, crossCells:0, walls4:0, walls3:0, walls2:0, walls1:0, buried:0, edgeWalls4:0, noHasCross:0, samples:[] };
+  pitScan(){ try{ const out={ chunks:0, crossCells:0, walls4:0, walls3:0, walls2:0, walls1:0, buried:0, edgeWalls4:0, noHasCross:0, samples:[], samples2:[] };
       for(const c of world.values()){ if(!c||!c.blocks||!c.generated) continue; out.chunks++;
         let sawCross=false;
         for(let lz=0;lz<CK;lz++)for(let lx=0;lx<CK;lx++)for(let y=1;y<WH-1;y++){
@@ -19856,7 +19880,15 @@ window.__hc={
           if(walls===4){ out.walls4++; if(edge) out.edgeWalls4++;
             if(out.samples.length<12) out.samples.push({kind:'pit',x:wx,y,z:wz,block:b,edge,hasCross:!!c.hasCross}); }
           else if(walls===3){ out.walls3++; if(out.samples.length<12) out.samples.push({kind:'pit3',x:wx,y,z:wz,block:b,edge}); }
-          else if(walls===2){ out.walls2++; }     // a slot or an inside corner — removed since Ben set the bar at walls>=2
+          else if(walls===2){ out.walls2++;      // a slot or an inside corner — removed since Ben set the bar at walls>=2
+            // SAMPLED, because a bare count cannot say WHY one survived. The interesting facts are whether it sits on a
+            // chunk seam (the invariant reads a missing neighbour as "no wall" on purpose) and what the two walls are made
+            // of — a plant beside a model block or a leaf is a different bug from one beside raised dirt.
+            if(out.samples2.length<12){ const w=[];
+              for(let i=0;i<4;i++){ const dx=(i===0)?1:(i===1)?-1:0, dz=(i===2)?1:(i===3)?-1:0;
+                const b2=getBlock(wx+dx,y,wz+dz); if(b2 && isSolid[b2] && blockCat[b2]!=='cross') w.push({d:[dx,dz], b:b2, cat:blockCat[b2]}); }
+              const up=c.blocks[idx(lx,y+1,lz)];
+              out.samples2.push({x:wx,y,z:wz,block:b,edge,lx,lz,walls:w,above:up||0,hasCross:!!c.hasCross}); } }
           else if(walls===1){ out.walls1++; } }   // leaning on one face — kept, and the reason walls>0 was too broad
         if(sawCross && !c.hasCross) out.noHasCross++;   // the invariant is gated on hasCross: a chunk with plants and a false flag is skipped entirely
       }
