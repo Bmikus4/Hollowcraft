@@ -71,10 +71,10 @@ function tone(file, crop){
       const s=await page.evaluate(`__hc.sunDir()`);
       if(!(s.elevDeg>0.5 && s.elevDeg<9)) continue;
       await page.evaluate(`__hc.cam({yaw:${s.yawToSun}, pitch:0.03})`); await sleep(450);
-      // THE SKY IS BAKED INTO A CUBEMAP AND THE BAKE IS NOT IMMEDIATE. With a 450ms settle the first samples after a clock jump
-      // came back with the PREVIOUS sky still in the background: the dawn rows read a sky of rgb(49,40,31) against dusk's
-      // rgb(220,189,167) at the same sun elevation, which is impossible in a world whose sky is a function of elevation alone —
-      // and it showed up as a 0.09 dawn "gap" while the fog colour either side of it was identical to two digits.
+      // A LONG SETTLE, but NOT for the reason first written here. That comment blamed a stale sky cubemap; the cubemap path is
+      // opt-in behind ?skycube and off, so it was never the explanation. The dawn rows read a sky of rgb(49,40,31) against dusk's
+      // rgb(220,189,167) at the same sun elevation because the crop was sampling a HILLSIDE, which is what the vantage change
+      // below fixed. The settle is kept because the clock has to be re-pinned either side of a shot anyway (§7).
       await page.evaluate(`__hc.setTime(${t})`); await sleep(1700); await page.evaluate(`__hc.setTime(${t})`); await sleep(300);
       const f=path.join(OUT,`dawnfog-t${String(t).replace('.','')}.png`);
       await page.screenshot({path:f});

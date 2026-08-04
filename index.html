@@ -2993,7 +2993,14 @@ const skyMat = new THREE.ShaderMaterial({
         }
       }
       col = mix(col, cloudCol, cloud);
-      add *= (1.0-cloud*0.92);                                                        // a cloud covers the stars and discs behind it
+      // A CLOUD ACTUALLY HIDES WHAT IS BEHIND IT (Ben 08-04: "when clouds cross the sun the sun should hide itself"). This was
+      // (1.0 - cloud*0.92), which sounds like near-total occlusion and is not: the sun disc is added at FORTY times white, so the
+      // 8% left over is still 3.2x white — a blazing disc straight through solid cover, and the bloom pass then spreads it.
+      // A power curve instead, so thin wisps still let the sun glow through them (that is most of what a sky does) while thick
+      // cover genuinely puts it out: at cloud 0.5 this leaves 0.29 where the old line left 0.54, and at 0.9 it leaves 0.014
+      // against 0.17 — a factor of twelve where it matters. Same line governs the moon and the stars, which want the same
+      // treatment for the same reason.
+      add *= pow(max(0.0, 1.0-cloud), 1.8);
       col *= uSkyDark;   // SKYBOX BACKGROUND DARKER (Ben 07-27) - the gradient knocked down; the lights in add are untouched
       // VALUE CONVERGENCE AT THE SEA LINE (Ben 07-28: "the night skybox fading into the water"). uHorizonBlend is built in
       // updateHorizon to be EXACTLY what the water fogs to at its far edge - that is its whole purpose. It was then
@@ -5173,7 +5180,7 @@ function assignPointLights(){
     // IN THIRD PERSON THE LIGHT COMES OFF THE BODY'S HAND (Ben 08-04: "should render from the hand"). Camera-relative is right
     // in first person -- the eye IS between the hands -- but with the camera on a boom behind you it put the glow three and a
     // half blocks back, so the torch you were holding lit the air behind your head and left you in your own shadow.
-    if(_tpsOn && _tpsBody && _tpsBody.group.visible) heldLight.position.copy(_tpsHandW);
+    if(_tpsAct && _tpsBody && _tpsBody.group.visible) heldLight.position.copy(_tpsHandW);
     else heldLight.position.set(camera.position.x + _m[0]*0.34*_side, camera.position.y-0.15 + _m[1]*0.34*_side, camera.position.z + _m[2]*0.34*_side);   // NO held light while grabbed — it blows out the throat jumpscare with glare
     const strong=hl>=15; heldLight.color.setHex(strong?0xff9838:0xff6a22);
     heldLight.intensity=(strong?58:46)*(1+Math.sin(t*11)*0.07+Math.sin(t*1.9)*0.05); heldLight.distance=strong?32:26; heldLight.decay=1.3;
@@ -5657,6 +5664,15 @@ function physics(dt){
   const landed = p.onGround && !p._wasGround;
   p.landT=Math.max(0,(p.landT||0)-dt*3.0);   // decays BEFORE this frame's landing can set it, or the impact would be eaten on arrival
   if(p._landCorr) p._landCorr = (p._landCorr>0.0015) ? p._landCorr*Math.exp(-dt*13) : 0;   // the eye catches up with the body in ~0.1 s
+  // THE EYE IS ON A SPRING, NOT A SCRIPTED DIP (Ben 08-04: "when i land on the ground I snap upward"). The first version set a
+  // dip DEPTH the moment you landed, which moves the camera by that whole amount in one frame — a jolt down, then a smooth rise
+  // back, which is exactly the snap being reported. An impact does not teleport a head; it gives it downward VELOCITY. So the
+  // landing kicks _eyeVel and a critically-damped spring carries the eye down and back: position stays continuous by construction,
+  // and there is no frame at which the camera moves more than its velocity allows.
+  { const k=150, c=24;                                                   // ~0.35 s to settle, no overshoot worth seeing
+    p._eyeVel = (p._eyeVel||0) + (-k*(p._eyeOff||0) - c*(p._eyeVel||0))*dt;
+    p._eyeOff = (p._eyeOff||0) + p._eyeVel*dt;
+    if(Math.abs(p._eyeOff)<1e-4 && Math.abs(p._eyeVel)<1e-3){ p._eyeOff=0; p._eyeVel=0; } }
   if(landed && p._impactVy!=null){ const spd=-p._impactVy;
     const wet = p.inWater || getBlock(Math.floor(p.pos.x),Math.floor(p.pos.y),Math.floor(p.pos.z))===WATER || getBlock(Math.floor(p.pos.x),Math.floor(p.pos.y+0.9),Math.floor(p.pos.z))===WATER;
     if(spd>16 && !wet) damage(Math.min(20,Math.round((spd-14)*1.1)),'the fall broke you','env');
@@ -5666,7 +5682,8 @@ function physics(dt){
     // The knee-give starts at a plain jump's landing speed (~8) rather than only on a real drop, because a jump that lands with
     // no give at all is the other half of what reads as a snap. Speed is only bled off above 7, as before.
     if(spd>7 && !wet){ const f=Math.max(0.55, 1-(spd-7)*0.045); p.vel.x*=f; p.vel.z*=f; }
-    if(spd>4 && !wet) p.landT=Math.min(0.34,(spd-4)*0.026); }
+    if(spd>3 && !wet){ p.landT=Math.min(0.34,(spd-4)*0.026);
+      p._eyeVel = (p._eyeVel||0) - Math.min(2.4,(spd-3)*0.19); } }   // the impact's own velocity, handed to the spring above
   p._impactVy=null;
   p._wasGround=p.onGround;
   if(p.pos.y<-24 && !p.fly){ damage(4,'the dark below','env'); respawn(); }
@@ -7405,11 +7422,30 @@ function _clipSolidAt(x,y,z){ const b=getBlock(Math.floor(x),Math.floor(y),Math.
 // creature in open ground, and they were the feet. A part that is genuinely inside the world has solid ABOVE it as well; a foot
 // pressed into the ground has open air over it. That one extra sample is the whole difference.
 function _clipBuried(v){ return _clipSolidAt(v.x,v.y,v.z) && _clipSolidAt(v.x,v.y+0.55,v.z); }
+// THE CENTRE IS NOT THE PART (Ben 08-04: "i can still sort of see creatures bodies through things"). Testing one point per mesh
+// only catches a part that is ENTIRELY swallowed: an arm lying half through a wall keeps its centre in open air, stays drawn, and
+// its far half shows on the other side — which is exactly the sliver still visible. The test now walks the mesh's own bounding
+// box: centre first (the common case, and it exits early), then the eight corners. Any one of them buried hides the whole part.
+//
+// It is deliberately eager. A limb that is a third of the way into stone is not something you should see a third of; the parts are
+// small and jointed, so losing one whole reads as the limb ending at the surface, while keeping it reads as the wall being made of
+// glass. The corners are transformed by the mesh's own matrix rather than by a world Box3, because a rotated box's AABB is much
+// larger than the part and would hide limbs that are nowhere near the wall.
+const _clipC=new THREE.Vector3();
+function _meshBuried(o){
+  o.getWorldPosition(_clipV); if(_clipBuried(_clipV)) return true;
+  const g=o.geometry; if(!g) return false;
+  if(!g.boundingBox) g.computeBoundingBox();
+  const bb=g.boundingBox; if(!bb) return false;
+  o.updateWorldMatrix(true,false);
+  for(let i=0;i<8;i++){
+    _clipC.set(i&1?bb.max.x:bb.min.x, i&2?bb.max.y:bb.min.y, i&4?bb.max.z:bb.min.z).applyMatrix4(o.matrixWorld);
+    if(_clipBuried(_clipC)) return true; }
+  return false; }
 function clipRig(root, restoreOnly){ if(!root) return 0; let n=0;
   root.traverse(o=>{ if(!o.isMesh) return;
     if(!o.visible && !o.userData._cclip) return;                                  // the game hid this one — not ours to touch
-    if(!restoreOnly){ o.getWorldPosition(_clipV);
-      if(_clipBuried(_clipV)){ if(o.visible){ o.visible=false; o.userData._cclip=1; n++; } return; } }
+    if(!restoreOnly && _meshBuried(o)){ if(o.visible){ o.visible=false; o.userData._cclip=1; n++; } return; }
     if(o.userData._cclip){ o.visible=true; o.userData._cclip=0; } });
   return n; }
 function updateCreatureClip(){ if(_CLIP_OFF || player.grabbed) return;
@@ -8249,7 +8285,7 @@ function updateCamera(dt){
   const swim=p.inWater;
   // The landing dip rides on the bob because it is the same quantity — where the eye is relative to the body. One sine hump over
 //  the life of p.landT: the knees give, then push back. See the landing block in physics for where landT comes from.
-  const landDip = p.landT>0 ? Math.sin(Math.min(1,p.landT/0.34)*Math.PI)*0.20 : 0;
+  const landDip = -(p._eyeOff||0);   // the spring's displacement IS the dip; negative _eyeOff = the head has dropped
   const bobY=Math.sin(p.bob*2)*(swim?0.08:0.045)*clamp((speed+(swim?1.6:0))/6,0,1) + (swim?Math.sin(clock.elapsedTime*1.15)*0.04:0) - landDip - (p._landCorr||0);   // swim stroke + a gentle buoyant bob even at rest, minus the landing correction the body just took
   const bobX=Math.cos(p.bob)*(swim?0.05:0.03)*clamp((speed+(swim?1.0:0))/6,0,1);
   const swimRoll=swim?Math.sin(p.bob)*0.025*clamp(speed/3,0.4,1):0;   // slight body roll with each stroke
@@ -8263,13 +8299,34 @@ function updateCamera(dt){
   camera.position.set(p.pos.x+right.x*bobX, p.pos.y+EYE+bobY, p.pos.z+right.z*bobX);
   // ---- F4 THIRD PERSON (Ben 07-27) — deliberately ROUGH tracking: the boom lags the eye instead of being welded to it,
   //      so the camera swings and settles behind you rather than snapping. Pulled in if a wall is in the way.
-  if(_tpsOn){ updateTpsCamera(dt, p);
+  _tpsAct = _tpsOn && !_tpsUpdateIndoors(dt);   // the player's preference, minus the indoor override
+  if(_tpsAct){ updateTpsCamera(dt, p);
     _tpsHideHands(true);                                                              // no held viewmodel floating in the air behind you
   } else if(!player.grabbed) _tpsHideHands(false);
   globalU.uCamPos.value.copy(camera.position);
   updateTpsBody(dt);
 }
 let _tpsOn=false; const _TPS_D=3.6, _tpsPos=new THREE.Vector3();
+// INDOORS IS FIRST PERSON (Ben 08-04: "force first person perspective inside of buildings"). A 3.6 m boom in a cabin spends its
+// life jammed against a wall or looking through one, and the close-in fallback only makes it a shoulder cam in a corridor. So the
+// view SWITCHES rather than shortens, and _tpsOn stays exactly as the player left it: this is a live override, not a mode change,
+// so stepping outside puts you straight back where F3 had you.
+//
+// TWO GUARDS AGAINST FLICKER. The overhead test ignores leaves, or every tree in the wood would read as a roof; and it is held for
+// a moment either way (0.2 s to go inside, 0.6 s to come back out) so a doorway, an overhang or a low branch cannot strobe the
+// camera. Coming out is slower than going in on purpose: false-positive first person is survivable, a flickering camera is not.
+let _tpsAct=false, _tpsInT=0, _tpsIndoors=false;
+function _tpsRoofOpaque(p){ const x=p.pos.x, z=p.pos.z;
+  for(let dy=2.1; dy<=5.1; dy+=0.5){ const b=getBlock(Math.floor(x),Math.floor(p.pos.y+dy),Math.floor(z));
+    if(b===AIR||b===WATER) continue;
+    if(b===BID.leaves||b===BID.leaves_core) continue;                     // a canopy is not a ceiling
+    if(isOpaque[b]) return true; }
+  return false; }
+function _tpsUpdateIndoors(dt){ const r=_tpsRoofOpaque(player);
+  if(r===_tpsIndoors){ _tpsInT=0; return _tpsIndoors; }
+  _tpsInT+=dt;
+  if(_tpsInT >= (r?0.2:0.6)){ _tpsIndoors=r; _tpsInT=0; }
+  return _tpsIndoors; }
 // =====================================================================
 //  THIRD-PERSON BOOM (Ben 08-04: "smoother but better tracking, less sway" + "should go around blocks/structures never
 //  inside, if the player is inside a structure get close to them")
@@ -8370,8 +8427,8 @@ function tpsBody(){ if(_tpsBody) return _tpsBody;
     scene.add(P.group); _tpsBody=P; applyWorn(P); }catch(e){ _tpsBody=null; }
   return _tpsBody; }
 function updateTpsBody(dt){
-  const P=_tpsOn?tpsBody():_tpsBody; if(!P) return;
-  const show=_tpsOn && !player.dead && !player.grabbed;
+  const P=_tpsAct?tpsBody():_tpsBody; if(!P) return;
+  const show=_tpsAct && !player.dead && !player.grabbed;
   if(P.group.visible!==show){ P.group.visible=show; if(show) applyWorn(P); }   // catch up on anything equipped while it was hidden
   if(!show) return;
   P.group.position.set(player.pos.x, player.pos.y, player.pos.z);
@@ -8899,7 +8956,7 @@ function loop(){ try{
   // and sets view.group.visible=true from four separate poses of its own, so hiding the hands when third person was switched on
   // lasted exactly until that ran: the probe read main/off/arm all visible with the body drawn behind them. Deciding it
   // immediately before the draw is the only point no later writer can undo.
-  if(typeof _tpsHideHands==='function') _tpsHideHands(_tpsOn && !player.grabbed);
+  if(typeof _tpsHideHands==='function') _tpsHideHands(_tpsAct && !player.grabbed);
   // THE HORRIFIC WRETCH's drift loop writes render targets the scene below then samples, so it steps here — before the
   // world pass, and after every camera update this frame.
   if(wretchExtra.length){ T.begin(TID.drift); try{ stepHorrificDrift(dt); }catch(e){ if(!window._hwErr){ window._hwErr=String(e&&e.stack||e); console.error('[horrific] drift step crashed — caught so the game keeps running:', e); } } T.end(TID.drift); }
@@ -12662,6 +12719,28 @@ function _viewLocalBox(root){ const box=new THREE.Box3(), v=new THREE.Vector3(),
     const b=o.geometry.boundingBox; if(!b) return; m.multiplyMatrices(inv,o.matrixWorld);
     for(let i=0;i<8;i++){ v.set((i&1)?b.max.x:b.min.x,(i&2)?b.max.y:b.min.y,(i&4)?b.max.z:b.min.z).applyMatrix4(m); box.expandByPoint(v); } });
   return box; }
+// THE BLOCK-OUT TILT PIVOTS AT THE BUTT, and that is the whole difference between ac03f95 and a muzzle that is actually out
+// of the wall. A viewmodel group's origin sits near the RECEIVER, so rotating there swings a 0.58 m barrel up AND FORWARD:
+// at 1.35 rad the tip travelled further into the block than the retraction pulled it out, which is why the probe still
+// reported muzzleInBlock true at full press. Turning about the rearmost point instead sweeps only the muzzle and leaves the
+// butt where the pose put it — the motion of a man standing a rifle up against his own chest.
+// Done as "note where the butt would go, then put it back", so no pivot object is inserted into the hierarchy and the poses
+// (which are Ben's, settled by eye) keep their authored origins. One function, so the gun, any other held item and the
+// offhand all bend by the same arithmetic — the alternative was three copies of it drifting apart, exactly what the three
+// duplicated sight-sway branches cost.
+// CALLERS MUST REWRITE THE POSE EVERY FRAME: this ADDS an offset, so a component nothing else assigns would accumulate.
+const _boV=new THREE.Vector3(), _boW=new THREE.Vector3(), _boQ=new THREE.Quaternion();
+function blockOutHand(v, bend, tilt, pull){
+  const g=v.group, m=v.mesh; if(!m || !(bend>0.002)) return 0;
+  let bb=m.userData._vbb; if(!bb){ bb=_viewLocalBox(m); m.userData._vbb=bb; }
+  m.updateMatrix();
+  _boV.set((bb.min.x+bb.max.x)*0.5,(bb.min.y+bb.max.y)*0.5,bb.max.z).applyMatrix4(m.matrix);   // the butt = rearmost point, since a held item points down -z
+  _boW.copy(_boV).applyQuaternion(_boQ.setFromEuler(g.rotation));                             // where the butt sits untilted…
+  const a=bend*tilt; g.rotation.x+=a;
+  _boV.applyQuaternion(_boQ.setFromEuler(g.rotation));                                        // …and where the tilt alone would throw it
+  g.position.add(_boW.sub(_boV));                                                             // put it back — the rotation now turns about it
+  g.position.z+=bend*pull;                                                                    // the item still retracts toward the chest as well
+  return a; }
 // shared MUZZLE-FLASH sprite: a canvas-drawn radial starburst (bright core + orange spikes, transparent bg) on a camera-facing plane — reads as a real flash, not a ball
 let _muzzleTex=null;
 function muzzleFlashTex(){ if(_muzzleTex)return _muzzleTex; const c=document.createElement('canvas'); c.width=c.height=64; const x=c.getContext('2d'); x.translate(32,32);
@@ -13290,7 +13369,7 @@ function setOffItem(id){ if(offView.id===id)return; offView.id=id;
       m.traverse(o=>{ if(o.isMesh&&o.material){ const L=Array.isArray(o.material)?o.material:[o.material]; for(const mm of L) mm.side=THREE.DoubleSide; } });
       const mir=new THREE.Group(); mir.scale.x=-1; mir.add(m);
       offView.group.position.set(-0.34,-0.14,-0.62); offView.group.rotation.set(0,0,0);   // the fist branch of updateView, x negated and lifted twice (Ben: "a little too low", then "too low")
-      offView.baseY=-0.14; offView.baseZ=-0.62; offView.baseRX=0; offView.mesh=mir; offView.group.add(mir); applyViewFog(mir);
+      offView.baseX=-0.34; offView.baseY=-0.14; offView.baseZ=-0.62; offView.baseRX=0; offView.mesh=mir; offView.group.add(mir); applyViewFog(mir);
       return; }
     const _bd = ITEMS[id].block!=null ? B[ITEMS[id].block] : null;
     const _fit = ITEMS[id].gun ? _gunOffFit
@@ -13484,7 +13563,7 @@ function updateCrosshair(dt, isGun){
   // sights to the face"). view.adsT IS that raise — the same 0..1 curve the viewmodel's cheek-weld interpolates on — so blending
   // by it directly, OUTSIDE the easing above, makes the two identical by construction rather than by two matched constants.
   let d=_xhCur;
-  if(ads>0.01) d = d*(1-ads) + (_tpsOn?XH_AIM_TPS:XH_REST*0.5)*ads;
+  if(ads>0.01) d = d*(1-ads) + (_tpsAct?XH_AIM_TPS:XH_REST*0.5)*ads;
   d += _xhFire*14;                                   // a gunshot blooms it AFTER the aim shrink, so aiming never hides recoil
   // THE RING IS THE SPREAD, NOT A PICTURE OF IT (Ben 08-04: "when jumping reticle aim should be less accurate"). fireGun reads
   // this and scatters the shot inside exactly the circle you are looking at, so the HUD cannot lie about where a bullet may go.
@@ -13493,7 +13572,7 @@ function updateCrosshair(dt, isGun){
   const px=Math.round(d);
   if(px!==_xhLastD){ _xhLastD=px; xh.style.width=px+'px'; xh.style.height=px+'px'; }
   // Third person keeps its ring at full strength however far the sight is raised; first person hands over to the optic.
-  const op = _tpsOn ? 0.85 : 0.85*(1-clamp((ads-0.3)/0.4,0,1));
+  const op = _tpsAct ? 0.85 : 0.85*(1-clamp((ads-0.3)/0.4,0,1));
   if(Math.abs(op-_xhLastOp)>0.01){ _xhLastOp=op; xh.style.opacity=op.toFixed(2); }
 }
 function updateView(dt){ updateRecoil(dt);                                          // camera recoil integrates every frame (kick + smooth recovery)
@@ -13529,6 +13608,27 @@ function updateView(dt){ updateRecoil(dt);                                      
   view._rlOff=false;
   if(view.reloadT>0 && view.reloadDur && armor[EQ_OFF] && ITEMS[armor[EQ_OFF].id] && ITEMS[armor[EQ_OFF].id].gun && gunKey(armor[EQ_OFF])===view.reloadKey){
     const _u=clamp(1-view.reloadT/view.reloadDur,0,1); offView.group.position.y-=Math.sin(_u*Math.PI)*0.09; view._rlOff=true; }
+  // WALL BEND / BLOCK-OUT PROBE (#62) — probe ahead; if a block is close, whatever is in your hands pulls back and stands up
+  // so a long barrel cannot clip through it. THREE HEIGHTS, not one: a single ray at eye level missed a waist-high ledge and
+  // the lower half of a doorframe entirely, so the gun happily buried itself in things the probe could not see.
+  // IT RUNS FOR EVERY HELD ITEM, not just guns (Ben 08-04: "any held item, and for offhand items"), which is why it sits out
+  // here above the isGun branch: one proximity test per frame, one eased signal, and the right hand, the left hand and a
+  // pickaxe can never disagree about whether you are against a wall.
+  { const fx=-Math.sin(player.yaw), fz=-Math.cos(player.yaw); let near=1.6;
+    for(const hy of [EYE, EYE-0.55, EYE+0.25]){
+      for(let d=0.5; d<=1.55; d+=0.22){ if(solidAt(player.pos.x+fx*d, player.pos.y+hy, player.pos.z+fz*d)){ if(d<near)near=d; break; } } }
+    const bt=clamp((1.5-near)/1.0,0,1); view.gunBend=(view.gunBend||0)+(bt-(view.gunBend||0))*Math.min(1,dt*10);
+    // THE CLICK IS LATCHED, AND IT NEEDS HYSTERESIS TO BE (Ben: a mechanical click, once per block-out, not per frame).
+    // A bare threshold on this signal is exactly the mistake the Backrooms portal made with a frustum edge: it flapped
+    // while turning and took the median frame from 8.79 to 12.74 ms with a 243 ms worst frame. Two different distances
+    // mean the latch cannot oscillate — it takes 1.00 to set and has to come back out past 1.22 to clear, so strafing
+    // along a wall through several probe steps cannot chatter. Never collapse these to one number.
+    // An EMPTY FIST is not a block-out: there is nothing to push through the wall, and clicking as you brush past one is noise.
+    const wasOut=!!view._blockOut, holding=(view.id!=null)||!!offView.mesh;
+    if(!wasOut && near<=BLOCKOUT_IN && holding) view._blockOut=true;
+    else if(wasOut && (near>=BLOCKOUT_OUT || !holding)) view._blockOut=false;
+    if(view._blockOut && !wasOut){ view._blockOutN=(view._blockOutN||0)+1;   // counted so a harness can prove it fired ONCE
+      if(typeof playSample==='function') playSample('click', null, 0.55); } }
   const gunKind=ITEMS[view.id]&&ITEMS[view.id].gun, isGun=!!gunKind, isBolt=gunKind==='bolt';
   // bolt cycle animation + fire-gating clock
   view.boltT=Math.max(0,(view.boltT||0)-dt); view.gunKick=Math.max(0,(view.gunKick||0)-dt*7);   // viewmodel kick decays (every gun bucks against the shoulder on fire)
@@ -13555,29 +13655,7 @@ function updateView(dt){ updateRecoil(dt);                                      
     // smoothed STRAFE SWAY — signed lateral/forward velocity relative to facing, eased every frame so the gun drifts instead of snapping
     const latV=player.vel.x*Math.cos(player.yaw)+player.vel.z*(-Math.sin(player.yaw));   // + = strafing right
     view.gunLat=(view.gunLat||0)+((clamp(latV,-6,6)/6)-(view.gunLat||0))*Math.min(1,dt*5);   // eased smoother
-    // WALL BEND — probe straight ahead; if a block is close, pull the muzzle back toward the player and tilt it up so it never clips through
-    // WALL BEND — probe ahead; if a block is close, pull the muzzle back AND rotate it up so a long barrel cannot clip through.
-    // THREE HEIGHTS, not one. A single ray at eye level missed a waist-high ledge and the lower half of a doorframe entirely,
-    // so the gun happily buried itself in things the probe could not see. Nearest hit of the three wins.
-    { const fx=-Math.sin(player.yaw), fz=-Math.cos(player.yaw); let near=1.6;
-      for(const hy of [EYE, EYE-0.55, EYE+0.25]){
-        for(let d=0.5; d<=1.55; d+=0.22){ if(solidAt(player.pos.x+fx*d, player.pos.y+hy, player.pos.z+fz*d)){ if(d<near)near=d; break; } } }
-      const bt=clamp((1.5-near)/1.0,0,1); view.gunBend=(view.gunBend||0)+(bt-(view.gunBend||0))*Math.min(1,dt*10);
-      // THE CLICK IS LATCHED, AND IT NEEDS HYSTERESIS TO BE (Ben: a mechanical click, once per block-out, not per frame).
-      // A bare threshold on this signal is exactly the mistake the Backrooms portal made with a frustum edge: it flapped
-      // while turning and took the median frame from 8.79 to 12.74 ms with a 243 ms worst frame. Two different distances
-      // mean the latch cannot oscillate — it takes 0.62 to set and has to come back out past 0.86 to clear, so strafing
-      // along a wall through several probe steps cannot chatter. Never collapse these to one number.
-      const wasOut=!!view._blockOut;
-      if(!wasOut && near<=BLOCKOUT_IN) view._blockOut=true;
-      else if(wasOut && near>=BLOCKOUT_OUT) view._blockOut=false;
-      if(view._blockOut && !wasOut){ view._blockOutN=(view._blockOutN||0)+1;   // counted so a harness can prove it fired ONCE
-        if(typeof playSample==='function') playSample('click', null, 0.55); } }
-    // Rotate the muzzle UP toward vertical, not the ~34 degrees bend*0.6 used to give: retraction alone cannot clear a
-    // 0.58-long bolt-rifle barrel, which is the whole reason this item exists. Driven off the SAME eased signal — one
-    // proximity test in this function, never a second one that can disagree with it.
-    const bendUp=view.gunBend*BLOCKOUT_TILT;
-    const lat=view.gunLat, bend=view.gunBend;
+    const lat=view.gunLat, bend=view.gunBend;   // the wall-bend signal is probed once above, for both hands
     // ===== SCOPE RAISE-TO-EYE: adsT eases 0..1 toward the aim INTENT; it drives the pose blend, PiP fade, FOV & sensitivity =====
     const aimGoal=view.ads?1:0, prevAdsT=view.adsT||0;
     view.adsT = prevAdsT + (aimGoal-prevAdsT)*Math.min(1,dt*(view.ads?13:11));   // raise ~0.23s / lower ~0.27s — framerate-independent ease, never a snap
@@ -13618,10 +13696,12 @@ function updateView(dt){ updateRecoil(dt);                                      
     if(_swayPin){ swx=_swayPin.x; swy=_swayPin.y; }
     view.swayX=swx; view.swayY=swy;   // the final drift, published for __hc.swayMag — a probe that recomputed it would be testing its own arithmetic
     // ---- POSE BLEND: hip(ready) ↔ scope(aimed), a REAL interpolation by smoothstep(adsT) — no hard flip ----
-    const sPx=swx*SWAY_POS + lat*0.010, sPy=-0.10 + b*0.3 + swy*SWAY_POS + bend*0.05, sPz=-0.38 + bend*0.16;   // scope (cheek-weld) pose — flipped + tamed strafe lean
-    const sRx=view.swing*0.4 + swy*SWAY_ROT + bendUp*0.58, sRy=swx*SWAY_ROT + lat*0.022, sRz=-lat*0.028;
-    const hPx=0.17 + lat*0.024, hPy=-0.20+b + bend*0.06, hPz=-0.5 + bend*BLOCKOUT_PULL;   // the tilt pivots near the receiver, so a long barrel swings up AND FORWARD — measured with the muzzle still inside the block at 1.05 rad, so the retraction has to carry its share                             // hip (ready) pose — flipped + tamed strafe lean
-    const hRx=view.swing*0.55 + bendUp, hRy=0.05 + lat*0.05, hRz=-lat*0.055;
+    // NO BEND TERMS IN EITHER POSE any more: the block-out is one post-pass over the finished pose (blockOutHand, called
+    // below), because the tilt has to pivot at the butt and a pose term cannot express a rotation about a point.
+    const sPx=swx*SWAY_POS + lat*0.010, sPy=-0.10 + b*0.3 + swy*SWAY_POS, sPz=-0.38;   // scope (cheek-weld) pose — flipped + tamed strafe lean
+    const sRx=view.swing*0.4 + swy*SWAY_ROT, sRy=swx*SWAY_ROT + lat*0.022, sRz=-lat*0.028;
+    const hPx=0.17 + lat*0.024, hPy=-0.20+b, hPz=-0.5;                             // hip (ready) pose — flipped + tamed strafe lean
+    const hRx=view.swing*0.55, hRy=0.05 + lat*0.05, hRz=-lat*0.055;
     const e=adsT*adsT*(3-2*adsT);                                                                          // smoothstep so the raise starts & lands gently
     view.group.visible=true;
     let aPx=sPx,aPy=sPy,aPz=sPz,aRx=sRx,aRy=sRy,aRz=sRz;                                                   // aimed target = scope cheek-weld…
@@ -13654,6 +13734,11 @@ function updateView(dt){ updateRecoil(dt);                                      
       if(M&&M.pump){ const rack=(u>0.72? Math.sin((u-0.72)/0.28*Math.PI) : 0); M.pump.position.z=(M.pumpZ||0)+rack*0.085; }
       if(M&&M.bolt && isBolt){ const bh=M.bolt, bz=M.boltZ||0.12, open=(u<0.18? u/0.18 : u>0.86? clamp((1-u)/0.14,0,1) : 1);   // rifle: bolt held open, rounds pressed into the internal box
         bh.rotation.z=-open*1.15; bh.position.z=bz+open*0.07 + (open>0.9? Math.abs(Math.sin(u*18))*0.012 : 0); } }
+    // ---- BLOCK-OUT (#62): applied to the FINISHED pose, pivoted at the butt. It runs after gunKick and the reload dip so
+    // there is one gun in one place, and before the near-plane guard below so that guard sees where the gun really ended up.
+    // The tilt relaxes to 0.58 of full as the sight comes to the eye, exactly as the old pose terms did: a rifle already at
+    // the shoulder has less room to swing, and the retraction relaxes with it from the hip's 0.34 to 0.16.
+    view._boTilt=+blockOutHand(view, bend, BLOCKOUT_TILT*(1-0.42*e), BLOCKOUT_PULL+(0.16-BLOCKOUT_PULL)*e).toFixed(4);
     // ---- NEAR-PLANE CLEARANCE: the gun must FIT in front of the eye (Ben 08-04: "i can still see inside the shotgun's
     // stock when it is ads") ----
     // Seeing the INSIDE of a mesh means the near plane has cut through it. MEASURED across all 16 gun variants while aimed:
@@ -13699,6 +13784,11 @@ function updateView(dt){ updateRecoil(dt);                                      
     else { view.group.position.set(0.34,-0.30+b,-0.62); view.group.rotation.set(-sw*1.3,0,0); }
     if(view.mesh&&view.mesh.isMesh) view.mesh.rotation.y = (ITEMS[view.id]&&ITEMS[view.id].block!=null)?0.6:0;
     /* held flame no longer bounces — it holds a steady big flame (the flameMat still shimmers subtly on its own) */ }
+  // BLOCK-OUT FOR EVERYTHING ELSE IN THE RIGHT HAND (Ben 08-04: "any held item"). The gun branch does its own, pose-blended
+  // version above; this is the else — a torch, a pickaxe, a spear all come back and stand up against a wall. Each of those
+  // branches assigns position and rotation outright every frame, which is the precondition blockOutHand states.
+  // The empty fist is excluded on purpose: nothing to clip, and see the latch above.
+  if(!isGun && view.id!=null) blockOutHand(view, view.gunBend||0, BLOCKOUT_TILT, BLOCKOUT_PULL);
   updateCrosshair(dt, isGun);   // the ring's size and its fade under a raised sight — one owner (see below)
   // ---- HOLOGRAPHIC RETICLE — parented to the CAMERA on the true aim axis (parallax-free, exactly the point of impact;
   //      the gun/window wobble AROUND it, and recoil moves reticle+aim together). Fades in as the eye comes on-axis. ----
@@ -13709,7 +13799,7 @@ function updateView(dt){ updateRecoil(dt);                                      
   // parented to the CAMERA on the aim axis, which is the whole point of it in first person — and exactly why it survived third
   // person as a hologram floating in the middle of the screen with no sight anywhere near it. The gun is on the body's shoulder
   // over there; the crosshair ring is the aiming reference (see updateCrosshair), and it shrinks on the same raise curve.
-  { const on=isGun && isDotG && !_tpsOn && (view.adsT||0)>0.28 && !(view.reloadT>0);
+  { const on=isGun && isDotG && !_tpsAct && (view.adsT||0)>0.28 && !(view.reloadT>0);
     view.holoRet.visible=on;
     if(on){ const o=clamp(((view.adsT||0)-0.35)/0.5,0,1);                                   // alignment fade — off-axis shows glass, no floating reticle
       // IT SLIDES OFF THE GLASS, IT DOES NOT DIM (Ben 08-04: "holosight reticle fades away close to the edge of its sight, it
@@ -21866,7 +21956,7 @@ window.__hc={
   musicSkew(sec){ try{ _musicSkew=+sec||0; startGameMusic(); return this.musicProbe(); }catch(e){ return {err:String(e.message||e)}; } },
   // THE BOOM ITSELF: where it ended up, how long it is, which shoulder, and whether it is inside anything (it must never be).
   tpsCam(){ try{ const c=camera.position, P=player.pos;
-      return { on:_tpsOn, dist:+_tpsDist.toFixed(2), yawOff:+_tpsYawOff.toFixed(3), shoulder:_tpsShoulder, side:+_tpsSide.toFixed(2),
+      return { on:_tpsOn, active:_tpsAct, indoors:_tpsIndoors, dist:+_tpsDist.toFixed(2), yawOff:+_tpsYawOff.toFixed(3), shoulder:_tpsShoulder, side:+_tpsSide.toFixed(2),
         cam:[+c.x.toFixed(2),+c.y.toFixed(2),+c.z.toFixed(2)], camInSolid:_tpsSolid(c.x,c.y,c.z),
         fromPlayer:+Math.hypot(c.x-P.x,c.z-P.z).toFixed(2), roofed:_tpsRoofed(player) }; }catch(e){ return {err:String(e.message||e)}; } },
   // WHERE THE GUN IN THE THIRD-PERSON HAND IS ACTUALLY POINTING, in world space, against where you are looking. barrelPitch must
@@ -21951,7 +22041,7 @@ window.__hc={
       return { nodes:n, floating:bad.length, first:bad.slice(0,6) }; }catch(e){ return {err:String(e.message||e)}; } },
   // THIRD PERSON, end to end: is there a body, is it wearing what you are wearing, is the held item in its hand, is the hand
   // where the held light is coming from, and are all three first-person hand groups actually off.
-  tpsProbe(on){ try{ if(on!=null){ _tpsOn=!!on; _tpsReset(); }
+  tpsProbe(on){ try{ if(on!=null){ _tpsOn=!!on; _tpsAct=!!on && !_tpsRoofOpaque(player); _tpsReset(); }
       updateTpsBody(0.016); const P=_tpsBody; if(!P) return { tps:_tpsOn, body:false };
       const hw=new THREE.Vector3(); P.hand.getWorldPosition(hw);
       return { tps:_tpsOn, body:!!P.group.visible, yaw:+P.group.rotation.y.toFixed(2),
