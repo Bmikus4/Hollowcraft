@@ -182,6 +182,25 @@ judges the whole look at once instead of five times.
 **Tier 2, cheap, target <0.5 ms each, each behind its own PERF flag.**
 
 6. **Cloud shadows on the ground** (Ben's note 7). Do this FIRST of the tier — best value per ms on the list.
+   **SHIPPED** `cec8614`, `bench/assert-cloud-shadows.mjs` 6/6, 0.005–0.075 ms.
+6b. **The sun hides behind cloud, and behind blocks** (Ben 08-04) — **SHIPPED** `5691611`,
+   `bench/assert-sun-hides.mjs` 15/15. Two structural facts worth keeping, because both cost a session's
+   worth of measurement:
+   - **The visible sun disc is NOT in the sky shader.** `drawSunOverlay` draws it after the whole post chain,
+     so nothing inside skyMat — `add *= pow(1-cloud,1.8)`, uSkyDark, the horizon anchor — can touch it. Any
+     future claim about the sun's brightness or occlusion has to be made in BOTH places or it does nothing.
+   - **The cloud field compresses toward the zenith.** `cp = dir/(dir.y*0.9+0.1)` is a plane projection, so a
+     full turn of bearing at 67° up traces a fraction of an fBm cell: measured cloud spread across 12 bearings
+     is 0.374 at 24° and 0.000 at 67°. A midday sun sits on one nearly-constant value of the noise. This, not
+     the `smoothstep(0.38,0.62)` ramp, is why cover over the sun looked rare. Anything that wants weather to
+     read at the zenith has to change the projection, not the ramp.
+   - The sun's occlusion is now a CPU port of the field (`cloudCoverAt`) checked against the GPU's own value by
+     `__hc.cloudProbe()` through a `uCloudDbg` readout on a 1×1 target. `h13` is chaotic, so the port cannot be
+     bit-exact — it is averaged over the disc's five rays so an isolated divergence cannot put the sun out.
+   - **What is left of the halo is the sky's forward scatter, not the bloom.** Radial profiles: bloom off moves
+     the shoulder at 40–100 px by four luminance levels; the seed gain 40→10 cut the blown-out core threefold.
+     The next cut comes out of `pow(sd,34)` (`uSunSheen`) and `pow(sd,3)`, and `pow(sd,3)` is the reason a clear
+     day is not a flat blue lid. `bench/results/sun-halo-{before,after,minimal}.png` is Ben's call to make.
 7. **Storm cloud value/colour ramp off `oc`**, and rain streaks taking the sky's value (note 6).
 8. **Directional skylight.** `vSky` is a per-face SCALAR, so a canopy floor and a canopy wall are lit
    identically and shade has no direction. Three bands (up/horizontal/down) is a mesher attribute plus a
