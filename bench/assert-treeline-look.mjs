@@ -62,6 +62,23 @@ function silhouette(fileOn, fileOff, crop=[0.04,0.96,0.02,0.62], th=3){
            jag:+(jag/Math.max(1,n)).toFixed(3), jitter:+jitter.toFixed(2), range:Math.max(...hit)-Math.min(...hit),
            mean:+mean.toFixed(1), top };
 }
+// THE SILHOUETTE'S HEIGHT ON SCREEN, per column, by difference: the first changed row from the top and the last one from the
+// bottom. Ben 08-04: "skybox pines became extremely tall im not sure why" — the shape uniforms moved today (base 24 -> 29,
+// swing 18 -> 11), so the height has to be read as pixels rather than argued from the arithmetic.
+function heights(fileOn, fileOff, crop=[0.04,0.96,0.02,0.62], th=3){
+  const A=decodePNG(fs.readFileSync(fileOn)), B=decodePNG(fs.readFileSync(fileOff));
+  const P=A;
+  const x0=(P.w*crop[0])|0,x1=(P.w*crop[1])|0,y0=(P.h*crop[2])|0,y1=(P.h*crop[3])|0;
+  const h=[];
+  for(let x=x0;x<x1;x++){
+    let top=-1, bot=-1;
+    for(let y=y0;y<y1;y++){ const i=(y*P.w+x)*P.ch;
+      if(Math.abs(lum(A.data,i)-lum(B.data,i))>th){ if(top<0) top=y; bot=y; } }
+    if(top>=0) h.push(bot-top+1); }
+  if(!h.length) return { n:0, mean:null, p90:null };
+  const sorted=[...h].sort((a,b)=>a-b);
+  return { n:h.length, mean:+(h.reduce((a,b)=>a+b,0)/h.length).toFixed(1), p90:sorted[Math.floor(sorted.length*0.9)] };
+}
 // A LAYER'S OWN FOOTPRINT, by difference: rows changed per column, how many columns it touches at all, and the mean size of
 // the change. "Does the brown extend far enough down" is the rows figure; "is it everywhere the canopy is" is the columns
 // figure; and the mean change is what the haze acts on, which is how the fog claim gets made.
@@ -99,7 +116,11 @@ function strip(file, top, from, to, crop=[0.04,0.96,0.02,0.62]){
     await ctx.addInitScript(()=>{ try{ localStorage.setItem('hollowcraft_grain','0'); }catch(e){} });
     const page=await ctx.newPage();
     const errs=[]; page.on('pageerror',e=>{ errs.push(String(e.message||e)); console.log('  PAGEERROR:',String(e.message||e).slice(0,180)); });
-    await page.goto(base+'/index.html?debug=1&rd=8',{waitUntil:'load',timeout:120000});
+    // HC_PAGE, because index.html is edited by two live sessions: a half-written const in theirs (MON used 2000 lines before its
+    // declaration — typeof does not save you from a temporal dead zone) stops the whole module booting. Point a run at a
+    // known-good copy instead of waiting for the tree to be quiet. Leading slash added here; Git Bash rewrites a bare one.
+    const PAGE='/'+String(process.env.HC_PAGE||'index.html').replace(/^\/+/,'');
+    await page.goto(base+PAGE+'?debug=1&rd=8',{waitUntil:'load',timeout:120000});
     await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
     await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
     await page.evaluate(`__hc.lock(true); __hc.pinScene(); __hc.cmdRun('/gamemode creative'); __hc.cmdRun('/fly on');`);
@@ -139,6 +160,16 @@ function strip(file, top, from, to, crop=[0.04,0.96,0.02,0.62]){
     await page.evaluate(`__hc.treeShape({base:${shape.base}, amp:${shape.amp}, spike:${shape.spike}, crown:${shape.crown}})`);
     const [nOn,nOff]=await pair('treeline-volatile-after');
     const sO=silhouette(oOn,oOff), sN=silhouette(nOn,nOff);
+    const hO=heights(oOn,oOff), hN=heights(nOn,nOff);
+    console.log(`  HEIGHT on screen: pre-08-04 shape ${hO.mean} px/column (p90 ${hO.p90}) -> shipped ${hN.mean} px/column (p90 ${hN.p90})`);
+    check('the treeline is not taller than it was', hN.mean < hO.mean*1.15, `silhouette height ${hO.mean} -> ${hN.mean} px per column`);
+    // AND THE SKIRT IS WHAT MADE IT LOOK TALL. It hangs below the treeline's own ground line, and until the ocean band was
+    // removed this morning it hung against dark blue and could not be seen. Priced against the same measurement.
+    for(const sk of [0.22,0.12,0.06]){ await page.evaluate(`__hc.treeShape({skirt:${sk}})`);
+      const [a,b]=await pair(`treeline-skirt-${String(sk).replace('.','p')}`);
+      const h=heights(a,b);
+      console.log(`  skirt ${sk.toFixed(2)}:  silhouette ${h.mean} px/column (p90 ${h.p90})`); }
+    await page.evaluate(`__hc.treeShape({skirt:${(await page.evaluate('__hc.treeShape()')).skirt})`);
     console.log(`  BEFORE  jaggedness ${sO.jag} px/col   jitter ${sO.jitter} px   range ${sO.range} px   top mean ${sO.mean}   columns ${sO.cover}%`);
     console.log(`  AFTER   jaggedness ${sN.jag} px/col   jitter ${sN.jitter} px   range ${sN.range} px   top mean ${sN.mean}   columns ${sN.cover}%`);
     check('the peaks are less jagged', sN.jag < sO.jag*0.8, `mean column-to-column change ${sO.jag} -> ${sN.jag} px`);
