@@ -206,21 +206,20 @@ function around(file, px, py, r=26, th=40){
         const withRays=a-b, without=d-c, shaft=+(withRays-without).toFixed(2);
         console.log(`  seedMin ${seed}: the lamp adds ${withRays.toFixed(2)} with the pass on and ${without.toFixed(2)} with it off -> ${shaft} of that is SHAFT`);
         return shaft; };
-      const dOld=await streakAt(0.62);
-      const dNew=await streakAt(2.2);
-      await page.evaluate(`__hc.godrays({seedMin:2.2, on:true})`);
-      // NOT ASSERTED, AND HERE IS WHY. With the pass OFF the seed threshold cannot matter, so the two "with it off" brackets
-      // must agree — and they read 21.26 and 0.14. The frames are not comparable: placing a lantern kicks off a chunk relight
-      // and remesh that outlasts any wait short enough to keep this file usable, so the lamp's own light is still arriving in
-      // some frames and not others. That is 20-100x any shaft it could seed, so it buries the thing being measured.
-      // The seed change (0.62 -> 2.2) rests on the shader's arithmetic instead, which is checkable by reading it: this pass runs
-      // BEFORE the tonemapper, the sky beside the sun sits at 0.6-1.1 in linear HDR, a block emitter reaches a few, and the sun's
-      // disc is drawn at uSunGain = 10. What is asserted below is the half that CAN be measured cleanly — that the sun still
-      // makes rays. If this needs to be isolated properly, the way in is a scene with no block light at all and an emissive
-      // quad placed by the harness, not a lantern that relights the world around it.
-      console.log(`  NOT ASSERTED: seeded-shaft isolation is inconclusive (${dOld} vs ${dNew}); the pass-off brackets disagree, so the frames are not comparable`);
+      // SUPERSEDED, 2026-08-04, AND KEPT ONLY AS A RECORD OF WHY IT FAILED. This double difference was trying to isolate a
+      // lantern's seeded shaft by sweeping a brightness THRESHOLD, and it never converged: placing a lantern kicks off a chunk
+      // relight and remesh that outlasts any wait short enough to keep this file usable, so the lamp's own light — 20-100x any
+      // shaft it seeds — was still arriving in some frames and not others, and the two "pass off" brackets disagreed (21.26
+      // against 0.14) when they cannot.
+      // It was also chasing the wrong lever. uSeedMin is no longer a threshold at all: after Ben reported "lanterns and other
+      // lights STILL giving god rays" at 2.2, the seed became DEPTH — only a pixel with nothing in it may seed a shaft, so a
+      // lantern cannot at any brightness — and uSeedMin is the gain on a fully unoccluded line. The isolation lives in
+      // bench/assert-godray-seed.mjs, which adds a lamp instead of toggling a threshold and measures dark GROUND rather than the
+      // saturated sky beside the sun.
+      const dOld=await streakAt(0.16);
+      console.log(`  (record only, the seed is depth now: ${dOld})`);
       // …and the sun must still make them, or this is just "turn god rays off".
-      await page.evaluate(`__hc.godrays({on:true, seedMin:2.2})`); await sleep(250);
+      await page.evaluate(`__hc.godrays({on:true, seedMin:0.16})`); await sleep(250);
       const sOn=await shot('emit-rays-sun-on.png');
       await page.evaluate(`__hc.godrays({on:false})`); await sleep(250);
       const sOff=await shot('emit-rays-sun-off.png');
