@@ -3903,6 +3903,24 @@ const globalU = {
   // grade's own S-curve is why a 0.58 factor costs 61% of the value rather than 42%.
   uSkyDirUp: { value:1.06 },
   uSkyDirDn: { value:0.80 },
+  // THE SKYLIGHT CONTRAST CURVE, as a dial instead of two literals (Ben 08-05: "absolute dark shadows during day time, like
+  // hyperrealistic daytime shadows, and THEN ALSO realistic daytime darkness too" — with "you must be careful not to reintroduce
+  // our black pixel bug" in the same breath). x is the FLOOR a fully sky-occluded face keeps, y the EXPONENT on vSky.
+  // THE FLOOR IS NOT THE DIAL TO TURN. It went 0.035 -> 0.16 (07-20) -> 0.26 (07-27) on Ben's own instructions, both times because
+  // shade had become flat black holes with no form, and lowering it again is re-running a rejected experiment. The EXPONENT is the
+  // shape: raising it darkens the MIDDLE of the range — a face at half sky — and leaves both ends exactly where he signed them off,
+  // vSky 0 at the floor and vSky 1 untouched. `__hc.skyCurve({floor,exp})`, and 0.26/1.15 is the pre-dial build.
+  uSkyCurve: { value:new THREE.Vector2(0.26, 1.15) },
+  // ---- DAYTIME SHADE (Ben 08-05: "absolute dark shadows during day time ... and THEN ALSO realistic daytime darkness too") ----
+  // x is how much of its ambient a face keeps where THE SUN DOES NOT REACH IT, 1 being the pre-dial build. y is how fast a face
+  // counts as sunlit as delivered light rises. Both take effect only in daylight (scaled by uDay in the shader), so nothing Ben has
+  // signed off at night can move.
+  // WHY NOT THE SKY CURVE, which was the plan: measured, it is INERT in a wood. Sweeping its exponent 1.15 -> 3.0 moves the canopy
+  // vantage's median 11.47 -> 11.47 and its p10 5.70 -> 5.62, because leaves are deliberately not sky occluders (occludesSky, Ben
+  // 07-23) so a forest floor reads vSky ~1 and `pow(vSky,e)` is 1 at every exponent. The only thing darkening a forest floor by day
+  // is the SHADOW MAP, which lands on directDiffuse alone, and the ambient then fills the shadow back in. So shade has to be taken
+  // out of the ambient, and the shadow is already in this shader — as the direct light that did not arrive.
+  uDayShade: { value:new THREE.Vector2(1.0, 6.0) },
   // THE SCOTOPIC DIALS ARE NOT HERE. They live in _scotG / _scotH at the top of this file, as Float32Arrays, because a globalU
   // entry can only be shared by materials this file injects by hand and Ben asked for the pass on every material in the game.
   // Why each value is what it is:
@@ -3971,6 +3989,7 @@ function injectAtlas(mat, opts={}){
     sh.uniforms.uCloudScroll = globalU.uCloudScroll; sh.uniforms.uSunDirC = globalU.uSunDir;
     sh.uniforms.uChunkTint = { value:new THREE.Color(LIGHT_PAL[0][0],LIGHT_PAL[0][1],LIGHT_PAL[0][2]) };   // PER CLONE, deliberately: _chunkMat overwrites it with that chunk's own dominant light colour
     sh.uniforms.uSkyDirAmt = globalU.uSkyDirAmt; sh.uniforms.uSkyDirUp = globalU.uSkyDirUp; sh.uniforms.uSkyDirDn = globalU.uSkyDirDn;
+    sh.uniforms.uSkyCurve = globalU.uSkyCurve; sh.uniforms.uDayShade = globalU.uDayShade; sh.uniforms.uDayS = globalU.uDay;   // SHARED refs, same reason as the pair above: every chunk clone must move together or half the world keeps the old curve
     sh.uniforms.uCut = globalU.uCut;
     sh.uniforms.uWhiteTile = globalU.uWhiteTile;   // SHARED ref → the vantawhite glow survives every material clone / recompile / composer rebuild / VFX toggle (was a fresh per-material uniform that a pre-tile-index recompile could latch at -1)
     sh.vertexShader = sh.vertexShader
@@ -4010,7 +4029,7 @@ function injectAtlas(mat, opts={}){
         // HC_SCOT_ATLAS routes the GLOBAL scotopic pass (patched into three's own lights/dithering chunks at the top of this
         // file) down the atlas branch, where `_bl` and `vSky` exist. Without it the wash still runs here, on the non-atlas
         // branch, and the cave descent would never fire on the one material that can tell a cave from a field.
-        '#include <common>\n#define HC_SCOT_ATLAS 1\n'+(opts.leafTrans?'uniform float uFolTrans;\n':'')+'precision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform vec3 uChunkTint;\nuniform float uSkyDirAmt;\nuniform float uSkyDirUp;\nuniform float uSkyDirDn;\nuniform float uCut;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
+        '#include <common>\n#define HC_SCOT_ATLAS 1\n'+(opts.leafTrans?'uniform float uFolTrans;\n':'')+'precision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform vec3 uChunkTint;\nuniform float uSkyDirAmt;\nuniform float uSkyDirUp;\nuniform float uSkyDirDn;\nuniform vec2 uSkyCurve;\nuniform vec2 uDayShade;\nuniform float uDayS;\nuniform float uCut;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
       // ---- NIGHT VOLUMETRIC DARKNESS ON REAL FOLIAGE (Ben 07-29) ----
       // "volumetric darkness at night is applied to horizon pines, but not to forest trees." Correct, and the two fade to
       // different targets. The horizon backdrop fades to _uPineFog, which is scene.fog.color pulled toward storm blue and
@@ -4078,7 +4097,14 @@ function injectAtlas(mat, opts={}){
         // (grain on 0.122% isolated black against 0.067% off, both negligible, bench/tmp-grain-black.mjs). Do not re-run either
         // theory; what has not been done is locating the black pixels against `?dbg=sky` and `?albedo` at the same vantage, which
         // is what separates the bake from the texture from the grade.
-        'irradiance *= (0.26 + 0.74*pow(vSky,1.15));\n'+   // skylight CONTRAST curve — floor 0.035→0.16 (Ben 07-20) →0.26 with a softer exponent (Ben 07-27, "black pixels everywhere"): under a canopy vSky≈0, and 16% of a 0.6 hemi is indistinguishable from black, so the forest floor and any dappled shade read as solid black holes. Caves/interiors still go dark (they also lose the direct term below) and torches still dominate.
+        // ---- WHERE THE SUN DOES NOT REACH, THE AMBIENT DOES NOT EITHER (see globalU.uDayShade) ----
+        // reflectedLight.directDiffuse is already computed at this point (lights_fragment_begin runs before lights_fragment_maps) and
+        // it already carries the shadow map, the cloud mask and N·L. So "is this fragment in sun" is one dot product on light the
+        // shader has in hand — no second shadow lookup, no getShadowMask (which is not included in the lit shaders at all), no new
+        // texture. DAY ONLY, scaled by uDayS, so the whole term collapses to 1 at night and Ben's signed-off night is untouched.
+        'float _sunlit=clamp(dot(reflectedLight.directDiffuse, vec3(0.2126,0.7152,0.0722))*uDayShade.y, 0.0, 1.0);\n'+
+        'irradiance *= mix(1.0, mix(uDayShade.x, 1.0, _sunlit), clamp(uDayS,0.0,1.0));\n'+
+        'irradiance *= (uSkyCurve.x + (1.0-uSkyCurve.x)*pow(vSky,uSkyCurve.y));\n'+   // skylight CONTRAST curve, now globalU.uSkyCurve (floor, exponent) — see it, and __hc.skyCurve(). Was the literal (0.26 + 0.74*pow(vSky,1.15)): — floor 0.035→0.16 (Ben 07-20) →0.26 with a softer exponent (Ben 07-27, "black pixels everywhere"): under a canopy vSky≈0, and 16% of a 0.6 hemi is indistinguishable from black, so the forest floor and any dappled shade read as solid black holes. Caves/interiors still go dark (they also lose the direct term below) and torches still dominate.
         'vec3 _lpc = vLP + normalize(vObjN)*0.5;\n'+   // FACE→AIR offset (Ben 07-21): a face sits on the solid/air boundary; sampling there blended the solid cell (light 0) with the air cell → half-lit AND a per-cell checkerboard on lit surfaces. Push half a cell along the normal so we sample the LIT air cell at its texel centre.
         // RADIANCE, three channels: the volume carries each light's own colour premultiplied by its level (see LIGHT_PAL and
         // buildLightTexture), so a crimson shrine torch tints its alcove red and an industrial lamp reads cold, instead of every
@@ -11961,6 +11987,12 @@ function updateSubmerge(){
 //  and (HOST-authoritative) the Wretch pose + world time. Degrades to single-player if offline.
 // ===================================================================
 let playerName='';
+// PVP IS OFF UNLESS THE PAGE ASKS FOR IT (?pvp). Ben's item 23 wants a round to be able to find another player; it does not follow
+// that every co-op session should be friendly-fire. Co-op here is a Wretch hunt in the dark with four people shooting at the same
+// thing from different angles — unconditional friendly fire would make a crowded cabin a killbox and every ricochet a betrayal.
+// A query flag is opt-in per session and needs no menu, no sync and no host authority: each shooter's own page decides whether ITS
+// bullets can wound a peer, which is already how owner-authoritative damage works everywhere else in this file.
+let PVP = Q.get('pvp')!=null;
 const NET={ on:false, ws:null, id:0, host:false, hostId:0, peers:{}, avatars:{}, sendAcc:0, wAcc:0, anAcc:0, applying:false, wnet:null, anet:null, dropSeq:0, rescueT:{} };
 const avatarGroup=new THREE.Group(); scene.add(avatarGroup);
 function nameTag(text){ const cv=document.createElement('canvas'); cv.width=256; cv.height=64; const c=cv.getContext('2d');
@@ -18847,6 +18879,7 @@ function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id
 // blocks against 128 at 30). Scaling each pellet by distance as WELL would contradict the flat 25 Ben asked for, and it
 // would put back the per-range special case this function was deliberately built without.
 let _ricoLog=0, _ricoNear=99;   // QA only: how many times the last shot skipped off a wall — see __hc.ricoTest
+let _pvpLog=0, _pvpLast=null;   // QA only: peer hits this shot, and the last 'dmg' packet built — see __hc.pvpTest
 const PELLET_DMG=25, PELLET_HEAD=1.33, PELLET_SUP=6;   // a suppressed 12 gauge keeps the proportional cost it always had (3 of 12 -> 6 of 25)
 function _traceBullet(o,d,bolt,rev,sup,sg,vo){
   const animDmg=Math.max(3,(sg?PELLET_DMG:bolt?40:rev?14:10) - (sup?(sg?2:bolt?20:4):0));   // one pellet is worth 6 on an animal, so a whole shell is 54 — a deer dies to one                               // the hunting rifle hits far harder; suppressor costs the rifle -20 but light guns only -4 (the flat -20 drove AR/Python animal damage NEGATIVE — bullets healed animals)
@@ -18871,6 +18904,22 @@ function _traceBullet(o,d,bolt,rev,sup,sg,vo){
        && py>player.pos.y-0.1 && py<player.pos.y+PH+0.1){                                              // your own ricochet, coming back
       if(typeof damage==='function') damage(animDmg, 'your own ricochet found you', 'bullet');
       spawnParticles(px,py,pz,0xcc2018,10,1.8,0.5); return true; }
+    // PVP — A ROUND FINDS ANOTHER PLAYER (Ben's item 23, second half). The same capsule as the shooter's own above, tested at every
+    // step of the same segmented walk, so a teammate can be hit by a ricochet as well as by a straight shot. It sits BEFORE the
+    // terrain branch for the reason the animal tests do: whoever is first along the line takes the round.
+    //   NO GRACE SEGMENT, unlike the self-hit. A peer is never at the shooter's own origin, so segment 0 is honest here.
+    //   OWNER-AUTHORITATIVE, via the packet that already exists: the victim's page applies its OWN damage() from 'dmg', which is how
+    // the seraph's eye beam, its shards and the Mega-Wretch already wound peers. kind 'bullet' matches the local self-hit, so a
+    // shield answers a peer's round exactly as it answers your own ricochet.
+    if(PVP && NET.on) for(const _pid in NET.peers){ const _pp=NET.peers[_pid];
+      if(!_pp || _pp.dead || _pp.tied) continue;
+      if(Math.abs(px-_pp.x)<HW+0.2 && Math.abs(pz-_pp.z)<HW+0.2 && py>_pp.y-0.1 && py<_pp.y+PH+0.1){
+        const _pkt={t:'dmg',to:+_pid,v:animDmg,c:(playerName||'another player')+' shot you',k:'bullet'};
+        _pvpLog++; _pvpLast=_pkt;                                                        // QA only (see __hc.pvpTest): the packet, not a flag
+        netSend(_pkt);
+        spawnParticles(px,py,pz,0xcc2018,10,1.8,0.5);
+        if(typeof flashName==='function') flashName('hit '+(_pp.nm||('player '+_pid)));   // the shooter gets the hit marker; the victim gets the cause line
+        return true; } }
     // THE TRACER LEAVES THE MUZZLE AND CONVERGES ONTO THE LINE. vo is the barrel's own position; the hit trace still runs from the
     // eye down d, so the two are parallel and a few centimetres apart. Blending the tracer's origin from the muzzle onto the true
     // ray over the first 4 blocks means the streak starts AT the barrel and is on the bullet's line by the time it is far enough
@@ -31058,6 +31107,14 @@ window.__hc={
   ricoTest(o){ o=o||{}; try{
       const yaw=(o.yaw==null?0.30:+o.yaw);
       player.creative=false; player.dead=false; player.health=20; player.pitch=0;
+      // level:true LEVELS THE MUZZLE, NOT JUST THE CAMERA — and it is OFF by default, which is not laziness in either direction.
+      // Recoil never re-centers (Ben 07-20) and the bullet leaves down the BARREL axis (Ben 08-04), so a sweep of forty shots
+      // leaves the gun pointing degrees off the reticle. That wander is REQUIRED by the self-hit case: player.pitch set inside one
+      // probe call cannot steer the shot, because the camera quaternion the barrel axis rides is only rebuilt on the next frame —
+      // so the vertical angles that send a round back at the shooter are reached by the climb, not by the aim. It RUINS the
+      // square-hit case for the same reason: a climbed muzzle grazes the floor and bounces twice, which reads as a broken gate.
+      // So the sweep runs dirty and the single square shot asks to be levelled.
+      if(o.level){ RECOIL.tp=0; RECOIL.ty=0; view.gunKick=0; if(typeof offView!=='undefined'&&offView)offView.gunKick=0; }
       const px=Math.floor(player.pos.x), py=Math.floor(player.pos.y), pz=Math.floor(player.pos.z);
       // A STONE BOX AROUND THE SHOT. One wall is not enough to bring a round back to the shooter — a single graze sends it away down the
       // wall. Three faces of a small chamber give it somewhere to come back FROM, which is the case Ben is describing.
@@ -31076,6 +31133,34 @@ window.__hc={
       return { yaw:+player.yaw.toFixed(2), gun:id, bounces:_ricoLog, near:+_ricoNear.toFixed(2), health:+player.health.toFixed(2) }; }
     catch(e){ return {err:String(e.message||e)}; } },
   ricoRead(){ try{ return { bounces:_ricoLog, health:+player.health.toFixed(2), dead:!!player.dead }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA: STAND A PEER IN FRONT OF THE MUZZLE AND SHOOT IT (Ben's item 23, PVP half). A real second client cannot be had in a headless
+  // page, and it is not what the claim needs: PVP is decided entirely inside _traceBullet against NET.peers, so a peer record at a
+  // known position and NET.on is the whole world the code under test can see. The shot goes through the REAL fireGun.
+  //   THE ASSERTION IS THE PACKET, NOT A FLAG. netSend drops silently with no socket, so the probe reports the 'dmg' object the trace
+  // actually built — recipient, damage and cause — which is the same object the victim's page would apply.
+  //   RUN IT TWICE, once with on:false. The gate is half the feature; a hit count that does not fall to zero with PVP off is a
+  // friendly-fire session nobody asked for.
+  pvpTest(o){ o=o||{}; const _wasOn=NET.on, _wasPvp=PVP, _wasPeers=NET.peers; try{
+      const D=(o.d==null?3:+o.d), N=(o.shots==null?5:o.shots|0);
+      player.creative=false; player.dead=false; player.health=20; player.pitch=0;
+      RECOIL.tp=0; RECOIL.ty=0; view.gunKick=0; if(typeof offView!=='undefined'&&offView)offView.gunKick=0;   // same reason as ricoTest: the round follows the barrel, and the barrel keeps its climb
+      const dir=lookDir();
+      // A CLEAR LANE. Otherwise the round buries itself in whatever wall or tree trunk happens to stand at spawn and the test
+      // measures the terrain, not the capsule.
+      for(let t=1;t<=D+1;t+=0.5){ const bx=Math.floor(player.pos.x+dir.x*t), by=Math.floor(player.pos.y+EYE+dir.y*t), bz=Math.floor(player.pos.z+dir.z*t);
+        for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++)for(let dz=-1;dz<=1;dz++) setBlockWorld(bx+dx,by+dy,bz+dz,AIR,true); }
+      const tx=player.pos.x+dir.x*D, tz=player.pos.z+dir.z*D, ty=player.pos.y+EYE+dir.y*D-EYE*0.5;   // feet half an eye-height below the line, so the line crosses the torso
+      PVP=(o.on!==false); NET.on=true; NET.peers={ 7:{x:tx,y:ty,z:tz,nm:'testpeer',dead:false,tied:false} };
+      _pvpLog=0; _pvpLast=null;
+      const id=o.gun||'ar15'; inv[selSlot]={id,n:60}; refreshHotbar(); setViewItem(id);
+      // RE-LEVEL BETWEEN SHOTS. Six rounds of AR climb walk the muzzle off a distant capsule (4 of 6 landed at 12 blocks before this),
+      // which measures the recoil model, not the PVP capsule. Each shot is fired from a level gun so the hit count means one thing.
+      for(let i=0;i<N;i++){ RECOIL.tp=0; RECOIL.ty=0; view.gunKick=0; player.pitch=0;
+        if(typeof fireGun==='function') fireGun(inv[selSlot]); }
+      return { pvp:PVP, gun:id, dist:D, shots:N, hits:_pvpLog, pkt:_pvpLast,
+               peer:{x:+tx.toFixed(2),y:+ty.toFixed(2),z:+tz.toFixed(2)}, myHealth:+player.health.toFixed(2) }; }
+    catch(e){ return {err:String(e.message||e)}; }
+    finally{ NET.on=_wasOn; PVP=_wasPvp; NET.peers=_wasPeers; } },
   spearSelf(pitch, straight){ try{ if(typeof throwSpear!=='function') return {no:'no throwSpear'};
       player.creative=false; player.health=20; player.dead=false;
       const id=Object.keys(ITEMS).find(k=>ITEMS[k]&&ITEMS[k].spear); if(!id) return {no:'no spear item'};
@@ -31361,6 +31446,25 @@ window.__hc={
       if(o&&o.r!=null) _propFill[0]=+o.r; if(o&&o.g!=null) _propFill[1]=+o.g; if(o&&o.b!=null) _propFill[2]=+o.b;
       if(o&&o.k!=null){ _propFill[0]=+o.k*0.79; _propFill[1]=+o.k*0.89; _propFill[2]=+o.k; }   // one dial along the sky's own hue
       return { r:+_propFill[0].toFixed(4), g:+_propFill[1].toFixed(4), b:+_propFill[2].toFixed(4), day:+_scotG[3].toFixed(3) };
+    }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench and Ben's own dial for daytime shade: the skylight contrast curve. `exp` is the SHAPE — raising it darkens a face at
+  // HALF sky and leaves a fully occluded one and a fully open one exactly where they are, which is why it is the dial and the floor
+  // is not (the floor was raised twice, 0.035 -> 0.16 -> 0.26, both times because shade had gone to flat black holes).
+  // 0.26 / 1.15 is the build as it shipped before this became a dial. Guard it with bench/assert-daylight-black.mjs.
+  skyCurve(o){ try{ if(o&&o.floor!=null) globalU.uSkyCurve.value.x=+o.floor; if(o&&o.exp!=null) globalU.uSkyCurve.value.y=+o.exp;
+      const v=globalU.uSkyCurve.value;
+      // what the curve does at three points, because the number that matters is the middle one
+      const at=s=>+(v.x+(1-v.x)*Math.pow(s,v.y)).toFixed(4);
+      return { floor:+v.x.toFixed(4), exp:+v.y.toFixed(4), at0:at(0), atHalf:at(0.5), at1:at(1) };
+    }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench and Ben's dial for "absolute dark shadows during day time": how much of its ambient a face keeps where the sun does not
+  // reach it, in DAYLIGHT only. 1 is the pre-dial build (the ambient fills every shadow completely); 0.5 halves the fill in shade and
+  // leaves sunlit ground untouched. `k` is how fast a face counts as sunlit. Guard any change with bench/assert-daylight-black.mjs —
+  // this is the exact term that put flat black holes in the shade twice before, which is why Ben's own words were "you must be
+  // careful not to reintroduce our black pixel bug".
+  dayShade(o){ try{ if(o&&o.dark!=null) globalU.uDayShade.value.x=+o.dark; if(o&&o.k!=null) globalU.uDayShade.value.y=+o.k;
+      if(o&&o.on!=null&&!o.on) globalU.uDayShade.value.x=1;
+      return { dark:+globalU.uDayShade.value.x.toFixed(4), k:+globalU.uDayShade.value.y.toFixed(3), day:+globalU.uDay.value.toFixed(3) };
     }catch(e){ return {err:String(e.message||e)}; } },
   skyDir(o){ try{ if(o&&o.amt!=null) globalU.uSkyDirAmt.value=+o.amt; if(o&&o.on!=null) globalU.uSkyDirAmt.value=o.on?1:0;
       if(o&&o.up!=null) globalU.uSkyDirUp.value=+o.up; if(o&&o.dn!=null) globalU.uSkyDirDn.value=+o.dn;

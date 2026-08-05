@@ -60,7 +60,11 @@ let fails=0; const ok=(n,c,g)=>{ if(!c)fails++; console.log(`  ${c?'ok  ':'FAIL'
     // IN THE WIDE ROOM, because the tight one cannot isolate the angle. At radius 1 the walls are a metre away and the shot's own spread
     // plus wherever in its cell the player happens to be standing means the round can clip a side wall before the one it was aimed at —
     // measured 2 bounces at yaw 0 in the tight cell, which says nothing about the gate. At radius 3 the wall dead ahead is unambiguous.
-    const square=await page.evaluate(`__hc.ricoTest({yaw:0, r:3})`);
+    // AND WITH THE MUZZLE LEVELLED (level:true). The forty shots above leave the gun climbed — recoil never re-centers, and the
+    // round follows the barrel — so this shot was grazing the floor and bouncing twice: 2 bounces at yaw 0 in a wide room, a
+    // failure that was entirely the aim. The sweep above must stay dirty; see ricoTest for why the climb is what reaches the
+    // vertical angles at all.
+    const square=await page.evaluate(`__hc.ricoTest({yaw:0, r:3, level:true})`);
     console.log('    square hit', JSON.stringify(square));
     ok('a square hit into stone does not come back', (square.bounces||0)===0, square);
     ok('no page errors', errors.length===0, errors);
