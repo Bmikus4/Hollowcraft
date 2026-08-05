@@ -14,14 +14,22 @@
 //
 // Both hours: night (the wash is on, and the wash is the new thing) and day (where the fog and the ring were tuned).
 //
-// RESULT, 2026-08-05, AND THE BAND IS WRONG — fix that before trusting a number from this file. The largest row jump came back at
-// row 271 of 560 in every single condition: 58.2 at night, 94.25 by day. Row 271 is 0.484 of the frame height, which is THE HORIZON
-// LINE — sky meeting sea — not the render wall. The band below (0.44 to 0.70) spans it, so the sky/sea edge swamps the handover this
-// file exists to find. Start the band BELOW the horizon (0.50 to 0.70 from this vantage) and re-run.
+// RESULT, 2026-08-05, with the band finally straddling the wall (rows 277-347; rd 8 puts chunk water's end at 112 blocks, the eye
+// 8 above the sea, so the wall projects to row ~285 and the horizon to ~254 at 7.57 px/degree).
 //
-// WHAT IT DID ANSWER, which is why it is committed: the night wash added to both water shaders in 6f9afd8 did NOT open a seam.
-// Worst jump with the wash against without, same hour, same vantage: 58.19 vs 58.87 at night and 94.25 vs 94.25 by day. Whatever
-// the step at row 271 is, it is the horizon and it was already there.
+// AT NIGHT THERE IS NO STEP. The largest single row-to-row jump anywhere in the band is 1.07 of 255, and it lands at row 283 —
+// which IS the wall, so the measurement is looking at the right place and finding nothing. That is the backlog item's question
+// answered for the night case: the far disc and the chunk water hand over smoothly.
+//
+// BY DAY THERE IS A 37.7-LEVEL EDGE, AND IT IS NOT THE WALL. It sits at row 320, thirty-five rows below it, in exactly the same
+// place with the wash off (37.66), so it is neither the handover nor the wash. The band's bottom row reads 0 by day and 38-40 at
+// night: looking down at the near water from eight blocks up, the daytime surface CRUSHES TO PURE BLACK below that row, and the
+// only reason the night frame does not is the night-only in-scatter floor added in 61fe516. So the artefact is in the near water's
+// own depth/fresnel ramp at a steep angle, in daylight, and it has a hard edge. NOT investigated further here — it is a different
+// item from the handover, and the handover is what this file was pointed at.
+//
+// TWO EARLIER BANDS, both dead: 0.44-0.70 straddled the HORIZON, so the sky/sea edge (58 at night, 94 by day, always at row 271)
+// swamped everything; 0.52-0.72 started six rows BELOW the wall and missed it entirely.
 //
 //   node bench/tmp-sea-handover.mjs
 import { spawn } from 'node:child_process'; import { createServer } from 'node:net';
@@ -74,16 +82,24 @@ function rowProfile(file,x0f,x1f,y0f,y1f){
     const hz=await page.evaluate(`__hc.horizonDbg()`);
     console.log(`  offshore at ${X},48,${Z}   horizon state ${JSON.stringify(hz).slice(0,150)}`);
     const pin=async t=>{ await page.evaluate(`__hc.setTime(${t})`); await sleep(560); await page.evaluate(`__hc.setTime(${t})`); await sleep(280); };
+    // WHERE THE WALL SHOULD LAND, so a maximum can be judged instead of merely reported. waterMat's uMeshR is (RD-1)*CK, the eye is
+    // at y=48 and the sea at CFG.SEA=40, and the camera is a 74-degree VERTICAL fov over 560 px = 7.57 px/degree. The horizon sits
+    // pitch above centre; the wall sits atan(dy/uMeshR) below the horizon.
+    const geom=await page.evaluate(`(function(){ const rd=__hc.st().rd||8; return { rd, meshR:(rd-1)*16, camY:__hc.pos().y }; })()`);
+    { const PXDEG=560/74, pitchDeg=0.06*57.29578, dy=Math.max(1,geom.camY-40);
+      const horizonRow=280-pitchDeg*PXDEG, wallRow=horizonRow+Math.atan(dy/geom.meshR)*57.29578*PXDEG;
+      console.log(`  rd ${geom.rd}, chunk water ends at ${geom.meshR} blocks; eye ${geom.camY.toFixed(1)} over sea 40`);
+      console.log(`  predicted horizon row ~${horizonRow.toFixed(0)}, render wall row ~${wallRow.toFixed(0)} (band covers rows 277-347, straddling it)`); }
     for(const [tag,t] of [['night',0.94],['day',0.42]]){
       await pin(t);
       const f=path.join(OUT,`handover-${tag}.png`); await page.screenshot({path:f});
       // the band from a little above the waterline down into the near sea: the handover is somewhere in here
-      const prof=rowProfile(f,0.25,0.75,0.44,0.70);
+      const prof=rowProfile(f,0.25,0.75,0.495,0.62);
       console.log(`  ${tag.padEnd(6)} ${JSON.stringify(prof)}`);
       // and with the wash forced OFF, so any seam the wash itself opened is separable from one that was already there
       await page.evaluate(`__hc.scot({amt:0})`); await sleep(420); await pin(t);
       const f2=path.join(OUT,`handover-${tag}-nowash.png`); await page.screenshot({path:f2});
-      console.log(`  ${tag.padEnd(6)} no wash ${JSON.stringify(rowProfile(f2,0.25,0.75,0.44,0.70))}`);
+      console.log(`  ${tag.padEnd(6)} no wash ${JSON.stringify(rowProfile(f2,0.25,0.75,0.495,0.62))}`);
       await page.evaluate(`__hc.scot({amt:0.85})`); await sleep(300);
     }
     console.log(`\n  READ IT LIKE THIS: `+'`ratio`'+` is the largest single row-to-row jump over the median jump in the same band. A smooth`);
