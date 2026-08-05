@@ -378,8 +378,31 @@ const _scotG = new Float32Array([0.85, 0.01, 0.45, 1]);
 // proportion to how much fog is in the way. NIGHT ONLY, scaled by (1 - day): reflectedLight.directDiffuse carries the sun too,
 // and the daylight fog bank's value was signed off after four rounds of tuning (see updateSky) — it must not move.
 const _scotH = new Float32Array([1.0, 0.15, 0.5, 0]);
+// ---- A PROP IN SHADE IS NOT A PROP AT NIGHT (Ben 08-05: the scarecrow near spawn "is completely black") ----
+// (r, g, b, -). The daylight SKY FILL that every non-atlas lit material was missing.
+//
+// The voxel atlas carries a baked per-face skylight term and a prop carries nothing, so the two disagree in shade and only
+// in shade. A block's ambient is scaled by (0.26 + 0.74*vSky) and its sun by (0.17 + 0.83*vSky), which means a face under an
+// open canopy keeps most of the sky even where the shadow map takes the sun away. A prop has no vSky at all: its whole
+// daylight fill is the hemisphere light, at 0.28 of a colour that measures 0.046 linear — so anything the shadow map covers
+// falls to about 1 of 255 and reads as a black cutout. The scarecrow shadows ITSELF: the hat brim is a 0.24-radius disc
+// directly over the head and torso, which is why the hat photographs correctly lit and the body under it is black.
+// Raising the hemisphere light instead is the change not to make: it is the SAME light the atlas materials use, so it would
+// lift every shaded block face in the world with it, and the daylight frame has been signed off four times.
+// Gated on uScotG.w (the day factor) so it is gone at night, which is what Ben asked for in the same breath: extremely
+// black nights, with the light in them coming from lamps.
+const _propFill = new Float32Array([0.237, 0.267, 0.30, 0]);
 { const L='vec3(0.2126,0.7152,0.0722)';
-  THREE.ShaderChunk.lights_pars_begin += '\nuniform vec4 uScotG;\nuniform vec4 uScotH;\n';
+  THREE.ShaderChunk.lights_pars_begin += '\nuniform vec4 uScotG;\nuniform vec4 uScotH;\nuniform vec4 uPropFill;\n';
+  // ATLAS MATERIALS ARE EXCLUDED BY THE SAME DEFINE THE WASH BRANCHES ON, and the exclusion is the whole point: a block
+  // already has this term, baked and sky-occluded, so adding a flat one would lift caves and interiors by daylight.
+  // diffuseColor-weighted, so a dark prop stays dark and a pale one lifts — a flat add is a fog, not a fill.
+  // ONLY WHERE THE DIRECT LIGHT IS NOT. Unweighted, this lifts a SUNLIT prop by the same amount as a shadowed one — a third
+  // again on a surface already at full sun — and props would read chalky by day, which is the opposite complaint. The fill is
+  // therefore scaled by what the direct lights did not deliver, so a sunlit face is left as it was and only shade is filled.
+  THREE.ShaderChunk.lights_fragment_end += '\n#ifndef HC_SCOT_ATLAS\n'+
+    '  { float _pfd=clamp(dot(reflectedLight.directDiffuse,'+L+'),0.0,1.0);\n'+
+    '    reflectedLight.indirectDiffuse += diffuseColor.rgb * uPropFill.rgb * uScotG.w * (1.0-_pfd); }\n#endif\n';
   // reflectedLight and totalEmissiveRadiance are both still in scope at dithering_fragment (same main(), later line), so the
   // gate is computed here only to mark the shader as lit. A #define inside main() is legal: the preprocessor is line-ordered
   // and lights_fragment_end always precedes dithering_fragment in all four shaders.
@@ -426,7 +449,7 @@ const _scotH = new Float32Array([1.0, 0.15, 0.5, 0]);
 // the 225 call sites; an entry the GLSL never references is dropped by seqWithValue and costs nothing.
 for(const k of ['lambert','phong','standard','physical','toon','dashed','basic','points','sprite']){
   const S=THREE.ShaderLib[k]; if(!S||!S.uniforms) continue;
-  S.uniforms.uScotG={ value:_scotG }; S.uniforms.uScotH={ value:_scotH };
+  S.uniforms.uScotG={ value:_scotG }; S.uniforms.uScotH={ value:_scotH }; S.uniforms.uPropFill={ value:_propFill };
 }
 
 // =====================================================================
@@ -7024,7 +7047,23 @@ function buildModelBlocks(c,g){
         for(const rot of [0.0,Math.PI/2]){ const im=new THREE.InstancedMesh(logGeo,wood,arr.length); im.castShadow=true; im.receiveShadow=true;
           for(let i=0;i<arr.length;i++){ const a=arr[i]; _e.set(0,rot,Math.PI*0.46); _q.setFromEuler(_e); _v.set(a[0]+0.5,a[1]+0.07,a[2]+0.5); m4.compose(_v,_q,_one); im.setMatrixAt(i,m4); }
           im.instanceMatrix.needsUpdate=true; im.userData.modelMat=wood; g.add(im); }
-        addIM(sphereG(0.3), new THREE.MeshBasicMaterial({color:0xff5a1e}), 0.06, false, im=>im.scale.set(1,0.32,1)); continue; }
+        // HOT COALS IN THE BASE (Ben 08-05: "campfires base should have hot coals in it" / "campfires fire has a little blip"). The
+        // base was ONE flattened sphere of MeshBasic 0xff5a1e — an unlit, fully saturated orange dome 0.6 across sitting between the
+        // logs. Unlit means it ignores the scene entirely, so at any hour it read as a flat orange blob under the flame rather than
+        // as fire: that dome IS the blip. Coals are the opposite material: nearly black rock that GLOWS, so they take the scene's
+        // light and carry their own heat through emissive.
+        //
+        // Six lumps welded into ONE geometry, because addIM instances a single geometry across every campfire in the chunk and six
+        // separate calls would be six instanced meshes for the same handful of blocks. The offsets are baked into the geometry, the
+        // way the camera bracket and the shotgun bead are, since addIM can only place instances at the block centre.
+        { const coal=new THREE.MeshPhongMaterial({color:0x1b1512, emissive:0x7a2103, emissiveIntensity:1.0, shininess:8});
+          const lumps=[[0,0,0,0.16,0.09],[0.15,-0.004,0.07,0.13,0.075],[-0.14,-0.006,0.09,0.12,0.07],
+                       [0.08,-0.008,-0.15,0.12,0.065],[-0.1,-0.009,-0.12,0.11,0.062],[0.17,-0.01,-0.04,0.10,0.058]];
+          const geos=lumps.map(([lx2,ly2,lz2,w,h])=>{ const gm=box(w,h,w*0.92); gm.translate(lx2,ly2,lz2); return gm; });
+          addIM(_mergeGeos(geos), coal, 0.055, false); }
+        // …and the heat in the gaps between them: a small, DIM bed, kept below the coals' own tops so it is glow leaking out from
+        // under the lumps rather than a dome sitting on them. 0.2 x 0.18 tops out at 0.061 against coal tops at 0.10.
+        addIM(sphereG(0.2), new THREE.MeshBasicMaterial({color:0xc03408}), 0.025, false, im=>im.scale.set(1,0.18,1)); continue; }
       if(m==='tent'){ const canvas=new THREE.MeshPhongMaterial({color:0x7a6a48,side:THREE.DoubleSide,shininess:4}), pole=new THREE.MeshLambertMaterial({color:0x3a2a1a});
         for(const s of [-1,1]){ const im=new THREE.InstancedMesh(planeG(0.95,1.15),canvas,arr.length); im.castShadow=true; im.receiveShadow=true;
           for(let i=0;i<arr.length;i++){ const a=arr[i]; _e.set(0,0,s*0.62); _q.setFromEuler(_e); _v.set(a[0]+0.5+s*0.26,a[1]+0.46,a[2]+0.5); m4.compose(_v,_q,_one); im.setMatrixAt(i,m4); }
@@ -29286,6 +29325,32 @@ window.__hc={
   // of cloth floating above the end of the twig, and it is 3 cm of geometry at the top of a small object — invisible in a bench
   // frame, obvious in the hand. Both draw sites are built here and measured the same way: the highest wood surface against the
   // highest cloth surface, in the model's own space.
+  // QA: WHAT A CAMPFIRE IS ACTUALLY MADE OF (Ben 08-05: coals in the base, and the "little blip"). Reads the drawn scene rather than
+  // the constants that built it: every instanced mesh in the chunk group whose instances sit within this block, with its material's
+  // colour, emissive and the height its geometry reaches. A blob of unlit orange and a bed of glowing coal are two rows here.
+  campfireParts(dx,dy,dz){ try{
+      const wx=Math.floor(player.pos.x)+(dx|0), wy=Math.floor(player.pos.y)+(dy|0), wz=Math.floor(player.pos.z)+(dz|0);
+      const c=getChunk(wx>>4,wz>>4); if(!c||!c.group) return {no:'no chunk'};
+      const out=[]; const _m=new THREE.Matrix4(), _p=new THREE.Vector3(), _q2=new THREE.Quaternion(), _s2=new THREE.Vector3();
+      c.group.traverse(o=>{ if(!o.isInstancedMesh||!o.geometry) return;
+        if(!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+        const bb=o.geometry.boundingBox;
+        for(let i=0;i<o.count;i++){ o.getMatrixAt(i,_m); _m.decompose(_p,_q2,_s2);
+          // The chunk group's instances are placed in CHUNK-LOCAL x/z (lx+0.5, 0..16) and world y, because the group itself carries
+          // the chunk's offset. Comparing against world x/z matched nothing at all and read as "the campfire has no parts".
+          if(Math.abs(_p.x-((wx&15)+0.5))>0.5 || Math.abs(_p.z-((wz&15)+0.5))>0.5 || Math.abs(_p.y-wy)>1.2) continue;
+          const M=Array.isArray(o.material)?o.material[0]:o.material;
+          out.push({ type:o.geometry.type, basic:!!M.isMeshBasicMaterial,
+                     color:M.color?'#'+M.color.getHexString():null,
+                     emissive:M.emissive?'#'+M.emissive.getHexString():null,
+                     yBase:+(_p.y-wy).toFixed(4),
+                     // The MESH's own scale as well as the instance's: a flattened dome is flattened by im.scale, which is not in the
+                     // instance matrix at all, so reading only the matrix reported a 0.6-wide bed as 0.225 tall instead of 0.061.
+                     top:+((_p.y-wy)+bb.max.y*_s2.y*o.scale.y).toFixed(4), meshScaleY:+o.scale.y.toFixed(3),
+                     tris:o.geometry.index?o.geometry.index.count/3:(o.geometry.attributes.position.count/3) });
+        } });
+      return { at:[wx,wy,wz], block:getBlock(wx,wy,wz), parts:out }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   torchFit(){ try{ const out={};
       const scan=(root,label)=>{ let woodTop=-9, ragTop=-9;
         root.updateMatrixWorld(true);
@@ -29832,6 +29897,13 @@ window.__hc={
   // skips a disabled pass entirely, so enabled/disabled is a real A/B rather than a uniform set to zero that still pays.
   // QA/bench: directional skylight. amt 0 is the A/B off. up/dn multiply the sky term at a face pointing straight up / straight
   // down; a vertical face takes their midpoint, so up 1.10 / dn 0.58 puts a wall on 0.84.
+  // QA/bench: the prop sky fill (see _propFill). {r,g,b} sets it, {on:false} is the A/B off — the pass as it was when the
+  // scarecrow was black. It is multiplied by the day factor in the shader, so at night these numbers do nothing.
+  propFill(o){ try{ if(o&&o.on===false){ _propFill[0]=_propFill[1]=_propFill[2]=0; }
+      if(o&&o.r!=null) _propFill[0]=+o.r; if(o&&o.g!=null) _propFill[1]=+o.g; if(o&&o.b!=null) _propFill[2]=+o.b;
+      if(o&&o.k!=null){ _propFill[0]=+o.k*0.79; _propFill[1]=+o.k*0.89; _propFill[2]=+o.k; }   // one dial along the sky's own hue
+      return { r:+_propFill[0].toFixed(4), g:+_propFill[1].toFixed(4), b:+_propFill[2].toFixed(4), day:+_scotG[3].toFixed(3) };
+    }catch(e){ return {err:String(e.message||e)}; } },
   skyDir(o){ try{ if(o&&o.amt!=null) globalU.uSkyDirAmt.value=+o.amt; if(o&&o.on!=null) globalU.uSkyDirAmt.value=o.on?1:0;
       if(o&&o.up!=null) globalU.uSkyDirUp.value=+o.up; if(o&&o.dn!=null) globalU.uSkyDirDn.value=+o.dn;
       return { amt:+globalU.uSkyDirAmt.value.toFixed(3), up:+globalU.uSkyDirUp.value.toFixed(3), dn:+globalU.uSkyDirDn.value.toFixed(3),
