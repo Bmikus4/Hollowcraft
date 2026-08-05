@@ -88,6 +88,20 @@ window.__IV={
     for(const c of (BR.crawls||[])) add('crawl', (c.x0+c.x1)/2, (c.z0+c.z1)/2, Math.abs(c.x1-c.x0)<0.01, Math.max(Math.abs(c.x1-c.x0),Math.abs(c.z1-c.z0)));
     const byKind={}; for(const r of rows){ const k=byKind[r.kind]=byKind[r.kind]||{n:0,blocked:0,fully:0}; k.n++; if(r.blocked)k.blocked++; if(r.blocked===5)k.fully++; }
     return { total:rows.length, byKind, worst:rows.filter(r=>r.blocked).slice(0,12) }; },
+  // WHY IS THIS CELL SOLID. brSlabColumn writes bedrock, concrete below the floor, carpet AT the floor and a ceiling at
+  // topY — and NOTHING in between. So a solid cell at chest height cannot be this column's own storey: it has to be a
+  // slab laid under a DIFFERENT storey, which is what brxChunkBaseY per BRX chunk makes possible. This reports the two
+  // numbers that separate those: the floor the carve would compute for this column, and the floor the player is on.
+  explain(x,z){
+    const yF=Math.floor(player.pos.y-0.1), bc=brxChunkOf(x,z);
+    const col=[]; for(let y=yF-2;y<=yF+3;y++) col.push({y, b:getBlock(Math.floor(x),y,Math.floor(z))});
+    let base=null; try{ base=brxChunkBaseY(bc.gx,bc.gz); }catch(e){}
+    let pbase=null; try{ const pc=brxChunkOf(player.pos.x,player.pos.z); pbase=brxChunkBaseY(pc.gx,pc.gz); }catch(e){}
+    let stair=null; try{ stair=brStairSpanAt(x,z)||null; }catch(e){}
+    let vd=null; try{ vd=!!brVoidAt(x,z); }catch(e){}
+    const r=brxRoomAt(x,z);
+    return { at:[+x.toFixed(1),+z.toFixed(1)], chunk:bc.gx+'_'+bc.gz, carveFloor:base, playerChunkFloor:pbase,
+             playerFeetY:yF, sameStorey:(base===pbase), stair:!!stair, voidCol:vd, room:!!r, column:col }; },
   // BEN'S ACTUAL EXPERIENCE, ASKED DIRECTLY: walk the body until something stops it, then ask what the player would SEE
   // at that moment — a mesh within reach of the crosshair, and the luminance of the middle of the frame. Blocked with a
   // surface in front of you is a wall. Blocked with nothing drawn in front of you is an invisible block, and it is the
@@ -114,8 +128,16 @@ window.__IV={
         player.yaw=Math.atan2(-Math.cos(ang), -Math.sin(ang)); player.pitch=0;
         camera.position.set(player.pos.x, player.pos.y+1.4, player.pos.z);
         camera.rotation.set(0, player.yaw, 0); camera.updateMatrixWorld(true);
-        rc.setFromCamera({x:0,y:0}, camera);
-        const h=rc.intersectObject(scene,true).filter(o=>o.object&&o.object.isMesh&&o.object.visible);
+        // LOOK LOW AS WELL AS LEVEL. A dinner table or a junk pile stops the body at knee height and is entirely
+        // legitimate, but an eye-level crosshair sees straight over it and the stop reads as invisible. Three pitches,
+        // and a hit at any of them means there IS something there to see.
+        let h=[];
+        for(const p2 of [0,-0.5,-0.9,0.3]){
+          camera.rotation.set(p2, player.yaw, 0, 'YXZ'); camera.updateMatrixWorld(true);
+          rc.setFromCamera({x:0,y:0}, camera);
+          h=rc.intersectObject(scene,true).filter(o=>o.object&&o.object.isMesh&&o.object.visible);
+          if(h.length) break; }
+        camera.rotation.set(0, player.yaw, 0, 'YXZ'); camera.updateMatrixWorld(true);
         // WHAT IS ON SCREEN, not what is in the graph: render and read the middle of the frame back out of GL.
         renderer.render(scene,camera);
         const gl=renderer.getContext(), W=64, H=64;
@@ -125,8 +147,21 @@ window.__IV={
         const lum=+(sum/(W*H)).toFixed(1);
         if(h.length){ out.blockedWithSurface++; }
         else { out.blockedWithNothing++;
-          if(out.cases.length<10) out.cases.push({x:+player.pos.x.toFixed(1), z:+player.pos.z.toFixed(1),
-            y:+player.pos.y.toFixed(1), lum, nearestMeshM:null, dir:+(ang*57.3).toFixed(0)}); }
+          if(out.cases.length<10){
+            // WHICH RECORD IS HOLDING THE BODY. brSlabColumn writes nothing between floor and ceiling, so a stop at
+            // chest height is a BRX record collider, and naming it is the difference between a bug report and a number.
+            const X=player.pos.x, Z=player.pos.z, RAD=0.42+BR_WT/2, who=[];
+            const seg=(ax,az,bx,bz,rad,what)=>{ const dx=bx-ax,dz=bz-az,ll=dx*dx+dz*dz||1; let t=((X-ax)*dx+(Z-az)*dz)/ll; t=t<0?0:t>1?1:t;
+              const dd=Math.hypot(X-(ax+dx*t), Z-(az+dz*t)); if(dd<rad) who.push(what+'@'+dd.toFixed(2)); };
+            (BR.walls||[]).forEach((s2,i)=>seg(s2.x0,s2.z0,s2.x1,s2.z1,RAD,'wall'+i));
+            (BR.solids||[]).forEach((s2,i)=>seg(s2.x0,s2.z0,s2.x1,s2.z1,RAD,'solid'+i));
+            (BR.crawls||[]).forEach((s2,i)=>seg(s2.x0,s2.z0,s2.x1,s2.z1,RAD,'crawl'+i));
+            (BR.doors||[]).forEach((d2,i)=>{ if(d2.a!=null&&d2.a<=1.15&&d2.seg) seg(d2.seg.x0,d2.seg.z0,d2.seg.x1,d2.seg.z1,0.42,'doorseg'+i); });
+            (BR.pillars||[]).forEach((p2,i)=>{ if(Math.hypot(X-p2.x,Z-p2.z)<p2.hw+0.42) who.push('pillar'+i); });
+            (BR.tables||[]).forEach((t2,i)=>{ const vt=Math.abs(t2.rot)>0.1; if(Math.abs(X-t2.x)<(vt?0.75:t2.len/2)+0.42 && Math.abs(Z-t2.z)<(vt?t2.len/2:0.75)+0.42) who.push('table'+i); });
+            (BR.boxes||[]).forEach((b2,i)=>{ if(Math.abs(X-b2.x)<b2.hx+0.42 && Math.abs(Z-b2.z)<b2.hz+0.42) who.push('box'+i); });
+            out.cases.push({x:+X.toFixed(1), z:+Z.toFixed(1), y:+player.pos.y.toFixed(1), lum,
+                            heldBy:who.slice(0,4), dir:+(ang*57.3).toFixed(0)}); } }
         break;
       }
     }
@@ -209,7 +244,11 @@ function ensureProbe(root){
     await sleep(3000);
     console.log('census:   '+J(await ev('__IV.census(40,1)')));
     console.log('openings: '+J(await ev('__IV.openings()')));
-    console.log('bumps(entry):   '+J(await ev('__IV.bumps(24,60)')));
+    const op=await ev('__IV.openings()');
+    if(op&&op.worst) for(const w of op.worst.slice(0,4)) console.log('  why '+w.kind+': '+J(await ev('__IV.explain('+w.at[0]+','+w.at[1]+')')));
+    const bp=await ev('__IV.bumps(24,60)');
+    console.log('bumps(entry):   '+J(bp&&{walks:bp.walks,blocked:bp.blocked,withSurface:bp.blockedWithSurface,withNothing:bp.blockedWithNothing}));
+    if(bp&&bp.cases) for(const c of bp.cases.slice(0,3)) console.log('  why bump: '+J(await ev('__IV.explain('+c.x+','+c.z+')')));
     // THE PATHS A PLAYER EXERCISES, not the one a bench exercises. Invisible geometry classically comes from remesh and
     // unload-reload, not from first generation, and Ben's word was "still" — he had been playing, not just arriving.
     await ev('(()=>{const y=player.pos.y; player.pos.x+=260; brxStream(true); player.pos.x-=260; brxStream(true); player.pos.y=y;})()');
