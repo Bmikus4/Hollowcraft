@@ -2161,6 +2161,21 @@ function _wetNear(wx,wz){
       if(surfaceH(wx+Math.round(Math.cos(th)*r), wz+Math.round(Math.sin(th)*r)) <= CFG.SEA) return true; }
   return false;
 }
+// The mud columns near a point, with the water they sit beside — the pair a camera needs: somewhere to stand and
+// something to look at. Generator-level (surfaceH + the same wet test genColumn uses), so it answers before a chunk has
+// streamed and cannot be fooled by what happens to be meshed.
+function _mudSpots(px,pz,R,limit){
+  const out=[]; const LIM=limit||6;
+  for(let r=6;r<=R && out.length<LIM;r+=2)
+    for(let k=0;k<24 && out.length<LIM;k++){ const th=k*0.2618, x=px+Math.round(Math.cos(th)*r), z=pz+Math.round(Math.sin(th)*r);
+      const h=surfaceH(x,z); if(h<=CFG.SEA+1 || h>CFG.SEA+3) continue; if(!_wetNear(x,z)) continue;
+      let wx=null,wz2=null;                                  // the water it stands beside, for the camera to aim at
+      for(let rr=1;rr<=2 && wx==null;rr++) for(let a=0;a<8;a++){ const t2=a*0.7854, ax=x+Math.round(Math.cos(t2)*rr), az=z+Math.round(Math.sin(t2)*rr);
+        if(surfaceH(ax,az)<=CFG.SEA){ wx=ax; wz2=az; break; } }
+      if(wx==null) continue;
+      out.push({x,z,h,wx,wz:wz2, d:+Math.hypot(x-px,z-pz).toFixed(1)}); }
+  return out;
+}
 function surfaceH(wx, wz){
   const kk = wx+','+wz; let h=_hmCache.get(kk); if (h!==undefined) return h;
   // domain warp
@@ -5601,11 +5616,19 @@ const MotionBlurShader={
     tDiffuse:{value:null}, tDepth:{value:null}, tPrev:{value:null},   // tPrev = dummy so ShaderPass has somewhere to dump readBuffer (we feed tDiffuse ourselves from the scene RT)
     uInvVP:{value:new THREE.Matrix4()}, uPrevVP:{value:new THREE.Matrix4()}, uStrength:{value:0.6}, uEnabled:{value:1},
     uWUV:{value:new THREE.Vector2(-9,-9)}, uWVel:{value:new THREE.Vector2(0,0)}, uWWorld:{value:new THREE.Vector3()}, uWParams:{value:new THREE.Vector3(0.18,0.0,3.0)},   // x=screen radius, y=active, z=world radius
-    uCamPos:{value:new THREE.Vector3()}, uNear:{value:2.6}   // pixels within uNear units of the camera = the held viewmodel/scope → NEVER motion-blurred (Ben 07-21: reprojection smeared the camera-locked gun/sights)
+    uCamPos:{value:new THREE.Vector3()}, uNear:{value:2.6},   // pixels within uNear units of the camera = the held viewmodel/scope → NEVER motion-blurred (Ben 07-21: reprojection smeared the camera-locked gun/sights)
+    // THE DEPTH-BUFFER VALUE OF uNear, set per frame from the live camera (see the motion-blur uniform block in the frame loop).
+    // A GATHER BLUR CANNOT BE STOPPED BY CLASSIFYING THE DESTINATION PIXEL, which is all uNear above ever did: the gun's own
+    // pixels were left sharp, and then every WORLD pixel beside it sampled backwards along its velocity, straight into the gun,
+    // and smeared the gun outward into the world. That is exactly what Ben reported — "especially on thier edges" — and it is why
+    // the existing guard looked correct in code and wrong on screen. Each TAP is tested now, not just the centre.
+    // A depth compare, not a second unprojection: the renderer has no logarithmicDepthBuffer, so the window-space depth of a
+    // given view distance is one number the CPU can hand over, and the test costs one fetch and one compare per tap.
+    uNearD:{value:0.99}
   },
   vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
   fragmentShader:`precision highp float; varying vec2 vUv;
-    uniform sampler2D tDiffuse, tDepth; uniform mat4 uInvVP, uPrevVP; uniform float uStrength, uEnabled, uNear;
+    uniform sampler2D tDiffuse, tDepth; uniform mat4 uInvVP, uPrevVP; uniform float uStrength, uEnabled, uNear, uNearD;
     uniform vec2 uWUV, uWVel; uniform vec3 uWWorld, uWParams, uCamPos;
     void main(){
       if(uEnabled<0.5){ gl_FragColor=texture2D(tDiffuse,vUv); return; }   // blur off → pass the scene through untouched (this pass is also the scene→composer bridge)
@@ -5621,9 +5644,15 @@ const MotionBlurShader={
       }
       float vl=length(vel); const float mx=0.045; if(vl>mx){ vel*=mx/vl; vl=mx; }
       if(vl<0.0008){ gl_FragColor=texture2D(tDiffuse,vUv); return; }    // effectively still → single tap
-      const int N=12; vec3 col=vec3(0.0);
-      for(int i=0;i<N;i++){ float t=float(i)/float(N-1); col+=texture2D(tDiffuse, vUv - vel*t).rgb; }   // trailing samples
-      gl_FragColor=vec4(col/float(N),1.0);
+      // TRAILING SAMPLES, AND A TAP THAT LANDS ON THE HELD VIEWMODEL IS DROPPED (Ben 08-05: motion blur must not touch hands,
+      // held items or guns, "especially on thier edges"). Dropped and renormalised, not clamped to the centre: the world beside a
+      // gun still blurs, it just no longer has the gun in its trail. Every tap on the viewmodel skipped means the average is over
+      // the taps that remain, which is why wsum is counted rather than dividing by N.
+      const int N=12; vec3 col=vec3(0.0); float wsum=0.0;
+      for(int i=0;i<N;i++){ float t=float(i)/float(N-1); vec2 suv=vUv - vel*t;
+        if(texture2D(tDepth,suv).x < uNearD) continue;                   // that tap is the hand/gun/scope — do not drag it outward
+        col+=texture2D(tDiffuse, suv).rgb; wsum+=1.0; }
+      gl_FragColor=vec4(wsum>0.5 ? col/wsum : texture2D(tDiffuse,vUv).rgb, 1.0);
     }`
 };
 let gradePass, ssaoPass=null, godrayPass=null, motionPass=null, _sceneRT=null, _mbMode=false;
@@ -11602,6 +11631,14 @@ function loop(){ try{
     if(!_mbInit){ _prevVP.copy(_curVP); _mbInit=true; }                                 // no bogus full-screen smear on frame 1
     const U=motionPass.uniforms;
     U.uInvVP.value.copy(_curVP).invert(); U.uPrevVP.value.copy(_prevVP); U.uCamPos.value.copy(camera.position);
+    // The window-space depth of uNear, so each blur TAP can reject the held viewmodel with one fetch instead of a second
+    // unprojection. Standard perspective depth (no logarithmicDepthBuffer anywhere in this file), and recomputed every frame
+    // because camera.far tracks the render-distance slider.
+    // This is a PLANE at view-depth uNear where the centre-pixel test is a SPHERE of radius uNear, so at the corners of a 74-degree
+    // frame it reaches about 1.4x further. Nothing but the viewmodel is ever that close except a wall you are pressed against, and
+    // the sphere test already excluded that from the blur.
+    { const n=camera.near, f=camera.far, z=U.uNear.value;
+      U.uNearD.value = 0.5 + 0.5*((f + n - 2.0*f*n/Math.max(z, n+1e-4)) / (f - n)); }
     U.uStrength.value = player.grabbed?0.0:0.6;                                         // no blur during the grab cutscene
     _mbW.set(wretch.pos.x, wretch.pos.y+1.2, wretch.pos.z);                             // Wretch object smear
     let wactive=0;
@@ -28399,7 +28436,11 @@ window.__hc={
       const wet=_wetNear(x,z); if(wet) nearWater++;
       if(h<=CFG.SEA+3 && wet){ mud++; if(h<minH)minH=h; if(h>maxH)maxH=h; } }
     return { dry, sand, nearWater, mud, mudFrac:dry?+(mud/dry).toFixed(4):0,
-             mudH:mud?[minH,maxH]:null, sea:CFG.SEA }; },
+             mudH:mud?[minH,maxH]:null, sea:CFG.SEA, spots:_mudSpots(P.x,P.z,R) }; },
+  // WHERE the mud is, not just how much: a handful of real columns to stand on. Every attempt to photograph mud so far
+  // has aimed at a river cell and put the camera in the channel or under the bank — the bank is what you want to stand
+  // on, and it is the column BESIDE the water, two or three blocks above it.
+  mudSpots(r){ return _mudSpots(Math.round(player.pos.x), Math.round(player.pos.z), r||140); },
   // #68 follow-up: the three things the species commits shipped unverified. Each one drives the REAL path — the break
   // handler, groundStructure's own sweep, and saveGame/applySave — because a hook that re-implements the thing it is
   // testing tests the hook.
