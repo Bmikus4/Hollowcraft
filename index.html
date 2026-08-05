@@ -1438,6 +1438,16 @@ paintTile('planks',    (x,y,r)=>{ if(y%5===4)return[54+jit(r,0,8),40,26]; const 
 // GAPS, NOT SPECKLE. Punching random pixels gives a grey dither that reads as noise at any distance. This cuts a few
 // ROUND holes per tile with soft edges, which is what a gap between two leaves looks like, and keeps a hard alpha edge
 // for the alpha test to bite on.
+// #68 stage 2: the sprig that sticks out of a canopy's surface. Mostly ALPHA — it is a handful of leaves on air, not a
+// tile with leaves drawn on it, and if it covers much more than a third of its quad it reads as a second solid wall
+// standing off the first one. Three overlapping blobs, softened at the edges, with the bottom left clear so a sprig
+// hanging under a branch has somewhere to end.
+paintTile('leaf_sprig',(x,y,r)=>{
+  const B=[[5.0,5.5,3.4],[10.5,7.0,3.0],[7.5,11.0,2.8]];
+  let d2=99; for(const [bx,by,br] of B){ const d=Math.hypot(x-bx,y-by)/br; if(d<d2)d2=d; }
+  if(d2>1.0+(r()-0.5)*0.22) return [0,0,0,0];
+  const v=jit(r,0,30), edge=smooth(1.0,0.55,d2);            // darker at the rim: a leaf cluster is not flat
+  return [30+v*0.5+edge*10, 58+v+edge*16, 28+v*0.5+edge*8, 255]; });
 paintTile('leaves',(x,y,r)=>{
   const H=[[3.5,4.0,2.1],[11.0,6.5,1.9],[6.0,12.0,2.0],[13.5,13.0,1.5]];   // four gaps, fixed so every leaf tile tiles with itself
   for(const [hx,hy,hr] of H){ const d=Math.hypot(x-hx,y-hy); if(d<hr+(r()-0.5)*0.9) return [0,0,0,0]; }
@@ -2240,7 +2250,8 @@ function placeSet(c, wx, wy, wz, b, force){
   if (cx!==c.cx || cz!==c.cz) return;                   // this chunk only
   const i=idx(wx&15,wy,wz&15);
   if (force || c.blocks[i]===AIR || c.blocks[i]===BID.leaves){ c.blocks[i]=b;
-    if(b===WATER)c.hasWater=true; else if(blockCat[b]==='cross')c.hasCross=true; else if(blockCat[b]==='model')c.hasModel=true; }   // keep render flags in sync so worldgen model/cross blocks (sulfur, foliage) mesh on first build, not only after an edit
+    if(b===WATER)c.hasWater=true; else if(blockCat[b]==='cross')c.hasCross=true; else if(blockCat[b]==='model')c.hasModel=true;
+    if(b===BID.leaves||b===BID.leaves_core)c.hasLeaf=true; }   // keep render flags in sync so worldgen model/cross blocks (sulfur, foliage) mesh on first build, not only after an edit — and hasLeaf gates the canopy sprig scan (#68), which would otherwise walk WH x 16 x 16 on every treeless chunk in the world
 }
 // =====================================================================
 //  PINE — ONE SOURCE OF TRUTH, ALL-OR-NOTHING (Ben 07-27: "if a tree BASE is allowed, ALL its leaves must generate;
@@ -3129,6 +3140,44 @@ function foliageMesh(c){
     const hh=B[id].tall2?2:1;   // 2-block-high meadow grass stretches its cross quads (and sways harder — wind scales with the uv it feeds)
     quad(lx+0.5+jx, ly, lz+0.5+jz, 0.85,0.85, tile, sky, wind*hh, hh);
     quad(lx+0.5+jx, ly, lz+0.5+jz, 0.85,-0.85, tile, sky, wind*hh, hh);
+  }
+  // ---- #68 STAGE 2: LEAFY FOLIAGE ON EVERY EXPOSED SURFACE OF A TREE ---------------------------------------------
+  // Ben 08-05: "creating a textured leafy foliage to be placed on the outside of EVERY surface of a tree". A canopy
+  // made of cubes has a cube's silhouette however good the tile on it is — the edge is a straight line and a stair-step
+  // at every scale. This hangs a sprig off each exposed leaf face so the outline of a tree is foliage.
+  //
+  // DERIVED AT MESH TIME, LIKE THE KELP, AND FOR THE SAME REASON: a sprig is not a block, it stores nothing, it cannot
+  // be mined, it costs no id, and a canopy that is chopped or burnt loses its sprigs on the remesh without anything
+  // having to remember they were there. The mesher already walks the six neighbours of every cell for face culling, so
+  // "is this face exposed" is a question it is answering anyway.
+  //
+  // ONE IN TWO FACES, and that is a look decision as much as a budget one: a sprig on every face of every block is a
+  // fur coat, and the tree stops reading as leaves and starts reading as moss. The hash is in WORLD coordinates so the
+  // pattern does not swim when a chunk is rebuilt, and the per-chunk cap is a floor under the worst case — a chunk that
+  // is nothing but canopy has about 4000 exposed faces, and 900 sprigs is already more than the eye can resolve.
+  if(c.hasLeaf){ let sprigs=0;
+    const SPRIG_TILE=TILEIDX['leaf_sprig'], NB=[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+    for(let ly=1;ly<WH-1 && sprigs<900;ly++) for(let lz=0;lz<CK;lz++) for(let lx=0;lx<CK;lx++){
+      const id=g(lx,ly,lz); if(id!==BID.leaves && id!==BID.leaves_core) continue;
+      const sky=clamp(_ssky(lx,ly,lz),0,1);
+      for(const [ox,oy,oz] of NB){
+        const nx=lx+ox, ny=ly+oy, nz=lz+oz;
+        // Edge cells: a neighbour outside this chunk is not readable here, and guessing "air" would hang sprigs on the
+        // seam between two chunks where the canopy actually continues. Skipped — the face one block in still gets one.
+        if(nx<0||nx>=CK||nz<0||nz>=CK||ny<0||ny>=WH) continue;
+        if(g(nx,ny,nz)!==AIR) continue;
+        const wx=cx0+lx, wz=cz0+lz;
+        if(xhash(wx, ly*6+(ox+2)*3+(oy+2), wz, 151) > 0.5) continue;      // one face in two
+        const jx=(xhash(wx,ly+7,wz,157)-0.5)*0.30, jz=(xhash(wx,ly+11,wz,163)-0.5)*0.30;
+        // Centred ON the face and pushed just outside it, as a cross so it has substance from every angle — the same
+        // reason the plants are crossed quads. 0.62 tall and dropped by 0.31 so it straddles the face instead of
+        // growing up out of it: a sprig on the UNDERSIDE of a branch has to hang.
+        const px=lx+0.5+ox*0.52+jx, py=ly+oy*0.52-0.31, pz=lz+0.5+oz*0.52+jz;
+        quad(px,py,pz, 0.78,0.78, SPRIG_TILE, sky, 0.42, 0.62);
+        quad(px,py,pz, 0.78,-0.78, SPRIG_TILE, sky, 0.42, 0.62);
+        sprigs+=2;
+      }
+    }
   }
   // ---- UNDERWATER KELP (#67). IT IS NOT A BLOCK, and that is the whole design. ----------------------------------
   // A kelp BLOCK would have to occupy a cell, and this game has no waterlogging anywhere in it — so the cell it took
@@ -5688,6 +5737,7 @@ function setBlockWorld(wx,wy,wz,b,record){
   const lx=wx&15, lz=wz&15;
   if(_bulk){ c.blocks[idx(lx,wy,lz)]=b;
     if(b===WATER) c.hasWater=true; else if(blockCat[b]==='cross') c.hasCross=true; else if(blockCat[b]==='model') c.hasModel=true;
+    if(b===BID.leaves||b===BID.leaves_core) c.hasLeaf=true;   // #68: a canopy placed or grown after generation still gets its sprigs
     _bulk.touched.set(key(c.cx,c.cz), c);
     if(lx===0){ const n=getChunk(c.cx-1,c.cz); if(n&&n.generated)_bulk.touched.set(key(n.cx,n.cz),n); } else if(lx===15){ const n=getChunk(c.cx+1,c.cz); if(n&&n.generated)_bulk.touched.set(key(n.cx,n.cz),n); }   // edge writes: neighbor's border faces must re-cull
     if(lz===0){ const n=getChunk(c.cx,c.cz-1); if(n&&n.generated)_bulk.touched.set(key(n.cx,n.cz),n); } else if(lz===15){ const n=getChunk(c.cx,c.cz+1); if(n&&n.generated)_bulk.touched.set(key(n.cx,n.cz),n); }
@@ -15505,6 +15555,10 @@ const muzzleLight=new THREE.PointLight(0xffcc88,0,9,2); scene.add(muzzleLight); 
 const viewFill=new THREE.PointLight(0xbfd0e8,0.85,1.3,1.6); viewFill.position.set(0.32,0.22,0.22); camera.add(viewFill);
 const VIEW_FILL_BASE=0.85;
 let _flashHold=false;   // QA only (__hc.flashHold) — see the flash-decay block in updateView
+// QA only (__hc.holoHide) — hides the reticle WITHOUT touching the pose, so a bench can subtract a reticle-off frame from a
+// reticle-on one and be left with the hologram alone. Counting "red pixels" absolutely cannot work: a foxglove or a berry bush
+// streaming into view behind the glass reads redder than a 15 px hologram, and which flora has loaded differs run to run.
+let _holoHide=false;
 // How much room the held gun must keep in front of the near plane. One constant, because the fault it fixes was 14 of 16
 // gun variants having their stock at or behind the eye while aimed; per-gun tuning is what let them drift apart.
 const VIEW_NEAR_CLEAR=0.10;
@@ -17169,7 +17223,7 @@ function updateView(dt){ updateRecoil(dt);                                      
   // person as a hologram floating in the middle of the screen with no sight anywhere near it. The gun is on the body's shoulder
   // over there; the crosshair ring is the aiming reference (see updateCrosshair), and it shrinks on the same raise curve.
   { const on=isGun && isDotG && !_tpsAct && (view.adsT||0)>0.28 && !(view.reloadT>0);
-    view.holoRet.visible=on;
+    view.holoRet.visible=on && !_holoHide;   // _holoHide is QA only: the pose is untouched, only the hologram goes
     if(on){ const o=clamp(((view.adsT||0)-0.35)/0.5,0,1);                                   // alignment fade — off-axis shows glass, no floating reticle
       // IT SLIDES OFF THE GLASS, IT DOES NOT DIM (Ben 08-04: "holosight reticle fades away close to the edge of its sight, it
       // shouldnt do this it should just slide off the plane"). The old version scaled the WHOLE reticle's opacity by how close the
@@ -20320,7 +20374,42 @@ function brxGenerate(o){ BR.rooms=[]; BR.walls=[]; BR.doors=[]; BR.lintels=[]; B
       if(_nearSpawn(px,pz,2))continue; if(!_clearAt(px,pz))continue;
       const rad = kind===5 ? (1.1+rng()*1.0) : 0.62;
       BR.props.push({x:px, z:pz, kind, rot, r:rad});
-      BR.boxes.push({x:px, z:pz, hx:rad, hz:rad}); } } }
+      BR.boxes.push({x:px, z:pz, hx:rad, hz:rad}); } }
+  BR._buried=(BR._buried||0)+brxDropBuriedWalls(); }
+// A WALL STANDING ENTIRELY INSIDE ANOTHER WALL. A stairwell's side lining is emitted at c0/c1 = floor/ceil(cross +/-
+// BRX_STAIR_HW), and room walls sit on the BR_CS grid — so when a well sits centred in a cell those two coordinates are
+// the SAME line, and the lining lays a second 8 m x 8 m face exactly over the room wall already there. One material, one
+// merged geometry: the whole face z-fights, which is the wide version of Ben's "wall edges peek through walls" and reads
+// as a flickering sheet rather than a hairline. Measured 14 of them across 15 generations (bench/br-wall-sheets.mjs), all
+// 8 m, and 14 of 14 carried a descending record, which only the lining emits.
+// Dropping the CONTAINED record cannot open a hole: it is kept only when some other collinear same-storey wall covers its
+// whole span, so that wall still collides and still renders. Only full containment, and only spans wider than a wall
+// thickness — a pair overlapping by ~BR_WT is the deliberate corner growth in brxEmitWall and must be left alone.
+// Bucketed by wall LINE (axis + fixed coordinate + storey floor), because the naive pass is O(walls^2) per chunk.
+function brxDropBuriedWalls(){ const W=BR.walls; if(!W||W.length<2) return 0;
+  const _floor=w=>(w.by!=null? w.by : (w.ty!=null? w.ty-(BR_WY1-BR_WY0) : BR_WY0));
+  const key=w=>{ const ax=Math.abs(w.x1-w.x0)<1e-6, az=Math.abs(w.z1-w.z0)<1e-6;
+    if(!ax && !az) return null;                                                   // angled chamber walls never share a line with a lining
+    return (ax?'X':'Z')+':'+(ax?w.x0:w.z0).toFixed(2)+':'+_floor(w).toFixed(1)+':'+(w.ty!=null?w.ty:BR_WY1).toFixed(1); };
+  const lines=new Map();
+  for(let i=0;i<W.length;i++){ const k=key(W[i]); if(k==null) continue;
+    let L=lines.get(k); if(!L){ L=[]; lines.set(k,L); } L.push(i); }
+  const kill=new Set();
+  for(const idx of lines.values()){ if(idx.length<2) continue;
+    for(const i of idx){ if(kill.has(i)) continue; const a=W[i];
+      const ax=Math.abs(a.x1-a.x0)<1e-6, a0=Math.min(ax?a.z0:a.x0, ax?a.z1:a.x1), a1=Math.max(ax?a.z0:a.x0, ax?a.z1:a.x1);
+      for(const j of idx){ if(j===i || kill.has(j)) continue; const b=W[j];
+        const b0=Math.min(ax?b.z0:b.x0, ax?b.z1:b.x1), b1=Math.max(ax?b.z0:b.x0, ax?b.z1:b.x1);
+        if(b1-b0 <= BR_WT*1.5) continue;                                          // too short to be a sheet at all
+        if(b0 < a0-1e-6 || b1 > a1+1e-6) continue;                                 // not buried in a
+        // Strictly shorter loses. Two records of the SAME length on the same line are exact duplicates, and requiring
+        // "strictly longer" would keep both — so the higher index loses, which also makes the pass order-independent.
+        if((a1-a0) > (b1-b0)+1e-6 || j>i) kill.add(j); } } }
+  if(!kill.size) return 0;
+  // Spliced in place rather than reassigned: generation hands `near` arrays and the collision code the SAME array object,
+  // and swapping BR.walls for a copy would leave any captured reference pointing at the pre-drop list.
+  for(let i=W.length-1;i>=0;i--) if(kill.has(i)) W.splice(i,1);
+  return kill.size; }
 function brxEmitWall(run, vert, rnd, o){ const s0=vert?run.z0:run.x0, s1=vert?run.z1:run.x1, fixed=vert?run.x:run.z, L=s1-s0;
   const isDoor = run.a>=0 && run.b>=0 && BR._door && BR._door.has(run.a<run.b?run.a+'_'+run.b:run.b+'_'+run.a);
   const _R=BR.rooms, _zr=_R[run.a>=0?run.a:run.b], zone=_zr?(_zr.zone|0):0;                  // a wall wears the skin of the room it bounds (the `a` side, else `b` at the region edge)
@@ -22618,10 +22707,19 @@ if(typeof window!=='undefined'){ window.__hcBRX={          // the chunk substrat
         const yov=Math.min(at2,bt)-Math.max(ab,bb);
         if(yov<=0.01) continue;
         out.overlaps++;
+        // WHICH EMITTER, without tagging the source. `pushWall` bails on `a1-a0<=0.001`, so every run brxEmitWall emits
+        // ASCENDS along its own axis. The stairwell lining beside `BR.stairs.push` bypasses pushWall and emits
+        // `seg(R.a1, fixed)` when `R.out<0`, which descends. A record with x1<x0 or z1<z0 therefore came from a well
+        // lining and nothing else — that is the whole attribution, and it is why `desc` rides on the record.
+        const _desc=w=>((w.x1-w.x0)<-1e-6)||((w.z1-w.z0)<-1e-6);
+        const _inWell=w=>{ const mx=(w.x0+w.x1)/2, mz=(w.z0+w.z1)/2, HS=BRX_STAIR_HW+6;
+          return (BR.stairs||[]).some(s=>Math.abs(mx-s.cx)<=HS && Math.abs(mz-s.cz)<=HS); };
         const rec={ ov:+ov.toFixed(3), yov:+yov.toFixed(2), kind:(ov>BR_WT*1.5?'sheet':'growth'),
-                    a:[+a.x0.toFixed(2),+a.z0.toFixed(2),+a.x1.toFixed(2),+a.z1.toFixed(2),+ab.toFixed(1),+at2.toFixed(1)],
-                    b:[+b.x0.toFixed(2),+b.z0.toFixed(2),+b.x1.toFixed(2),+b.z1.toFixed(2),+bb.toFixed(1),+bt.toFixed(1)] };
+                    desc:(_desc(a)||_desc(b)), well:(_inWell(a)||_inWell(b)),
+                    a:[+a.x0.toFixed(2),+a.z0.toFixed(2),+a.x1.toFixed(2),+a.z1.toFixed(2),+ab.toFixed(1),+at2.toFixed(1),_desc(a)?'DESC':'asc'],
+                    b:[+b.x0.toFixed(2),+b.z0.toFixed(2),+b.x1.toFixed(2),+b.z1.toFixed(2),+bb.toFixed(1),+bt.toFixed(1),_desc(b)?'DESC':'asc'] };
         out[rec.kind]=(out[rec.kind]||0)+1;
+        if(rec.kind==='sheet'){ if(rec.desc)out.sheetDesc=(out.sheetDesc||0)+1; if(rec.well)out.sheetWell=(out.sheetWell||0)+1; }
         if(ov>out.worst){ out.worst=+ov.toFixed(3); out.sample.unshift(rec); out.sample=out.sample.slice(0,6); } } }
     return out; },
   // QA: per-loaded-chunk storey bookkeeping. r.ceil and w.ty are stored LOCAL at generation and rewritten to WORLD by
@@ -27985,6 +28083,7 @@ window.__hc={
   // the axis", which passed for every gun while the frame held almost no red at all: a ring that is one pixel across, or drawn
   // at a tenth of its opacity, is off-axis by nothing and invisible anyway. ringPx is the radius in DEVICE pixels, worked from
   // the plane's own half-width and the camera's vertical FOV, so it can be compared with what the screenshot measured.
+  holoHide(on){ try{ _holoHide=!!on; return {holoHide:_holoHide, vis:!!(view.holoRet&&view.holoRet.visible)}; }catch(e){ return {err:String(e.message||e)}; } },
   holoRetInfo(){ try{ const R=view.holoRet; if(!R) return {no:'no reticle'};
       const m=R.material, g=R.geometry&&R.geometry.parameters||{};
       R.updateWorldMatrix(true,false);
