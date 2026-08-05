@@ -2914,7 +2914,20 @@ function waterMesh(c){
 // KELP_DENSITY is a fraction of SUBMERGED columns, not of all of them — most of the world is dry, so this is far
 // denser on a seabed than the number looks. KELP_SWAY is per block of strand height, and it is deliberately larger
 // than land foliage gets: water moves a plant further and slower than air does.
-const KELP_DENSITY=0.34, KELP_SWAY=1.35;
+const KELP_DENSITY=0.68, KELP_SWAY=1.35;   // 0.45 is now the density INSIDE a bed in deep water, not a flat fraction of all submerged columns — the patch mask and the depth ramp below both scale it down
+// KELP GROWS IN BEDS, NOT AS A LAWN (Ben 08-05: "50% less kelp, more gradual and starting closer to the shore but not often close
+// to shore, and it should spawn in sponge-like patches, so it should have round, connected patches, but should not be everywhere").
+// The old rule was one white-noise roll per submerged column against a flat 0.34 — every seabed uniformly speckled, which is the
+// definition of everywhere, and no amount of turning that number down makes a PATCH; it just thins the speckle.
+// Three separate things, because Ben asked for three:
+//   PATCHES come from a low-frequency fbm thresholded with a soft edge. Noise contours are round and connected by nature, so a
+//     smoothstep across one gives blobs with bare seabed between them — the sponge look — and the soft rim keeps their edges from
+//     being a hard circle. 0.085 puts a patch at roughly 12-25 blocks across.
+//   GRADUAL comes from a depth ramp rather than the old hard "depth<2 → none" cliff. Squared, so the shallows are not merely
+//     less likely but noticeably rare: at 2 blocks of water it is at 1% of full, at 4 it is 25%, and it saturates by about 8.
+//   CLOSER TO SHORE is the ramp starting at depth 1 instead of 2 — kelp can now begin one block down, which is where the water
+//     first covers it, and the squared ramp is what keeps it from being common there.
+const KELP_PATCH_F=0.085, KELP_PATCH_LO=-0.12, KELP_PATCH_HI=0.14, KELP_DEPTH_FULL=5;
 function foliageMesh(c){
   const P=[], NM=[], UVB=[], TL=[], SK=[], WIND=[];
   const cx0=c.cx*CK, cz0=c.cz*CK;
@@ -2951,12 +2964,20 @@ function foliageMesh(c){
   // strand is deterministic in world coordinates, so it is identical on every client and across a reload.
   if(c.hasWater) for(let lz=0;lz<CK;lz++) for(let lx=0;lx<CK;lx++){
     const wx=cx0+lx, wz=cz0+lz;
-    if(xhash(wx,7,wz,911) > KELP_DENSITY) continue;
+    // THE PATCH MASK IS TESTED FIRST because it is the cheapest rejection and it throws away most of the map: no fbm, no column
+    // walk and no depth scan for a cell that is not in a bed at all.
+    const patch=smooth(KELP_PATCH_LO, KELP_PATCH_HI, fbm2(wx*KELP_PATCH_F, wz*KELP_PATCH_F, 617, 2));
+    if(patch<=0) continue;
+    const roll=xhash(wx,7,wz,911);
+    if(roll > KELP_DENSITY*patch) continue;                               // inside a bed it is dense; at the rim it thins out
     let sy=-1;
     for(let y=Math.min(WH-2,CFG.SEA); y>0; y--){ const b=g(lx,y,lz); if(b===WATER) continue; if(b===AIR) break; sy=y; break; }
     if(sy<1) continue;                                                    // no seabed under water in this column
     let depth=0; while(sy+1+depth<WH && g(lx,sy+1+depth,lz)===WATER) depth++;
-    if(depth<2) continue;                                                 // not deep enough to be underwater planting
+    if(depth<1) continue;                                                 // the seabed has to be under water at all
+    // AND THE SHALLOWS ARE RARE RATHER THAN FORBIDDEN. Squared ramp, so 1 block of water is nearly bare, 4 is a quarter as likely
+    // as open seabed, and it saturates around 8 — a beach that fades into weed instead of a wall of it starting at a fixed depth.
+    const dr=Math.min(1,(depth-1)/KELP_DEPTH_FULL); if(roll > KELP_DENSITY*patch*dr*dr) continue;
     // ONE quad pair per strand, not one per cell: aWind is uv.y*strength, so a single tall quad gives a sway that
     // grows smoothly to the tip. Stacked one-block quads would step it, and the roster asks for more at the tip.
     const hh=Math.min(depth-1, 2+Math.floor(xhash(wx,9,wz,977)*4));       // 2..5, and never up through the surface
@@ -4114,6 +4135,9 @@ let farSea=null, _farSeaWant=true, _farSeaAllow=true;   // _farSeaWant is the QA
 // colour without moving these two would split the sea line — the exact drift the comments around updateHorizon were written
 // against. All three are here, together, and __hc.seaLook moves them live.
 const _uWaterBody={ value:new THREE.Color(0.004,0.034,0.052) };
+// THE NIGHT SEA'S ONLY LIGHT TERM. Separate from _uWaterBody on purpose: uBody is the colour deep water sinks TOWARD at every
+// hour and is authored for daylight, so raising it to cure a night hole would drag the daytime deep sea with it. See the shader.
+const _uSeaNight={ value:new THREE.Color(0.010,0.020,0.030) };
 const _seaHorizon=new THREE.Color(0.0206,0.0422,0.0624);
 const _deepSea=new THREE.Color(0.010,0.075,0.205), _horizCamDir=new THREE.Vector3();   // the DEEP BLUE below the horizon — a DARKER, deeper deep-ocean navy (Ben 07-21): low R/G, still blue-dominant but lower value so the under-horizon band reads as deep ocean at ALL hours
 // PINE TREELINE — a distant forest silhouette on the horizon, shown ONLY toward azimuths where REAL land continues
@@ -4551,6 +4575,7 @@ const waterMat = new THREE.ShaderMaterial({
     // only thing standing between it and eye level is how much of the depth colour this cap lets the grazing reflection erase. At
     // 0.80 a fifth survived; at 0.42 well over half does, so the sea reads as water from a shore as well as from the air.
     uFresCap:{value:0.42},   // how far the grazing-angle reflection is allowed to replace the depth colour — 1.0 is the old behaviour
+    uSeaNight:_uSeaNight,    // night-only in-scatter floor; see the shader note beside "NIGHT IN-SCATTER FLOOR". 0,0,0 is the A/B off
     // OFF (Ben 08-05: "I want to get rid of the white foam"). The term stays because it is measured and harnessed and he may want it
     // back at a lower strength; __hc.foam({amt:1}) is the whole way back. It costs nothing at 0 — the multiply is still there, but
     // there is no branch to mispredict and no fetch behind it.
@@ -4658,7 +4683,7 @@ const waterMat = new THREE.ShaderMaterial({
     precision highp float;
     varying float vFar; uniform float uMeshR;
     varying float vTop; varying float vDepth; varying vec3 vW; varying vec3 vN; varying float vFog; varying float vCrest; varying vec2 vFlow;
-    uniform vec3 uSunDir,uMoonDir,uCamPos; uniform float uDay,uTime; uniform vec3 uFogColor; uniform vec3 uBody; uniform float uFogDensity, uDeep, uWx; uniform vec3 uRing; uniform float uRingFade;
+    uniform vec3 uSunDir,uMoonDir,uCamPos; uniform float uDay,uTime; uniform vec3 uFogColor; uniform vec3 uBody; uniform float uFogDensity, uDeep, uWx; uniform vec3 uRing; uniform float uRingFade; uniform vec3 uSeaNight;
     uniform float uGladeAfter, uGladeAmt, uFresCap, uFoam;
     float h2(vec2 p){ return fract(sin(dot(p,vec2(12.9,78.2)))*43758.5); }
     float vn2(vec2 x){ vec2 i=floor(x),f=fract(x); f=f*f*(3.0-2.0*f); return mix(mix(h2(i),h2(i+vec2(1,0)),f.x),mix(h2(i+vec2(0,1)),h2(i+vec2(1,1)),f.x),f.y); }
@@ -4739,6 +4764,19 @@ const waterMat = new THREE.ShaderMaterial({
       // aDepth 12, so open ocean is bit-identical.
       float absorb = 1.0 - exp(-vDepth*0.42);                         // 0 at a thin film -> ~1 in deep water
       col = mix(col, uBody, absorb*0.97);                            // sink toward the body colour with depth — the deep must read genuinely DARK (Ben 07-20)
+      // NIGHT IN-SCATTER FLOOR (Ben 08-05: "kelp and nighttime water is blackened when I am close to it at night").
+      // Close water at night had NO light term of any kind, and that is structural rather than a tuning miss. Everything above
+      // this line is either day-gated or Fresnel-gated: base is mix(deep,shallow,uDay*0.5) so it collapses to deep at night;
+      // skyRefl is uRing, which updateHorizon scales to 0.26 at night, and it only reaches col through min(F,uFresCap) — and F
+      // is 0.02 looking STRAIGHT DOWN, which is exactly what you do when you stand next to water. So close night water was the
+      // deep constant sunk 97 percent toward uBody, i.e. luminance 0.013 of linear black, and the alpha floor that went up
+      // earlier today to stop kelp showing through then made that blackness opaque. Both of his reports are the same pixel.
+      // This is an in-scatter term, NOT more reflection: light scattering out of the water body toward the eye does not care
+      // about the view angle, which is why it belongs here rather than in the Fresnel mix, and why it survives looking down.
+      // NOT A LIFT OF THE NIGHT AMBIENT, which Ben has asked four times to keep genuinely black and assert-night-crush guards:
+      // the target is PARITY WITH THE LAND at the same hour (unlit night ground measures 2 of 255), so the sea stops being a
+      // hole in a scene that is merely dark. Night only, so daylight water stays bit-identical.
+      col += uSeaNight * (1.0 - uDay);
       // AFTER THE ABSORPTION, NOT BEFORE IT. The line above mixes 97% of the way to near-black in deep water, so a highlight
       // added before it is erased by the very thing that makes the deep sea read deep: measured, the sun sat 3 degrees over
       // the horizon, dead centre in frame, with the water beneath it completely flat. A reflection lives ON the surface and
@@ -17069,11 +17107,15 @@ function killWretch(){ spawnParticles(wretch.pos.x,wretch.pos.y+1,wretch.pos.z,0
     if(typeof seraphSay==='function'){ seraphSay('death1'); setTimeout(()=>seraphSay('death2'),4600); }   // it dies like scripture: the verse cut mid-word, then the last soft line over the toll
     achUnlock('seraph'); flashName('THE CERAPHIM FALLS — all three lives spent. Its reward is in your bags, and JESUS is risen.'); }
   else { wretch.hp=wretch.hpMax; achUnlock('wretch_slain');
-    try{ lootChest(bx, gy, bz, [['egg_herobrine',1]]); }catch(e){}       // the wretch's chest holds the Herobrine spawner
+    // THE CHEST HOLDS THE WHOLE SHRINE, NOT JUST THE SPAWNER (Ben 08-05: "the wretchs reward chest. MUST spawn the items for a
+    // herobrine shrine, 9x gold, 4x red torches, and 1x netherrack"). It held the egg alone, so the reward told you to build a
+    // shrine and handed you none of the materials for it — gold_block is not craftable and red_torch takes a shrine torch you do
+    // not have. Every id here is the one the shrine's own blocks use (see the cuff message that names them).
+    try{ lootChest(bx, gy, bz, [['egg_herobrine',1],['gold_block',9],['red_torch',4],['netherrack',1]]); }catch(e){}       // the wretch's chest holds the Herobrine spawner AND the shrine kit
     try{ invAdd('wretch_bag',1); refreshHotbar(); }catch(e){}            // and the WRETCH's SPOILS bag (statue, berry bowls, AR-15, ammo, diamonds) → every player
     if(NET.on && typeof netSend==='function') netSend({t:'wretchdead'});  // guests each get their own wretch bag
     startHaunt();                                                        // …and HE begins to haunt — cuff him and bring him to the shrine
-    flashName('the Wretch falls — its spoils are in your bags, and a chest holds the Herobrine spawner. Build the shrine…'); } }
+    flashName('the Wretch falls — its spoils are in your bags, and a chest holds the spawner and all the shrine needs. Build it…'); } }
 // ===== THE MEGA-WRETCH — a winged, red-glowing, flying boss summoned at the lit Herobrine shrine =====
 // SERAPH RIG — a biblically-accurate seraph: FIVE wing-pairs (3 ASCENDING crown + 2 DESCENDING with tips curling UP),
 // a body core wrapped in a wheel of blue eyes, feathers of white cloth with blood bleeding from the quill.
@@ -27692,6 +27734,14 @@ window.__hc={
   // so erased past ~250 blocks); `amt` scales the whole thing.
   // QA/bench: the sea's whole palette at once — the body colour you see INTO, and the deep colour the far plane and the horizon
   // band are built from. Both together, because moving one without the other splits the sea line.
+  // QA/bench: the night sea's in-scatter floor. amt scales the shipped colour (1 = shipped, 0 = the A/B off, i.e. the black
+  // close-up water Ben reported); rgb sets it outright. Night only — at uDay 1 this term is multiplied out entirely.
+  seaNight(o){ try{ const D=[0.010,0.020,0.030];
+      if(o&&o.rgb) _uSeaNight.value.setRGB(+o.rgb[0],+o.rgb[1],+o.rgb[2]);
+      else if(o&&o.amt!=null) _uSeaNight.value.setRGB(D[0]*+o.amt, D[1]*+o.amt, D[2]*+o.amt);
+      const v=_uSeaNight.value;
+      return { rgb:[+v.r.toFixed(4),+v.g.toFixed(4),+v.b.toFixed(4)], amt:+(v.b/D[2]).toFixed(3), day:+globalU.uDay.value.toFixed(3) };
+    }catch(e){ return {err:String(e.message||e)}; } },
   seaLook(o){ try{ if(o){ if(o.body) _uWaterBody.value.setRGB(+o.body[0],+o.body[1],+o.body[2]);
         if(o.far) _deepSea.setRGB(+o.far[0],+o.far[1],+o.far[2]);
         if(o.horizon) _seaHorizon.setRGB(+o.horizon[0],+o.horizon[1],+o.horizon[2]); }
