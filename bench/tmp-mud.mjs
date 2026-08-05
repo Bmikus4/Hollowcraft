@@ -26,6 +26,11 @@ const sleep = ms => new Promise(r=>setTimeout(r,ms));
     await page.evaluate('__hc.setTime(0.28)');
     await sleep(3000);
     console.log('census ' + JSON.stringify(await page.evaluate('__hc.mudCensus(120)')));
+    // PAIRED: the same crossings at the old threshold and the new one, on one page.
+    await page.evaluate('__hc.riverWidth(0.035)');
+    console.log('width old ' + JSON.stringify(await page.evaluate('__hc.streamWidth(24)')).slice(0,150));
+    await page.evaluate('__hc.riverWidth(0.055)');
+    console.log('width new ' + JSON.stringify(await page.evaluate('__hc.streamWidth(24)')).slice(0,150));
     // A REAL river, not the first water column: riverNear returns any wet cell, and near spawn that is the sea.
     const riv = await page.evaluate('(()=>{ const c=__hc.flowCensus(); return c.river ? {found:true, x:c.river.x, z:c.river.z, h:c.river.h} : {found:false}; })()');
     console.log('river  ' + JSON.stringify(riv));
@@ -33,13 +38,24 @@ const sleep = ms => new Promise(r=>setTimeout(r,ms));
     { const st = await page.evaluate("__hc.blockStudio('mud',3)");
       console.log('studio ' + JSON.stringify(st)); await sleep(2500);
       fs.writeFileSync(path.join(ROOT,'bench','results','mud-block.png'), await page.screenshot()); }
-    if(riv && riv.found){
-      await page.evaluate('__hc.tp('+(riv.x+7)+','+(riv.z+7)+')');   // tp() ground-snaps; tpAt put the camera inside the bank
-      await page.waitForFunction('(()=>{try{const f=__hc.fill(); return f.meshed>=f.want;}catch(e){return false;}})()', null, {timeout:90000}).catch(()=>{});
-      await sleep(4000);
-      await page.evaluate('__hc.look('+riv.x+','+(riv.h+1)+','+riv.z+')'); await sleep(1500);
+    // STAND ON THE BANK, LOOK ACROSS THE WATER. mudSpots returns the pair a camera needs — a mud column to stand on
+    // and the water cell beside it. Aiming at a river CELL is what put the camera in the channel twice.
+    const spots = await page.evaluate('__hc.mudSpots(160)');
+    if(spots && spots.length){
+      const sp = spots[0];
+      await page.evaluate('__hc.tp('+sp.x+','+sp.z+')');
+      await page.waitForFunction('(()=>{try{const f=__hc.fill(); return f.meshed>=f.want;}catch(e){return false;}})()', null, {timeout:120000}).catch(()=>{});
+      await sleep(5000);
+      await page.evaluate('__hc.tp('+sp.x+','+sp.z+')'); await sleep(900);
+      await page.evaluate('__hc.look('+sp.wx+','+(sp.h-1)+','+sp.wz+')'); await sleep(1200);
       fs.writeFileSync(path.join(ROOT,'bench','results','mud-river.png'), await page.screenshot());
-      console.log('wrote mud-river.png  ' + JSON.stringify(await page.evaluate('__hc.mudCensus(40)')));
+      console.log('bank   ' + JSON.stringify(sp) + '  at ' + JSON.stringify(await page.evaluate('__hc.water()')));
+      // and the stream from above, for the width and the braiding
+      await page.evaluate('__hc.tpAt('+sp.x+','+(sp.h+30)+','+(sp.z+18)+')'); await sleep(3000);
+      await page.evaluate('__hc.tpAt('+sp.x+','+(sp.h+30)+','+(sp.z+18)+')');
+      await page.evaluate('__hc.look('+sp.wx+','+(sp.h-2)+','+sp.wz+')'); await sleep(300);
+      fs.writeFileSync(path.join(ROOT,'bench','results','stream-above.png'), await page.screenshot());
+      console.log('wrote mud-river.png and stream-above.png');
     }
     await browser.close();
   } finally { try{ server.kill(); }catch(e){} }
