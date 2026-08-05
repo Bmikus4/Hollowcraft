@@ -38,19 +38,23 @@ let fails=0; const ok=(n,c,g)=>{ if(!c)fails++; console.log(`  ${c?'ok  ':'FAIL'
     const r=await page.evaluate(`__hc.cathedralBase()`);
     console.log('    base', JSON.stringify(r));
     ok('the cathedral is built', r && r.done===true && r.padTop!=null, {done:r&&r.done, padTop:r&&r.padTop});
-    // FOUR BLOCKS. The measurement is on the skirt, outside the walls, so it is the plinth and not the building on it. Six is the
-    // allowance: four courses of plinth plus the block the pad's own top course sits on where the ground was already low.
-    ok('the base is four blocks of masonry, not twenty', r.baseDepth>0 && r.baseDepth<=6, {baseDepth:r.baseDepth, wasAbout:24});
+    // FOUR BLOCKS TALL. Measured as HEIGHT ABOVE THE ORIGINAL GROUND, not as a masonry column: this promontory is stone under its
+    // topsoil, so counting masonry downward from the apron reads 43 and is describing the mountain, not the base. Five is the
+    // allowance — four courses of plinth plus the top course itself where the ground under it was already a block low.
+    ok('the base stands four blocks over the ground, not twenty', r.baseLiftLand!=null && r.baseLiftLand<=5,
+       {baseLiftLand:r.baseLiftLand, cliffFooting:r.baseLift, footingAt:r.liftAt, wasAbout:24});
+    // NOTHING FLOATS. The plinth is clamped to four courses, so on a promontory that falls to the sea the floor was a single course of
+    // cobble over open air — 302 of 1325 columns had nothing under them within four blocks, and you could look under the church and
+    // into it. What is left is caves: a natural void below the footing reads the same to a block scan.
+    ok('the floor has ground under it', r.hangFloor<=60, {hangFloor:r.hangFloor, wasAbout:302, floatApron:r.floatApron});
     // ON THE GROUND: the pad's top course sits one block over the site's own ground level, not over the highest point for 60 blocks.
     ok('…and it sits on the ground at its own centre', Math.abs(r.padTop-(r.gy0+1))<=1, {padTop:r.padTop, groundAtCentre:r.gy0});
-    // A FLAT SHORE: every column in the shore band tops out at the same height. One height in the histogram is flat; the old
-    // staircase would show one per ring.
-    const heights=Object.keys(r.shoreHeights||{}).map(Number).sort((a,b)=>a-b);
-    const dominant=heights.length?heights.reduce((a,h)=>r.shoreHeights[h]>r.shoreHeights[a]?h:a,heights[0]):null;
-    const flatFrac=heights.length?r.shoreHeights[dominant]/r.shoreN:0;
-    console.log('    shore heights', JSON.stringify(r.shoreHeights), 'dominant', dominant, 'frac', +flatFrac.toFixed(3));
-    ok('the shore around it is flat', flatFrac>0.9, {dominant, flatFrac:+flatFrac.toFixed(3), n:r.shoreN});
-    ok('…and it is at the church\'s own ground level', dominant!=null && Math.abs(dominant-r.gy0)<=1, {dominant, gy0:r.gy0});
+    // COBBLESTONE, NOT GRASS (Ben 08-05: "the cathedrals base needs to be cobblestone not grass"). The old base was a paved pad with
+    // a ten-block dead-flat GRASS shore laid over its skirt, and from the ground a mown terrace and a paved one both read as base.
+    ok('the base is cobble, with no grass on it', r.grassOnApron===0 && r.apronCobble>200, {grassOnApron:r.grassOnApron, apronCobble:r.apronCobble});
+    // …AND SMALLER, FITTING CLOSER (same ask). The apron is now every column within CATH_PAD of the CRUCIFORM outline rather than of
+    // its bounding box, so the cross's four empty corners are ground again. Masonry more than one ring past the apron is the fault.
+    ok('…and no masonry reaches past the apron', r.wideMasonry===0, {wideMasonry:r.wideMasonry, pad:r.pad});
     // NO TREES ON THE BASE, TREES AROUND IT.
     ok('nothing grows on the base', r.treesOnPad===0, {treesOnPad:r.treesOnPad});
     ok('…and the wood still surrounds it', r.treeColumnsAround>40, {treeColumnsAround:r.treeColumnsAround});
