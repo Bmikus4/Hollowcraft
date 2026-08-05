@@ -4802,7 +4802,12 @@ const waterMat = new THREE.ShaderMaterial({
       // whatever the depth said. 0.38 lets the shelf show while the depth terms still close it up: at one block this is 0.51, at
       // three 0.72 — the old floor — and deep water still lands on 0.99. The Fresnel term stays, so a grazing view is glassier
       // than a plan view, which is what makes shallow water read as a surface at all.
-      float alpha = clamp(0.38 + 0.60*absorb + 0.08*F, 0.0, 0.99);    // NOT glass, but not a lid either: deep = solid
+      // MORE OPAQUE AT NIGHT (Ben 08-05: "water at night is a huge problem, kelp can be seen 100% through it, it just needs made a
+      // little more opaque at night"). The transparency shipped earlier today is a DAY read — you see the seabed because there is
+      // light on it — and at night there is none, so the same alpha shows the kelp as a black cutout through what should be dark
+      // water. This lifts the floor as the day falls and leaves the depth curve alone: nothing about daylight water moves, because
+      // uDay is 1 then.
+      float alpha = clamp(0.38 + 0.60*absorb + 0.08*F + (1.0-uDay)*0.30, 0.0, 0.99);    // NOT glass, but not a lid either: deep = solid
       if(vTop<0.5) alpha = max(alpha, 0.95);                          // side faces stay solid-looking
       // THE OLD PATH, kept as a flag so the distance claim can be measured rather than argued: at uGladeAfter 0 the glade is
       // added here, before the fog mix and before the ring landing, exactly as it was — and the landing then erases it past
@@ -6666,7 +6671,15 @@ function cullChunks(){
   }
   const fogCheb=Math.max(2, Math.ceil(2.146/Math.max(1e-6,scene.fog.density)/CK));   // distance where FogExp2 reaches ~99% opacity, in chunks: anything past it is pure fog color on screen — skip drawing it entirely. Daylight fog cuts nothing (falls beyond RD); night/underwater/fog-weather cut real draws.
   world.forEach(c=>{ if(!c.group) return; const cheb=Math.max(Math.abs(c.cx-pcx),Math.abs(c.cz-pcz));
-    const vis = (cheb<=5 || (c._vf===_visFrame)) && cheb<=fogCheb;   // near ring (within shadow-caster range) always on → preserves shadows; Three's per-mesh frustum cull still skips its camera draws. occlusion hides only farther chunks.
+    // FOG MUST NOT PULL THE WORLD IN (Ben 08-05: "render distance should not change during fog events... right now render distance is
+    // reduced to about 4-5 chunks and the entire horizon regresses"). fogCheb is where FogExp2 reaches ~99% opacity, and the claim
+    // above it — that anything past it is pure fog colour, so culling it is free — is false in practice: what stands behind those
+    // chunks is the pine backdrop and the sky band, which are NOT that colour, so cutting them at 4 chunks visibly withdraws the
+    // horizon instead of fogging it. The land is now drawn to the render distance whatever the weather, and the fog does the hiding.
+    // This costs draws during a fog event, which is the trade he asked for; the foliage and leaf suppression below still follow the
+    // fog, because those genuinely are sub-pixel out there.
+    const drawCheb = Math.max(fogCheb, CFG.RENDER_DIST);
+    const vis = (cheb<=5 || (c._vf===_visFrame)) && cheb<=drawCheb;   // near ring (within shadow-caster range) always on → preserves shadows; Three's per-mesh frustum cull still skips its camera draws. occlusion hides only farther chunks.
     c.group.visible=vis;
     // FOLIAGE FOLLOWS THE FOG, NOT A RING (Ben 08-04: "foliage is still not affected by fog always"). It was suppressed past a
     // FIXED ring — RD-3 — which in clear daylight is nowhere near where the fog actually reaches: fogCheb is 46 chunks at noon
@@ -26800,6 +26813,31 @@ window.__hc={
   // QA/bench: an ITEM ICON as numbers. Rows and columns of set pixels are enough to tell a silhouette apart from the circle that
   // drawIcon falls back to when an icon type has no painter — a circle of r=5 about (8,8) cannot reach row 1 or row 14, and a
   // cross reaches both. Same rasterising trick ammoIcons uses.
+  // QA/bench: an arachnid's legs as EIGHT FOOT POSITIONS in its own body space. "The legs look wrong" is an opinion; where each
+  // foot sits relative to the body centre is arithmetic, and it is the only way to see the fault this was written for — a left leg
+  // whose foot lands at POSITIVE x has reached across underneath the animal, which no photograph of a dark spider would show.
+  // Reported in the rig's own space (world matrix inverted out) so the creature's facing does not enter the answer.
+  legRig(type){ try{
+      let g=null;
+      if(typeof animals!=='undefined') for(const a of animals){ if(a.type===type && a.mesh && a.mesh.userData && (a.mesh.userData.spiderLegs||a.mesh.userData.legs)){ g=a.mesh; break; } }
+      if(!g && typeof _dunBugs!=='undefined') for(const b of _dunBugs){ if(b.kind===type && b.g && b.g.userData && (b.g.userData.spiderLegs||b.g.userData.legs)){ g=b.g; break; } }
+      if(!g) return {none:true, type};
+      const legs=g.userData.spiderLegs||g.userData.legs||[];
+      // AT REST, BY DEFAULT. These creatures are always mid-stride, and a gait is asymmetric ON PURPOSE — measuring a walking
+      // spider reported left and right feet 0.3 apart and called the rig skewed, which is the animation doing its job. Each leg
+      // stores its authored fz/tz, so the rest pose can be restored for one measurement and put straight back. That is the pose
+      // the model actually declares, and the only one a claim about spread can be made against. Pass live:true for the walk.
+      const rest=[];
+      if(!(type&&type.live)) for(const L of legs){ rest.push([L.femG.rotation.z, L.tibG.rotation.z]);
+        L.femG.rotation.z=L.fz; L.tibG.rotation.z=L.tz; }
+      g.updateMatrixWorld(true);
+      const inv=new THREE.Matrix4().copy(g.matrixWorld).invert(), v=new THREE.Vector3(), out=[];
+      for(const L of legs){ const tib=(L.tibG.children||[]).find(o=>o.isMesh); if(!tib) continue;
+        if(!tib.geometry.boundingBox) tib.geometry.computeBoundingBox();
+        v.set(0, tib.geometry.boundingBox.max.y, 0).applyMatrix4(tib.matrixWorld).applyMatrix4(inv);
+        out.push({ side:L.side, i:L.i, x:+v.x.toFixed(3), y:+v.y.toFixed(3), z:+v.z.toFixed(3),
+                   bearing:+(Math.atan2(-v.z, v.x)*57.29578).toFixed(1) }); }
+      return { type, n:out.length, feet:out }; }catch(e){ return {err:String(e.message||e)}; } },
   iconPix(id){ try{ const cv=document.createElement('canvas'); cv.width=cv.height=16;
       const cx=cv.getContext('2d'); cx.imageSmoothingEnabled=false; drawIcon(cx,id);
       const d=cx.getImageData(0,0,16,16).data; const rows=[], cols=new Array(16).fill(0); let tot=0;
