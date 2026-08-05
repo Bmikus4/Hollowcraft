@@ -13,6 +13,16 @@
 //   keys are new MATERIALS                        -> the cause is material variants appearing as the world streams,
 //                                                    and a stable light count would remove none of them.
 //
+// ANSWERED 2026-08-05, and it kills plan item A2 as an FPS fix. 37 -> 105 programs, 69 new, as 135 chunks meshed. The
+// light-count fields in every key are IDENTICAL (2/25/0/0/1; basic, lambert and phong each show one distinct numeric
+// signature, physical two, differing in a trailing flag and not in a light count), and the light census is the same
+// outside and inside: 2 dir, 1 hemi, 1 ambient, 24+1 point, unchanged. So A1's stable pool is holding and the count no
+// longer moves. The 69 new programs are new MATERIALS — 16 basic, 16 physical, 15 lambert, 10 phong — arriving as the
+// world streams. That is the SECOND branch of the rule above, so A2's central claim ("the program then depends on nothing
+// that varies: zero recompiles") is already true of light count and would remove none of this churn. A2's only remaining
+// payoff is the emitter ceiling, which is report E, and E measures as worth about two extra lights (see BR_LIT_HOPS).
+// Whatever is left of the compile storm is a material-variant question, not a lighting one.
+//
 // usage: node bench/progs-who.mjs      (HC_ROOT=<pinned tree> to measure a pinned hash)
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';

@@ -2641,7 +2641,7 @@ function pineEmit(wx,wz,emit){
         // surface, which is the whole of what Ben was looking at when he said the leaves were not transparent.
         // A canopy is a sphere here, so the honest test is the 3D distance from its centre.
         const core=(Math.sqrt(rr*rr + y*y) <= cr-3.0);
-        if(!core && rng()<0.06) continue;                           // a few natural gaps in the shell
+        if(!core && rr > rad-2 && rng()<0.06) continue;             // gaps in the outer two layers only — see the pine's note
         emit(wx+ox, h+yy, wz+oz, core?LEAF_CORE:LEAF_SHELL, false);
       }
     }
@@ -2664,7 +2664,11 @@ function pineEmit(wx,wz,emit){
       // apex term is the one that was missing — a cone's discs shrink going up, so lateral depth alone leaves the
       // top of every layer's core exposed to the sky.
       const core=(rr<=rad-3) && ((th+2-y)>=3) && ((y-base)>=3);
-      if (!core && rng()<0.05) continue;               // outer shell: a few natural gaps; core stays solid
+      // THE GAPS ONLY GO IN THE OUTER TWO LAYERS, and that is what was exposing the core. A gap punched anywhere in
+      // the shell can land directly beside a core cell, and then the opaque block has open air one step away — which
+      // is how __hc.shellDepth found core at DEPTH 1 on every pine in the world. Keeping the gaps out near the rim
+      // leaves the innermost shell layer intact as a lid over the core.
+      if (!core && rr > rad-2 && rng()<0.05) continue;   // outer shell: a few natural gaps; core stays covered
       emit(wx+ox, h+y, wz+oz, core?LEAF_CORE:LEAF_SHELL, false);
     }
   }
@@ -3387,7 +3391,13 @@ function foliageMesh(c){
   if(c.hasLeaf){ let sprigs=0;
     const SPRIG={ pine:TILEIDX['leaf_sprig'], birch:TILEIDX['birch_sprig'], oak:TILEIDX['oak_sprig'] };
     const NB=[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
-    for(let ly=1;ly<WH-1 && sprigs<2600;ly++) for(let lz=0;lz<CK;lz++) for(let lx=0;lx<CK;lx++){
+    // NO HEIGHT-BIASED CAP (Ben 08-05: "foliage ... is still missing past a certain height, and doesnt cover
+    // everything even canopy tops"). The loop ascends in Y, so a per-chunk sprig budget does not thin the canopy
+    // evenly — it lops the TOP off it, which is the half you see from anywhere. The cap is now a runaway guard set
+    // far above what a real chunk asks for: a chunk that is nothing but canopy has about 4000 exposed faces and so
+    // wants around 16000 quads, and the measured cost of the whole cutout-plus-sprig pass in deep woods is inside
+    // the noise of the frame. If this ever binds, something is wrong with the canopy, not with the budget.
+    for(let ly=1;ly<WH-1 && sprigs<60000;ly++) for(let lz=0;lz<CK;lz++) for(let lx=0;lx<CK;lx++){
       const id=g(lx,ly,lz); if(!isLeafId(id)) continue;
       const SPRIG_TILE = (id===BID.birch_leaves||id===BID.birch_leaves_core) ? SPRIG.birch
                        : (id===BID.oak_leaves  ||id===BID.oak_leaves_core)   ? SPRIG.oak : SPRIG.pine;
@@ -17558,8 +17568,11 @@ function updateView(dt){ updateRecoil(dt);                                      
       _sv.set(0, view.mesh.userData.dotY, 0).applyMatrix4(view.mesh.matrixWorld);
       camera.worldToLocal(_sv);
       view._hgSv=[+_sv.x.toFixed(4),+_sv.y.toFixed(4),+_sv.z.toFixed(4)];   // what the correction itself measured, for the probe to compare against
-      view.group.position.x -= clamp(_sv.x,-0.10,0.10)*e;
-      view.group.position.y -= clamp(_sv.y,-0.10,0.10)*e; }
+      // The clamp is a guard against a model with a nonsense dotY, NOT a strength limit — at 0.10 it bound against a real error of
+      // 0.117 and left the sights 1.7 cm high, which is the fault this block exists to fix. A pistol's grip anchor legitimately sits
+      // that far below its sight line: the whole 11.7 cm is the correction.
+      view.group.position.x -= clamp(_sv.x,-0.22,0.22)*e;
+      view.group.position.y -= clamp(_sv.y,-0.22,0.22)*e; }
     // A MODEL'S CARRY CANT COMES OFF AS THE GUN COMES UP. It is a look for the hip — the minigun is held slightly muzzle-high and
     // rolled — and the aim axis is read off the mesh matrix, so leaving it on while aimed points the bore (and therefore the
     // reticle, and the round) above where the sight is looking. Blended by the same raise `e` as the pose, and written BEFORE
@@ -22254,17 +22267,23 @@ function brFlick(ph,t){ const s=Math.sin(t*1.7+ph)*Math.sin(t*0.63+ph*1.7);
 // geometry, and only the 2 nearest cast (6 faces each; 16 casters is unaffordable). So gate the pool by ROOM VISIBILITY
 // instead: your own room always, plus any room joined to it by an opening that is actually open. A shut door now
 // genuinely occludes its room's light. Recomputed a few times a second, not per frame.
-// How many open doorways the light gate may walk through. STAYS AT 1, AND WIDENING IT IS A MEASURED REGRESSION, NOT THE
-// FIX IT LOOKS LIKE. The plan for report E was "the gate throws away 106 of 139 fixtures within 95 m, replace it with
-// distance plus frustum". A/B on one HEAD, one character apart (bench/br-lights.mjs, `gate` and `pixels`):
-//   1 hop: litRooms 2, gatedOut 111, frame mean luminance 47.8
-//   2 hops: litRooms 4, gatedOut 111, luminance 44.7
-//   3 hops: litRooms 6, gatedOut 109, luminance 44.7
-// Admitting more rooms barely moves the gated-out count and makes the view DARKER, because the real constraint is the 16
-// pool slots, not the gate: brxUpdateLights sorts by distance and takes the nearest 16, so every extra room admitted only
-// spends slots on tubes further away. litRooms is an intermediate, not an outcome — it improved while the picture got worse.
-// E is therefore gated on A2, the voxel light grid, exactly as the plan says: with tubes writing into a grid there is no
-// 16-slot competition to lose.
+// How many open doorways the light gate may walk through. STAYS AT 1 because widening it buys almost nothing, and the
+// reason is worth more than the setting. Report E read as "the gate throws away 106 of 139 fixtures within 95 m", which
+// sounds like most of the light is being withheld. It is not: those 140 are everything within a 95 m radius, and only
+// about 18 fixtures are ever near enough to be among the nearest slots. Measured on ONE HEAD, pool size and hop depth
+// crossed, using `duty` from bench/br-lights.mjs — average lit slots over 60 frames:
+//   pool 16, 1 hop (shipped)  15.98 slots   intensity 191.8
+//   pool 32, 1 hop            17.00         204        <- gate binds: only ~17 fixtures are eligible at all
+//   pool 16, 3 hops           16.00         192        <- pool binds: extra rooms admitted, no slot to light them in
+//   pool 32, 3 hops           18.00         216        <- both raised, and it is still only +2 lights
+// The two limits mask each other, so testing either alone says "no effect" for opposite reasons. Raising BOTH gains two
+// lights. That is the whole upside, and it is why E is not the brightness lever it was written as.
+//
+// DO NOT JUDGE THIS WITH `pixels` FROM br-lights: that is a SINGLE frame and 27 of the fixtures are flickering, so its
+// mean swings on flicker phase alone. It reported 47.8 / 44.7 / 44.7 across hop depths on one tree and 47.8 / 40.2 / 47.8
+// on another, i.e. 2 hops "darker" than both 1 and 3 — not monotonic, therefore not the gate. An earlier commit here
+// claimed widening the gate darkened the view on the strength of that number; it was flicker noise. Any luminance verdict
+// in the halls has to average many frames or pin the flicker.
 const BR_LIT_HOPS=1;
 let _brLitSet=null, _brLitT=0, _brLitRoom=-2;
 function brLitRooms(){ const me=brxRoomAt(player.pos.x,player.pos.z); const id=me?me.id:-1;
