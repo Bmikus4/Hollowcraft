@@ -14744,7 +14744,19 @@ function decorateDungeon(cx,fy,cz){ const g=new THREE.Group(); scene.add(g); con
       const along=(Math.random()*2-1)*(DR-1.5), up=fw+0.6+Math.random()*(DH-2.4), rz=(Math.random()*2-1)*0.22;
       const gx=(wl.ax==='x')?(cx+along):wl.p, gz=(wl.ax==='x')?wl.p:(cz+along);                 // glyph seats ON the inner face
       const wbx=(wl.ax==='x')?(cx+along):wl.wb, wbz=(wl.ax==='x')?wl.wb:(cz+along);              // probe the wall block behind it
-      if(getBlock(Math.floor(wbx),Math.floor(up),Math.floor(wbz))!==BID.mossy) continue;         // only scratch where a solid wall actually stands (an open mouth/passage → skip, no floating glyph)
+      // THE WHOLE GLYPH HAS TO HAVE WALL BEHIND IT, NOT ITS CENTRE (Ben's backlog item 32: "don't place dungeon symbols over open
+      // doorways"). The old gate probed ONE block, behind the middle of the plane — which is correct for the small glyphs and useless
+      // for the big ones: `big` runs to 4.2 blocks across, so a glyph seated on solid wall a metre from a passage mouth hung half of
+      // itself over the opening. Every doorway in the hall is at most a few blocks wide, so the footprint is walked in 0.9-block steps
+      // (under one block, so no opening can fall between two samples) with the extremes always included, and one miss rejects it.
+      //   Sampled by COUNT, not by stepping a float: `for(a=-h; a<=h; a+=0.9)` stops before the far edge on any glyph whose width is
+      // not a multiple of the step, and the far edge is exactly where the overhang is.
+      { const h=s2*0.5, ns=Math.max(1, Math.ceil(2*h/0.9)); let solid=true;
+        for(let si=0; si<=ns && solid; si++) for(let sj=0; sj<=ns; sj++){
+          const a=-h+2*h*si/ns, v=-h+2*h*sj/ns;
+          const ax=(wl.ax==='x')?(cx+along+a):wl.wb, az=(wl.ax==='x')?wl.wb:(cz+along+a);
+          if(getBlock(Math.floor(ax),Math.floor(up+v),Math.floor(az))!==BID.mossy){ solid=false; break; } }
+        if(!solid) continue; }
       for(const mat of [SM.dark[k],SM.red[k]]){ const q=new THREE.Mesh(geo.clone(),mat);   // clone: mergeGeos mutates each geo, so dark & red can't share one
         q.position.set(gx, up, gz);
         q.lookAt(gx+wl.n[0], up, gz+wl.n[2]); q.rotation.z=rz; q.position.addScaledVector(new THREE.Vector3(wl.n[0],0,wl.n[2]), mat===SM.red[k]?0.02:0); bucket(q); } } }
@@ -30591,6 +30603,53 @@ window.__hc={
   // QA: THE DROPS ON THE GROUND (Ben's backlog item 30: "dropped stackable items merge when close together"). Reports the live entity
   // list, because "they merged" is a statement about how many ENTITIES exist and how the counts add up — not about anything on screen.
   // spawnDrop pops each item out on a random impulse, so a bench must let them land before it counts: `rest` is that.
+  // QA: DO ANY DUNGEON GLYPHS HANG OVER AN OPENING (Ben's backlog item 32: "don't place dungeon symbols over open doorways"). Read off
+  // the BUILT geometry rather than off the placement code, because the glyphs are welded into one merged mesh per material and the merge
+  // bakes their world matrices in — so every vertex in that mesh is a real world position and the block behind it can be sampled. Any
+  // vertex whose backing wall block is not mossy is a corner of a symbol floating over a passage mouth.
+  dungeonGlyphs(){ try{ if(typeof _dungeonGroup==='undefined'||!_dungeonGroup) return {no:'no dungeon built'};
+      const red=(wretch.symbolRedMats||[]); if(!red.length) return {no:'no symbol materials'};
+      const c=_dungeonC; if(!c) return {no:'no dungeon centre'};
+      const DR=13;                                                                  // room half-extent, same constant buildDungeon and decorateDungeon use
+      let verts=0, bad=0; const sample=[];
+      _dungeonGroup.traverse(o=>{ if(!o.isMesh||!o.geometry) return;
+        const mat=Array.isArray(o.material)?o.material[0]:o.material;
+        if(red.indexOf(mat)<0) return;                                             // the RED twin of every glyph: one mesh, every symbol on that wall
+        const p=o.geometry.attributes.position; if(!p) return;
+        // INSET EACH VERTEX TOWARD ITS OWN QUAD'S CENTRE before sampling. A corner vertex sits exactly on a block boundary, so the
+        // floor() of it lands in the NEIGHBOURING column as often as its own and reports the wall next door — two false positives on the
+        // first run, one of them "behind: stone", which is a perfectly good wall. 0.12 is far less than the smallest glyph's half-width.
+        for(let i=0;i<p.count;i++){
+          const q0=i-(i%6);                                                        // merged plane geometry: 6 vertices per quad
+          let ccx=0,ccy=0,ccz=0, n6=0;
+          for(let k=q0;k<Math.min(q0+6,p.count);k++){ ccx+=p.getX(k); ccy+=p.getY(k); ccz+=p.getZ(k); n6++; }
+          ccx/=n6; ccy/=n6; ccz/=n6;
+          const vx=p.getX(i), vy=p.getY(i), vz=p.getZ(i);
+          const x=vx+(ccx-vx)*0.12/Math.max(0.12,Math.abs(ccx-vx)||0.12)*Math.min(1,Math.abs(ccx-vx)),
+                y=vy+(ccy-vy)*0.12/Math.max(0.12,Math.abs(ccy-vy)||0.12)*Math.min(1,Math.abs(ccy-vy)),
+                z=vz+(ccz-vz)*0.12/Math.max(0.12,Math.abs(ccz-vz)||0.12)*Math.min(1,Math.abs(ccz-vz));
+          // which wall this vertex belongs to, from its own position: the glyph sits on the inner face, so step OUTWARD in the axis it is
+          // flattest in. dx/dz to the room centre decide that without needing the placement code's bookkeeping.
+          const dx=x-c.x, dz=z-c.z;
+          // THE WALL BLOCK IS AT A KNOWN COORDINATE — c ± (DR-0.5) — which is exactly what the placement gate probes. Offsetting from
+          // the vertex by a guessed distance instead put the sample a whole block outside the wall on the far side of the hall and
+          // reported two glyphs as floating when the block they are scratched into was right there.
+          //   AND THE TWO SIDES ARE NOT SYMMETRIC. decorateDungeon probes c+DR+0.5 on the plus side and c-(DR-0.5) on the minus one,
+          // because the inner faces of the ring are not the same distance from the centre in both directions. Using one expression for
+          // both put every plus-side sample a block inside the room: 96 of 200 vertices came back "behind: air" on a hall that is fine.
+          const onX=Math.abs(dx)>Math.abs(dz);
+          const wall=(cc,d)=> d>0 ? cc+DR+0.5 : cc-(DR-0.5);
+          const bx=onX ? wall(c.x,dx) : x;
+          const bz=onX ? z : wall(c.z,dz);
+          verts++;
+          // ANY solid block is a wall. The ask is about OPENINGS, not about which stone the hall is built from — the placement gate
+          // requires mossy, but a probe that also requires it reports the cobble and stone blocks in the same wall as faults.
+          const _bb=getBlock(Math.floor(bx),Math.floor(y),Math.floor(bz));
+          if(_bb===AIR || _bb===WATER || (B[_bb]&&B[_bb].solid===false)){ bad++;
+            if(sample.length<8) sample.push({x:+x.toFixed(2),y:+y.toFixed(2),z:+z.toFixed(2),
+                                             behind:(B[_bb]||{}).name||'air'}); } } });
+      return { glyphVerts:verts, overOpening:bad, sample }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   dropsHere(id){ try{ const rows=drops.filter(d=>!id||d.id===id)
         .map(d=>({ id:d.id, n:d.n, rest:!!d.rest, uid:d.uid!=null, x:+d.x.toFixed(2), y:+d.y.toFixed(2), z:+d.z.toFixed(2) }));
       return { entities:rows.length, resting:rows.filter(r=>r.rest).length,
