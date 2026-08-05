@@ -1516,6 +1516,23 @@ paintTile('chainlink_mesh',(x,y,r)=>{
   const over=onA&&!onB, v=jit(r,0,10), g=(over?178:152)+v; // the wire passing OVER catches the light
   return (y>12 && r()<0.45) ? [g+14,g-30,g-46,255] : [g,g+4,g+11,255];
 });
+// ---- KELP (#67) — two strands, APPENDED for the same reason the sandbag tile is: paintTile seeds its rng from the
+// atlas index, so a tile inserted anywhere but the end re-rolls the grain of every tile after it.
+// y=0 is the TOP of a tile here (see 'yarrow'/'foxglove'), so the strand is drawn from the bottom up and the frond
+// spacing counts from the holdfast. One stalk with fronds off it, olive at the base and paler toward the tip, which
+// is what reads as kelp rather than as tall grass that happens to be wet.
+paintTile('kelp', (x,y,r)=>{ const up=15-y;                                    // 0 at the holdfast, 15 at the tip
+  const cx=8+Math.sin(up*0.52)*2.6;                                            // the stalk itself is not straight
+  const d=Math.abs(x-cx), frond=(up%5===2)&&d<3.4&&d>0.8;
+  if(d>1.2 && !frond) return [0,0,0,0];
+  const v=jit(r,0,20), lit=up/15;
+  return [26+v*0.5+18*lit, 62+v+26*lit, 34+v*0.4+8*lit, 255]; });
+paintTile('kelp_small',(x,y,r)=>{ const up=15-y; if(up>8) return [0,0,0,0];    // a short strand: the lower half only
+  const cx=8+Math.sin(up*0.62)*2.0;
+  const d=Math.abs(x-cx), frond=(up%3===1)&&d<2.8&&d>0.7;
+  if(d>1.1 && !frond) return [0,0,0,0];
+  const v=jit(r,0,20), lit=up/8;
+  return [24+v*0.5+14*lit, 58+v+22*lit, 32+v*0.4+8*lit, 255]; });
 const ATLAS_COUNT = _tileCursor;
 
 // ---- DataArrayTexture: one layer per tile → zero atlas bleed + per-layer mipmaps ----
@@ -2444,21 +2461,29 @@ function buildLightTexture(c){
   // so every light in the game was the same orange. It now holds the light's own colour premultiplied by its level, which is
   // ALSO the only form that survives the trilinear filter: interpolating premultiplied radiance is a real average of two lights,
   // whereas interpolating a palette INDEX between a crimson torch and a cold lamp would land on whatever entry sits between them.
-  // RGBA, NOT RGB: three r160 removed THREE.RGBFormat entirely, so `format = THREE.RGBFormat` set it to undefined, the texture
-  // never uploaded and every cell sampled 0 — a sealed cell with a lantern in it measured no block light at all. There is no RGB8
-  // path to go back to; four bytes a cell is the format that exists. 128 KB per chunk, so 37 MB of texture at rd 8 (289 chunks)
-  // against 9.5 MB when the volume was a single channel. Alpha is unused and written opaque.
-  let vol=c._lvData; if(!vol){ vol=c._lvData=new Uint8Array(CK*WH*CK*4); }
+  // ONE BYTE A CELL, AND THE COLOUR PER CHUNK. Written first as RGBA radiance per cell, which is exactly right and four times the
+  // upload: 128 KB a chunk against 32, i.e. 37 MB of texture at rd 8 rather than 9.5 MB, and every newly streamed chunk pays it in
+  // the stream scope of a walk — the one place this game is already over budget (`stream` runs 10-19 ms of a 7.14 ms frame while
+  // chunks arrive). The cheap form gets the same picture for nothing: the level stays a single channel, and the chunk's DOMINANT
+  // emitter colour rides on the texture object into a per-chunk uniform.
+  // WHAT THIS GIVES UP, stated plainly: a chunk holding two DIFFERENT-coloured lights tints both with the stronger one's colour.
+  // Lights are grouped by what they are — a shrine is red torches, a workshop is cold lamps — so the case is rare, and the cost of
+  // being exact about it is a 4x upload on every chunk in the world.
+  let vol=c._lvData; if(!vol){ vol=c._lvData=new Uint8Array(CK*WH*CK); }
+  const _tw=[0,0,0];
   for(let y=0;y<WH;y++)for(let z=0;z<CK;z++)for(let x=0;x<CK;x++){
-    const si=_lpi(x+LPAD,y,z+LPAD), lv=_lv[si]*17, p=LIGHT_PAL[_lvT[si]]||LIGHT_PAL[0], o=(x + CK*(y + WH*z))*4;
-    vol[o]=lv*p[0]; vol[o+1]=lv*p[1]; vol[o+2]=lv*p[2]; vol[o+3]=255;   // 0..15 → 0..255, times the emitter's own colour
+    const si=_lpi(x+LPAD,y,z+LPAD), lv=_lv[si];
+    vol[x + CK*(y + WH*z)] = lv*17;   // 0..15 → 0..255
+    if(lv>0){ const t=_lvT[si]; if(t<_tw.length) _tw[t]+=lv; }   // weight each colour by the light it actually delivers, so one dim candle cannot outvote a shrine
   }
+  let _dom=0; for(let i=1;i<_tw.length;i++) if(_tw[i]>_tw[_dom]) _dom=i;
   if(!c.light3D){ const t=new THREE.Data3DTexture(vol, CK, WH, CK);
-    t.format=THREE.RGBAFormat; t.type=THREE.UnsignedByteType; t.minFilter=THREE.LinearFilter; t.magFilter=THREE.LinearFilter;
+    t.format=THREE.RedFormat; t.type=THREE.UnsignedByteType; t.minFilter=THREE.LinearFilter; t.magFilter=THREE.LinearFilter;
     t.wrapR=t.wrapS=t.wrapT=THREE.ClampToEdgeWrapping; t.unpackAlignment=1; c.light3D=t; }
+  c.light3D.userData.tintCol = LIGHT_PAL[_dom] || LIGHT_PAL[0];   // read by _chunkMat, so a re-bake that changes the dominant light re-tints the chunk on its next material bind
   c.light3D.needsUpdate=true;
 }
-const _emptyLight3D = (()=>{ const t=new THREE.Data3DTexture(new Uint8Array(4), 1,1,1); t.format=THREE.RGBAFormat; t.type=THREE.UnsignedByteType; t.needsUpdate=true; return t; })();   // fallback sampled by chunks with no nearby light
+const _emptyLight3D = (()=>{ const t=new THREE.Data3DTexture(new Uint8Array(1), 1,1,1); t.format=THREE.RedFormat; t.type=THREE.UnsignedByteType; t.needsUpdate=true; return t; })();   // fallback sampled by chunks with no nearby light
 
 // =====================================================================
 //  GREEDY MESHER
@@ -2662,6 +2687,10 @@ function waterMesh(c){
 }
 
 // crossed-quad foliage merged per chunk (wind in vertex shader)
+// KELP_DENSITY is a fraction of SUBMERGED columns, not of all of them — most of the world is dry, so this is far
+// denser on a seabed than the number looks. KELP_SWAY is per block of strand height, and it is deliberately larger
+// than land foliage gets: water moves a plant further and slower than air does.
+const KELP_DENSITY=0.34, KELP_SWAY=1.35;
 function foliageMesh(c){
   const P=[], NM=[], UVB=[], TL=[], SK=[], WIND=[];
   const cx0=c.cx*CK, cz0=c.cz*CK;
@@ -2677,7 +2706,9 @@ function foliageMesh(c){
       P.push(vv[0],vv[1],vv[2]); NM.push(nx*0.3,1.0,nz*0.3); UVB.push(uu[0],uu[1]); TL.push(tile); SK.push(sky);   // mostly-up normal so flowers/grass/bushes catch overhead sun (were reading dark)
       WIND.push(uu[1]*wind); }
   };
-  for (let ly=0;ly<WH;ly++) for (let lz=0;lz<CK;lz++) for (let lx=0;lx<CK;lx++){
+  // Gated per source, not once for the function: a chunk that is all sea has no cross blocks and must not pay for the
+  // full WH x 16 x 16 scan looking for them, and a chunk of dry meadow must not pay for the kelp column walk.
+  if(c.hasCross) for (let ly=0;ly<WH;ly++) for (let lz=0;lz<CK;lz++) for (let lx=0;lx<CK;lx++){
     const id=g(lx,ly,lz); if (id===AIR||blockCat[id]!=='cross') continue;
     const below = ly>0 ? g(lx,ly-1,lz) : 0; if (below===AIR||below===WATER) continue;   // NO FLOATING FOLIAGE (Ben 07-20): grass/ferns/flowers only render with solid ground under them — catches any orphaned by trail-carving, structure grounding, or block edits, whatever placed them
     const tile=B[id].tileI; const sky=clamp(_ssky(lx,ly,lz),0,1);
@@ -2686,6 +2717,34 @@ function foliageMesh(c){
     const hh=B[id].tall2?2:1;   // 2-block-high meadow grass stretches its cross quads (and sways harder — wind scales with the uv it feeds)
     quad(lx+0.5+jx, ly, lz+0.5+jz, 0.85,0.85, tile, sky, wind*hh, hh);
     quad(lx+0.5+jx, ly, lz+0.5+jz, 0.85,-0.85, tile, sky, wind*hh, hh);
+  }
+  // ---- UNDERWATER KELP (#67). IT IS NOT A BLOCK, and that is the whole design. ----------------------------------
+  // A kelp BLOCK would have to occupy a cell, and this game has no waterlogging anywhere in it — so the cell it took
+  // would stop being water, and every strand would stand in its own pocket of air, which is exactly what you would be
+  // looking at while submerged. Waterlogging it properly means teaching 54 separate WATER identity checks about a
+  // second wet id, one of which lives in another session's file span. So kelp is DERIVED from the seabed at mesh time
+  // instead: the water stays water, nothing collides, nothing is stored, and no save or block id is involved. The
+  // strand is deterministic in world coordinates, so it is identical on every client and across a reload.
+  if(c.hasWater) for(let lz=0;lz<CK;lz++) for(let lx=0;lx<CK;lx++){
+    const wx=cx0+lx, wz=cz0+lz;
+    if(xhash(wx,7,wz,911) > KELP_DENSITY) continue;
+    let sy=-1;
+    for(let y=Math.min(WH-2,CFG.SEA); y>0; y--){ const b=g(lx,y,lz); if(b===WATER) continue; if(b===AIR) break; sy=y; break; }
+    if(sy<1) continue;                                                    // no seabed under water in this column
+    let depth=0; while(sy+1+depth<WH && g(lx,sy+1+depth,lz)===WATER) depth++;
+    if(depth<2) continue;                                                 // not deep enough to be underwater planting
+    // ONE quad pair per strand, not one per cell: aWind is uv.y*strength, so a single tall quad gives a sway that
+    // grows smoothly to the tip. Stacked one-block quads would step it, and the roster asks for more at the tip.
+    const hh=Math.min(depth-1, 2+Math.floor(xhash(wx,9,wz,977)*4));       // 2..5, and never up through the surface
+    if(hh<2) continue;
+    const tile=(hh>=3?TILEIDX.kelp:TILEIDX.kelp_small);
+    const sky=clamp(_ssky(lx,sy+1,lz),0,1);
+    const jx=(xhash(wx,3,wz,131)-0.5)*0.5, jz=(xhash(wx,4,wz,137)-0.5)*0.5;
+    // NEGATIVE wind is the kelp FLAG, read by sign in the injected vertex shader. It rides the existing aWind
+    // attribute rather than adding a second one, because a new attribute would have to be threaded through every
+    // other user of foliageMat for a single bit. Magnitude still means the same thing it always did.
+    quad(lx+0.5+jx, sy+1, lz+0.5+jz, 0.85, 0.85, tile, sky, -KELP_SWAY*hh, hh);
+    quad(lx+0.5+jx, sy+1, lz+0.5+jz, 0.85,-0.85, tile, sky, -KELP_SWAY*hh, hh);
   }
   if(!P.length) return null;
   const geo=new THREE.BufferGeometry();
@@ -2842,6 +2901,7 @@ function injectAtlas(mat, opts={}){
     // cloud shadows and the measurement is of nothing.
     sh.uniforms.uCloudTex = globalU.uCloudTex; sh.uniforms.uCloudShadow = globalU.uCloudShadow;
     sh.uniforms.uCloudScroll = globalU.uCloudScroll; sh.uniforms.uSunDirC = globalU.uSunDir;
+    sh.uniforms.uChunkTint = { value:new THREE.Color(LIGHT_PAL[0][0],LIGHT_PAL[0][1],LIGHT_PAL[0][2]) };   // PER CLONE, deliberately: _chunkMat overwrites it with that chunk's own dominant light colour
     sh.uniforms.uSkyDirAmt = globalU.uSkyDirAmt; sh.uniforms.uSkyDirUp = globalU.uSkyDirUp; sh.uniforms.uSkyDirDn = globalU.uSkyDirDn;
     sh.uniforms.uScotDay = globalU.uDay; sh.uniforms.uScotAmt = globalU.uScotAmt; sh.uniforms.uScotLo = globalU.uScotLo; sh.uniforms.uScotHi = globalU.uScotHi;   // SHARED refs, same reason as uWhiteTile
     sh.uniforms.uWhiteTile = globalU.uWhiteTile;   // SHARED ref → the vantawhite glow survives every material clone / recompile / composer rebuild / VFX toggle (was a fresh per-material uniform that a pre-tile-index recompile could latch at -1)
@@ -2854,10 +2914,15 @@ function injectAtlas(mat, opts={}){
         // vWPos = WORLD position. vLP is chunk-local, so it cannot address a world-scale cloud field: every chunk would sample
         // the same patch and the shadows would tile visibly at the chunk grid. modelMatrix carries the chunk group's offset.
         '#include <begin_vertex>\nvTile=aTile; vSky=aSky; vBUV=aBlockUV; vLP=position; vObjN=normal; vWPos=(modelMatrix*vec4(transformed,1.0)).xyz;'+   // vLP = chunk-local position; vObjN = object-space face normal (for the block-light air-cell offset)
-        (opts.wind?'\nfloat wsw = sin(uTime*1.6 + transformed.x*0.6 + transformed.z*0.5)*0.10*aWind; transformed.x += wsw; transformed.z += cos(uTime*1.3 + transformed.x*0.4)*0.07*aWind;':''));
+        // TWO WIND MODES ON ONE ATTRIBUTE. A NEGATIVE aWind means kelp (#67): water moves a plant further and much
+        // slower than air does, so the frequencies drop and the amplitudes rise. The land numbers below are the
+        // originals to the digit — 1.6/1.3/0.10/0.07 — so nothing that grew on dry land moves differently for this.
+        (opts.wind?'\nfloat kelp = step(aWind, -1e-4); float aw = abs(aWind);'+
+          '\nfloat spd1 = mix(1.6, 0.50, kelp), spd2 = mix(1.3, 0.40, kelp), amp1 = mix(0.10, 0.26, kelp), amp2 = mix(0.07, 0.18, kelp);'+
+          '\nfloat wsw = sin(uTime*spd1 + transformed.x*0.6 + transformed.z*0.5)*amp1*aw; transformed.x += wsw; transformed.z += cos(uTime*spd2 + transformed.x*0.4)*amp2*aw;':''));
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>',
-        '#include <common>\nprecision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform float uScotAmt;\nuniform float uScotLo;\nuniform float uScotHi;\nuniform float uScotDay;\nuniform float uSkyDirAmt;\nuniform float uSkyDirUp;\nuniform float uSkyDirDn;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
+        '#include <common>\nprecision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform float uScotAmt;\nuniform float uScotLo;\nuniform float uScotHi;\nuniform float uScotDay;\nuniform vec3 uChunkTint;\nuniform float uSkyDirAmt;\nuniform float uSkyDirUp;\nuniform float uSkyDirDn;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
       // ---- NIGHT VOLUMETRIC DARKNESS ON REAL FOLIAGE (Ben 07-29) ----
       // "volumetric darkness at night is applied to horizon pines, but not to forest trees." Correct, and the two fade to
       // different targets. The horizon backdrop fades to _uPineFog, which is scene.fog.color pulled toward storm blue and
@@ -2912,10 +2977,14 @@ function injectAtlas(mat, opts={}){
         // buildLightTexture), so a crimson shrine torch tints its alcove red and an industrial lamp reads cold, instead of every
         // emitter in the game casting the same orange. `_bl` is the level again — the largest channel — because the falloff curve
         // and every existing gate (?dbg=bl, the flicker, the scotopic gate) are written against a 0..1 intensity.
-        'vec3 _blc = texture(uLight3D, vec3(_lpc.x/'+CK.toFixed(1)+', _lpc.y/'+WH.toFixed(1)+', _lpc.z/'+CK.toFixed(1)+')).rgb;\n'+
-        'float _bl = max(_blc.r, max(_blc.g, _blc.b));\n'+   // baked block light 0..1, trilinear, 0 behind walls
+        'float _bl = texture(uLight3D, vec3(_lpc.x/'+CK.toFixed(1)+', _lpc.y/'+WH.toFixed(1)+', _lpc.z/'+CK.toFixed(1)+')).r;\n'+   // baked block light 0..1, trilinear, 0 behind walls
         'float _fl = 0.90 + 0.10*sin(uTime*7.3 + vLP.x*1.7 + vLP.z*1.3);\n'+   // cheap warm flicker
-        'irradiance += vec3(3.6,1.95,0.80) * pow(_bl,1.45) * _fl;')   // warm torch glow added to indirect — falloff SOFTENED from _bl² (Ben 07-20: in truly dark chunks the squared curve collapsed the glow to an invisible puddle; ^1.45 carries the light to its full flood radius) + peak brightened ~16%
+        // THE LIGHT'S OWN COLOUR, per chunk. 3.6 is the old vec3(3.6,1.95,0.80)'s red channel and LIGHT_PAL[0] is that vector
+        // divided by it, so a torch, a lantern, a candle and a campfire come out bit-identical to what shipped; only a block
+        // carrying a `tint:` of its own moves. uChunkTint is set per material clone from the chunk's dominant emitter (see
+        // _chunkMat and buildLightTexture) — the hue must NOT ride on the sampled level, or the falloff curve gets applied to it
+        // a second time and every coloured light collapses.
+        'irradiance += 3.6 * uChunkTint * pow(_bl,1.45) * _fl;')   // warm torch glow added to indirect — falloff SOFTENED from _bl² (Ben 07-20: in truly dark chunks the squared curve collapsed the glow to an invisible puddle; ^1.45 carries the light to its full flood radius) + peak brightened ~16%
       .replace('#include <aomap_fragment>',
         '#include <aomap_fragment>\nreflectedLight.directDiffuse *= (0.17 + 0.83*smoothstep(0.16,0.9,vSky));\n'+
         // ---- CLOUDS BLOCKING THE SUN (Ben's note 7) ----
@@ -3012,7 +3081,10 @@ function _chunkMat(tpl, tex){
   const m=tpl.clone();
   m.customProgramCacheKey = tpl.customProgramCacheKey;
   const base=tpl.onBeforeCompile;
-  m.onBeforeCompile=(sh,r)=>{ base(sh,r); if(sh.uniforms.uLight3D) sh.uniforms.uLight3D.value = tex||_emptyLight3D; };
+  m.onBeforeCompile=(sh,r)=>{ base(sh,r); if(sh.uniforms.uLight3D) sh.uniforms.uLight3D.value = tex||_emptyLight3D;
+    // THE CHUNK'S OWN LIGHT COLOUR, carried on the texture object rather than through the signature: every call site already
+    // passes that texture and nothing else knows about chunks here.
+    if(sh.uniforms.uChunkTint){ const tc=(tex&&tex.userData&&tex.userData.tintCol)||LIGHT_PAL[0]; sh.uniforms.uChunkTint.value.setRGB(tc[0],tc[1],tc[2]); } };
   m.userData = { atlas:true, chunkClone:true };
   return m;
 }
@@ -6129,7 +6201,8 @@ function buildChunkStaged(c){
   // coloured window should let light through, and an alpha-tested shadow from a blended pane would be a hard black rectangle.
   { const pg=greedyMesh(c,'pane'); if(pg){ pg.computeBoundingSphere(); const _pm = L? _chunkMat(paneMat,L) : paneMat;
       const m=new THREE.Mesh(pg,_pm); m.castShadow=false; m.receiveShadow=true; m.renderOrder=2; m.userData.baseMat=paneMat; g.add(m); } }
-  if(c.hasCross){ const fg=foliageMesh(c); if(fg){ fg.computeBoundingSphere(); const m=new THREE.Mesh(fg,_fm); m.castShadow=false; m.receiveShadow=true; m.userData.detail=1; m.userData.baseMat=foliageMat; g.userData.foliage=m; g.add(m); } }   // detail=1: suppressible in the fogged far rings
+  // hasWater too, for kelp (#67): an all-sea chunk holds no cross BLOCK and would never have built a foliage mesh at all.
+  if(c.hasCross || c.hasWater){ const fg=foliageMesh(c); if(fg){ fg.computeBoundingSphere(); const m=new THREE.Mesh(fg,_fm); m.castShadow=false; m.receiveShadow=true; m.userData.detail=1; m.userData.baseMat=foliageMat; g.userData.foliage=m; g.add(m); } }   // detail=1: suppressible in the fogged far rings
   if(c.hasWater){ const wg=waterMesh(c); if(wg){ wg.computeBoundingSphere(); const m=new THREE.Mesh(wg,waterMat); m.castShadow=false; m.receiveShadow=false; m.renderOrder=3; m.userData.detail=1; g.userData.water=m; g.add(m); } }
   if(c.hasModel) buildModelBlocks(c,g); else c.emitters=[];
   _lampRegister(c);   // remember this chunk's lights so they survive it unloading — see updateLampHalos
@@ -11727,7 +11800,18 @@ function updateWretch(dt){
     if(_canGrab && (_pb || (near<3.2 && Math.abs(_gp.y-wretch.pos.y)<2.4 && _gLOS && !_roofed) || (wretch._reachT>0.16 && near<4.2 && Math.abs(_gp.y-wretch.pos.y)<2.4 && _gLOS && !_roofed))){ wretch._reachT=0; HORROR.encounters++; HORROR.sinceScare=0; wretch.committed=false;
       if(NET.on && huntId!==NET.id){ wretch.owner=huntId; netSend({t:'own',owner:huntId}); netSend({t:'grab',tid:huntId}); return; }   // grabbed a PEER → hand them the capture
       if(!player.creative || wretch._summoned){ beginDrag(); return; }               // creative players are normally immune to capture — but a SUMMONED wretch grabs anyway (so you can test it)
-      damage(4,'the Wretch tore into you'); despawnWretch(true); return; } }
+      damage(4,'the Wretch tore into you'); despawnWretch(true); return; }
+    // A CHARGE THAT CANNOT END IN A GRAB HAS TO END IN SOMETHING. _canGrab is summoned-or-night-2, but nothing gated the COMMIT
+    // on it — the wantHunt commit above fires on anger alone, and anger re-arms every 16-44 s — so on night 1 the creature
+    // closed the distance, completed the twenty-block RISE, and then stood over the player for as long as it could see them
+    // with no branch left that could do anything. Both reports are this one hole: "it charges upright" is the finished rise
+    // held indefinitely, and "it charges and then does nothing" is the same frame described from the other side.
+    //   The young hunt still must not CAPTURE (that is the night-2 escalation, and the firearm-breaks-the-charge rule at the
+    // damage site says nights 1-2 do charge). So it lands a blow and breaks off, which is a charge that resolves.
+    else if(wretch._reachT>0.16 && near<3.6 && Math.abs(_gp.y-wretch.pos.y)<2.4 && _gLOS && !_roofed){
+      wretch._reachT=0; HORROR.encounters++; HORROR.sinceScare=0; wretch.committed=false;
+      damage(3,'the Wretch struck you');
+      wretch.state='FLEE'; wretch.fleeing=true; return; } }
   else if(st==='FLEE'){ wretch.fleeing=true; wretch.stealth=1.0;
     const fleePanic = watched ? (1.4 + Math.min(0.6,(wretch.observed||0)*0.12)) : 1.0;   // bolts even HARDER when it feels your eyes on its back — and the longer you stare, the faster it scrambles
     speed=(wretch.routed?24:19)*fleePanic; wretch.crawl=Math.min(1,wretch.crawl+dt*4.0);   // PANIC SCAMPER — bolts flat-out for the treeline
@@ -24464,6 +24548,21 @@ window.__hc={
       _GP.mk=_GP.gen=_GP.sweep=_GP.mesh=_GP.pine=_GP.bulk=_GP.draw=0; _GP.mkN=_GP.genN=_GP.sweepN=_GP.meshN=_GP.pineN=_GP.bulkN=_GP.drawN=0; _GP.on=true; return 'on'; }catch(e){ return {err:String(e.message||e)}; } },
   // MESHED-in-ring is the number that matches what the player sees: a chunk that exists but has no mesh is invisible, so
   // counting world.size (which includes created-but-ungenerated chunks, and the RD+1 generation ring) overstates progress.
+  // #67 KELP, counted off the built geometry rather than off the generator, because kelp is not a block and there is
+  // nothing in the world array to ask. A strand is a vertex pair carrying NEGATIVE aWind (the kelp flag). Also returns
+  // where the lowest ones sit, so a harness can check the block there is really WATER — the whole design rests on the
+  // water cell staying water, and a kelp that ends up in air is the failure this item exists to avoid.
+  kelpCensus(){ try{ let strandV=0, folV=0, inWater=0, checked=0, minY=1e9, maxY=-1e9; const spots=[];
+      chunkRoot.traverse(o=>{ if(!o.isMesh||!o.geometry) return; const w=o.geometry.getAttribute('aWind'), p=o.geometry.getAttribute('position'); if(!w||!p) return;
+        for(let i=0;i<w.count;i++){ if(w.getX(i)>=0){ if(w.getX(i)>0) folV++; continue; } strandV++;
+          const wx=p.getX(i)+o.parent.position.x, wy=p.getY(i), wz=p.getZ(i)+o.parent.position.z;
+          if(wy<minY)minY=wy; if(wy>maxY)maxY=wy;
+          if(checked<400){ checked++;   // every strand vertex until the cap: a stride keyed on the raw index sampled nothing at all, because a chunk's kelp verts do not start where the stride expects
+            const b=getBlock(Math.floor(wx),Math.floor(wy+0.5),Math.floor(wz)); if(b===WATER) inWater++;
+            if(spots.length<6) spots.push([Math.floor(wx),Math.floor(wy),Math.floor(wz),b]); } } });
+      return { strandVerts:strandV, foliageVerts:folV, sampled:checked, inWater,
+        yLow:(minY<1e9?+minY.toFixed(1):null), yHigh:(maxY>-1e9?+maxY.toFixed(1):null), sea:CFG.SEA, spots }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   fill(){ try{ const pcx=Math.floor(player.pos.x)>>4, pcz=Math.floor(player.pos.z)>>4, R=CFG.RENDER_DIST; let meshed=0, want=0;
       for(let dx=-R;dx<=R;dx++) for(let dz=-R;dz<=R;dz++){ want++; const c=getChunk(pcx+dx,pcz+dz); if(c&&c.meshed&&!c.dirty) meshed++; }
       return { meshMS:_lastMeshMS, genMS:_lastGenMS,
@@ -25793,6 +25892,28 @@ window.__hc={
                nearCut: inside?5200:3600, farCut: inside?2600:1500,
                wired: !!convGunNear }; }
     catch(e){ return {err:String(e.message||e)}; } },
+  // QA: the charge, as numbers. "Is it on all fours" is decided by `claw` in the animator — clamp((crawl-0.45)/0.55) — so a
+  // crawl of 0.4 and a crawl of 0 look identical in a frame and mean different things in the code. canGrab is the whole
+  // question of whether a charge can resolve at all.
+  wretchCharge(){ try{ const w=wretch;
+      return { state:w.state, committed:!!w.committed, commitT:+(w.commitT||0).toFixed(2), dist:+(w.dist||0).toFixed(2),
+               crawl:+(w.crawl||0).toFixed(3), claw:+clamp(((w.crawl||0)-0.45)/0.55,0,1).toFixed(3),
+               riseB:+(w._riseB||0).toFixed(3), reachT:+(w._reachT||0).toFixed(3),
+               summoned:!!w._summoned, huntArmed:!!HORROR.huntArmed, canGrab:!!(w._summoned||HORROR.huntArmed),
+               posture:w.posture, active:!!w.active, hp:w.hp,
+               playerHealth:+(player.health||0).toFixed(2), fleeing:!!w.fleeing }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // QA: force the night-1 case — armed=false and NOT summoned — which is the only state in which a charge cannot end in a grab.
+  // Both flags are needed: every other way of getting the creature on its feet from a harness sets _summoned, which arms the grab
+  // and hides exactly the state under test.
+  wretchArm(on,summoned){ try{ HORROR.huntArmed=!!on; if(summoned!=null) wretch._summoned=!!summoned;
+      return {huntArmed:!!HORROR.huntArmed, summoned:!!wretch._summoned, canGrab:!!(wretch._summoned||HORROR.huntArmed)}; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // QA: commit it to the charge WITHOUT moving it. In the state ladder `committed` is what turns into HUNT/CHASE
+  // (st = s.seen ? (near<6?'HUNT':'CHASE') : 'TRACK'), and it is the one input a harness cannot reach any other way: yank()
+  // commits but also drops the creature in front of the player, where `watched` outranks HUNT and sends it to FLEE instead.
+  wretchCommit(){ try{ wretch.committed=true; wretch.commitT=0;
+      return {committed:true, state:wretch.state, dist:+(wretch.dist||0).toFixed(2)}; }catch(e){ return {err:String(e.message||e)}; } },
   // QA: which way every raked box on a gun leans. The muzzle is -z and the eye is +z, so a grip's BOTTOM end must sit at a
   // greater z than its top; a 120 px viewmodel cannot answer "is this grip backwards" but two numbers can.
   gripRake(){ try{
