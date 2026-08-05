@@ -2870,8 +2870,18 @@ function waterMesh(c){
   // piece of moving water, and giving a column's side a different current from its own surface would shear the texture
   // at the waterline. It is read once per (lx,lz) and held here for whatever push calls follow.
   const cx0=c.cx*CK, cz0=c.cz*CK; let _cfx=0, _cfz=0;
+  const _fvc=new Map();   // per-corner flow, for this chunk's mesh only — NOT the module-level _flowCache, which is keyed by chunk and holds something else
   const push=(a,b,cc,d,nx,ny,nz,top,depth,colD)=>{ const quad=[a,b,cc,d]; const o=[0,1,2,0,2,3];
-    for(let t=0;t<6;t++){const vv=quad[o[t]];P.push(vv[0],vv[1],vv[2]);NM.push(nx,ny,nz);TOPF.push(top);DEP.push(depth);COLD.push(colD);FLOW.push(_cfx,_cfz);} };
+    // FLOW PER VERTEX, NOT PER BLOCK (Ben 08-05: "NONE of the tiles are synced up, every block is off"). The whole quad used to take
+    // its block centre's flow, so the surface noise — which is advected by `vW.xz - vFlow*uTime` — was offset by a DIFFERENT amount
+    // in every block, and the ripple pattern broke at every block boundary. Evaluated at each vertex's own world x,z instead, the
+    // corners two quads share get the same value by construction and the field is continuous. It only became visible now because
+    // uFresCap dropped to 0.42: with a fifth of the depth colour surviving you could not see the surface well enough to notice.
+    // Cached per corner, so a shared corner costs one flowVec call and not four.
+    for(let t=0;t<6;t++){const vv=quad[o[t]];P.push(vv[0],vv[1],vv[2]);NM.push(nx,ny,nz);TOPF.push(top);DEP.push(depth);COLD.push(colD);
+      const _fk=(vv[0]+4096)*16384+(vv[2]+4096); let _fc=_fvc.get(_fk);
+      if(_fc===undefined){ const _fv=flowVec(vv[0], vv[2]); _fc=[_fv.x,_fv.z]; _fvc.set(_fk,_fc); }
+      FLOW.push(_fc[0],_fc[1]);} };
   for (let ly=0;ly<WH;ly++) for (let lz=0;lz<CK;lz++) for (let lx=0;lx<CK;lx++){
     if (g(lx,ly,lz)!==WATER) continue;
     { const fv=flowVec(cx0+lx+0.5, cz0+lz+0.5); _cfx=fv.x; _cfz=fv.z; }
@@ -4892,7 +4902,19 @@ scene.add(nvLight); scene.add(nvLight.target);
 // PLACED torches/lanterns/candles are now BAKED into the mesh (flood-filled per-vertex light) → no dynamic
 // point-lights for them at all. Only the torch IN YOUR HAND needs a live light (it isn't a placed block, so it
 // has no baked contribution). One point light, no shadow map = the whole per-frame lighting budget.
-const LIGHT_POOL = 10;   // dynamic warm-light pool: the nearest placed torches/lanterns/candles are lit (the "baked" volume wasn't lighting spawned lights — dungeon/structures went dark)
+// ONE POOL FOR THE WHOLE GAME, OVERWORLD AND HALLS, AND ITS SIZE IS THE POINT-LIGHT COUNT FOR THE PROCESS.
+// three keys every lit program on numPointLights, so the count is a shader variant, not a number. Measured at
+// daeb162 with bench/progs-who.mjs: the overworld renders at 19 point lights and the Backrooms at 44, because the
+// halls added a SECOND pool of 16 on top of this one and then hung a live PointLight on every pull-cord bulb and
+// lit candle. So every lit material in the game was linked twice over, and the second link landed on whichever
+// frame first rendered the halls — 18 programs on entry, or 58 in one 9.8 s loading-screen frame when
+// brPrecompile paid for them up front. Worse, the bulbs come and go with the loaded chunks, so "44" was really
+// "however many bulbs happen to be loaded", and each new total was another full set of programs.
+// 16 because that is the size Ben chose for the halls (PERF.brLightPool), and the halls need the most slots. The
+// overworld therefore renders at 25 point lights instead of 19 — six more iterations of the point-light loop per
+// fragment, paid always, in exchange for the program set never growing again. That trade is the whole change:
+// DO NOT "optimize" this back down to 10, and do not let anything create a PointLight per world object.
+const LIGHT_POOL = 16;   // dynamic warm-light pool: the nearest placed torches/lanterns/candles are lit (the "baked" volume wasn't lighting spawned lights — dungeon/structures went dark)
 let _hwLightSlot = -1;            // index into pointPool reserved for the Horrific Wretch's eye glow, or -1
 const _lampV = new THREE.Vector3();   // scratch for a swinging lamp's bulb position — this is read inside the per-frame light loop
 const pointPool = [];
@@ -6430,7 +6452,10 @@ function assignPointLights(){
   const _owShFire = ((_owShTick=(_owShTick+1)%OW_SHADOW_EVERY)===0);   // one shadow-cube refresh per OW_SHADOW_EVERY frames, counted here so it is independent of the sun's tick
   // Placed torches are BAKED into the per-chunk light volume, so the point-light POOL is empty (LIGHT_POOL=0).
   // Skip the whole per-frame world scan + sort in that case — it was iterating every chunk's emitters for nothing.
-  if(pointPool.length){
+  // THE HALLS DRIVE THE SAME POOL, so the overworld must stand down while you are inside — otherwise both writers
+  // fight for slot 0 every frame and the troffer above you flickers between a fluorescent tube and a torch. The
+  // held-light block below still runs: you can carry a lantern into the Backrooms.
+  if(pointPool.length && !(typeof BR!=='undefined' && BR.inside)){
     _plCand.length=0;
     const px=player.pos.x, py=player.pos.y+1, pz=player.pos.z;
     const pcx=Math.floor(px)>>4, pcz=Math.floor(pz)>>4;
@@ -6645,7 +6670,12 @@ function cullChunks(){
     // only where the fog has genuinely swallowed it. Water keeps the ring, because a distant water PLANE is a shimmering
     // high-contrast surface that reads as noise long before fog hides it, which is a different problem with a different answer.
     if(vis){ const far=cheb>fogRing;               // fog-distance detail suppression (water is sub-signal out there)
-      const f=c.group.userData.foliage, w=c.group.userData.water; if(f)f.visible = cheb < fogCheb; if(w)w.visible=!far;
+      // WATER GOES ALL THE WAY OUT (Ben 08-05: "water should render as far out as other chunks, right now it looks like it's about a
+      // chunk or two short"). It was suppressed past RD-3 on the argument above — a distant water plane is high-contrast shimmer —
+      // and that argument was written when the painted far-sea disc covered the gap. It no longer does inside the meshed radius,
+      // because the disc is now discarded there to keep it out of holes in the land, so RD-3 left a two-ring band with no water in
+      // it at all. The shimmer it was avoiding is the TAA/bloom-quality item on the backlog, not a reason to delete the sea.
+      const f=c.group.userData.foliage, w=c.group.userData.water; if(f)f.visible = cheb < fogCheb; if(w)w.visible=true;
       // leaves are the forest's biggest fill/overdraw sink (alpha-tested → no early-Z). In the OUTERMOST rings
       // the canopy is buried in fog AND already backed by the pine-horizon silhouette, so dropping the live leaf
       // shells there is invisible but reclaims a lot of fragment work when you look across a forest.
@@ -16073,6 +16103,15 @@ function _hideOffHand(){ offView.group.visible=false; offArm.group.visible=false
 let _xhEl=null, _xhCur=16, _xhLastD=-1, _xhLastOp=-1, _xhFire=0, _xhSpread=0, _xhDual=false, _xhPreDual=16;
 let _xhT=null;          // scratch for the third-person impact projection
 let _xhOX=0, _xhOY=0;   // the ring's drift off screen-centre, in px: the gun's aim axis projected (see updateCrosshair)
+// THE RING IS SMOOTHED IN THE PLACE IT IS READ, not at each of its sources (Ben 08-05: "the crosshair is so jittery when looking
+// around, it really should follow where the gun is aiming, and it should always be smooth").
+// The jitter was never the aim axis — it was the DISTANCE. Third person projects the point the shot would hit, and that point is
+// found with a raycastVoxel() every frame: cross the silhouette of anything and the range flips between a near hit and the 40 m
+// fallback in one frame, which slides the reticle across the screen and back. Easing the distance fixes the cause; easing the
+// final offset as well makes the guarantee unconditional, so no future source of jitter can reach the screen either.
+// _xhDist starts at the fallback so the first frame after equipping a gun does not ramp in from zero.
+let _xhDist=40, _xhTX=0, _xhTY=0, _xhHave=false;
+const XH_DIST_TAU=0.10, XH_OFF_TAU=0.055;   // 0.055 s is ~3 frames at 60: enough to kill a single-frame jump, short enough that the ring still tracks a fast flick
 let _lastShot=null;     // the direction the last round took, for __hc.lastShot — the bullet is the claim, not the wiring
 const _shotQ=new THREE.Quaternion(), _shotF=new THREE.Vector3(), _shotA=new THREE.Vector3();   // hoisted: one trigger pull should not allocate
 const XH_REST=16, XH_AIM_TPS=6, XH_TRUE=9;
@@ -16088,22 +16127,37 @@ function aimSpreadRad(){ if(_xhSpread<=0.5) return 0;
 function crosshairFireKick(mag){ _xhFire=Math.min(2.2, _xhFire + (mag||1)); }
 function updateCrosshair(dt, isGun){
   const xh=_xhEl||(_xhEl=document.getElementById('xh')); if(!xh) return;
-  const p=player, ads=isGun?(view.adsT||0):0;
+  // A GUN IN THE LEFT HAND IS A GUN (Ben 08-05: "IT MUST apply to offhand 3rd person, offhand first person, mainhand 3rd and
+  // first person"). isGun is read off view.id — the MAIN hand — so carrying a gun only in the offhand got the plain movement ring:
+  // no drift onto the barrel, no shot cone, no bloom on firing, in either camera. All four cases are one ring now, and the axis it
+  // rides is whichever hand is actually holding a gun.
+  const offGun = !!(armor[EQ_OFF] && ITEMS[armor[EQ_OFF].id] && ITEMS[armor[EQ_OFF].id].gun);
+  const anyGun = isGun || offGun;
+  const p=player, ads=isGun?(view.adsT||0):0;                                  // only the main hand ever raises a sight — the offhand has no cheek weld to raise to
   const spd=Math.hypot(p.vel.x,p.vel.z);
   _xhFire=Math.max(0, _xhFire - dt*2.6);                                       // ~0.4 s to shed one shot's worth of bloom
   const kick=Math.max(0, Math.min(1, view.swing||0));
+  // MORE VOLATILE (Ben 08-05: "ALL iterations also need some more circle volatility"). Every term that opens the ring is bigger,
+  // and it opens quicker: 0.14 s out against the same 0.5 s back, so the asymmetry that makes movement legible is sharper too.
+  // These numbers are the shot cone as well as the drawing (see _xhSpread), so this costs accuracy in exactly the measure it shows.
   const move = XH_REST
-        + Math.min(1, spd/7.2)*10                    // walking opens it, sprinting opens it fully
-        + (p.onGround?0:8)                           // airborne: you have no business being accurate
-        + (p.sneak?-4:0)                             // crouched and steady
-        + kick*10;                                   // a swing throws it wide, then it recovers
-  const rate = move>_xhCur ? 0.18 : 0.5;             // out fast, back slow — only the MOVEMENT ring is eased
+        + Math.min(1, spd/7.2)*14                    // walking opens it, sprinting opens it fully
+        + (p.onGround?0:12)                          // airborne: you have no business being accurate
+        + (p.sneak?-5:0)                             // crouched and steady
+        + kick*13;                                   // a swing throws it wide, then it recovers
+  const rate = move>_xhCur ? 0.14 : 0.5;             // out fast, back slow — only the MOVEMENT ring is eased
   _xhCur += (move-_xhCur)*Math.min(1, dt/rate);
   // THE SHRINK IS THE RAISE (Ben 08-04: "aiming in 3rd person should take the same amount of time as it takes to raise the iron
   // sights to the face"). view.adsT IS that raise — the same 0..1 curve the viewmodel's cheek-weld interpolates on — so blending
   // by it directly, OUTSIDE the easing above, makes the two identical by construction rather than by two matched constants.
   let d=_xhCur;
-  if(ads>0.01) d = d*(1-ads) + (_tpsAct?XH_AIM_TPS:XH_REST*0.5)*ads;
+  // AND AIMING OVER THE SHOULDER DOES NOT MAKE YOU STEADY (Ben 08-05: "when aiming in 3rd person moving, jumping, should still
+  // cause the crosshair to expand"). The blend used to land on XH_AIM_TPS flat, which at a full aim discarded every movement term
+  // — sprinting and jumping while aimed drew the same tiny hard circle as standing still. The part of the ring that came from
+  // MOVING now survives the shrink at 55%, so the tight circle is what you get for holding still, not for holding the button.
+  // First person still collapses toward the optic, because there the ring is fading out and the sight takes over.
+  if(ads>0.01){ const moveExcess=Math.max(0,_xhCur-XH_REST);
+    d = d*(1-ads) + (_tpsAct ? (XH_AIM_TPS + moveExcess*0.55) : XH_REST*0.5)*ads; }
   d += _xhFire*14;                                   // a gunshot blooms it AFTER the aim shrink, so aiming never hides recoil
   // TWO GUNS, TWICE THE RING (Ben 08-04: "when dual wielding any guns the aiming ring should get 2x bigger"). Applied last, so it
   // doubles whatever the ring had already become — movement, airborne, recoil bloom and all. And because the ring IS the shot cone
@@ -16125,7 +16179,7 @@ function updateCrosshair(dt, isGun){
   // that used to cost only the sight picture now costs the shot as well.
   // Projected, not approximated: a camera-space direction divided by its own depth is the tangent of its angle off-axis, and the
   // frustum's half-height at unit depth is tan(fov/2). That makes this correct at every FOV, which matters because aiming zooms.
-  { const av=(isGun && !_tpsAct) ? view.aimCam : null;
+  { const av=(!_tpsAct) ? (isGun ? view.aimCam : (offGun ? offView.aimCam : null)) : null;   // whichever hand holds the gun owns the axis; captureAim fills both
     let ox=0, oy=0;
     // THIRD PERSON PROJECTS THE IMPACT, NOT THE AXIS (Ben 08-04: "the crosshair is not always in the center of the screen, or
     // actually overtop of where the player is aiming ... its off quite a bit too far to the left"). Too far LEFT is the whole
@@ -16136,13 +16190,18 @@ function updateCrosshair(dt, isGun){
     // The distance matters because the camera is metres off the firing line: a point assumed far away parks the reticle wide of a
     // near wall. The block ray is REACH-limited and covers the close case that shows the error; past it, 40 m is far enough that
     // the remaining parallax is under a pixel.
-    if(isGun && _tpsAct){
+    if(anyGun && _tpsAct){
       const hit=(typeof raycastVoxel==='function')?raycastVoxel():null;
       const ex=player.pos.x, ey=player.pos.y+EYE, ez=player.pos.z;
-      const dist = hit ? Math.max(1.2, Math.hypot(hit.x+0.5-ex, hit.y+0.5-ey, hit.z+0.5-ez)) : 40;
+      // THE RANGE IS EASED, AND THAT IS THE JITTER FIX. A raycast is a step function of where you are looking: pan across the edge
+      // of a tree and this flips between a 2 m hit and the 40 m fallback in a single frame. The camera sits metres off the firing
+      // line, so that step is worth tens of pixels of parallax — the reticle jumps sideways and jumps back, every edge, all the way
+      // round. Nothing about the AIM moved. Easing the range turns each of those steps into a glide the eye reads as depth.
+      const distT = hit ? Math.max(1.2, Math.hypot(hit.x+0.5-ex, hit.y+0.5-ey, hit.z+0.5-ez)) : 40;
+      _xhDist += (distT-_xhDist)*Math.min(1, dt/XH_DIST_TAU);
       const d=tpsAimDir();   // the same swayed axis the round takes over the shoulder, so the ring cannot promise a steadier shot than you have
       const t=_xhT||(_xhT=new THREE.Vector3());
-      t.set(ex+d.x*dist, ey+d.y*dist, ez+d.z*dist).project(camera);
+      t.set(ex+d.x*_xhDist, ey+d.y*_xhDist, ez+d.z*_xhDist).project(camera);
       ox=t.x*innerWidth*0.5; oy=-t.y*innerHeight*0.5;
       const lim=Math.min(innerWidth,innerHeight)*0.46, m=Math.hypot(ox,oy);
       if(m>lim){ ox=ox/m*lim; oy=oy/m*lim; } }
@@ -16153,8 +16212,15 @@ function updateCrosshair(dt, isGun){
       // a reticle parked outside the window is worse than one that stops at the edge — it reads as a bug, not as a gun.
       const lim=Math.min(innerWidth,innerHeight)*0.42;
       const m=Math.hypot(ox,oy); if(m>lim){ ox=ox/m*lim; oy=oy/m*lim; } }
-    if(Math.abs(ox-(_xhOX||0))>0.4 || Math.abs(oy-(_xhOY||0))>0.4){ _xhOX=ox; _xhOY=oy;
-      xh.style.transform='translate(-50%,-50%) translate('+ox.toFixed(1)+'px,'+oy.toFixed(1)+'px)'; } }
+    // AND THE OFFSET ITSELF IS EASED, so smoothness does not depend on having found every source of a step. Snapped rather than
+    // eased on the first frame it exists (_xhHave) and whenever the ring is re-centred, or equipping a gun would drag the reticle
+    // in from wherever the last one left it.
+    if(!_xhHave){ _xhTX=ox; _xhTY=oy; _xhHave=true; }
+    else { const k=Math.min(1, dt/XH_OFF_TAU); _xhTX+=(ox-_xhTX)*k; _xhTY+=(oy-_xhTY)*k; }
+    // 0.15 px, not 0.4: the old gate was wide enough to be visible as stepping on a slow pan, and with the ease in front of it
+    // there is no longer a stream of large jumps to suppress.
+    if(Math.abs(_xhTX-(_xhOX||0))>0.15 || Math.abs(_xhTY-(_xhOY||0))>0.15){ _xhOX=_xhTX; _xhOY=_xhTY;
+      xh.style.transform='translate(-50%,-50%) translate('+_xhTX.toFixed(1)+'px,'+_xhTY.toFixed(1)+'px)'; } }
   // Third person keeps its ring at full strength however far the sight is raised; first person hands over to the optic.
   const op = _tpsAct ? 0.85 : 0.85*(1-clamp((ads-0.3)/0.4,0,1));
   if(Math.abs(op-_xhLastOp)>0.01){ _xhLastOp=op; xh.style.opacity=op.toFixed(2); }
@@ -16231,6 +16297,10 @@ function updateView(dt){ updateRecoil(dt);                                      
     if(view._blockOut && !wasOut){ view._blockOutN=(view._blockOutN||0)+1;   // counted so a harness can prove it fired ONCE
       if(typeof playSample==='function') playSample('click', null, 0.55); } }
   const gunKind=ITEMS[view.id]&&ITEMS[view.id].gun, isGun=!!gunKind, isBolt=gunKind==='bolt';
+  // THE SWAY IS THE MAIN HAND'S, AND IT MUST NOT OUTLIVE THE GUN. view.swayX/swayY are written only inside the isGun branch below,
+  // and tpsAimDir bends the over-the-shoulder aim axis by them — so holstering a rifle left its last wobble frozen in those two
+  // numbers, and a gun carried in the LEFT hand then aimed down a stale axis belonging to a weapon no longer in your hands.
+  if(!isGun){ view.swayX=0; view.swayY=0; }
   // bolt cycle animation + fire-gating clock
   view.boltT=Math.max(0,(view.boltT||0)-dt); view.gunKick=Math.max(0,(view.gunKick||0)-dt*7);   // viewmodel kick decays (every gun bucks against the shoulder on fire)
   // EITHER HAND'S GUN MAY BE THE ONE RELOADING. This compared the running reload against heldSlot() alone, so with a gun in
@@ -19206,7 +19276,10 @@ function brMaterials(){ if(_brMats)return _brMats; const TL=new THREE.TextureLoa
   _brMats={ 0:yellow, 1:conc, 2:tile, 3:conc, 4:yellow }; return _brMats; }   // per-zone skins (Ben 07-26)
 function brZoneMat(z){ const M=brMaterials(); return M[z]||M[0]; }
 function brClearEnv(){ if(BR.env){ scene.remove(BR.env); BR.env.traverse(o=>{ if(o.geometry)o.geometry.dispose(); }); BR.env=null; }
-  if(BR.lightPool){ for(const L of BR.lightPool)if(L.parent)L.parent.remove(L); BR.lightPool=null; } BR._cell=null; }
+  // BR.lightPool IS pointPool now (see brEnsureLightPool). Removing it from the scene here would strip the overworld's
+  // own torch lights out on the way out of the halls and change the game's point-light count on the spot; parking the
+  // slots at zero is the whole of the cleanup, and assignPointLights takes them straight back over.
+  if(BR.lightPool){ for(const L of BR.lightPool){ L.intensity=0; L.visible=true; } BR.lightPool=null; } BR._cell=null; }
 // ===== ROOM GENERATION (Ben 07-27) — a lore-accurate Level-0 layout. A coarse CELL grid is MERGED into rectangular rooms
 //   of many different sizes (this masks the grid), with a LARGE starting room. A randomized-Prim spanning tree over the
 //   room-adjacency graph is the doorway set → every room gets only 1–2 doorways (a labyrinth, not a grid of connected
@@ -19984,7 +20057,12 @@ function brBuildTables(grp){ const T=BR.tables; if(!T||!T.length)return; const M
     for(let c=0;c<nC;c++){ const cx=-L/2 + L*(c+0.5)/nC, yTop=H+TH/2+0.02;                    // candles down the centre line — stubs, and one may still be burning
       cyl(0.035,0.045,0.30,8, cx,yTop+0.15,0, M.candle);
       if(t.candle===c){ push(new THREE.ConeGeometry(0.035,0.10,6), M.flame, cx,yTop+0.35,0, 0);
-        const pl=new THREE.PointLight(0xffb347,2.2,7,2); pl.position.set(cx,yTop+0.4,0); g.add(pl); } }
+        // Recorded on the TABLE RECORD, not lit, and not pushed to a list: see the bulb above and LIGHT_POOL. A record
+        // field is overwritten by a rebuild where a list would collect a duplicate candle per rebuilt chunk. The flame
+        // sits at local (cx,·,0) inside a group that is placed at t.x,t.z and turned by t.rot, and the chunk group
+        // carries the storey, so both the rotation and BR._bdy have to be undone by hand to get a world position.
+        { const _s=Math.sin(t.rot||0), _c=Math.cos(t.rot||0);
+          t._cw={ x:t.x + cx*_c, z:t.z - cx*_s, y:BR_WY0 + yTop + 0.4 + (BR._bdy||0) }; } } }
     for(const [mat,geos] of BK){ const merged=_mergeGeos(geos); const mesh=new THREE.Mesh(merged,mat);
       mesh.castShadow=true; mesh.receiveShadow=true; mesh.frustumCulled=false; g.add(mesh);
       for(const gg of geos) gg.dispose(); }
@@ -20102,11 +20180,14 @@ function brBuildBulbs(grp){ const B=BR.bulbs; if(!B||!B.length)return; const M=b
     const glass=new THREE.Mesh(new THREE.SphereGeometry(0.085,10,8), M.off); glass.position.y=-drop-0.17; glass.scale.set(1,1.25,1); g.add(glass);
     b.glass=glass; b.y=b.ceil-drop-0.17+(BR._bdy||0);                                     // b.ceil is LOCAL (the chunk group carries the storey); b.y is compared against the camera in WORLD space by brTryPullCord, so it carries the storey itself — an upper-storey bulb was unreachable by a whole floor
     const cord=new THREE.Mesh(new THREE.BoxGeometry(0.014,0.42,0.014), M.chain); cord.position.set(0.10,-drop-0.30,0); g.add(cord);   // the pull cord, off to one side
-    const light=new THREE.PointLight(0xffe2a8, 0, 6.5, 2); light.position.set(0,-drop-0.17,0); g.add(light); b.light=light;
+    // NO LIGHT OBJECT HERE. A PointLight per bulb made the game's point-light count depend on how many chunks were
+    // loaded, and each distinct total is a full set of relinked shader programs (see LIGHT_POOL). brxUpdateLights
+    // reads BR.bulbs and gives a lit bulb one of the shared pool's slots instead.
     g.traverse(o=>{ if(o.isMesh)o.frustumCulled=false; }); } }
 function brSetBulb(b,on){ if(!b||!b.glass)return; b.on=!!on;
   b.glass.material = b.on ? brBulbMats().on : brBulbMats().off;
-  if(b.light) b.light.intensity = b.on ? 5.5 : 0; }
+  // b.on IS the switch: brxUpdateLights only offers a pool slot to a bulb that is on, so there is no light to dim here.
+}
 // right-click a bulb's cord — the only way to light one of these rooms
 function brTryPullCord(){ const B=BR.bulbs; if(!BR.inside||!B||!B.length)return false;
   const ld=(typeof lookDir==='function')?lookDir():{x:-Math.sin(player.yaw),z:-Math.cos(player.yaw)};
@@ -20519,10 +20600,17 @@ function brTrofferMats(){ if(_brTrofferMat) return _brTrofferMat;
     frame: new THREE.MeshStandardMaterial({map:_hs, roughnessMap:_hs, color:0xf0ece2, roughness:0.6, metalness:0.15, side:THREE.DoubleSide}),
     panel: new THREE.MeshBasicMaterial({map:_dif, color:0xfff3da, fog:false, toneMapped:true, side:THREE.DoubleSide}),
     dead:  new THREE.MeshStandardMaterial({map:_dif, color:0x7c7970, roughness:0.8, metalness:0.05, side:THREE.DoubleSide}) }; }
-function brEnsureLightPool(){ const want=Math.max(1,PERF.brLightPool|0);
-  if(BR.lightPool && BR.lightPool.length===want) return;
-  if(BR.lightPool) for(const L of BR.lightPool){ if(L.parent)L.parent.remove(L); if(L.shadow&&L.shadow.map){ L.shadow.map.dispose(); L.shadow.map=null; } }   // resizing disposes the old set, or the shadow maps of the discarded lights leak
-  BR.lightPool=[]; for(let i=0;i<want;i++){ const L=new THREE.PointLight(0xffedcf, 0, 56, 2.0); L.visible=false; scene.add(L); BR.lightPool.push(L); }
+// THE HALLS BORROW THE OVERWORLD'S POOL — they do not own one. This used to build its own 16 PointLights and add
+// them to the same scene, which is exactly how numPointLights became 19 outside and 44 inside (see LIGHT_POOL).
+// pointPool is resident from boot and never resized, so there is nothing to create, nothing to dispose, and no
+// count to change; brxUpdateLights writes fixtures into the same slots assignPointLights writes torches into, and
+// assignPointLights stands down while BR.inside so the two never fight over a slot.
+// PERF.brLightPool is now a CLAMP on how many of those slots the halls may drive, not a pool size. Asking for more
+// than the pool holds gets the pool, because handing out a seventeenth slot would recompile the game.
+function brEnsureLightPool(){
+  BR.lightPool = pointPool;
+  const want=Math.max(1,Math.min(pointPool.length, PERF.brLightPool|0));
+  BR._poolUse = want;
   // REAL CAST SHADOWS from the two nearest troffers (Ben 07-27). Point-light shadows are 6 faces each, so the count is
   // deliberately tiny and the far plane is clamped to the local room — everything past that is carried by the pooled falloff.
   brApplyShadowLights();
@@ -20532,7 +20620,8 @@ function brEnsureLightPool(){ const want=Math.max(1,PERF.brLightPool|0);
 // Park the whole pool properly on the way out. brStableLightCount keeps unused lights VISIBLE at zero intensity
 // so the count cannot move inside the halls — but the overworld must not then carry sixteen dead point lights
 // in every one of its shaders, so leaving the dimension turns them off for real.
-function brPoolLightsOff(){ if(!BR.lightPool) return; for(const L of BR.lightPool){ L.intensity=0; L.visible=false; } }
+// Intensity only — an ablation probe must not change the light COUNT, or it measures a recompile as well as the pool.
+function brPoolLightsOff(){ if(!BR.lightPool) return; for(const L of BR.lightPool){ L.intensity=0; } }
 // =====================================================================
 //  P3 · PRECOMPILE THE BACKROOMS (Ben 07-29)
 //  Measured on a cold page: walking the halls compiled 150 new shader programs, in frames of 5 958 / 6 250 /
@@ -20858,11 +20947,24 @@ function brxUpdateLights(px,pz){ if(!BR.lightPool||!BR.fixtures)return; const F=
   let vis=null; try{ vis=brLitRooms(); }catch(e){ vis=null; }
   for(let i=0;i<F.length;i++){ if(F[i].dead)continue; if(vis && F[i].room!=null && !vis.has(F[i].room))continue;
     const dx=F[i].x-px,dz=F[i].z-pz,d=dx*dx+dz*dz; if(d<95*95)near.push({f:F[i],d}); }
+  // PULL-CORD BULBS AND LIT CANDLES COMPETE FOR THE SAME SLOTS, because they used to own a PointLight each and that
+  // made the game's point-light count a function of how many chunks happened to be loaded (see LIGHT_POOL). They are
+  // dimmer and much shorter-range than a troffer, so `i` carries the intensity and reach rather than the loop.
+  // They are deliberately NOT gated on brLitRooms: a bulb is the only light in an unlit room, and gating it by nav
+  // adjacency is what left report 6's rooms dark.
+  for(const b of (BR.bulbs||[])){ if(!b.on) continue;
+    const dx=b.x-px, dz=b.z-pz, d=dx*dx+dz*dz; if(d<40*40) near.push({f:{x:b.x, z:b.z, y:b.y, i:5.5, r:6.5, c:0xffe2a8}, d}); }
+  for(const tb of (BR.tables||[])){ const c=tb._cw; if(!c) continue;
+    const dx=c.x-px, dz=c.z-pz, d=dx*dx+dz*dz; if(d<24*24) near.push({f:{x:c.x, z:c.z, y:c.y, i:2.2, r:7, c:0xffb347}, d}); }
   near.sort((a,b)=>a.d-b.d);
   let litNear=0, nearest=1e9;
-  for(let i=0;i<BR.lightPool.length;i++){ const L=BR.lightPool[i]; if(i<near.length){ const f=near[i].f; L.visible=true; L.position.set(f.x,(f.y!=null?f.y:y),f.z);   // f.y = under this fixture's own ceiling (rooms have different heights)
+  // BR._poolUse, not the pool length: the pool is the overworld's and may be larger than the halls are allowed to
+  // drive. Slots past it keep whatever the overworld last left them at intensity 0, still visible, still counted.
+  const use=Math.max(1,Math.min(BR.lightPool.length, BR._poolUse|0 || BR.lightPool.length));
+  for(let i=0;i<BR.lightPool.length;i++){ const L=BR.lightPool[i]; if(i<use && i<near.length){ const f=near[i].f; L.visible=true; L.position.set(f.x,(f.y!=null?f.y:y),f.z);   // f.y = under this fixture's own ceiling (rooms have different heights)
     const on = f.flick ? brFlick(f.ph||0,t) : 1;
-    L.intensity = on*12.0;                              // brighter than the old 7.5 — it is now the ONLY real light in here
+    L.color.setHex(f.c||0xffedcf); L.distance=f.r||56; L.decay=2.0;   // the slot may have been a torch a frame ago — every property the overworld writes has to be written back
+    L.intensity = on*(f.i||12.0);                       // brighter than the old 7.5 — it is now the ONLY real light in here
     if(L.castShadow) L.shadow.autoUpdate = on>0;        // a blinked-off tube skips its 6-face shadow pass entirely
     // THE SOUND FOLLOWS THE TUBE'S STATE, NOT ITS STROBE. See brFlickRegime: inside a burst brFlick toggles ~6.5 times a
     // second, so binding a sample to that transition fires ~13 a second from ONE tube. Measured before this: 4 distinct
@@ -20886,7 +20988,10 @@ function brxUpdateLights(px,pz){ if(!BR.lightPool||!BR.fixtures)return; const F=
     // 59 programs at load, 464 by the end of the suite, with isolated 607 ms / 354 ms / 107 ms frames landing
     // exactly on an increment. Keeping the light VISIBLE at zero intensity is pixel-for-pixel identical — three
     // still uploads it, the shader still loops it, it just contributes nothing — and the count stops moving.
-    else { L.intensity=0; L.visible = !!PERF.brStableLightCount; } }
+    // Unconditionally VISIBLE now, with no flag in front of it: the pool is the overworld's own and resident from
+    // boot, so hiding a slot here would drop the game's point-light count below what the overworld renders at and
+    // buy back the recompile this whole change exists to delete. PERF.brStableLightCount has nothing left to switch.
+    else { L.intensity=0; L.visible=true; } }
   BR._litNear=litNear; BR._litD=Math.sqrt(nearest);      // drives the fluorescent HUM (see brUpdateHum) — dark wings fall silent
   if(BR.flickers)for(const fl of BR.flickers) fl.m.visible = brFlick(fl.f.ph||0,t)>0; }   // the diffuser panel blinks with its own light
 function brxCollide(p){ const W=BR.walls; if(!W||!W.length)return; const RAD=0.42+BR_WT/2, X=p.pos.x, Z=p.pos.z; let px=X, pz=Z;   // radius accounts for wall thickness
@@ -26265,6 +26370,11 @@ window.__hc={
         // number. offAxisDeg is the angle between the gun's axis and the camera centre — 0 would mean the sway never reached the
         // shot, which is exactly the state this replaced.
         offX:+(_xhOX||0).toFixed(1), offY:+(_xhOY||0).toFixed(1),
+        // The eased range the third-person projection uses, and whether the LEFT hand is what makes this a gun ring at all.
+        // The range is here because it is the quantity that used to jump — a harness measuring jitter wants to see it settle.
+        easedDist:+_xhDist.toFixed(2),
+        offGun:!!(armor[EQ_OFF] && ITEMS[armor[EQ_OFF].id] && ITEMS[armor[EQ_OFF].id].gun),
+        mainGun:!!(ITEMS[view.id]&&ITEMS[view.id].gun),
         aimCam:view.aimCam?[+view.aimCam.x.toFixed(4),+view.aimCam.y.toFixed(4),+view.aimCam.z.toFixed(4)]:null,
         offAxisDeg:view.aimCam?+(Math.acos(Math.max(-1,Math.min(1,-view.aimCam.z)))*57.29578).toFixed(3):null,
         // holoPos, NOT holo: this object already ends with `holo` as a VISIBILITY boolean and with its own `adsT`, and later keys
