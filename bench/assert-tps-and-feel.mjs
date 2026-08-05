@@ -263,24 +263,9 @@ const ok=(name,cond,got)=>{ if(!cond)fails++; console.log(`  ${cond?'ok  ':'FAIL
     ok('and it still never sits inside the ground', anyInSolid===false, anyInSolid);
     await page.evaluate(`__hc.cam({pitch:0})`); await page.evaluate(`__hc.tpsProbe(false)`);
 
-    console.log('\n[14] leaves that pile up, and rot a stage a day');
-    // A pile needs open air over solid ground, and the cell must not ALREADY hold one: worldgen scatters leaf drifts across the
-    // whole map now (Ben 08-04), so the spot the player happens to be standing on can come with its own pile and the count this
-    // section is about would start at "already a pile". Cleared a block out in each direction, since groundY can land on the
-    // pile itself rather than the ground under it.
-    await page.evaluate(`(()=>{ const P=__hc.pos(), x=Math.floor(P.x), z=Math.floor(P.z), g=__hc.groundY(x,z);
-      for(let dx=-1;dx<=1;dx++) for(let dz=-1;dz<=1;dz++){ for(let dy=0;dy<=4;dy++) __hc.setBlockAt(x+dx,g+dy,z+dz,'air'); __hc.setBlockAt(x+dx,g-1,z+dz,'stone'); }
-      __hc.setBlockAt(x,g-1,z,'stone'); })()`);
-    const p1 = await page.evaluate(`__hc.leafPile(null,null,null,3)`);
-    ok('three leaves are not a pile', p1.isPile===false && p1.pending===3, {pending:p1.pending, need:p1.need, block:p1.block});
-    const p3 = await page.evaluate(`__hc.leafPile(null,null,null,1)`);   // same cell as p1 — the hook resolves it the one way, so the counts add up
-    ok('the fourth makes one', p3.isPile===true, {block:p3.block, at:p3.at});
-    const d1 = await page.evaluate(`__hc.leafDay(1)`);
-    ok('a day turns it to decaying', d1.piles[0] && d1.piles[0].block==='leaf_pile_decay', d1.piles[0]);
-    const d2 = await page.evaluate(`__hc.leafDay(1)`);
-    ok('another turns it dead', d2.piles[0] && d2.piles[0].block==='leaf_pile_dead', d2.piles[0]);
-    const d3 = await page.evaluate(`__hc.leafDay(1)`);
-    ok('and the third clears it away', d3.tracked===0, {tracked:d3.tracked, piles:d3.piles});
+    // [14] WAS THE LEAF-PILE MECHANIC, retired with the model on 2026-08-04 (Ben: "delete the old leaf models"). The number
+    // is left as a gap rather than renumbering [15] onward, so "[16] failed" in an older log still points at the same test.
+    // Fallen leaves are drawn by the ground cover now and there is no per-cell counter left to assert.
 
     console.log('\n[15] stamina, and armour as three shields of four');
     const v0 = await page.evaluate(`__hc.stamSet(100)`);
