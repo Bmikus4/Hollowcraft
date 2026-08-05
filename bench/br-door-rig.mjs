@@ -116,6 +116,40 @@ window.__PD={
       return { ck, saved:S.length, live:D.length, matched:m, cached:!!ent,
                genIsLiveRec: g? (g.doors===rec.doors) : null,
                sK:S.length?S[0].k:null, dK:D.length?K(D[0]):null }; }); },
+  // WHAT IS TOUCHING THE BODY AT (x,z), by identity and by the same radii brxCollide uses. A stall is only a doorway bug
+  // if the thing in the way is the doorway; if it is the leaf we just rotated that is real geometry, and if the walker
+  // stalls with nothing in range at all then the walker is the bug.
+  blocker(x,z){ const out=[]; const RAD=0.42+BR_WT/2;
+    const seg=(ax,az,bx,bz,rad,what)=>{ const dx=bx-ax,dz=bz-az,ll=dx*dx+dz*dz||1; let t=((x-ax)*dx+(z-az)*dz)/ll; t=t<0?0:t>1?1:t;
+      const d=Math.hypot(x-(ax+dx*t), z-(az+dz*t)); if(d<rad) out.push({what, d:+d.toFixed(2), rad:+rad.toFixed(2)}); };
+    (BR.walls||[]).forEach((s,i)=>seg(s.x0,s.z0,s.x1,s.z1,RAD,'wall#'+i+' ty'+(s.ty!=null?s.ty:'-')));
+    (BR.doors||[]).forEach((d,i)=>{ if(d.a!=null&&d.a<=1.15){ const s=d.seg; seg(s.x0,s.z0,s.x1,s.z1,0.42,'doorseg#'+i+' a'+(+d.a).toFixed(2)); }
+      if(d.a!=null&&d.a>0.12&&d.leafW&&d.pivots) for(const L of d.pivots){ const th=d.base+L.hs*d.swing*d.a;
+        seg(L.hx,L.hz,L.hx+Math.cos(th)*d.leafW*L.hs, L.hz-Math.sin(th)*d.leafW*L.hs, 0.36, 'leaf#'+i); } });
+    (BR.solids||[]).forEach((s,i)=>seg(s.x0,s.z0,s.x1,s.z1,RAD,'solid#'+i));
+    (BR.crawls||[]).forEach((s,i)=>seg(s.x0,s.z0,s.x1,s.z1,RAD,'crawl#'+i));
+    (BR.pillars||[]).forEach((p,i)=>{ const d=Math.hypot(x-p.x,z-p.z); if(d<p.hw+0.42) out.push({what:'pillar#'+i,d:+d.toFixed(2),rad:+(p.hw+0.42).toFixed(2)}); });
+    (BR.boxes||[]).forEach((b,i)=>{ if(Math.abs(x-b.x)<b.hx+0.42 && Math.abs(z-b.z)<b.hz+0.42) out.push({what:'box#'+i,d:0,rad:0}); });
+    (BR.tables||[]).forEach((t,i)=>{ const vt=Math.abs(t.rot)>0.1; if(Math.abs(x-t.x)<(vt?0.75:t.len/2)+0.42 && Math.abs(z-t.z)<(vt?t.len/2:0.75)+0.42) out.push({what:'table#'+i,d:0,rad:0}); });
+    out.sort((a,b)=>(a.d-a.rad)-(b.d-b.rad)); return out.slice(0,4); },
+  // THE WALKER'S OWN CONTROL: same rig, same step, same collider, walking AWAY from the door into the room it is standing
+  // in. If that cannot cover the distance either, the instrument is broken and no reading through the doorway means
+  // anything (22900's point, and it is correct).
+  walkFrom(x,z,yaw,n){ player.pos.x=x; player.pos.z=z; const sx=x, sz=z, dx=-Math.sin(yaw), dz=-Math.cos(yaw); const ticks=[];
+    for(let k=0;k<(n||24);k++){ const bx=player.pos.x, bz=player.pos.z; player.pos.x+=dx*0.12; player.pos.z+=dz*0.12;
+      try{ brxCollide(player); }catch(e){} ticks.push(+Math.hypot(player.pos.x-bx, player.pos.z-bz).toFixed(3)); }
+    return { m:+Math.hypot(player.pos.x-sx, player.pos.z-sz).toFixed(2), ticks:ticks.slice(0,14) }; },
+  // WHERE THE LEAF ACTUALLY IS relative to the spot the rig chose to stand, in world space, from the mesh's own bounding
+  // box. Answers "is the crosshair pointing at nothing because there is nothing there, or because the aim is wrong".
+  look(i){ const d=(BR.doors||[])[i]; if(!d) return {err:'no door'};
+    const rows=[]; const box=new THREE.Box3(), c=new THREE.Vector3();
+    for(const L of (d.pivots||[])){ if(!L||!L.pivot) continue; let n=0;
+      L.pivot.traverse(o=>{ if(o.isMesh){ n++; box.setFromObject(o); box.getCenter(c);
+        if(rows.length<4) rows.push({ mesh:o.name||'(unnamed)', c:[+c.x.toFixed(2),+c.y.toFixed(2),+c.z.toFixed(2)],
+                                      size:[+(box.max.x-box.min.x).toFixed(2),+(box.max.y-box.min.y).toFixed(2),+(box.max.z-box.min.z).toFixed(2)],
+                                      vis:o.visible, layers:o.layers.mask }); } });
+      rows.push({leafMeshes:n}); }
+    return { rec:[d.cx,d.cz], vert:!!d.vert, dw:d.dw, a:d.a, closed:!!d.closed, meshes:rows }; },
   counts(){ return { reapplied:BR._rigReapplied|0, missed:BR._rigMissed|0,
                      envCache:BR.envCache?BR.envCache.size:0, gen:BR.gen?BR.gen.size:0, loaded:(BR.loaded||[]).length,
                      recDoors:(BR.loaded||[]).reduce((s,r)=>s+((r.doors||[]).length),0) }; },
@@ -126,21 +160,42 @@ window.__PD={
     // wrong space cannot send the camera into empty void and report "no door here".
     const L0=(d.pivots||[])[0]; if(!L0||!L0.pivot) return Object.assign(out,{ why:'no pivot to locate — door is not in the graph' });
     const W=new THREE.Vector3(); L0.pivot.getWorldPosition(W);
-    const Y=W.y+1.4, TX=W.x, TZ=W.z;
+    // AIM AND WALK AT THE OPENING CENTRE, NOT THE PIVOT. The pivot IS the hinge: it sits on the jamb, so approaching and
+    // then walking along it drives the body into the wall beside the door and reports "cannot pass" for every door in the
+    // halls, open or shut. d.cx/d.cz is the centre of the opening, and it is only safe to trust it because the rig and
+    // the record are now proven to be the same generation (hinge-to-centre reads 1.04 m on every door, i.e. half a leaf).
+    const Y=W.y+1.4, TX=(d.cx!=null?d.cx:W.x), TZ=(d.cz!=null?d.cz:W.z);
     out.world=[+W.x.toFixed(1),+W.y.toFixed(1),+W.z.toFixed(1)];
     out.recOff=+Math.hypot((d.cx||0)-W.x, (d.cz||0)-W.z).toFixed(2);   // record vs graph: 0 means they agree
     // Approach from four sides and keep whichever one the crosshair actually lands a mesh on within reach. The door's
     // own orientation field is not trusted here — the ray decides.
+    // APPROACH ALONG THE DOOR'S NORMAL, AND ONLY FROM A SPOT THE BODY CAN ACTUALLY OCCUPY. Sweeping all four axes and
+    // keeping the NEAREST ray hit systematically chose to stand INSIDE the wall the door is hung in — a body embedded in
+    // a wall hits a mesh at 0.4 m and wins every time, then cannot move a step, and 24 doors report "cannot walk
+    // through" while the doorway is wide open. Measured: blocker wall#9 at d=0.00 against rad=0.60 on all 24. The door's
+    // own orientation gives the two legitimate sides, and brxCollide itself vetoes a start point it would push out of.
+    // The standoff has to come down as well as the axis being right: a door can open into a 2 m closet, where 1.5 m from
+    // the opening is inside the opposite wall, and every candidate gets vetoed. Nearest standable spot on either side.
     let best=null;
-    for(const [ox,oz] of [[1.5,0],[-1.5,0],[0,1.5],[0,-1.5]]){
+    const sides=[]; for(const s of (d.vert?[1,-1]:[1,-1])) for(const r of [1.5,1.2,0.9,0.7]) sides.push(d.vert?[s*r,0]:[0,s*r]);
+    const rejected=[];
+    for(const [ox,oz] of sides){
       const px=TX+ox, pz=TZ+oz;
-      player.pos.set(px,Y,pz); player.yaw=Math.atan2(-(TX-px),-(TZ-pz)); player.pitch=0;
+      player.pos.set(px,Y,pz); try{ brxCollide(player); }catch(e){}
+      if(Math.hypot(player.pos.x-px, player.pos.z-pz) > 0.01){ if(rejected.length<2) rejected.push({at:[+ox.toFixed(1),+oz.toFixed(1)], by:this.blocker(px,pz)[0]||null}); continue; }   // that spot is inside something solid
+      // AIM AT A LEAF, NOT AT THE CENTRE OF THE OPENING. Every door in the halls is a double: two leaves meeting on the
+      // centre line, so a ray fired dead at (cx,cz) goes through the crack between them and reports "the crosshair hit
+      // nothing", on all 24 doors. Measured on door 0: leaves centred 0.52 m either side of cz, each 1.04 m across.
+      // Offset the AIM by a quarter of the opening; the walk below still uses the centre line, which is the real gap.
+      const ax=TX+(d.vert?0:d.dw/4), az=TZ+(d.vert?d.dw/4:0);
+      player.pos.set(px,Y,pz); player.yaw=Math.atan2(-(ax-px),-(az-pz)); player.pitch=0;
       camera.position.copy(player.pos); camera.rotation.set(0,player.yaw,0); camera.updateMatrixWorld(true);
       const rc=new THREE.Raycaster(); rc.setFromCamera({x:0,y:0}, camera); rc.far=3.0;
       const hits=rc.intersectObject(scene,true).filter(h=>h.object&&h.object.visible&&h.object.isMesh);
       if(hits.length && (!best || hits[0].distance<best.h.distance)) best={ h:hits[0], px, pz, yaw:player.yaw };
     }
-    if(!best) return Object.assign(out,{ why:'crosshair hit nothing within 3 m from any side' });
+    if(!best) return Object.assign(out,{ why:'no standable spot on either side, or the crosshair hit nothing within 3 m',
+                                         sidesTried:sides.length, vert:!!d.vert, rejected });
     // stand where the winning ray was cast from
     player.pos.set(best.px,Y,best.pz); player.yaw=best.yaw; player.pitch=0;
     camera.position.copy(player.pos); camera.rotation.set(0,player.yaw,0); camera.updateMatrixWorld(true);
@@ -164,10 +219,23 @@ window.__PD={
     out.stateA = +(d.a||0).toFixed(2); out.stateClosed = !!d.closed;
     // COLLISION: walk the physics body along the view ray through the opening, using the game's own collider. 24 steps
     // of 0.12 covers 2.9 m, so arrival means it passed the door plane rather than merely leaving the start cell.
-    const sx=player.pos.x, sz=player.pos.z, dx=-Math.sin(player.yaw), dz=-Math.cos(player.yaw);
-    for(let k=0;k<24;k++){ player.pos.x+=dx*0.12; player.pos.z+=dz*0.12; try{ brxCollide(player); }catch(e){} }
-    out.walkedM = +Math.hypot(player.pos.x-sx, player.pos.z-sz).toFixed(2);
-    out.gotThrough = out.walkedM > 1.9;                      // 1.5 m to reach the leaf, so >1.9 m means past it
+    // THE WALK MUST FACE AN OPEN DOOR. 15% of doors generate open, and the single toggle above SHUTS those — the body
+    // then stops dead on doorseg at 0.42 m, which is a closed door doing its job, counted as a doorway you cannot pass.
+    if(d.a!=null && d.a<=1.15){ brTryToggleDoor(); for(let k=0;k<120;k++) brUpdateDoors(0.05); out.reopened=true; }
+    out.walkStateA=+(d.a||0).toFixed(2);
+    const sx=player.pos.x, sz=player.pos.z;
+    // PASSAGE IS CROSSING THE DOOR PLANE, NOT COVERING A DISTANCE. The standoff varies per door now, so a fixed metre
+    // count would mark a door passed or failed on how much room there was to stand in.
+    const wyaw=Math.atan2(-(TX-sx),-(TZ-sz));                // the walk goes at the opening centre; only the AIM was offset
+    const nx=-Math.sin(wyaw), nz=-Math.cos(wyaw);
+    const before=(sx-TX)*nx+(sz-TZ)*nz;                      // negative: we start on the near side
+    const fwd=this.walkFrom(sx,sz,wyaw,26);
+    out.walkedM=fwd.m; out.ticks=fwd.ticks; out.standoff=+Math.abs(before).toFixed(2);
+    out.pastPlaneM=+(((player.pos.x-TX)*nx+(player.pos.z-TZ)*nz)).toFixed(2);
+    out.gotThrough = out.pastPlaneM > 0.4;                   // through the opening and clear of the leaf
+    if(!out.gotThrough) out.blockedBy=this.blocker(player.pos.x, player.pos.z);
+    // …and the same walk in reverse, into open room. A rig that cannot do THIS has not measured the doorway.
+    out.backM=this.walkFrom(sx,sz,wyaw+Math.PI,24).m;
     return out; }
 };`;
 
@@ -208,6 +276,7 @@ function ensureProbe(root){
     console.log('leaves: '+J(await ev('__PD.leaves()')));
     console.log('counts: '+J(await ev('__PD.counts()')));
     const au=await ev('__PD.audit()'); if(Array.isArray(au)) for(const c of au) console.log('  chunk '+J(c)); else console.log('audit: '+J(au));
+    console.log('look0:  '+J(await ev('__PD.look(0)')));
     const list=await ev('__PD.list()');
     console.log('doors:  '+(Array.isArray(list)?list.length+' total, '+list.filter(d=>d.piv>0).length+' with pivots':J(list)));
 
