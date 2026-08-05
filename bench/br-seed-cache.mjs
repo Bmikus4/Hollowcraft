@@ -99,8 +99,10 @@ function ensureProbe(root){
     const errs=[]; page.on('pageerror',e=>errs.push(String(e.message||e).slice(0,180)));
     const ev=async(js)=>{ try{ return await page.evaluate(js); }catch(e){ return {err:String(e.message||e).slice(0,200)}; } };
 
-    // NO ?brseed — this is the shipping behaviour, which is the thing under test.
-    await page.goto(base+'/index.html?perf=1&debug=1&rd=8',{waitUntil:'load',timeout:90000});
+    // NO ?brseed by default — the shipping behaviour is the thing under test. BRSEED=N pins it, which is what the
+    // per-chunk door-population comparison needs: two runs that differ in nothing the game can see.
+    const seedQ = process.env.BRSEED ? '&brseed='+process.env.BRSEED : '';
+    await page.goto(base+'/index.html?perf=1&debug=1&rd=8'+seedQ,{waitUntil:'load',timeout:90000});
     await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',{timeout:90000});
     await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',{timeout:90000});
     await sleep(9000);                                      // let the load-time prewarm finish
