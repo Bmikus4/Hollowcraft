@@ -1939,8 +1939,8 @@ let PLAINS_K=1, PLAINS_DAMP=0.85;
 function plainsAt(wx,wz){
   const wxo = wx + 34*fbm2(wx*0.0041, wz*0.0041, 701, 4);
   const wzo = wz + 34*fbm2(wx*0.0041+11.3, wz*0.0041+7.7, 733, 4);
-  const mtn = smooth(0.5,0.84, fbm2(wxo*0.0012, wzo*0.0012, 55, 4));
-  return PLAINS_K * smooth(0.46, 0.74, fbm2(wxo*0.0009, wzo*0.0009, 77, 4)) * (1-mtn);
+  const mtnRaw = fbm2(wxo*0.0012, wzo*0.0012, 55, 4);
+  return PLAINS_K * smooth(-0.21, -0.10, fbm2(wxo*0.0009, wzo*0.0009, 77, 4)) * (1-smooth(0.42, 0.56, mtnRaw));
 }
 function surfaceH(wx, wz){
   const kk = wx+','+wz; let h=_hmCache.get(kk); if (h!==undefined) return h;
@@ -1952,7 +1952,8 @@ function surfaceH(wx, wz){
   const rdg  = ridged(wxo*0.0075, wzo*0.0075, 37, 5);            // pine ridges 0..1
   let elev = CFG.SEA + 2 + cont*24 + (rdg-0.4)*30*smooth(0.15,0.6,cont+0.3) - ero*7;
   // MOUNTAINS: a low-frequency region mask lifts whole areas into real peaks (rocky caps in genColumn)
-  const mtn = smooth(0.5,0.84, fbm2(wxo*0.0012, wzo*0.0012, 55, 4));
+  const _mtnRaw = fbm2(wxo*0.0012, wzo*0.0012, 55, 4);
+  const mtn = smooth(0.5,0.84, _mtnRaw);
   // ---- #69 FLAT PLAINS, WHICH IS ALSO THE ITEM THAT GIVES RIVERS SOMEWHERE TO BE RIVERS ----
   // Rivers already exist: the carve below lerps a channel to CFG.SEA-3 wherever a noise field crosses zero. In steep
   // ground that reads as a gash and in flat ground it reads as a river, which is the strongest argument for this biome.
@@ -1970,8 +1971,20 @@ function surfaceH(wx, wz){
   // argue it. A radius gate was considered and rejected: the real coastline runs from about 220 to 280 blocks out, well
   // inside ISLE_CORE, so no single radius separates inland from shore. Height does. ***
   //
-  // Mutually exclusive with mtn, or you get a flat mountain: mtn is already 0..1 over its own region mask.
-  let pl = PLAINS_K * smooth(0.46, 0.74, fbm2(wxo*0.0009, wzo*0.0009, 77, 4)) * (1-mtn);
+  // THE WINDOW IS MEASURED, NOT CHOSEN, and the numbers look wrong on purpose. fbm2 is NORMALISED to -1..1, so the
+  // obvious window for picking "the top quarter of a region field" is something like 0.46..0.74 — and it selects
+  // NOTHING: a value-noise sum lands nowhere near the ends of its own range, and this particular field, over this
+  // island, runs from about -0.35 to 0 with a median of -0.246 (__hc.plainsHist reports the percentiles). -0.21..-0.10
+  // is p60 to p90 of the real distribution: about a third of the island gets some flattening and a tenth gets all of it.
+  // The world is deterministic — every seed in surfaceH is a constant — so these percentiles are a property of the game
+  // and not of a sample. Do not "tidy" them back into 0..1 numbers; that silently deletes the biome.
+  //
+  // Mutually exclusive with mountains, and gated on the mtn FIELD rather than on mtn itself. mtn is
+  // smooth(0.5,0.84,field) while the field's p99 over the island is 0.633, so mtn never exceeds about 0.36 here and
+  // (1-mtn) would leave two thirds of the flattening running through the mountains. (That the mountain mask is itself
+  // nearly inert in this world — the real peaks come from the ISLE core term, not from mtn*mtn*96 — is a separate
+  // finding, and not one to fix inside a plains item: rewindowing mtn moves land across the whole map.)
+  let pl = PLAINS_K * smooth(-0.21, -0.10, fbm2(wxo*0.0009, wzo*0.0009, 77, 4)) * (1-smooth(0.42, 0.56, _mtnRaw));
   if(pl>0.001){
     pl *= smooth(CFG.SEA+3, CFG.SEA+10, elev);
     if(pl>0.001) elev = lerp(elev, Math.max(CFG.SEA+4, CFG.SEA+2+cont*24), pl*PLAINS_DAMP);
@@ -26638,12 +26651,20 @@ window.__hc={
   // The mask's own distribution, which is the first thing to look at when a biome does not appear: fbm2 returns -1..1, so a
   // smoothstep window picked for a 0..1 field selects nothing at all.
   plainsHist(n,step){ const N=n||24, ST=step||64; let mn=9, mx=-9, dry=0; const bins=[0,0,0,0,0]; let hMax=0, hMaxPl=0;
+    const raws=[], mtns=[];
     for(let i=0;i<N;i++)for(let j=0;j<N;j++){ const x=Math.round(ISLE_X-(N-1)/2*ST+i*ST), z=Math.round(ISLE_Z-(N-1)/2*ST+j*ST);
       const h=surfaceH(x,z); if(h<=CFG.SEA) continue; dry++;
       const p=plainsAt(x,z); mn=Math.min(mn,p); mx=Math.max(mx,p); bins[Math.min(4,Math.floor(p*5))]++;
+      // THE RAW FIELDS TOO, because "the biome is missing" and "the window is in the wrong place" look identical from
+      // the mask alone. fbm2 is normalised to -1..1 but a value-noise sum lands nowhere near the ends of that.
+      const wxo=x+34*fbm2(x*0.0041,z*0.0041,701,4), wzo=z+34*fbm2(x*0.0041+11.3,z*0.0041+7.7,733,4);
+      raws.push(fbm2(wxo*0.0009,wzo*0.0009,77,4)); mtns.push(fbm2(wxo*0.0012,wzo*0.0012,55,4));
       if(h>hMax){ hMax=h; hMaxPl=p; } }
+    const pc=(a,q)=>{ const s=a.slice().sort((x,y)=>x-y); return +s[Math.min(s.length-1,Math.floor(q*s.length))].toFixed(3); };
     return { dry, min:+mn.toFixed(3), max:+mx.toFixed(3), bins, frac:+(bins.slice(2).reduce((a,b)=>a+b,0)/(dry||1)).toFixed(3),
-             highest:hMax, highestPl:+hMaxPl.toFixed(3) }; },
+             highest:hMax, highestPl:+hMaxPl.toFixed(3),
+             raw:{ p05:pc(raws,0.05), p50:pc(raws,0.5), p75:pc(raws,0.75), p90:pc(raws,0.9), p99:pc(raws,0.99) },
+             mtnRaw:{ p50:pc(mtns,0.5), p90:pc(mtns,0.9), p99:pc(mtns,0.99) } }; },
   plains(k,d){ try{ if(k!=null) PLAINS_K=+k; if(d!=null) PLAINS_DAMP=+d; _hmCache.clear();
       return { k:PLAINS_K, damp:PLAINS_DAMP }; }catch(e){ return {err:String(e.message||e)}; } },
   // How flat is the ground, and is it flat because it is a plain? Mean absolute height difference between neighbours over
