@@ -430,7 +430,13 @@ const _propFill = new Float32Array([0.237, 0.267, 0.30, 0]);
     // THE 0.2 IS THE CALIBRATION, not a fudge: BRDF_Lambert is albedo/PI, so dividing by albedo leaves irradiance/PI, and 0.2 is the
     // mid albedo the ramp's lo/hi were tuned against. A mid-grey surface gates exactly as it did before this change; only the dark
     // and the bright ones move, and they move onto the same footing as each other.
-    '{ float _dlit=dot(reflectedLight.directDiffuse/max(diffuseColor.rgb,vec3(0.05)),'+L+')*0.2*uScotH.x;\n'+
+    // CLAMPED, NOT JUST DIVIDED, and the clamp is what the measurement forced. Dividing by the raw albedo also DESENSITISES bright
+    // surfaces, and that broke assert-lit-chroma's "the night is not brightened to do it" — 9.83 levels against a 3.34 flicker,
+    // because a lantern-lit floor's gate had moved. Clamping the divisor to [0.05, 0.2] makes this ONE-DIRECTIONAL: a surface at or
+    // above the mid albedo gates exactly as it did before, and only darker ones are lifted, by up to 4x. That is the whole of the
+    // chest fix and none of the collateral.
+    '{ vec3 _alb=clamp(diffuseColor.rgb, vec3(0.05), vec3(0.2));\n'+
+    '  float _dlit=dot(reflectedLight.directDiffuse/_alb,'+L+')*0.2*uScotH.x;\n'+
     // A SURFACE THAT IS ITS OWN LIGHT COUNTS AS LIT. Without this every emissive prop in the game — lamp glass, a troffer, a
     // furnace mouth — greys out at night, which is the exact opposite of Ben's rule that anything a light touches goes warm.
     '  float _emi=dot(totalEmissiveRadiance,'+L+');\n'+
@@ -447,7 +453,12 @@ const _propFill = new Float32Array([0.237, 0.267, 0.30, 0]);
     // than as a gradient. With the knee a walled-in face (vSky 0) still descends fully and a shaded forest face at 0.25 or more does
     // not descend at all. I weighed this knee when the descent shipped and rejected it for consistency with the ambient curve above;
     // his report is the evidence that the linear term is too eager.
-    '  float _open=smoothstep(0.0,0.25,clamp(vSky,0.0,1.0));\n'+
+    // 0.05, NOT 0.25, AND THE 4-BIT QUANTUM IS WHY. aSky is 4 bits, so vSky arrives in steps of 1/15 = 0.0667: a walled-in face is
+    // EXACTLY 0 and the smallest non-zero value is 0.0667. A knee at 0.05 separates "no baked sky at all" from "one step of sky"
+    // cleanly, so nothing that receives any skylight whatsoever descends. At 0.25 it did not: assert-cave-black's own open-night crop
+    // fell from min 26 to 2 and lum 28.86 to 4.86, because that crop holds ground shaded by the trees added today, whose faces sit at
+    // one or two steps of sky — the same faces Ben reports as "dark random blocks in the woods".
+    '  float _open=smoothstep(0.0,0.05,clamp(vSky,0.0,1.0));\n'+
     '#else\n'+
     // Non-atlas materials have no sky bake, so they take the day factor straight: immune by day, washed at night unless a
     // light reaches them. _open 1.0 used to mean "never descend", on the reasoning that blackening a prop on open night ground
@@ -3169,8 +3180,10 @@ function _ssky(lx,ly,lz){ const th=_snapT[(lx+1)+(lz+1)*_SW]; if(ly>=th)return 1
 function _sskyOpen(lx,ly,lz){ let s=_ssky(lx,ly,lz); if(s>=1)return 1;
   const m=Math.max(s, _ssky(lx+1,ly,lz), _ssky(lx-1,ly,lz), _ssky(lx,ly,lz+1), _ssky(lx,ly,lz-1)); return m; }
 
+let _LEAF_UV_MIRROR = true;   // __hc.leafUV(false) + a world remesh is the A/B for the per-layer tile mirror below
 function greedyMesh(c, pass){
   // pass: 'opaque' | 'cutout'
+  const _leafUV = _LEAF_UV_MIRROR && pass==='leaf';
   let _vn=0;                           // vertices written into the shared scratch this call
   const g=_sg;                         // padded-snapshot reads (snapshotChunk(c) ran in buildChunkMeshes) — NOT world getBlock
   const isSrc = pass==='opaque'
@@ -3228,6 +3241,18 @@ function greedyMesh(c, pass){
           else      { v0=[px,py,pz]; v1=[px+dv[0],py+dv[1],pz+dv[2]]; v2=[px+du[0]+dv[0],py+du[1]+dv[1],pz+du[2]+dv[2]]; v3=[px+du[0],py+du[1],pz+du[2]]; }
           // UV derived from WORLD axes so side tiles stay upright (V = world +Y).
           //   y-faces: (X,Z)   x-faces: (Z,Y)   z-faces: (X,Y)
+          //
+          // EVERY LEAF LAYER MIRRORS ITS TILE DIFFERENTLY, and this is what actually makes a canopy read as deep (Ben
+          // 08-05, after the leaf-leaf faces were restored: "still cant see those leaves through other leaves"). The uv
+          // above has NO TERM IN THE FACE'S OWN AXIS — an x-face is (z,y) whatever x it sits at — so every layer of a
+          // canopy sampled the SAME TEXEL along the line of sight. The inner layers were meshed and drawn; they were
+          // just transparent in exactly the same places, so a ray through a hole in the first layer passed through the
+          // hole in all of them and landed on the sky. Mirroring u/v by the layer's own coordinate mod 4 decorrelates
+          // them: consecutive layers can never share a state, and the tile is asymmetric noise, so a hole in one layer
+          // lands on leaf in the next. A MIRROR, not an offset: an offset wraps the tile and cuts a seam across the
+          // middle of every block face. Layers only, and only along the axis you are looking down, so nothing that is
+          // one block thick changes at all. Chunk-local is safe here because CK is 16 and 16 % 4 === 0.
+          const _lp = _leafUV ? (x[d]&3) : 0;
           const quad=[v0,v1,v2,v3];
           const order=[0,1,2, 0,2,3];
           if(_vn+6 > _mCap) _growMesh();
@@ -3237,6 +3262,7 @@ function greedyMesh(c, pass){
             if (d===1){ uu0=vv[0]; uu1=vv[2]; }
             else if (d===0){ uu0=vv[2]; uu1=vv[1]; }
             else { uu0=vv[0]; uu1=vv[1]; }
+            if(_lp){ if(_lp&1) uu0=-uu0; if(_lp&2) uu1=-uu1; }   // see _leafUV above: fract(-c) is the mirrored tile, and it costs nothing on the GPU
             const p3=_vn*3, u2=_vn*2;
             _mP[p3]=vv[0]; _mP[p3+1]=vv[1]; _mP[p3+2]=vv[2];
             _mN[p3]=nrm[0]; _mN[p3+1]=nrm[1]; _mN[p3+2]=nrm[2];
@@ -6410,13 +6436,20 @@ const flameMat=new THREE.ShaderMaterial({
         float a=fract(t*sp + h(vec2(vSeed*7.0+fi, 1.0)));                   // 0..1 life, restarting
         float ey=1.0+a*(${FLAME_QUAD_EXT.toFixed(2)}-1.0);
         float ex=(h(vec2(vSeed*5.0+fi,4.0))-0.5)*0.34*a + (nz(vec2(t*1.1+fi, vSeed))-0.5)*0.10;
-        float d=length(vec2((x-ex)*1.0, (y-ey)*0.42));
-        float s=smoothstep(0.085,0.0,d)*(1.0-a);                            // dims as it cools
+        // A SPARK, NOT A SECOND FLAME (Ben 08-05, twice: "campfires and torches still BOTH have that weird little blip at the top").
+        // Three things made one ember read as a small fire hanging a block over every flame in the game. It was 0.085 across and
+        // stretched 2.4x vertically (the 0.42 divides the y distance), so it drew a cone rather than a point. Its envelope was (1-a),
+        // brightest at a=0 — which is y=1.0, immediately above the flame's tip — so the hottest sample of it sat exactly where the
+        // complaint is. And it is drawn at 2.6 additive on FOUR crossed planes: when the flame went from two planes to four the BODY's
+        // output was brought down for it (see the note above) and this was not, so a ray through all four crossed 10x the intended gain
+        // and cleared the bloom gate on its own.
+        float d=length(vec2((x-ex)*1.0, (y-ey)*0.78));
+        float s=smoothstep(0.048,0.0,d)*(1.0-a)*smoothstep(0.0,0.16,a);     // dims as it cools, and fades IN so nothing is bright at the tip
         e+=s; warm+=s*(1.0-a); }
       if(e<0.02) discard;
       vec3 col=mix(vec3(0.85,0.16,0.02), vec3(1.0,0.78,0.34), clamp(warm*2.2,0.0,1.0));
       if(vType>3.5) col=mix(vec3(0.9,0.05,0.03), vec3(1.0,0.35,0.28), clamp(warm*2.2,0.0,1.0));
-      gl_FragColor=vec4(col*e*2.6, e);
+      gl_FragColor=vec4(col*e*0.85, e*0.85);
     }`
 });
 flameMat.customProgramCacheKey=()=>'flame';
@@ -29461,6 +29494,11 @@ window.__hc={
   // chunks, same frame. Every chunk has its own material clone, so the base and all the clones have to be told.
   // The leaf meshes as the GPU has them, so a probe can intersect the canopy's own triangles and answer "how many leaf
   // surfaces does a ray through this tree cross" as a number instead of a screenshot (bench/tmp-leaf-depth.mjs).
+  // The per-layer leaf tile mirror, off and on, with the world remeshed either way — the only honest A/B of "can you
+  // see leaves behind leaves", since without it every layer is transparent in the same texels.
+  leafUV(on){ try{ _LEAF_UV_MIRROR = (on==null? true : !!on); let n=0;
+      world.forEach(c=>{ if(c.meshed){ c.dirty=true; buildChunkMeshes(c); n++; } });
+      return { mirror:_LEAF_UV_MIRROR, remeshed:n }; }catch(e){ return {err:String(e.message||e)}; } },
   leafMeshes(){ const out=[]; try{ chunkRoot.traverse(o=>{ if(o.userData&&o.userData.leaf&&o.userData.leaf.geometry) out.push(o.userData.leaf); }); }catch(e){} return out; },
   leafCut(v){ try{ const a=(v==null?0.5:+v); leafMat.alphaTest=a; leafMat.needsUpdate=true;
       let n=0; world.forEach(c=>{ const g=c.group; if(!g) return; const m=g.userData&&g.userData.leaf;
