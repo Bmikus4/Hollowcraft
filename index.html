@@ -2177,11 +2177,54 @@ function noTreeZones(){ if(_NOTREE) return _NOTREE;
 // SHAPE — height/thickness/canopy reach, drawn from the per-tree rng. Split out so the wide decorate sweep can ask "can
 // this tree even reach my chunk?" for the price of two rng calls (cheap) instead of a full pineEmit, and so the height
 // formula and the rng CONSUMPTION ORDER (th, th, thick, then the canopy gap rolls) live in exactly one place.
+// ---- THE TREE REWORK (Ben 08-05: "move on to the tree rework") -------------------------------------------------
+// The island had ONE tree. Every trunk in the world came out of this function as a 18-31 block conical pine with no
+// branches, so a lowland meadow, a river bank and a mountain treeline were all the same silhouette repeated, and the
+// new plains biome (#69) was a flat field of the same conifer.
+//
+// THREE SHAPES NOW, chosen by where the tree is standing rather than at random, so the change reads as different
+// COUNTRY and not as noise: the pine keeps the treeline it was written for, a broad round-canopied tree fills the
+// lowlands and the plains, and a slender one thickens the ground between them. The pine's numbers are untouched, which
+// is deliberate — the treeline, the horizon band and every photograph Ben has already approved are of pines.
+//
+// AND THE BROADLEAVES HAVE BRANCHES. Horizontal log stubs under the canopy are the single biggest reason a voxel tree
+// reads as a tree rather than as a green ball on a stick, and this generator had none anywhere.
+//
+// WHY NO NEW BLOCK: birch bark and per-species leaf tiles would each need their own id, and `BID.log` and `BID.leaves`
+// are referenced 68 and 36 times across this file — the mesher's leaves-only pass, occludesSky, the sapling drop, the
+// chop, "a canopy is not a ceiling", the structure sweeps, the animal cover tests. Threading a species set through all
+// of that is a bigger and far riskier change than the shapes, and it is the wrong one to make first: shape is what you
+// see from fifty blocks away. Birch bark is a follow-up with its own risk, not a detail of this one.
+const TREE_PINE=0, TREE_BROAD=1, TREE_SLENDER=2;
+function _treeKind(wx,wz,h,rng){
+  // The treeline is not negotiable: high ground stays conifer, and so does anywhere the mountain mask is doing work.
+  if(h >= CFG.SEA+34) return TREE_PINE;
+  const pl = (typeof plainsAt==='function') ? plainsAt(wx,wz) : 0;
+  const f = fbm2(wx*0.0016, wz*0.0016, 613, 3);          // the grove field: which broadleaf a region favours
+  if(pl > 0.35) return (f > 0.02) ? TREE_BROAD : TREE_SLENDER;   // a plain is a meadow with round trees in it
+  const low = 1 - clamp((h - (CFG.SEA+6)) / 26, 0, 1);   // 1 at the shore, 0 by SEA+32
+  if(rng() < low*0.72) return (f > -0.06) ? TREE_BROAD : TREE_SLENDER;
+  return TREE_PINE;
+}
 function _pineShape(wx,wz){ const rng=tileRng((wx*92821^wz*68917)>>>0);
   const th = Math.max(10, Math.round((18 + (rng()*14|0)) * (0.9 + rng()*0.25)));      // 18..31 base, then ±~12% random size fluctuation
   const thick = rng()<0.15?1:0;                        // mostly single-trunk pines (was 35% chunky) → thinner on average
   const base = Math.floor(th*0.45);
-  return { rng, th, thick, base, reach: Math.max(0, Math.round(0.6 + (th+2-base)*0.44)) + thick }; }
+  // The kind is drawn AFTER th/thick/base so those three streams are bit-identical to what they were: a pine that used
+  // to grow here is the same pine, seed for seed. rng is deterministic per column, so every caller — decorate, the
+  // structure sweeps, _pineEmitPreZone, the QA hook — agrees about which tree stands where without storing anything.
+  const kind = _treeKind(wx,wz,surfaceH(wx,wz),rng);
+  if(kind!==TREE_PINE){
+    // A broadleaf is SHORT and WIDE and a slender is tall and narrow; both are much shorter than a 30-block conifer,
+    // which is what stops a lowland wood reading as a plantation.
+    const bth = kind===TREE_BROAD ? (7+(rng()*5|0)) : (11+(rng()*6|0));
+    const crad = kind===TREE_BROAD ? (3+(rng()*2|0)) : 2;
+    // reach BOUNDS the canopy and the no-tree zones are tested against it — under-reporting it is how a tree ends up
+    // half-erased inside a building.
+    return { rng, kind, th:bth, thick:kind===TREE_BROAD&&rng()<0.35?1:0, base:Math.max(2,bth-2), crad,
+             reach: crad + 2 };
+  }
+  return { rng, kind, th, thick, base, reach: Math.max(0, Math.round(0.6 + (th+2-base)*0.44)) + thick }; }
 // DYNAMIC NO-TREE ZONES — registered by groundStructure when a dynamically-sited builder actually picks its spot.
 //
 // This is the root of "trees broken around structures", and it is architectural, not cosmetic. The static list above
@@ -2262,6 +2305,38 @@ function pineEmit(wx,wz,emit){
   // trunk: each footprint column grows from its OWN floor up to the canopy (fills up to 2 blocks over an overhang)
   for(const fp of foot){ const gy=Math.min(h, surfaceH(wx+fp[0],wz+fp[1]));
     for(let y=gy+1; y<=h+th; y++) emit(wx+fp[0], y, wz+fp[1], BID.log, true); }
+  // ---- BROADLEAF AND SLENDER: a round canopy, branches under it, and an irregular rim ----
+  if(sh.kind!==TREE_PINE){
+    const cr=sh.crad, top=th+cr-1, cy=th;                 // canopy centre sits at the top of the trunk
+    // BRANCHES FIRST, so the canopy fills in around them. Three to five stubs at the canopy base, each one or two
+    // blocks out and one up — enough to break the trunk's silhouette, cheap enough to cost nothing.
+    if(sh.kind===TREE_BROAD){ const nb=3+(rng()*3|0);
+      for(let b=0;b<nb;b++){ const a=(b/nb)*6.283+rng()*0.9, len=1+(rng()*2|0), by=th-1-(rng()*2|0);
+        for(let s=1;s<=len;s++){ const bx=Math.round(Math.cos(a)*s), bz=Math.round(Math.sin(a)*s);
+          emit(wx+bx, h+by+(s===len?1:0), wz+bz, BID.log, true); } } }
+    // A ROUND CANOPY WITH A LUMPY EDGE. The radius is modulated by a world-space field rather than by the per-tree rng,
+    // so the lumps are consistent between the generator and the structure sweeps that re-run it, and neighbouring trees
+    // in a grove do not share the same silhouette.
+    for(let y=-cr; y<=cr+1; y++){
+      const yy=cy+y, ny=y/(cr+1);
+      let rad = Math.round(Math.sqrt(Math.max(0, 1-ny*ny))*cr + (sh.kind===TREE_BROAD?0.35:0.0));
+      if(rad<=0 && y<0) continue;
+      for(let oz=-rad-1;oz<=rad+1;oz++) for(let ox=-rad-1;ox<=rad+1;ox++){
+        const rr=Math.sqrt(ox*ox+oz*oz);
+        const lump=fbm2((wx+ox)*0.31,(wz+oz)*0.31,977,2)*0.9;      // ±0.9 of a block on the rim
+        if(rr > rad+0.45+lump) continue;
+        if(ox===0&&oz===0&&yy<top-1) continue;                      // the trunk keeps its column
+        const core=(rr<=rad-2.0) && y>-cr+1 && y<cr;                // interior → the opaque core block, same as the pine
+        if(!core && rng()<0.06) continue;                           // a few natural gaps in the shell
+        emit(wx+ox, h+yy, wz+oz, core?BID.leaves_core:BID.leaves, false);
+      }
+    }
+    // A FEW HANGING LEAVES under the rim: the underside of a broadleaf is not a flat disc, and this is what you see
+    // standing under one.
+    if(sh.kind===TREE_BROAD) for(let k=0;k<4;k++){ const a=rng()*6.283, r=Math.max(1,cr-1);
+      emit(wx+Math.round(Math.cos(a)*r), h+cy-cr-1, wz+Math.round(Math.sin(a)*r), BID.leaves, false); }
+    return true;
+  }
   // conical layered canopy
   for (let y=base; y<=th+2; y++){
     const t=(th+2-y);
@@ -12221,7 +12296,12 @@ function updateWretch(dt){
   if(NET.on) computeHuntTarget();                                      // owner hunts the NEAREST connected player
   // AN OWED CONVERSION IS PAID AS SOON AS THERE IS A BODY TO PAY IT INTO (see hwOnSacrifice). Cheap: one falsy check per frame
   // in the overwhelming case, and the flag is cleared by the dressing itself.
-  if(HORROR.hwPending && wretchPrime && wretchPrime.group && wretchPrime.P && !wretchPrime.horrific){
+  // AND IT MUST BE OUT, not merely built (Ben 08-05: "the horrific wretch is invisible"). The first version of this paid the debt
+  // as soon as wretchPrime had a group and a P, which is true of a DORMANT creature too — and dressing a dormant one produced a
+  // changed Wretch you could not see: the horrific body is drawn by its own drift loop, which has nothing to draw for a creature
+  // that is not in the world. hwOnSacrifice was already careful about this ("THE WRETCH HAS TO BE OUT TO BECOME IT") and my flag
+  // walked around that guard. Requiring active keeps the debt owed until there is something to see.
+  if(HORROR.hwPending && wretchPrime && wretchPrime.active && wretchPrime.group && wretchPrime.P && !wretchPrime.horrific){
     if(hwDress(wretchPrime,true)){ wretchPrime._hwNightly=false; HORROR.hwPending=0;
       flashName('something was made of what you gave it'); } }
   if(wretch.boss && wretch.active && !player.dead){ bossUpdate(dt); return; }   // THE MEGA-WRETCH runs FIRST — nothing else (lurk/dawn/despawn/grab) can touch it, so it never gets stuck or vanishes
@@ -16021,6 +16101,19 @@ camera.add(offView.group);
 // the limb. Guns are exempt by construction, not by a test here — updateMainArm/updateOffArm hide these groups for a gun,
 // because a gun carries its own hand (attachGunHand) and that hand rides the weapon.
 const FIST_REST_Y=-0.22, ARM_REST_Z=0.12;   // ARM_REST_Z is also the base the block-out's arm-follow rebases off — see the end of updateView
+// NEITHER FIST EVER CHANGES HEIGHT (Ben 08-05: "I ASKED FOR BOTTH THE MAIN AND OFF HAND TO NEVER CHANGE THIER NO ITEM FIST HEIGHT
+// EVEN WHEN HOLDING AN ITEM, FOR ALL ITEMS. THE ONLY EXCEPTION IS GUNS").
+// The empty hand draws buildFist through view.group at FIST_REST_Y. Fill either hand with anything that is not a gun and the fist
+// you see is the same mesh in mainArm.group / offArm.group — so those groups must sit at FIST_REST_Y too, or the limb steps the
+// moment your hand is full. That was the whole of the first attempt this morning, and it was right as far as it went.
+// WHAT IT MISSED is that every held-item pose in this file was authored against the arm's OLD rest of -0.34. Raising the arm alone
+// left each item behind at the height it was tuned for, which is what "you moved the players hand from its good postiion" was
+// describing — not the arm being wrong, but the hand and the thing in it coming apart. So the item poses take the SAME lift, and
+// the two move as one assembly: the fist height is fixed and the item keeps its authored relationship to the fist.
+// Guns are exempt by construction, not by a test: updateMainArm/updateOffArm hide these groups for a gun, because a gun carries
+// its own hand (attachGunHand) that rides the weapon.
+const HAND_POSE_Y=-0.34;                     // the arm rest every held-item pose below was originally authored against
+const HAND_LIFT=FIST_REST_Y-HAND_POSE_Y;     // +0.12 — apply to any NON-GUN held pose so it rises with the fist
 // REVERTED (Ben 08-05: "for some reason you moved the players hand from its good postiion before, bring it back. it seems to be
 // ONLY when holding blocks in the main hand"). Earlier today this was tied to FIST_REST_Y so that equipping a non-gun item could
 // not change the forearm's height — the empty hand draws buildFist at -0.22 and the arm groups sat at -0.34, so the limb dropped
@@ -16031,7 +16124,7 @@ const FIST_REST_Y=-0.22, ARM_REST_Z=0.12;   // ARM_REST_Z is also the base the b
 // fist DOWN to -0.34 (nothing moves on equip, held items keep their authored pose) or bring the block's pose UP to -0.22. Either
 // is a visible change to a pose Ben tuned by eye, so it is his call and not a thing to pick quietly. Until then the 0.12 step on
 // equipping a non-gun item is deliberate.
-const OFF_VIEW_Y=-0.26, OFF_ARM_Y=-0.34;
+const OFF_VIEW_Y=-0.26+HAND_LIFT, OFF_ARM_Y=FIST_REST_Y;
 offView.group.position.set(-0.22,OFF_VIEW_Y,-0.35);
 // Yaw is Ben's, OFFHAND ONLY (-0.45 -> -0.10): "spun counterclockwise a bit" seen from the top down, which about +Y is a
 // POSITIVE rotation. The main-hand shield keeps its own -0.30 in setViewItem; this group is only ever the left hand, so
@@ -16044,7 +16137,7 @@ offView.group.rotation.set(0.10,-0.10,0.16);
 // hand: the mirror of the right hand's held-item rest, which is view.group.position.set(0.34,-0.30+b,-0.62) — see updateView.
 // shield: NOT mirrored from anything, because there is nothing on the right to mirror; a shield is carried on the forearm and
 // its pose is Ben's own, settled by eye.
-const OFF_POSE={ shield:{p:[-0.22,-0.10,-0.35], r:[0.10,-0.10,0.16]}, hand:{p:[-0.34,-0.30,-0.62], r:[0.16,-0.34,0.10]} };
+const OFF_POSE={ shield:{p:[-0.22,-0.10+HAND_LIFT,-0.35], r:[0.10,-0.10,0.16]}, hand:{p:[-0.34,-0.30+HAND_LIFT,-0.62], r:[0.16,-0.34,0.10]} };   // y lifted by HAND_LIFT so the left hand's items ride with its fist
 // How long a GUN is in the offhand fist, in world units along its longest axis. A dial rather than a literal so three
 // candidate sizes can be photographed in one run and Ben can pick, instead of shipping a guess and asking if he likes it.
 let _gunOffFit=0.34;
@@ -16826,7 +16919,7 @@ function updateView(dt){ updateRecoil(dt);                                      
     const sw=Math.max(view.swing*Math.sin(view.swing*Math.PI), loopArc);
     if(view.id==null){ view.group.position.set(0.32, FIST_REST_Y+b, 0.12); view.group.rotation.set(0.06 - sw*0.95, sw*0.12, 0); }   // FIST: shoulder pivot sits behind the eye; the swing arcs the HAND (far end) down-forward while the elbow stays anchored to the body. y is FIST_REST_Y so the arm groups cannot drift off it — see there
 
-    else { view.group.position.set(0.34,-0.30+b,-0.62); view.group.rotation.set(-sw*1.3,0,0); }
+    else { view.group.position.set(0.34,-0.30+HAND_LIFT+b,-0.62); view.group.rotation.set(-sw*1.3,0,0); }   // lifted with the fist — see HAND_LIFT
     if(view.mesh&&view.mesh.isMesh) view.mesh.rotation.y = (ITEMS[view.id]&&ITEMS[view.id].block!=null)?0.6:0;
     /* held flame no longer bounces — it holds a steady big flame (the flameMat still shimmers subtly on its own) */ }
   // BLOCK-OUT FOR EVERYTHING ELSE IN THE RIGHT HAND (Ben 08-04: "any held item"). The gun branch does its own, pose-blended
@@ -17125,15 +17218,25 @@ function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id
   // a shell has to ask nine times down a cone, which is why the trace below is its own function now instead of the tail of
   // this one. The pellets are fanned over a disc about the aim, so the pattern OPENS with distance the way a real one does:
   // all of it lands inside a body at 8 m and one or two pellets at 30, with no per-range special case anywhere.
+  // WHERE THE ROUND IS SEEN TO LEAVE FROM (Ben 08-05: "it doesnt look like bullets really come out of the barrel of offhand
+  // guns"). The trace has always started at the EYE, and for the main hand that is close enough to the barrel to pass — but the
+  // offhand gun sits out to the left and low, so its tracer appeared from the middle of the screen while the pistol beside it did
+  // nothing. The DIRECTION is deliberately left alone: it comes from the reticle's axis, which is the promise the crosshair makes
+  // (see the note above _fireV), and moving the aim to the barrel would break that. Only the visible origin moves.
+  // The flash sprite already knows where the muzzle is — the muzzle LIGHT is placed at it — so this needs no new bookkeeping.
+  // Null in third person, where the viewmodel is hidden and there is no barrel on screen to leave from; the eye is then correct.
+  let _mo=null;
+  if(!_tpsAct){ const _mfl=_findFlash(_fireV===offView?offView.mesh:view.mesh);
+    if(_mfl){ _mo=new THREE.Vector3(); _mfl.getWorldPosition(_mo); } }
   if(it.gun==='shotgun'){ const SP=0.09;                                     // 5 degrees, half-angle: measured, 0.055 still put 7 of 9 pellets into a body at 30 blocks, which is a rifle with extra steps
     for(let i=0;i<9;i++){
       const a=(i/9)*6.2831853+Math.random()*0.7, r=(i===0?0:SP*Math.sqrt(Math.random()));   // one pellet dead centre; sqrt keeps the rest even across the disc instead of bunched at the middle
       const ux=Math.cos(a)*r, uy=Math.sin(a)*r;
       const rx=-d.z, rz=d.x, rl=Math.hypot(rx,rz)||1;                        // a horizontal vector perpendicular to the aim (pitch is clamped, so this is never degenerate)
       const pdx=d.x+(rx/rl)*ux, pdy=d.y+uy, pdz=d.z+(rz/rl)*ux, pl=Math.hypot(pdx,pdy,pdz)||1;
-      _traceBullet(o,{x:pdx/pl,y:pdy/pl,z:pdz/pl},bolt,rev,sup,true); }
+      _traceBullet(o,{x:pdx/pl,y:pdy/pl,z:pdz/pl},bolt,rev,sup,true,_mo); }
     return true; }
-  return _traceBullet(o,d,bolt,rev,sup,false);
+  return _traceBullet(o,d,bolt,rev,sup,false,_mo);
 }
 // ONE PELLET, OR ONE BULLET, down a ray: terrain, the Ceraphim's eyes and wings, the Wretch, birds, animals, and a peer's
 // mirrored animals. Split out of fireGun for the 12 gauge, which needs it nine times per trigger pull. `sg` marks a pellet:
@@ -17146,11 +17249,17 @@ function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id
 // blocks against 128 at 30). Scaling each pellet by distance as WELL would contradict the flat 25 Ben asked for, and it
 // would put back the per-range special case this function was deliberately built without.
 const PELLET_DMG=25, PELLET_HEAD=1.33, PELLET_SUP=6;   // a suppressed 12 gauge keeps the proportional cost it always had (3 of 12 -> 6 of 25)
-function _traceBullet(o,d,bolt,rev,sup,sg){
+function _traceBullet(o,d,bolt,rev,sup,sg,vo){
   const animDmg=Math.max(3,(sg?PELLET_DMG:bolt?40:rev?14:10) - (sup?(sg?2:bolt?20:4):0));   // one pellet is worth 6 on an animal, so a whole shell is 54 — a deer dies to one                               // the hunting rifle hits far harder; suppressor costs the rifle -20 but light guns only -4 (the flat -20 drove AR/Python animal damage NEGATIVE — bullets healed animals)
   const _maxR=sg?36:bolt?210:rev?120:70;   // shot sheds velocity fast: past ~36 blocks a 12 gauge is not a weapon                                                                    // the hunting rifle reaches ~3x as far as the AR; the revolver ~mid
   for(let t=0.6;t<_maxR;t+=0.35){ const px=o.x+d.x*t, py=o.y+d.y*t, pz=o.z+d.z*t;                      // finer step so tight hitboxes aren't skipped
-    if((t%(sg?9:3))<0.5) spawnParticles(px,py,pz,0xfff0b0,1,0.2,0.12);   // at the bullet's tracer rate, nine pellets would be nine times the particles for one trigger pull                                    // bullet TRACER streak down the line
+    // THE TRACER LEAVES THE MUZZLE AND CONVERGES ONTO THE LINE. vo is the barrel's own position; the hit trace still runs from the
+    // eye down d, so the two are parallel and a few centimetres apart. Blending the tracer's origin from the muzzle onto the true
+    // ray over the first 4 blocks means the streak starts AT the barrel and is on the bullet's line by the time it is far enough
+    // away for the difference to matter. Nothing about where the round lands changes; this is only what you see.
+    let px2=px, py2=py, pz2=pz;
+    if(vo){ const k=1-Math.min(1,t/4); px2=px+(vo.x-o.x)*k; py2=py+(vo.y-o.y)*k; pz2=pz+(vo.z-o.z)*k; }
+    if((t%(sg?9:3))<0.5) spawnParticles(px2,py2,pz2,0xfff0b0,1,0.2,0.12);   // at the bullet's tracer rate, nine pellets would be nine times the particles for one trigger pull                                    // bullet TRACER streak down the line
     const b=getBlock(px,py,pz); if(b!==AIR && b!==WATER && isOpaque[b]){   // hit terrain → voxel burst in the STRUCK block's own color + a bullet hole that lingers (Ben 07-20)
       const cx=Math.floor(px), cy=Math.floor(py), cz=Math.floor(pz);              // the struck voxel cell
       const qx=px-d.x*0.35, qy=py-d.y*0.35, qz=pz-d.z*0.35;                        // the previous (air) sample, one step back along the ray
@@ -27768,7 +27877,22 @@ window.__hc={
     return { h, th:sh.th, thick:!!sh.thick, trunkTop:h+sh.th, pineAt:!!pineAt(x,z), drop,
              trailDist:+trailDist(x,z).toFixed(2), inCabin:!!inCabin(x,z), nearOpening:!!nearOpening(x,z),
              inTower:(typeof inTower==='function')?!!inTower(x,z):null, grassSurface:!!isGrassSurface(x,z),
+             kind:sh.kind, kindName:['pine','broad','slender'][sh.kind]||'?', crad:sh.crad||null, reach:sh.reach,
+             plains:(typeof plainsAt==='function')?+plainsAt(x,z).toFixed(3):null,
              noTreeHit:!!noTreeHit(x,z,sh.thick?1:0), emits:!!pineEmit(x,z,()=>{}) }; }catch(e){ return {err:e.message}; } },
+  // What actually GREW, and of what kind, over a patch of the island — the only way to see a species mix rather than
+  // one tree at a time. Counts by re-running the generator, which is also a check that it is deterministic: the
+  // structure sweeps rely on a second run emitting the same blocks as the first.
+  treeCensus(r,step){ const R=r||160, ST=step||4, out={pine:0,broad:0,slender:0,none:0,blocks:0,logs:0,leaves:0,maxReach:0};
+    const px=Math.round(player.pos.x), pz=Math.round(player.pos.z);
+    for(let dx=-R;dx<=R;dx+=ST)for(let dz=-R;dz<=R;dz+=ST){ const x=px+dx, z=pz+dz;
+      let n=0, logs=0, leaves=0;
+      const grew=pineEmit(x,z,(bx,by,bz,id)=>{ n++; if(id===BID.log)logs++; else leaves++; });
+      if(!grew){ out.none++; continue; }
+      const sh=_pineShape(x,z); out[['pine','broad','slender'][sh.kind]]++;
+      out.blocks+=n; out.logs+=logs; out.leaves+=leaves; out.maxReach=Math.max(out.maxReach,sh.reach); }
+    const t=out.pine+out.broad+out.slender;
+    return Object.assign(out,{ trees:t, mix:t?{pine:+(out.pine/t).toFixed(3),broad:+(out.broad/t).toFixed(3),slender:+(out.slender/t).toFixed(3)}:null }); },
   // sceneRTHalf is here because 8 bits on THIS target is what put black lines around the night sky's dark blotches, and
   // nothing else in a screenshot tells you which precision the scene was stored at. HalfFloatType is 1016 in three.
   postfx(){ try{ return { mbOn:_mbOn, mbMode:_mbMode, motionPass:!!motionPass, softShadows:_softShadows, shadowType:renderer.shadowMap.type, grain:gradePass?+gradePass.uniforms.uGrain.value.toFixed(3):null,
