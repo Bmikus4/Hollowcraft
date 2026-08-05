@@ -76,6 +76,7 @@ const WINDOW=(n)=>`(async()=>{ const f=()=>new Promise(r=>requestAnimationFrame(
            progsStart:pFirst, progsEnd:pLast, over100ms:out.slice(0,12), over100count:out.length }; })()`;
 
 (async()=>{
+  console.log('probe: '+ensureProbe(ROOT));
   const port=await freePort();
   const server=spawn(process.execPath,[path.join(ROOT,'mp-server.js')],{cwd:ROOT,env:{...process.env,MP_PORT:String(port),MP_DISC:String(port+1)},stdio:'ignore'});
   try{
