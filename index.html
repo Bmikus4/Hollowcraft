@@ -333,6 +333,82 @@ import { seraphOn, seraphOff, seraphAnimate, seraphShowBeam, seraphHideBeam, ser
 import { driftInit, driftAttach, driftDetach, driftStep, driftFlush, driftTune, driftTintLock, driftState, driftHas, driftProbe, driftFraming, driftHostWorld } from './src/entity/drift/index.js';
 
 // =====================================================================
+//  THE SCOTOPIC PASS IS GLOBAL — one implementation, every lit material in the game
+//
+//  Ben, 08-05: "any pass you do visually should be a global thing", and "it doesnt even work for" roof tiles, doors, chests.
+//  He is right about the fault: the washout lived inside injectAtlas, so it covered the six voxel-atlas materials and nothing
+//  else. Every prop, door, chest, roof tile, animal and gun in the game is its own MeshPhongMaterial (225 of them), so at
+//  night the world greyed and everything standing on it kept the raw AgX chroma hash — the inconsistency is more visible than
+//  the original bug.
+//
+//  Patching 225 call sites is not the fix. THREE'S OWN SHADER CHUNKS ARE THE GLOBAL SEAM: `lights_pars_begin` and
+//  `lights_fragment_end` are included by exactly the four lit fragment shaders (lambert, phong, standard/physical, toon) and
+//  by nothing else, so the wash arrives in every lit material ever created — including materials the other sessions add
+//  later — and never in a MeshBasicMaterial, a sprite or a Points cloud, where `reflectedLight` does not exist and the
+//  injection would not compile. `#define HC_SCOT` is emitted by the lit-only chunk and tested at `dithering_fragment`, which
+//  every shader includes: the define is what makes one shared chunk safe to patch.
+//
+//  THE UNIFORMS ARE FLOAT32ARRAYS, AND THAT IS LOAD-BEARING. Built-in materials do not share `ShaderLib[x].uniforms` — every
+//  program gets `UniformsUtils.clone()` of it. clone() deep-copies anything with .isColor/.isVector*/.isTexture and
+//  `Array.isArray`, and copies everything else BY REFERENCE (three.module.js:12163). A Float32Array is neither, so one array
+//  written here is live in every program at once, which is the only way a runtime A/B (__hc.scot) can move all of them. A
+//  plain number or a Vector4 would be silently copied and every material would freeze at boot values.
+// =====================================================================
+// (amt, lo, hi, day). day is pushed from uDay each frame in updateSky; the other three are the dials __hc.scot() writes.
+// amt 0.85 / lo 0.01 / hi 0.45 are the values measured on the atlas pass — see globalU.uScotAmt for why each is what it is.
+const _scotG = new Float32Array([0.85, 0.01, 0.45, 1]);
+// (litK, floor, -, -). floor is the CAVE DESCENT, below.
+//
+// THE WASH IS LUMINANCE-PRESERVING, AND THAT IS THE BUG BEN REPORTED SECOND: "unlit caves at all hours are NOT DARK, and this
+// is because of the mono pass as well". Mixing a pixel toward its own 709 luma holds its brightness by construction — unlit
+// dirt (22.7, 3.5, 1.0) becomes (7.6, 7.6, 7.6), same luma, and the two DARKEST channels went UP, 1.0 -> 7.6. A fully washed
+// surface therefore reads as flat mid-grey rather than black at every hour, and an unlit cave is nothing but fully washed
+// surfaces. It is also why assert-night-crush measured 0% crushed black while Ben was looking at a lit-looking cave: that
+// harness asserts LUMA, and luma is exactly what the wash preserves. The counter-metric has to be the MIN CHANNEL.
+// So the wash desaturates AND DESCENDS: its target is luma*floor, not luma. 0.15 keeps a trace of value at the bottom rather
+// than clamping to pure black, which would lose the surface's form entirely.
+const _scotH = new Float32Array([1.0, 0.15, 0, 0]);
+{ const L='vec3(0.2126,0.7152,0.0722)';
+  THREE.ShaderChunk.lights_pars_begin += '\nuniform vec4 uScotG;\nuniform vec4 uScotH;\n';
+  // reflectedLight and totalEmissiveRadiance are both still in scope at dithering_fragment (same main(), later line), so the
+  // gate is computed here only to mark the shader as lit. A #define inside main() is legal: the preprocessor is line-ordered
+  // and lights_fragment_end always precedes dithering_fragment in all four shaders.
+  THREE.ShaderChunk.lights_fragment_end += '\n#define HC_SCOT 1\n';
+  THREE.ShaderChunk.dithering_fragment += '\n'+
+    '#if defined( HC_SCOT ) && !defined( HC_SCOT_SKIP )\n'+
+    // GATED ON THE LIGHT DELIVERED, NEVER ON THE PIXEL. A pixel-luminance gate is albedo-weighted: it washed the dirt out and
+    // left beach sand salmon-pink under the same moonlight, because sand is a brighter texture (c7c813d).
+    '{ float _dlit=dot(reflectedLight.directDiffuse,'+L+')*uScotH.x;\n'+
+    // A SURFACE THAT IS ITS OWN LIGHT COUNTS AS LIT. Without this every emissive prop in the game — lamp glass, a troffer, a
+    // furnace mouth — greys out at night, which is the exact opposite of Ben's rule that anything a light touches goes warm.
+    '  float _emi=dot(totalEmissiveRadiance,'+L+');\n'+
+    '#ifdef HC_SCOT_ATLAS\n'+
+    // The atlas knows two things no other material does: the baked block-light volume, and how much sky the face's own column
+    // can see. vSky is the CAVE GATE — leaves and glass are excluded from it (occludesSky, Ben 07-23), so vSky 0 means walled
+    // in by opaque blocks, not merely shaded. A forest floor reads vSky~1 and is left alone; only genuine enclosure descends.
+    '  float _slit=max(max(_bl, vSky*uScotG.w), max(_dlit,_emi));\n'+
+    '  float _open=clamp(vSky,0.0,1.0);\n'+
+    '#else\n'+
+    // Non-atlas materials have no sky bake, so they take the day factor straight: immune by day, washed at night unless a
+    // light reaches them. And no descent — a prop cannot tell a cave from a field, and blackening props on open night ground
+    // while the ground itself stays grey would read as holes.
+    '  float _slit=max(uScotG.w, max(_dlit,_emi));\n'+
+    '  float _open=1.0;\n'+
+    '#endif\n'+
+    '  float _w=1.0-smoothstep(uScotG.y,uScotG.z,_slit);\n'+
+    '  float _sl=dot(gl_FragColor.rgb,'+L+');\n'+
+    '  float _des=mix(1.0, uScotH.y, _w*(1.0-_open));\n'+
+    '  gl_FragColor.rgb=mix(gl_FragColor.rgb, vec3(_sl*_des), uScotG.x*_w); }\n'+
+    '#endif\n';
+}
+// Every lit ShaderLib entry gets the two vectors. Adding them to the library rather than to materials is what keeps this off
+// the 225 call sites; an entry the GLSL never references is dropped by seqWithValue and costs nothing.
+for(const k of ['lambert','phong','standard','physical','toon','dashed','basic','points','sprite']){
+  const S=THREE.ShaderLib[k]; if(!S||!S.uniforms) continue;
+  S.uniforms.uScotG={ value:_scotG }; S.uniforms.uScotH={ value:_scotH };
+}
+
+// =====================================================================
 //  THE SUMMONING CIRCLE — the loading screen (Ben 07-27, fix-list #2)
 //  A live canvas sigil: three counter-rotating rings of sacred geometry over a slowly drawn seal. Pure 2D canvas, so it
 //  animates smoothly while the main thread is busy generating chunks (no WebGL contention, no layout thrash), and it
@@ -2404,9 +2480,22 @@ function decorate(c){
     // for a fern or a meadow tuft, which then found the cell occupied and skipped: measured, tallgrass 258 -> 361 but fern 107 ->
     // 96 and both meadow variants down with it. So this asks the SAME roll what the understory would do here, and stands aside
     // wherever the answer is anything but the band reserved for low grass. Bare ground is the only thing it takes.
+    // AND WHICH GRASS IT IS DEPENDS ON THE COUNTRY (Ben 08-05: "grass that spawns in plains, and closer to the shores should not
+    // be tallgrass, it should be meadowgrass and occasional tall meadowgrass"). One species everywhere is why open ground looked
+    // like forest floor with the trees taken out: tallgrass is the woodland tile, dark and blunt. The plains mask is the same
+    // plainsAt the tree chooser reads, at the same 0.35, so a field of round broadleaves stands in meadow and not in two
+    // disagreeing biomes; the shore band is the four blocks under the coastal tree setback, which is exactly the strip that
+    // reads as "closer to the shore" from the waterline. One in five of those is the 2-block seeding variant — occasional, and
+    // drawn from its own hash so it clusters no differently than the rest.
     if (dx>=0 && dx<CK && dz>=0 && dz<CK && isGrassBlock(getBlock(wx,h,wz)) && c.blocks[idx(dx,h+1,dz)]===AIR
         && xhash(wx,7,wz,3371)<0.09){ const ur=xhash(wx,3,wz,919);
-      if(ur<0.09 || ur>=0.2762){ c.blocks[idx(dx,h+1,dz)]=BID.tallgrass; c.hasCross=true; } }
+      if(ur<0.09 || ur>=0.2762){
+        const meadow = (h<=CFG.SEA+4) || plainsAt(wx,wz)>0.35;
+        // One in eight, not one in five: the understory roll below already drops meadow_grass_tall on its own band, and at 1-in-5
+        // here the two together made a third of every plains blade the 2-block variant — measured 0.32 — which is a seeding
+        // field, not the occasional tall tuft he asked for.
+        c.blocks[idx(dx,h+1,dz)] = meadow ? (xhash(wx,9,wz,4457)<0.12 ? BID.meadow_grass_tall : BID.meadow_grass) : BID.tallgrass;
+        c.hasCross=true; } }
     if (h<=CFG.SEA+4 || h>=WH-28) continue;   // COASTAL SETBACK: trees start ≥4 blocks above sea (was +1), so the treeline pulls back off the beach/shore instead of crowding the waterline. Raise this number to push it further inland.
     if (trailDist(wx,wz)<2.6 || inCabin(wx,wz) || nearOpening(wx,wz)) continue;   // keep the dirt trail corridor + cabin footprint + trailhead clearings free of tree bases
     if (!isGrassSurface(wx,wz)) continue;   // pines only on grass → natural treeline; bare rock/snow/ice/beach stay clear (deterministic so border trees still straddle)
@@ -3245,10 +3334,8 @@ function injectAtlas(mat, opts={}){
     // cloud shadows and the measurement is of nothing.
     sh.uniforms.uCloudTex = globalU.uCloudTex; sh.uniforms.uCloudShadow = globalU.uCloudShadow;
     sh.uniforms.uCloudScroll = globalU.uCloudScroll; sh.uniforms.uSunDirC = globalU.uSunDir;
-    sh.uniforms.uHandPos = globalU.uHandPos; sh.uniforms.uHandK = globalU.uHandK; sh.uniforms.uHandR = globalU.uHandR; sh.uniforms.uScotLitK = globalU.uScotLitK;
     sh.uniforms.uChunkTint = { value:new THREE.Color(LIGHT_PAL[0][0],LIGHT_PAL[0][1],LIGHT_PAL[0][2]) };   // PER CLONE, deliberately: _chunkMat overwrites it with that chunk's own dominant light colour
     sh.uniforms.uSkyDirAmt = globalU.uSkyDirAmt; sh.uniforms.uSkyDirUp = globalU.uSkyDirUp; sh.uniforms.uSkyDirDn = globalU.uSkyDirDn;
-    sh.uniforms.uScotDay = globalU.uDay; sh.uniforms.uScotAmt = globalU.uScotAmt; sh.uniforms.uScotLo = globalU.uScotLo; sh.uniforms.uScotHi = globalU.uScotHi;   // SHARED refs, same reason as uWhiteTile
     sh.uniforms.uWhiteTile = globalU.uWhiteTile;   // SHARED ref → the vantawhite glow survives every material clone / recompile / composer rebuild / VFX toggle (was a fresh per-material uniform that a pre-tile-index recompile could latch at -1)
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>',
@@ -3267,7 +3354,10 @@ function injectAtlas(mat, opts={}){
           '\nfloat wsw = sin(uTime*spd1 + transformed.x*0.6 + transformed.z*0.5)*amp1*aw; transformed.x += wsw; transformed.z += cos(uTime*spd2 + transformed.x*0.4)*amp2*aw;'):''));   // stashed on the material so a harness can assert the RELATIONSHIP (kelp slower, kelp wider) against the source that actually compiled
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>',
-        '#include <common>\nprecision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform float uScotAmt;\nuniform float uScotLo;\nuniform float uScotHi;\nuniform float uScotDay;\nuniform vec3 uChunkTint;\nuniform vec3 uHandPos;\nuniform float uHandK;\nuniform float uHandR;\nuniform float uScotLitK;\nuniform float uSkyDirAmt;\nuniform float uSkyDirUp;\nuniform float uSkyDirDn;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
+        // HC_SCOT_ATLAS routes the GLOBAL scotopic pass (patched into three's own lights/dithering chunks at the top of this
+        // file) down the atlas branch, where `_bl` and `vSky` exist. Without it the wash still runs here, on the non-atlas
+        // branch, and the cave descent would never fire on the one material that can tell a cave from a field.
+        '#include <common>\n#define HC_SCOT_ATLAS 1\nprecision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform vec3 uChunkTint;\nuniform float uSkyDirAmt;\nuniform float uSkyDirUp;\nuniform float uSkyDirDn;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
       // ---- NIGHT VOLUMETRIC DARKNESS ON REAL FOLIAGE (Ben 07-29) ----
       // "volumetric darkness at night is applied to horizon pines, but not to forest trees." Correct, and the two fade to
       // different targets. The horizon backdrop fades to _uPineFog, which is scene.fog.color pulled toward storm blue and
@@ -3373,48 +3463,18 @@ function injectAtlas(mat, opts={}){
     // to zero while the top one survives — so every block lands on its most saturated hue and a patchwork of dirt and grass
     // becomes a red/green hash. Value was never the problem; chroma was.
     // Fixed by washing the colour out toward its own luminance as the surface goes dark, which is what dark adaptation actually
-    // does. LUMINANCE-PRESERVING by construction (mix toward the 709 luma of the same pixel), so night does not get brighter —
-    // Ben has asked four times for night to be genuinely black and assert-night-crush guards it.
-    // ON THE ATLAS MATERIALS ONLY, deliberately, NOT in the grade pass: the night sky and its stars sit at the same luminance as
-    // this ground (sky median 17.7 vs grass 13.7 on screen) so nothing in a post pass can separate them, and a grey night sky
-    // would be a worse bug than the one being fixed. A lit surface is what adapts; the sky is the light.
-    // GATED ON THE LIGHT REACHING THE FACE, NOT ON THE PIXEL'S OWN LUMINANCE. Gating on output luminance was tried first and is
-    // wrong: it is albedo-weighted, so at the same midnight the dirt washed out (0.94 sat -> 0.35) while the beach sand stayed
-    // salmon-pink, purely because sand is a brighter texture. Sand and dirt receive the SAME moonlight. `_bl` and `vSky` are the
-    // two light terms already sampled above, so this costs one max and one smoothstep and needs no extra fetch.
+    // does — and, since 08-05 late, by DESCENDING that target toward black wherever the face can see no sky, which is what makes
+    // an unlit cave read as unlit rather than as flat grey.
+    // NOT IN THE GRADE PASS, deliberately: the night sky and its stars sit at the same luminance as this ground (sky median 17.7
+    // vs grass 13.7 on screen) so nothing in a post pass can separate them, and a grey night sky would be a worse bug than the
+    // one being fixed. A lit surface is what adapts; the sky is the light.
+    //
+    // THE PASS ITSELF NOW LIVES AT THE TOP OF THIS FILE, patched into three's own lights_pars_begin / lights_fragment_end /
+    // dithering_fragment chunks, because Ben asked for it on every material and not only on the voxel atlas ("any pass you do
+    // visually should be a global thing"). All this material does is set HC_SCOT_ATLAS in its fragment header, which routes the
+    // shared code down the branch that reads `_bl` and `vSky`. There is exactly one copy of the wash; do not add a second here.
     sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>',
       '#include <dithering_fragment>\n'+
-      // THE LIGHT YOU CARRY COUNTS (Ben 08-05: "the nighttime chroma thing may look better if held light changed the colors").
-      // It is the fix for the complaint, not a garnish: the gate reads the BAKED volume, a carried torch is a PointLight that was
-      // never baked, so every surface a player actually lit stayed washed out and the night read as a grey world. One distance
-      // against the hand's own position, squared so the colour is strongest in the pool's core and gone by its edge — where the
-      // eye has nothing to see a colour with anyway.
-      // ---- THE GATE IS THE LIGHT THE RENDERER ACTUALLY DELIVERED HERE ----
-      // Ben, 08-05: "we want a genuinely black night, BUT we also want realism in the contrast that light provides at night...
-      // everything that light touches should become a warm orange glow, it should not stay dark. Chroma wash should become
-      // colorful everywhere a light source touches." So the rule is: unlit stays black, and ANYTHING a light reaches goes
-      // fully warm and fully chromatic. That raises contrast rather than compromising the black, which is why nothing here
-      // touches the night ambient and assert-night-crush still holds.
-      //
-      // WHAT WAS WRONG, and it was mine (bcb9ba1). The gate read a hand-rolled sphere: _hand = uHandK*(1 - d^2/uHandR^2)
-      // against uHandR = heldLight.distance*0.72 = 23 blocks. With uScotHi 0.45 that switches the washout FULLY OFF inside
-      // 0.74*R, about 17 blocks, for every fragment in the ball — through walls, on faces turned away from the lamp, and out
-      // past where the light visibly dies. So near the player the raw AgX chroma hash came straight back: saturated RED texels
-      // along the falloff edge of lantern-lit wood and neon yellow-green foliage, which is exactly what Ben photographed. And
-      // pointPool lights (every PLACED or spawned torch, 16 slots since 2a6112d) were not in the gate at all, so a lit room
-      // stayed grey no matter how many lamps were in it: "spawned lights have no affect on the chromatic greying/whitewash".
-      //
-      // reflectedLight is still in scope at dithering_fragment (it is declared in lights_fragment_begin, same function body),
-      // and its directDiffuse is the sum over EVERY light three.js just evaluated for this fragment. Reading it is strictly
-      // better than re-deriving any of it: it carries all 16 pool slots and the held light, with their real decay, and it is
-      // already multiplied by N dot L, so a face turned away from a lamp is correctly NOT lit and correctly stays washed.
-      // It costs one dot product and no new fetch, and it cannot drift from the lighting the player sees, because it IS that
-      // lighting. The sun rides in the same term, which is harmless: by day the washout is gated off by uScotDay anyway.
-      '{ float _dlit=dot(reflectedLight.directDiffuse,vec3(0.2126,0.7152,0.0722))*uScotLitK;\n'+
-      '  float _slit=max(max(_bl, vSky*uScotDay), _dlit);\n'+
-      '  float _sk=uScotAmt*(1.0-smoothstep(uScotLo,uScotHi,_slit));\n'+
-      '  float _sl=dot(gl_FragColor.rgb,vec3(0.2126,0.7152,0.0722));\n'+
-      '  gl_FragColor.rgb=mix(gl_FragColor.rgb, vec3(_sl), _sk); }\n'+
       'if(uWhiteTile>=0.0 && abs(vTile-uWhiteTile)<0.5){ gl_FragColor=vec4(1.0,1.0,1.0,gl_FragColor.a); }');   // VANTAWHITE: overwrite the FINAL pixel to pure white AFTER lighting/tonemap/fog → genuinely unlit, no shadow/AO/surface-detail, a hole of pure white (Ben 07-21)
     if(Q.get('albedo')) sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\ngl_FragColor=vec4(_tex.rgb,1.0);');   // DIAGNOSTIC ?albedo: flat raw texture, NO lighting
     if(Q.get('dbg')==='sky') sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\ngl_FragColor=vec4(vSky,vSky,vSky,1.0);');   // DBG: per-face baked skylight (black=0 sky-occluded, white=1 open)
@@ -3424,7 +3484,11 @@ function injectAtlas(mat, opts={}){
     // DBG ?dbg=lit: the delivered-direct-light gate itself, the term that decides where colour comes back. Grey 1.0 (white) is
     // "fully coloured"; black is "washed". This is what to look at when a surface is the wrong colour at night — it separates a
     // gate that never fired from a gate that fired on the wrong pixels, which is the distinction two sessions of statistics missed.
-    if(Q.get('dbg')==='lit') sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\n{ float _d=dot(reflectedLight.directDiffuse,vec3(0.2126,0.7152,0.0722))*uScotLitK; gl_FragColor=vec4(vec3(clamp(_d,0.0,1.0)),1.0); }');
+    if(Q.get('dbg')==='lit') sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\n{ float _d=dot(reflectedLight.directDiffuse,vec3(0.2126,0.7152,0.0722))*uScotH.x; gl_FragColor=vec4(vec3(clamp(_d,0.0,1.0)),1.0); }');
+    // DBG ?dbg=cave: the CAVE DESCENT gate — white where the wash is pulling the pixel toward black (walled in and unlit), black
+    // where it is not. This is the frame to look at when a cave reads too bright or a shaded hillside reads too dark: it shows
+    // whether the descent fired on the pixels it was meant for, which no luminance statistic can tell you.
+    if(Q.get('dbg')==='cave') sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\n{ float _d=dot(reflectedLight.directDiffuse,vec3(0.2126,0.7152,0.0722))*uScotH.x; float _s=max(max(_bl,vSky*uScotG.w),_d); float _ww=1.0-smoothstep(uScotG.y,uScotG.z,_s); gl_FragColor=vec4(vec3(_ww*(1.0-clamp(vSky,0.0,1.0))),1.0); }');
   };
   mat.userData.atlas = true;   // marks this as a voxel-atlas material → chunks bind their per-chunk light volume to it
   return mat;
@@ -7540,6 +7604,7 @@ function updateSky(dt){
   const elev=_sunDir.y;
   const day=smooth(-0.46,0.46,elev);   // VERY wide twilight band → the fade to night / to morning spans a long, gradual window (the sun crosses the horizon fastest, so a wide band is what keeps it from snapping)
   globalU.uDay.value=day;
+  _scotG[3]=day;   // the scotopic pass's own day factor — one shared Float32Array reaching every lit material's program (see the top of this file)
   globalU.uSunDir.value.copy(_sunDir);
   globalU.uMoonDir.value.copy(_sunDir).multiplyScalar(-1);
   // key light = sun by day, moon by night
@@ -28633,6 +28698,38 @@ window.__hc={
   // Every seeded landmark is placed relative to them (cabin +22/-14, dungeon +95/+70, village, towers), so a harness
   // without them can only guess a location -- one guessed (22,-14) and measured 221 blocks of plain stone.
   probe(){ const P=player.pos; return { worldSize:world.size, sea:CFG.SEA, WH, spawnX, spawnZ, x:+P.x.toFixed(2), y:+P.y.toFixed(2), z:+P.z.toFixed(2), feet:getBlock(Math.floor(P.x),Math.floor(P.y),Math.floor(P.z)), gyHere:groundYAt(P.x,P.z), gy26:groundYAt(P.x+26,P.z), gyN:groundYAt(P.x,P.z-26), chunkHere:!!getChunk(Math.floor(P.x)>>4,Math.floor(P.z)>>4), chunk26:!!getChunk((Math.floor(P.x)+26)>>4,Math.floor(P.z)>>4) }; },
+  // QA: WHICH GRASS GREW WHERE. The species choice reads plainsAt and the sea band, and neither the ids nor the mask are
+  // reachable from page scope — so a bench cannot otherwise tell "meadow in the plains" from "meadow everywhere". Walks
+  // generated columns only (surfaceH is cached, getBlock returns 0 outside loaded chunks) and buckets each blade by the same
+  // test the generator used, so a wrong bucket is a wrong generator and not a wrong bench.
+  grassMix(r){ try{ r=Math.max(8,r|0||96); const P=player.pos, ox=Math.floor(P.x), oz=Math.floor(P.z);
+      const z={tall:0,meadow:0,meadowTall:0}, mix={plains:{...z}, shore:{...z}, woods:{...z}}; let cols=0;
+      for(let dz=-r;dz<=r;dz++) for(let dx=-r;dx<=r;dx++){
+        const wx=ox+dx, wz=oz+dz;
+        // getChunk is true for created-but-UNGENERATED chunks (the streamer makes the record before it fills it), so asking it
+        // reports a full survey of empty air after a long teleport — the first run of this bench read 48841 columns and zero
+        // blades at four of five spots. The ground block itself is the only honest witness that this column was generated.
+        const h=surfaceH(wx,wz); if(getBlock(wx,h,wz)===AIR) continue; cols++;
+        const id=getBlock(wx,h+1,wz);
+        const k = id===BID.tallgrass?'tall' : id===BID.meadow_grass?'meadow' : id===BID.meadow_grass_tall?'meadowTall' : null;
+        if(!k) continue;
+        const b = (h<=CFG.SEA+4) ? 'shore' : (plainsAt(wx,wz)>0.35 ? 'plains' : 'woods');
+        mix[b][k]++; }
+      return {cols, ...mix}; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // QA: WHERE THE PLAINS ARE. plainsAt is pure noise, so this needs no generated world — but a bench that guesses coordinates
+  // instead surveys ocean and reports "no plains in the sampled spots", which is what the first grass run did at four of five
+  // guessed spots. Coarse grid outward from spawn, well-separated hits.
+  plainsSpot(want,maxR){ want=Math.max(1,want|0||3); maxR=maxR|0||3000;
+    try{ const out=[];
+      for(let r=160; r<=maxR && out.length<want; r+=160)
+        for(let a=0; a<12 && out.length<want; a++){
+          const wx=Math.round(spawnX + Math.cos(a*0.5236)*r), wz=Math.round(spawnZ + Math.sin(a*0.5236)*r);
+          if(plainsAt(wx,wz)<=0.42) continue; const h=surfaceH(wx,wz); if(h<=CFG.SEA+5) continue;
+          if(out.some(p=>Math.hypot(p[0]-wx,p[1]-wz)<300)) continue;
+          out.push([wx,wz,h]); }
+      return out; }
+    catch(e){ return {err:String(e.message||e)}; } },
   setBlock(dx,dy,dz,name){ const P=player.pos, wx=Math.floor(P.x)+(dx|0), wy=Math.floor(P.y)+(dy|0), wz=Math.floor(P.z)+(dz|0); const id=name==null?0:(typeof name==='number'?name:BID[name]); if(id===undefined)return 'unknown block: '+name; setBlockWorld(wx,wy,wz,id,true); return {wx,wy,wz,id,queued:{remesh:remeshSet.size,relight:relightSet.size}}; },   // QA/bench: place or clear (name=null) a block relative to the player, RECORDED like a player edit; reports the edit-queue depths
   fallDbg(){ const p=player; return { y:+p.pos.y.toFixed(2), vy:+p.vel.y.toFixed(2), onGround:!!p.onGround, fly:!!p.fly, creative:!!p.creative,
     seat:!!p.seat, grabbed:!!p.grabbed, inWater:!!p.inWater, sneak:!!p.sneak,
