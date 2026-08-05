@@ -22,6 +22,11 @@
 //   step     4.1     7.5     6.1     7.3     5.3     7.6      <- biggest row-to-row step, against the reported 37.7 hard edge
 // No crush, no threshold, and the darkening the mechanism predicts is not even the sign the lead claims. Night reads the same way
 // (medians 70-139, zero black), so the in-scatter added in 61fe516 is holding. The lead is closed as not-reproducible in this build.
+// AND AT THE SIGHTING'S OWN VANTAGE — eye 8 blocks over the sea looking LEVEL out, which is where tmp-sea-handover saw it, not the
+// low steep eye above — there is no such edge either. Scanning the same column with the HUD excluded, the biggest genuine row steps
+// are day 9.2 at row 312 and night 11.7 at row 296, against a median step of 0.78 and 0.36, and the rows at and below 320 read a
+// median of 50.8 by day where the report says the frame reads 0. Nothing at row 320, nothing of the size reported, at either hour.
+//
 // THE FIRST RUN OF THIS FILE WAS OF A BEACH. Copying the night file's "shore plus 24 blocks along the same bearing" put the camera
 // over wet SAND — the frame is a beach with a corner of sea in it — and it read median 110-130 with zero black, which would have
 // closed the lead for entirely the wrong reason. The vantage now walks out until the column under the eye is water, the seabed is six
@@ -107,6 +112,29 @@ function stat(file,c){
         const d=await page.evaluate(`__hc.scot({}).day`);
         console.log(`    pitch ${p.toFixed(2)}  uDay ${String(d).padEnd(5)}  med ${String(s.med).padStart(6)}  p10 ${String(s.p10).padStart(6)}  black ${String(s.black).padStart(5)}%  biggest row step ${String(s.edge).padStart(6)} at row ${s.edgeRow}`);
       }
+    }
+    // THE ORIGINAL SIGHTING'S OWN VANTAGE, because closing a lead against a different camera closes nothing. tmp-sea-handover saw the
+    // 37.7-level edge at row 320 from EIGHT blocks above the sea looking LEVEL out to it, not from a low eye pitched down, and it saw
+    // it while scanning a tall band rather than a crop. Same column, same widths, top three row steps.
+    console.log(`\n  === the tmp-sea-handover vantage: eye 8 blocks over the sea, looking level out ===`);
+    await page.evaluate(`__hc.tpAt(${wx}, 48, ${wz})`); await sleep(900);
+    for(const [tag,t] of [['day',0.30],['night',0.75]]){
+      await page.evaluate(`__hc.cam({yaw:${shore.th+Math.PI}, pitch:0})`); await sleep(320); await pin(t);
+      const f=path.join(OUT,`daywater-handover-${tag}.png`); await page.screenshot({path:f});
+      const P=decodePNG(fs.readFileSync(f));
+      // STOPS AT 0.74, AND BOTH CUTS ARE THE SAME TRAP TWICE. Scanning to 0.90 put the three biggest row steps at rows 494-496 — the
+      // HOTBAR's top edge. Stopping at 0.82 then put them at rows 428-436, night 123.6 and 77.1, which is the OBJECTIVE TEXT banner
+      // ("OBJECTIVE - Survive the first night") lying straight across the middle of the column. Neither is the sea. The compass, the
+      // crosshair, the hotbar, the held item and now the objective line: every one of them has faked a measurement in this bench.
+      const x0=(P.w*0.36)|0, x1=(P.w*0.64)|0, y0=(P.h*0.45)|0, y1=(P.h*0.74)|0;
+      const rows=[]; for(let y=y0;y<y1;y++){ const r=[];
+        for(let x=x0;x<x1;x++){ const i=(y*P.w+x)*P.ch; r.push(0.2126*P.data[i]+0.7152*P.data[i+1]+0.0722*P.data[i+2]); }
+        r.sort((a,b)=>a-b); rows.push({y, med:r[r.length>>1]}); }
+      const steps=[]; for(let i=1;i<rows.length;i++) steps.push({row:rows[i].y, d:+Math.abs(rows[i].med-rows[i-1].med).toFixed(2), from:+rows[i-1].med.toFixed(1), to:+rows[i].med.toFixed(1)});
+      const top=[...steps].sort((a,b)=>b.d-a.d).slice(0,3);
+      const med=[...steps].map(s=>s.d).sort((a,b)=>a-b)[steps.length>>1];
+      const below=rows.filter(r=>r.y>=320).map(r=>r.med).sort((a,b)=>a-b);
+      console.log(`    ${tag.padEnd(6)} top row steps ${JSON.stringify(top)}   median step ${med.toFixed(2)}   median of rows at/below 320: ${below.length?below[below.length>>1].toFixed(2):'n/a'}`);
     }
     console.log(`\n  READ IT LIKE THIS: a steep view of deep water SHOULD darken — that is the Fresnel term doing its job. What would be`);
     console.log(`  a defect is pure black (the night bug's own statistic) or a hard row STEP, which is a threshold rather than a curve.`);
