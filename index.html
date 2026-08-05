@@ -606,7 +606,12 @@ const PERF = {
   //   1213 environment meshes marked as casters and frustumCulled off, two of them multiplied the frame by 13.
   //   Measured: 20.23 ms -> 4.73 ms in the halls, 24.61 -> 8.05 at the portal. Ben's call, 07-28: cut them.
   //   The pooled fluorescent falloff and the dying-tube flicker are untouched — only the cast shadow goes.
-  brShadowLights: 0,
+  //   BACK TO 2, because the reason for cutting them is gone and cutting them was never in force. Nothing acted on
+  //   this flag: brxUpdateLights set autoUpdate=true on every lit frame, so the one caster the overworld had promoted
+  //   went on drawing six cube faces for ever and the halls have been SHOWING that shadow the whole time. It now
+  //   refreshes on change instead of every frame, so two real casters measure 3.64 ms against 2.85 with none at all —
+  //   where one inert one cost 8.08. Set this to 0 for no troffer shadows at all; the flag is genuinely live now.
+  brShadowLights: 2,
   //
   // P2 · brMergeRigid  (baseline: false)
   //   Merge the meshes hanging off a door pivot into one per material, in the pivot's own frame. They are rigid
@@ -3064,15 +3069,21 @@ function bakeLight(c){
     const nc=getChunk(c.cx+dx,c.cz+dz); NB[(dx+1)+(dz+1)*3]=(nc&&nc.generated)?nc:null;   // cache the 3x3 refs — the flood below reads blocks straight off them instead of a Map hit per neighbor cell
     if(!nc||!nc.generated) continue;
     const e=chunkEmitters(nc); if(!e.length) continue;
+    // CLEAR BEFORE ANYTHING READS `_lv`. The clear used to sit inside the `_lv[pi]<lvl` test below, i.e. the buffer was compared
+    // against whatever the PREVIOUS chunk's bake left in it: a stale level >= this emitter's rejected it, and if every emitter in
+    // range was rejected `_lvLit` stayed false, bakeLight returned false and buildLightTexture DESTROYED the chunk's whole light
+    // volume — one chunk, every fragment `_bl` 0, the night wash gate reading unlit. Intermittent because it depended on bake order.
+    // The fast path is unchanged: a 3x3 with no emitters still never clears, which is the reason the clear was lazy at all.
+    if(!_lvLit){ _lv.fill(0); _lvT.fill(0); _lvLit=true; }
     const nx0=(c.cx+dx)*CK, nz0=(c.cz+dz)*CK;
     for(let i=0;i<e.length;i+=5){   // stride 5 since chunkEmitters carries the tint index — see LIGHT_PAL
       const px=nx0+e[i]-cx0+LPAD, py=e[i+1], pz=nz0+e[i+2]-cz0+LPAD, lvl=e[i+3], tnt=e[i+4];
       if(px<0||px>=LPW||pz<0||pz>=LPW||py<0||py>=WH) continue;
       const pi=_lpi(px,py,pz);
-      if(_lv[pi]<lvl){ if(!_lvLit){ _lv.fill(0); _lvT.fill(0); _lvLit=true; } _lv[pi]=lvl; _lvT[pi]=tnt; if(qn<Q.length) Q[qn++]=pi; }
+      if(_lv[pi]<lvl){ _lv[pi]=lvl; _lvT[pi]=tnt; if(qn<Q.length) Q[qn++]=pi; }
     }
   }
-  if(!_lvLit) return false;
+  if(!qn) return false;   // "an emitter SEEDED the frame", not "an emitter exists" — a neighbour's emitter can sit one cell outside the padded frame (px = lx-1 at dx=-1), and a bake that seeded nothing must still drop the volume
   let head=0;
   while(head<qn){
     const pi=Q[head++]; const l=_lv[pi]; if(l<=1) continue;
@@ -3191,6 +3202,7 @@ function _ssky(lx,ly,lz){ const th=_snapT[(lx+1)+(lz+1)*_SW]; if(ly>=th)return 1
 function _sskyOpen(lx,ly,lz){ let s=_ssky(lx,ly,lz); if(s>=1)return 1;
   const m=Math.max(s, _ssky(lx+1,ly,lz), _ssky(lx-1,ly,lz), _ssky(lx,ly,lz+1), _ssky(lx,ly,lz-1)); return m; }
 
+let _SPRIGS_ON = true;      // __hc.sprigs(false) + a remesh drops the canopy fringe entirely: the pixels that change ARE the sprigs, which is the only way to measure them against the canopy they cover
 let _SPRIG_FACE_N = true;   // __hc.sprigNormals(false) + a remesh is the A/B for the canopy sprig's own face normal
 let _LEAF_UV_MIRROR = true;   // __hc.leafUV(false) + a world remesh is the A/B for the per-layer tile mirror below
 function greedyMesh(c, pass){
@@ -3505,7 +3517,7 @@ function foliageMesh(c){
   // fur coat, and the tree stops reading as leaves and starts reading as moss. The hash is in WORLD coordinates so the
   // pattern does not swim when a chunk is rebuilt, and the per-chunk cap is a floor under the worst case — a chunk that
   // is nothing but canopy has about 4000 exposed faces, and 900 sprigs is already more than the eye can resolve.
-  if(c.hasLeaf){ let sprigs=0;
+  if(c.hasLeaf && _SPRIGS_ON){ let sprigs=0;
     const SPRIG={ pine:TILEIDX['leaf_sprig'], birch:TILEIDX['birch_sprig'], oak:TILEIDX['oak_sprig'] };
     const NB=[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
     // NO HEIGHT-BIASED CAP (Ben 08-05: "foliage ... is still missing past a certain height, and doesnt cover
@@ -29660,6 +29672,9 @@ window.__hc={
   // is lit is a number in a buffer and a probe can read it instead of guessing at a screenshot.
   // The canopy sprig's own face normal, off and on, world remeshed either way. Off = the mostly-up normal grass uses,
   // which is what made a tree's fringe take the same overhead N·L on every side of every tree.
+  sprigs(on){ try{ _SPRIGS_ON = (on==null? true : !!on); let n=0;
+      world.forEach(c=>{ if(c.meshed){ c.dirty=true; buildChunkMeshes(c); n++; } });
+      return { sprigs:_SPRIGS_ON, remeshed:n }; }catch(e){ return {err:String(e.message||e)}; } },
   sprigNormals(on){ try{ _SPRIG_FACE_N = (on==null? true : !!on); let n=0;
       world.forEach(c=>{ if(c.meshed){ c.dirty=true; buildChunkMeshes(c); n++; } });
       return { faceNormals:_SPRIG_FACE_N, remeshed:n }; }catch(e){ return {err:String(e.message||e)}; } },
@@ -30077,6 +30092,15 @@ window.__hc={
                bend:+(view.gunBend||0).toFixed(4), nearPush:view._nearPush!=null?+view._nearPush:null, corrSaw:view._hgSv||null,
                kick:+(view.gunKick||0).toFixed(4), grpY:+view.group.position.y.toFixed(4), grpRotX:+view.group.rotation.x.toFixed(4),
                sightLocal:[+v.x.toFixed(4),+v.y.toFixed(4),+v.z.toFixed(4)],
+               // WHERE THE WEAPON SITS, as distinct from where its SIGHT sits (Ben 08-05: "holosight adjustment WENT THE WRONG WAY").
+               // The whole point of raising an optic on its mount is that the glass stays centred while the GUN drops in the frame, and
+               // only a number on the body can say which way the body actually went. The model's own bounding box in camera space: its
+               // centre height, and the top of it, which is what the eye reads as "how much gun is in the way".
+               gun:(()=>{ try{ const bb=(view.mesh.userData._vbb)||_viewLocalBox(view.mesh);
+                   const c=new THREE.Vector3((bb.min.x+bb.max.x)/2,(bb.min.y+bb.max.y)/2,(bb.min.z+bb.max.z)/2).applyMatrix4(view.mesh.matrixWorld);
+                   const t=new THREE.Vector3((bb.min.x+bb.max.x)/2,bb.max.y,(bb.min.z+bb.max.z)/2).applyMatrix4(view.mesh.matrixWorld);
+                   camera.worldToLocal(c); camera.worldToLocal(t);
+                   return { midY:+c.y.toFixed(4), topY:+t.y.toFixed(4) }; }catch(e){ return {err:String(e.message||e)}; } })(),
                offAxis:+Math.hypot(v.x,v.y).toFixed(4),
                boreVsLookDeg:+(Math.acos(Math.max(-1,Math.min(1,bore.dot(look))))*57.29578).toFixed(2) }; }
     catch(e){ return {err:String(e.message||e)}; } },
@@ -30432,6 +30456,43 @@ window.__hc={
   // least part of their log posts"). Not the peak towers — these are the four TOWER_SPOTS ones. For each post: how many log blocks it
   // has, and whether there is a GAP of air between the ground under it and the platform, which is what a post with its foot missing is.
   // A count alone cannot say that; a post can be ten blocks long and still start three blocks up in the air.
+  // QA: FIND THE PITS IN THE GROUND (Ben 08-05: "certain 1x1 and 1x2 block holes in the ground randomly"). A pit is a column whose top
+  // solid block sits BELOW all four of its neighbours' — one or two deep and one or two wide is what he is describing, and a scan is the
+  // only way to find something that is by definition rare and scattered. Reported with what is at the bottom, what is directly under it
+  // and where it sits in its chunk, because "always the same block", "always over a cave" and "always on a chunk edge" are three
+  // different bugs and the coordinates are what tell them apart.
+  holeScan(r){ try{ r=Math.min(96,r|0||64);
+      const px=Math.floor(player.pos.x), pz=Math.floor(player.pos.z);
+      const top=(x,z)=>{ for(let y=Math.min(WH-1,Math.floor(player.pos.y)+40); y>0; y--){ const b=getBlock(x,y,z);
+          if(b===AIR||b===WATER) continue;
+          if(B[b] && (B[b].cat==='cross'||B[b].cat==='model')) continue;                 // a flower or a fence is not the ground
+          return y; } return -1; };
+      const pits=[], byBlock={}; let scanned=0, edge=0, ground=0, capless=0, punched=0;
+      for(let dx=-r;dx<=r;dx++)for(let dz=-r;dz<=r;dz++){
+        const x=px+dx, z=pz+dz, t=top(x,z); if(t<0) continue; scanned++;
+        const n=[top(x+1,z),top(x-1,z),top(x,z+1),top(x,z-1)];
+        if(n.some(v=>v<0)) continue;
+        const lo=Math.min(...n), d=lo-t;                                                 // every neighbour is at least this much higher
+        if(d<1 || d>2) continue;                                                         // 1 or 2 deep — Ben's own description
+        const fl=getBlock(x,t,z), un=getBlock(x,t-1,z);
+        const nm=(B[fl]||{}).name||fl; byBlock[nm]=(byBlock[nm]||0)+1;
+        // GROUND ONLY, as a separate count: 80% of every scan is canopy topography — a dip between two leaf blocks is not a hole in the
+        // ground, and it drowns the handful of columns that are.
+        if(nm==='grass'||nm==='dirt'||nm==='sand'||nm==='stone'){ ground++;
+          if(nm!=='grass' && getBlock(x,t+1,z)===AIR) capless++; }
+        if((x&15)===0||(x&15)===15||(z&15)===0||(z&15)===15) edge++;
+        // WHAT IS IN THE HOLE MATTERS AS MUCH AS THE HOLE. This scan skips cross and model blocks when looking for the ground, so a
+        // column whose grass cap was REPLACED by a flower reads as a one-deep pit with a dirt floor — and that is a different bug from a
+        // dip in the heightfield, which has grass at the bottom like its neighbours.
+        // THE HEIGHTFIELD'S OWN OPINION, which is what separates a dip from a hole. surfaceH is the generator's answer for this column
+        // and knows nothing about what any builder did afterwards: if it says the ground is HIGHER than the top solid block actually is,
+        // something removed a block that generation put there. If it agrees, the dip is terrain and there is nothing to fix.
+        const sh=surfaceH(x,z)-t; if(sh>0) punched++;
+        const ab=getBlock(x,t+1,z);
+        if(pits.length<14) pits.push({ x,z, y:t, deep:d, floor:nm, under:(B[un]||{}).name||un,
+                                       above:(B[ab]||{}).name||(ab===0?'air':ab), sh, lx:x&15, lz:z&15, water:getBlock(x,t+1,z)===WATER }); }
+      return { scanned, pits:Object.values(byBlock).reduce((a,b)=>a+b,0), groundPits:ground, capless, punched, byBlock, onChunkEdge:edge, sample:pits }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   towerPosts(){ try{ const out=[];
       for(const t of TOWER_SPOTS){ const gy=surfaceH(t.x,t.z), H=10;
         if(!_sReady(t.x,t.z,16)){ out.push({at:[t.x,t.z], no:'chunks not loaded'}); continue; }

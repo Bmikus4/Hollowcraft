@@ -119,8 +119,12 @@ const findBrowser=()=>['C:/Program Files/Google/Chrome/Application/chrome.exe','
     const back=await arm('flag back to 0', `window.__hcPERF.shadowLights(0)`);
 
     const shipped=Math.min(s1.med,s2.med), stat=Math.min(on1.med,on2.med);
-    console.log('\ndemote:     shadowFaces '+s1.shadowFaces+' at the shipped flag, draws '+s1.calls+
-                '   '+(s1.shadowFaces===0? 'WORKS' : 'FAILED — the flag is still inert'));
+    // DEMOTION is proved by the LAST arm, which asks for 0, not by the shipped default: the default is now 2, and a
+    // rule that reads "shadowFaces must be 0 at the shipped flag" printed FAILED for a game doing exactly what it was
+    // told. What the flag says has to be read, not assumed.
+    console.log('\ndemote:     shipped flag left shadowFaces '+s1.shadowFaces+' (draws '+s1.calls+'); asking for 0 gave '+
+                back.shadowFaces+' (draws '+back.calls+')   '+
+                (back.shadowFaces===0? 'WORKS — the flag is live' : 'FAILED — the flag is still inert'));
     console.log('static:     flag 2 costs '+stat+' ms med against '+shipped+' ms with no casters at all;'+
                 ' expensive frames '+fStatic.pctHigh+'% of 40 (draws '+fStatic.lo+'..'+fStatic.hi+')');
     console.log('            '+(on2.shadowFaces===0 ? 'VOID — the flag did not promote a caster, so nothing was gated'
