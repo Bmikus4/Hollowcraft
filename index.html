@@ -6561,6 +6561,21 @@ function aabbHits(x,y,z){
   return false;
 }
 const keys={}, _NOKEYS=Object.freeze({});   // _NOKEYS: what physics reads instead of the live keys while a menu is up
+// THE WATER SURFACE IS FOUND, NOT ASSUMED. CFG.SEA is where the ocean is, but a river carved to SEA-3 and any water a
+// player has placed are water you must swim in too, so the column is scanned from the body upward and the top face of
+// the unbroken run is the surface plane. 24 getBlocks a frame, once, only while wet.
+function waterSurfaceY(x,y,z){
+  let ty=Math.floor(y+0.9);
+  if(getBlock(x,ty,z)!==WATER){ ty=Math.floor(y+0.1); if(getBlock(x,ty,z)!==WATER) return y+0.9; }
+  for(let i=0;i<24 && getBlock(x,ty+1,z)===WATER;i++) ty++;
+  return ty+1;
+}
+// HOW DEEP THE BODY RIDES WHEN IT HAS STOPPED RISING. pos.y is the feet, PH is 1.8, so 1.30 leaves the eye (EYE 1.62)
+// a third of a block clear of the waterline and the chest under it. That second half is load-bearing, not cosmetic:
+// p.inWater probes at pos.y+0.9, which is still a water cell at this height, so the swim branch stays LATCHED at the
+// float point. Float any higher and the probe comes up dry, physics hands you to the ground/gravity path for a frame,
+// you fall back in, and that alternation IS the pogo this item exists to kill.
+const SWIM_FLOAT = 1.30;
 function physics(dt){
   if(_resumeHold){ const c=getChunk(Math.floor(player.pos.x)>>4,Math.floor(player.pos.z)>>4);   // resumed game — hold still until the ground under you exists
     if(!c||!c.generated||!c.meshed){ player.vel.set(0,0,0); return; } _resumeHold=false; }
@@ -6574,6 +6589,7 @@ function physics(dt){
   p.onLadder = getBlock(p.pos.x, p.pos.y+0.1, p.pos.z)===BID.ladder || getBlock(p.pos.x, p.pos.y+0.6, p.pos.z)===BID.ladder || getBlock(p.pos.x, p.pos.y+1.2, p.pos.z)===BID.ladder;   // feet / body / head in a ladder cell → climb (feet check added so you grab on at the very bottom rung)
   const feetWet = getBlock(p.pos.x, p.pos.y+0.1, p.pos.z)===WATER || getBlock(p.pos.x, p.pos.y+0.5, p.pos.z)===WATER;   // feet/legs in water — catches shallow shore entry
   if(feetWet && !p._wasFeetWet && typeof sfxSplash==='function') sfxSplash(p.pos.x, p.pos.y+0.2, p.pos.z, 0.85);        // SPLASH the moment you step into any water
+  if(feetWet && !p._wasFeetWet && p.vel.y<-4 && typeof spawnBubbles==='function') spawnBubbles(p.pos.x,p.pos.y+0.3,p.pos.z, 14, 0.55, 1.5);   // the air a body drags under with it — only on a real plunge, so wading in is silent
   p.wading=feetWet; p._wasFeetWet=feetWet; p._wasInWater=p.inWater;
   // NO INPUT WHILE A MENU IS UP (Ben 08-04: "character should stop moving when in the inventory or pause menu"). Keys held when
   // the pointer unlocks stay held as far as the keys map is concerned, and with momentum a run now carries on for a fifth of a
@@ -6633,10 +6649,28 @@ function physics(dt){
       if(Math.abs(p.vel.x)<0.02) p.vel.x=0; if(Math.abs(p.vel.z)<0.02) p.vel.z=0; } }   // an exponential never reaches zero; a standing player must actually stand still
   if(p.fly){}                                                                          // flying → skip the swim/ladder/gravity chain below (its y is already set above)
   else if(p.inWater || (p.wading && getBlock(p.pos.x, p.pos.y+0.35, p.pos.z)===WATER)){ // buoyant water physics: swim up (Space), dive (Sneak), else float+slow-sink. Waist-deep ALSO swims — previously only a submerged torso did, so holding Space stalled with your eyes at the waterline and you could never break out of the water
-    if(K.Space){ if(p.inWater) p.vel.y=3.8;    // submerged: steady rise toward the surface
-      else { const ld=lookDir(), bx=Math.floor(p.pos.x+ld.x*1.15), bz=Math.floor(p.pos.z+ld.z*1.15), fy=Math.floor(p.pos.y);   // at the surface: the breach hop fires ONLY against a bank in front — held Space over open water just treads (it was a walk-on-water exploit, Ben 07-20)
-        const bank=solidAt(bx,fy,bz)||solidAt(bx,fy+1,bz)||solidAt(bx,fy-1,bz);
-        p.vel.y = bank?5.2:2.6; } }
+    // SPACE IS "GO UP AND THEN STAY THERE", AND THE SECOND HALF WAS MISSING. Rise was a flat 3.8 while the torso probe
+    // read water and a flat 2.6 the moment it did not — an impulse fired at the exact height where holding it stops
+    // qualifying, which is a bounce with a two-frame period, i.e. the pogo. It is one target now: rise at 3.8 until the
+    // float point is within reach, then close the last half-block on a damped approach and hold there.
+    const _surf=waterSurfaceY(p.pos.x,p.pos.y,p.pos.z), _float=_surf-SWIM_FLOAT;
+    if(K.Space){ const gap=_float-p.pos.y;
+      if(gap>0.55) p.vel.y=3.8;                // still under it: steady rise, unchanged
+      else { const ld=lookDir(), bx=Math.floor(p.pos.x+ld.x*1.15), bz=Math.floor(p.pos.z+ld.z*1.15), fy=Math.floor(p.pos.y);   // at the surface: the breach hop fires ONLY against a bank in front — held Space over open water just treads (it was a walk-on-water exploit, Ben 07-20). It is also the ONLY way out of chest-deep water onto a ledge, so it survives the rework.
+        // A BANK IS NOT ENOUGH ON ITS OWN, and the shore is where that showed. Standing chest-deep at the water's edge,
+        // the probe finds land every frame, so a held Space fired 5.2 over and over and the player bounced out and fell
+        // back in about twice a second — the pogo this item names, at the one place you are most likely to hold Space.
+        // The missing half is INTENT: climbing out is something you swim into, so it now also needs a movement key.
+        // Treading at the shore holds you at the surface exactly as it does in open water.
+        // The 5.2 is re-applied every frame on purpose and must stay that way. vel.y is ASSIGNED in this branch, so a
+        // one-shot impulse is overwritten by the float damping on the very next frame and lifts you 0.04 of a block —
+        // measured. The climb out of water is a sustained ascent, not a jump.
+        const bank=(mag>0) && (solidAt(bx,fy,bz)||solidAt(bx,fy+1,bz)||solidAt(bx,fy-1,bz));
+        // THE GAIN IS CAPPED BY THE FRAME, not picked as a constant. vel.y is ASSIGNED here rather than accumulated, so
+        // the step is gap*k*dt and any k above 1/dt overshoots the target and oscillates — a 7.5 that settles in 0.3 s at
+        // 60 fps would be a fresh pogo at 12. 0.9/dt can never overshoot at any framerate.
+        p.vel.y = bank ? 5.2 : clamp(gap*Math.min(7.5,0.9/Math.max(dt,1e-4)), -2.4, 2.6);
+        if(!bank && Math.abs(gap)<0.02){ p.pos.y=_float; p.vel.y=0; } } }   // an exponential never arrives; a treading player must actually be still
     else if(p.sneak) p.vel.y=-9.6;                                                 // deliberate dive still outruns the passive sink
     else { p.vel.y-=21*dt; if(p.vel.y<-7.8)p.vel.y=-7.8; p.vel.y*=0.9; } }         // 3× sink rate (Ben 07-20): water pulls you DOWN — floating is work now, not the default
   else if(p.onLadder){ // LADDER — cling to the rungs and climb. Horizontal is DAMPED so pressing W (or strafing) can't
@@ -10479,7 +10513,7 @@ function loop(){ try{
   T.end(TID.input);
   applyWaterFog();
   T.begin(TID.entities); T.begin(TID.props);
-  updateDrops(dt); updateSpears(dt); updateStuckSpears(dt); updateParticles(dt); updateShells(dt); updateView(dt); if(typeof updateWings==='function')updateWings(dt); updateWatchers(dt); checkNotes(dt); updateSkyBirds(dt); updateFireflies(dt); updateLampHalos(dt); updateLeaves(dt); if(typeof updateDungeonBugs==='function')updateDungeonBugs(dt);  // floating items, thrown/stuck spears, particles, ejected shell casings, held viewmodel, angel wings, watching-eyes, notes, sky birds, dungeon arachnids
+  updateDrops(dt); updateSpears(dt); updateStuckSpears(dt); updateParticles(dt); updateBubbles(dt); updateShells(dt); updateView(dt); if(typeof updateWings==='function')updateWings(dt); updateWatchers(dt); checkNotes(dt); updateSkyBirds(dt); updateFireflies(dt); updateLampHalos(dt); updateLeaves(dt); if(typeof updateDungeonBugs==='function')updateDungeonBugs(dt);  // floating items, thrown/stuck spears, particles, ejected shell casings, held viewmodel, angel wings, watching-eyes, notes, sky birds, dungeon arachnids
   netUpdate(dt);                                                             // co-op: send my transform, interpolate peers, host broadcasts the Wretch/time
   T.end(TID.props); T.end(TID.entities);
   T.begin(TID.audio); updateAudio(dt); T.end(TID.audio);
@@ -14398,6 +14432,67 @@ function updateParticles(dt){ if(!_pN){ _pIM.count=0; return; }
     MA[o+8]=0;  MA[o+9]=0;  MA[o+10]=sc;MA[o+11]=0;
     MA[o+12]=_pPos[i3]; MA[o+13]=_pPos[i3+1]; MA[o+14]=_pPos[i3+2]; MA[o+15]=1; }
   _pIM.count=_pN; _pIM.instanceMatrix.needsUpdate=true; _pIM.instanceColor.needsUpdate=true; }
+// ---- BUBBLES — the air leaving you while your head is under ----
+// A SECOND SYSTEM, NOT A FLAG ON THE FIRST. spawnParticles integrates -16 gravity and clamps every particle to
+// groundYAt: a bubble does the opposite of both (it rises, it accelerates as it rises, and it dies at the ceiling of
+// the water rather than at the floor of the world). Threading a buoyancy flag through those shared arrays would put a
+// branch in the hot loop that blood, sparks and debris all pay for. This is 120 slots and one draw call.
+// PALE IS THE ONLY COLOUR THAT SHOWS: underwater fog is 0.34, so anything with saturation is murk within two blocks.
+const B_MAX=120;
+const _bGeo=new THREE.SphereGeometry(1,8,6);                                        // unit sphere; per-instance scale IS the radius. 6x4 was visibly a hexagon at arm's length — these are drawn a metre from the eye, so the silhouette is the whole read
+const _bIM=new THREE.InstancedMesh(_bGeo, new THREE.MeshBasicMaterial({color:0xdff4ff, transparent:true, opacity:0.38, depthWrite:false}), B_MAX);
+_bIM.instanceMatrix.setUsage(THREE.DynamicDrawUsage); _bIM.count=0; _bIM.frustumCulled=false;
+fxGroup.add(_bIM);
+const _bPos=new Float32Array(B_MAX*3), _bVel=new Float32Array(B_MAX*3), _bR=new Float32Array(B_MAX),
+      _bAge=new Float32Array(B_MAX), _bTtl=new Float32Array(B_MAX), _bTop=new Float32Array(B_MAX), _bPh=new Float32Array(B_MAX);
+let _bN=0, _bWrap=0, _bAcc=0;
+function spawnBubbles(x,y,z,count,spread,speed){
+  const top=(typeof waterSurfaceY==='function')?waterSurfaceY(x,y,z):y+3;
+  for(let i=0;i<(count||1);i++){
+    let s; if(_bN<B_MAX){ s=_bN++; } else { s=_bWrap=(_bWrap+1)%B_MAX; }
+    const s3=s*3, sp=spread||0.16;
+    _bPos[s3]=x+(Math.random()-0.5)*sp; _bPos[s3+1]=y+(Math.random()-0.5)*0.1; _bPos[s3+2]=z+(Math.random()-0.5)*sp;
+    _bVel[s3]=(Math.random()-0.5)*0.25; _bVel[s3+1]=(speed||1.05)+Math.random()*0.5; _bVel[s3+2]=(Math.random()-0.5)*0.25;
+    _bR[s]=0.014+Math.random()*0.030; _bAge[s]=0; _bTtl[s]=5+Math.random()*2; _bPh[s]=Math.random()*6.283;
+    _bTop[s]=top;                                                                   // where THIS bubble pops, cached at spawn — the surface above it does not move, and re-scanning 120 columns a frame would
+  }
+}
+function updateBubbles(dt){
+  const p=player;
+  // EMIT FROM THE EYE'S OWN SUBMERSION TEST, not from p.inWater. applyWaterFog already decides every frame whether the
+  // camera is under, and that is the same fact the player is looking at — tying the bubbles to a torso probe would
+  // stream them while your head was clearly in open air at the float point.
+  if(_camSubmerged && !p.dead && !p.fly && !(typeof BR!=='undefined' && BR.inside)){
+    const hard=Math.hypot(p.vel.x,p.vel.z)>1.2 || !!keys.Space;                     // working harder spends more air
+    _bAcc+=dt*(hard?8:3.2);
+    // OUT IN FRONT OF THE FACE AND BELOW IT. Spawned at the eye they are born inside the near plane and the first thing
+    // they do is leave the top of the frame. Distance is set by APPARENT SIZE, not by anatomy: a 4 cm bubble half a
+    // block from the eye subtends 13 degrees and photographs as a pale plate covering the middle of the screen. At 0.9
+    // it is a bubble.
+    if(_bAcc>=1){ const d=lookDir(), mx=camera.position.x+d.x*0.9, my=camera.position.y+d.y*0.9-0.30, mz=camera.position.z+d.z*0.9;
+      while(_bAcc>=1){ _bAcc-=1; spawnBubbles(mx,my,mz,1,0.30,0.95); } }
+  } else _bAcc=0;
+  if(!_bN){ _bIM.count=0; return; }
+  const MA=_bIM.instanceMatrix.array;
+  for(let i=_bN-1;i>=0;i--){ const i3=i*3;
+    _bAge[i]+=dt;
+    if(_bAge[i]>=_bTtl[i] || _bPos[i3+1]>=_bTop[i]-0.03){ const L=--_bN, L3=L*3;    // popped at the surface, or ran out of life in still water
+      if(i!==L){ _bPos[i3]=_bPos[L3];_bPos[i3+1]=_bPos[L3+1];_bPos[i3+2]=_bPos[L3+2];
+        _bVel[i3]=_bVel[L3];_bVel[i3+1]=_bVel[L3+1];_bVel[i3+2]=_bVel[L3+2];
+        _bR[i]=_bR[L]; _bAge[i]=_bAge[L]; _bTtl[i]=_bTtl[L]; _bTop[i]=_bTop[L]; _bPh[i]=_bPh[L]; }
+      if(_bWrap>=_bN) _bWrap=0;
+      continue; }
+    if(_bVel[i3+1]<2.4) _bVel[i3+1]+=1.1*dt;                                        // a bubble accelerates upward: less water above it to push through, and it is growing
+    _bR[i]+=_bR[i]*0.28*dt;                                                         // and expands as the pressure drops
+    const w=Math.sin(_bPh[i]+_bAge[i]*6.5)*0.20;                                    // the wobble is what stops 120 spheres reading as one rigid column
+    _bPos[i3]+=(_bVel[i3]+w)*dt; _bPos[i3+1]+=_bVel[i3+1]*dt; _bPos[i3+2]+=(_bVel[i3+2]+Math.cos(_bPh[i]+_bAge[i]*5.9)*0.20)*dt;
+  }
+  for(let i=0;i<_bN;i++){ const i3=i*3, o=i*16, r=_bR[i];
+    MA[o]=r;    MA[o+1]=0;  MA[o+2]=0;  MA[o+3]=0;
+    MA[o+4]=0;  MA[o+5]=r;  MA[o+6]=0;  MA[o+7]=0;
+    MA[o+8]=0;  MA[o+9]=0;  MA[o+10]=r; MA[o+11]=0;
+    MA[o+12]=_bPos[i3]; MA[o+13]=_bPos[i3+1]; MA[o+14]=_bPos[i3+2]; MA[o+15]=1; }
+  _bIM.count=_bN; _bIM.instanceMatrix.needsUpdate=true; }
 // ---- EJECTED SHELL CASINGS — a spent brass rectangle flips out of the receiver, tumbles, falls, and TINKS on the ground ----
 const _shellGeo=new THREE.BoxGeometry(0.02,0.02,0.055);
 const _shellMat=new THREE.MeshPhongMaterial({color:0xc9a24a, shininess:120, specular:0x6b5a20});
@@ -19193,6 +19288,21 @@ function brxChunkGen(gx,gz){ if(!BR.gen) BR.gen=new Map();
   return rec; }
 // Rebuild the flat arrays as the union of the loaded set. Room ids are renumbered because the nav graph indexes by id and
 // every chunk numbers its own rooms from zero — without this, chunk 2's room 0 would silently shadow chunk 1's.
+// A DOOR'S RIG IS STAMPED ONLY WHILE brBuildEnv RUNS, AND A CACHED CHUNK NEVER RUNS IT. brBuildEnvAll re-parents the
+// group it finds in BR.envCache instead of rebuilding, so every door in a cached chunk kept its generated record and lost
+// its pivots — and brTryToggleDoor SKIPS a door with no pivots and returns false, silently. Measured on entry, with all
+// nine chunks served from the load-time prewarm's cache: 53 doors, 0 pivots, i.e. not one door in the halls could open.
+// So the rig travels with the group it belongs to. Index correspondence is safe because a chunk's generation is a pure
+// function of (gx, gz, seed): the door array comes back in the same order for the same chunk, always.
+const BR_DOOR_RIG=['pivots','pivot','base','a','target','hs','dbl','leafW','swing','_casing'];
+function brDoorRigSave(doors){ return (doors||[]).map(d=>{ const o={}; for(const k of BR_DOOR_RIG) o[k]=d[k]; return o; }); }
+function brDoorRigApply(doors, saved){ if(!saved||!doors) return 0; let n=0;
+  for(let i=0;i<Math.min(doors.length,saved.length);i++){ const d=doors[i], sv=saved[i];
+    if(!sv || !sv.pivots || !sv.pivots.length) continue;                  // nothing to hand over
+    if(d.pivots && d.pivots.length) continue;                             // already rigged — never overwrite a live rig
+    for(const k of BR_DOOR_RIG) if(sv[k]!==undefined) d[k]=sv[k];
+    n++; }
+  BR._rigReapplied=(BR._rigReapplied|0)+n; return n; }
 function brxUnion(){ const keep=BR.loaded||[];
   for(const f of BRX_FIELDS) BR[f]=[];
   for(const rec of keep){ const base=BR.rooms.length, dy=brxLevelDy(rec.gx,rec.gz);
@@ -20081,7 +20191,7 @@ function brxBuildChunkGroup(rec){
     const g=brBuildEnv();
     g.position.y=dy;
     try{ brMergeStatic(g); }catch(e){ console.error('[BRX] static merge failed for '+ck, e); }
-    ent={ g, ramps:(BR.ramps||[]).map(r=>({...r, y0:r.y0+dy, y1:r.y1+dy})), flickers:(BR.flickers||[]).slice() };
+    ent={ g, ramps:(BR.ramps||[]).map(r=>({...r, y0:r.y0+dy, y1:r.y1+dy})), flickers:(BR.flickers||[]).slice(), doorRig:brDoorRigSave(BR.doors) };
     BR.envCache.set(ck, ent);
   }catch(e){
     BR._buildErr=BR._buildErr||[]; if(BR._buildErr.length<8) BR._buildErr.push({gx:rec.gx, gz:rec.gz, err:String(e&&e.message||e)});
@@ -20116,6 +20226,7 @@ function brBuildEnvAll(){
     const ck=rec.gx+'_'+rec.gz; live.add(ck);
     let ent=BR.envCache.get(ck) || brxBuildChunkGroup(rec);                 // built earlier (or prewarmed at load): just re-parent
     if(ent){ parent.add(ent.g);
+      brDoorRigApply(rec.doors, ent.doorRig);                             // …and hand the doors back their pivots, or nothing in this chunk can open
       for(const r of ent.ramps) allRamps.push(r);
       for(const fl of ent.flickers) allFlick.push(fl);
       continue; }
@@ -20132,7 +20243,7 @@ function brBuildEnvAll(){
       try{ brMergeStatic(g); }catch(e){ console.error('[BRX] static merge failed for '+rec.gx+','+rec.gz, e); }
       // SPREAD, not a hand-written field list: the old copy enumerated x0..vert and silently dropped every field added
       // later (it ate chw, so the walk surface shrank back to the visual rails and you fell through the carve).
-      ent={ g, ramps:(BR.ramps||[]).map(r=>({...r, y0:r.y0+dy, y1:r.y1+dy})), flickers:(BR.flickers||[]).slice() };
+      ent={ g, ramps:(BR.ramps||[]).map(r=>({...r, y0:r.y0+dy, y1:r.y1+dy})), flickers:(BR.flickers||[]).slice(), doorRig:brDoorRigSave(BR.doors) };
       BR.envCache.set(ck, ent);
       for(const r of ent.ramps) allRamps.push(r);
       for(const fl of ent.flickers) allFlick.push(fl);
@@ -27258,7 +27369,17 @@ window.__hc={
   lock(on){ locked=!!on; return locked; },   // QA: force the pointer-lock flag — headless Chrome can never acquire real pointer lock, and physics() only runs while locked
   deepWater(){ for(let r=30;r<260;r+=6)for(let a=0;a<12;a++){ const th=a*0.5236, x=player.pos.x+Math.cos(th)*r, z=player.pos.z+Math.sin(th)*r;   // QA: nearest genuinely deep sea spot
     if(surfaceH(Math.round(x),Math.round(z))<=CFG.SEA-5) return {x:+x.toFixed(1),z:+z.toFixed(1),sea:CFG.SEA}; } return null; },
-  water(){ return {y:+player.pos.y.toFixed(2), inWater:player.inWater, wading:player.wading}; },   // QA: swim state
+  shallowWater(depth){ const d=depth||2; for(let r=8;r<220;r+=4)for(let a=0;a<16;a++){ const th=a*0.3927, x=Math.round(player.pos.x+Math.cos(th)*r), z=Math.round(player.pos.z+Math.sin(th)*r);   // QA: nearest water exactly `depth` blocks deep — the shelf makes chest-deep the common case and a deep-water rule can behave differently in it
+    if(surfaceH(x,z)===CFG.SEA-d){ let lx=null,lz=null;                                   // …WITH dry land in reach, or the spot is useless for testing a climb-out: the shelf is a long ramp and chest-deep can sit a dozen blocks off any bank, which is why this rejects the candidate rather than returning a null shore
+      for(let rr=1;rr<=16&&lx==null;rr++)for(let aa=0;aa<24;aa++){ const t2=aa*0.2618, ux=Math.round(x+Math.cos(t2)*rr), uz=Math.round(z+Math.sin(t2)*rr);
+        if(surfaceH(ux,uz)>CFG.SEA){ lx=ux+0.5; lz=uz+0.5; break; } }
+      if(lx!=null) return {x:x+0.5,z:z+0.5,h:CFG.SEA-d,sea:CFG.SEA,lx,lz,ly:surfaceH(Math.floor(lx),Math.floor(lz))+1}; } } return null; },
+  water(){ const s=waterSurfaceY(player.pos.x,player.pos.y,player.pos.z);   // QA: swim state + where the float point for this column is
+    return {y:+player.pos.y.toFixed(3), vy:+player.vel.y.toFixed(3), inWater:player.inWater, wading:player.wading, sub:!!_camSubmerged,
+            surf:+s.toFixed(2), float:+(s-SWIM_FLOAT).toFixed(2), eye:+(player.pos.y+EYE).toFixed(3), onGround:!!player.onGround}; },
+  bubbles(){ let above=0, below=0, rising=0; for(let i=0;i<_bN;i++){ const y=_bPos[i*3+1]; if(y>_bTop[i]) above++; else below++; if(_bVel[i*3+1]>0) rising++; }
+    return { n:_bN, cap:B_MAX, rising, aboveSurface:above, belowSurface:below, drawn:_bIM.count,
+             y:_bN?+(_bPos[1]).toFixed(2):null, top:_bN?+_bTop[0].toFixed(2):null }; },   // QA: bubble census — none may live above the water's own top face
   cine(){ return {active:!!_cine, built:!!(_cine&&_cine.built), boss:wretch.boss, shake:+((_cine&&_cine.shake)||0).toFixed(2), t:+(((_cine&&_cine.t)||0)).toFixed(2)}; },   // QA: cutscene state + stall-proof show clock
   ripTest(){ const d=lookDir(); const x=player.pos.x+d.x*18, z=player.pos.z+d.z*18; beginBossSummon(x,groundYAt(x,z),z); return this.cine(); },   // QA: run the full summon cutscene in front of the player
   carveTest(){ const d=lookDir(), ox=player.pos.x, oy=player.pos.y+14, oz=player.pos.z, tx=ox+d.x*40, tz=oz+d.z*40, gy=groundYAt(tx,tz);   // QA: erect a stone pillar straddling the beam path, fire one carve, confirm the pillar is eaten
