@@ -26872,7 +26872,17 @@ const rainGeo=new THREE.BufferGeometry(); rainGeo.setAttribute('position',new TH
 const rainMesh=new THREE.LineSegments(rainGeo,new THREE.LineBasicMaterial({color:0x9fb0c4,transparent:true,opacity:0.0})); rainMesh.frustumCulled=false; rainMesh.visible=false; rainMesh.renderOrder=2; scene.add(rainMesh);
 const _rainTint=new THREE.Color(0x9fb0c4);   // the streaks' old fixed colour, now only a hue the live air is nudged toward
 const weather={raining:false,t:60+Math.random()*90,flash:0,strikeT:10,thunderT:0, fog:0,fogTgt:0,fogHold:0,fogNext:400+Math.random()*600, rain:0,rainTgt:0,rainHold:0,rainNext:120+Math.random()*160, overcast:0};
-function thunder(){ if(!AC)return; if(playSample('thunder',null,0.85))return; burst(master,0.7,1.5,85,0.4,38); burst(master,0.35,0.5,300,0.6,90); }   // real sample if present, else low crack + tail
+// A CLAP FROM THREE KILOMETRES IS NOT A CLAP FROM NINETY METRES. Now that a strike has a distance (see the roll in updateWeather),
+// the same sample at the same 0.85 for both is the thing that makes every bolt sound like it is on the roof. Volume falls to a third
+// across the range. Kept 2D (position null) deliberately: the panner's distance model would have to be fought at kilometre range,
+// and a scaled gain is the whole of what the ask needs.
+// THE DISTANCE IS CONSUMED, not left lying about — the ICBM and the scripted set-pieces set thunderT themselves with no strike
+// behind it, and they must not inherit the volume of whatever the last storm bolt happened to be.
+function thunder(){ if(!AC)return;
+  const _d=weather.sdist, _v=0.85*(_d!=null?(1-Math.min(0.66,_d/3000*0.66)):1);
+  weather._qd=(_d==null?null:_d); weather._qv=_v; weather.claps=(weather.claps|0)+1;   // QA only — see __hc.strikeRead
+  weather.sdist=null;
+  if(playSample('thunder',null,_v))return; burst(master,0.7*(_v/0.85),1.5,85,0.4,38); burst(master,0.35*(_v/0.85),0.5,300,0.6,90); }   // real sample if present, else low crack + tail
 function caveDrip(){ const ang=Math.random()*6.283, r=Math.random()*5, x=player.pos.x+Math.cos(ang)*r, z=player.pos.z+Math.sin(ang)*r;
   const fx=Math.floor(x), fz=Math.floor(z); let cy=-1;
   for(let y=Math.floor(player.pos.y)+2; y<Math.floor(player.pos.y)+9; y++){ if(solidAt(fx,y,fz)){ cy=y; break; } }
@@ -26911,7 +26921,22 @@ function updateWeather(dt){
     // there the air is already pale and the streaks are its colour either way.
     { const _rc=rainMesh.material.color;
       _rc.copy(scene.fog.color).lerp(_rainTint, 0.04).multiplyScalar(1.15); }
-    weather.strikeT-=dt; if(weather.strikeT<=0 && weather.rain>0.5){ weather.strikeT=12+Math.random()*26; weather.flash=1; weather.thunderT=0.8+Math.random()*3.6; }   // lightning in heavier rain
+    // THE BOLT LANDS SOMEWHERE, AND THAT PLACE IS WHY THE THUNDER IS LATE (Ben's item 11: "delay from strike distance").
+    // The delay was 0.8+Math.random()*3.6 — a number with no cause — so a bolt that lit the whole room could rumble four seconds
+    // later while one on the horizon cracked instantly, which is the tell that the storm is a light switch and a sound file.
+    // A strike now has a POSITION: a bearing and a distance, and the clap arrives dist/343 seconds after the flash, 343 m/s being
+    // the speed of sound in air. 90 m answers in a quarter second; 3 km takes almost nine.
+    // THE DISTRIBUTION IS SQUARED ON PURPOSE. dist = 90 + r*r*2900 with r uniform makes near strikes rare, so most claps are
+    // distant rumbles and an overhead crack is an event — which is what a storm front sounds like, and it costs one multiply.
+    // The FLASH is untouched and still silent, which is the other half of the ask.
+    weather.strikeT-=dt;
+    if(weather.strikeT<=0 && weather.rain>0.5){ weather.strikeT=12+Math.random()*26;
+      // DISTANCE ONLY, NO BEARING. A bearing was written first and then deleted: nothing consumes it. The clap is played 2D (see
+      // thunder) because a panner fought at kilometre range buys nothing the ask wanted, and a stored x/z that no line reads is
+      // the kind of field a later reader trusts.
+      const _r=Math.random(), _sd=90+_r*_r*2900;
+      weather.sdist=_sd;
+      weather.flash=1; weather.thunderT=_sd/343; weather._delay0=weather.thunderT; }   // _delay0 is QA only (see __hc.strikeRead): thunderT itself counts down
     if(AC && !weather._rainNode){ try{ const rb=SFX['rain']&&SFX['rain'][0]; const n=AC.createBufferSource(); const g=AC.createGain(); g.gain.value=0;
         if(rb){ n.buffer=rb; n.loop=true; n.connect(g); weather._rainVol=0.62; }                                              // REAL CC0 rain loop
         else { n.buffer=NB; n.loop=true; const hp=AC.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=1050; n.connect(hp); hp.connect(g); weather._rainVol=0.22; }   // synth hiss fallback
@@ -31686,6 +31711,19 @@ window.__hc={
   haunt(){ if(typeof startHaunt==='function')startHaunt(); return {haunting:herobrine.haunting,owner:herobrine.owner}; },   // QA: begin a Herobrine haunt (owned by this player)
   // ---- PROP-PLACEMENT QA (gun rack / dungeon cuffs / cuffs-on-wrists) — measure the ACTUAL model edges ----
   tpExact(x,z,y){ player.pos.x=x; player.pos.z=z; player.pos.y=(y!=null)?y:groundYAt(x,z)+1; player.vel.set(0,0,0); return {x:+player.pos.x.toFixed(1),y:+player.pos.y.toFixed(1),z:+player.pos.z.toFixed(1)}; },   // exact-y teleport (tp() ground-snaps — useless inside carved interiors)
+  // QA: FORCE A REAL STRIKE AND READ WHAT THE STORM DECIDED (Ben's item 11, the distance half). It does NOT set the strike itself —
+  // it arms the conditions the roll needs (heavy rain, the strike timer expired) and lets updateWeather roll it on the next frame,
+  // so what is measured is the shipping code path rather than a probe's idea of one.
+  strikeRoll(){ try{ weather.rain=0.9; weather.rainTgt=0.9; weather.rainHold=600; weather.strikeT=0;
+      weather.thunderT=0; weather.sdist=null; weather._delay0=null; weather.claps=0; weather._qd=null; weather._qv=null;
+      return {armed:true, rain:weather.rain}; }catch(e){ return {err:String(e.message||e)}; } },
+  // dist/delay are the strike as rolled (_delay0 is stamped at the flash, because thunderT counts down from it); claps/clapDist/
+  // clapVol are what the clap did when it finally arrived. claps 0 with flash 1 is the "silent flash" half of the ask, measured.
+  strikeRead(){ try{ return { dist:(weather.sdist==null?(weather._qd==null?null:+weather._qd.toFixed(1)):+weather.sdist.toFixed(1)),
+      delay:(weather._delay0==null?null:+weather._delay0.toFixed(3)), left:+(weather.thunderT||0).toFixed(3),
+      flash:+(weather.flash||0).toFixed(3), claps:weather.claps|0,
+      clapDist:(weather._qd==null?null:+weather._qd.toFixed(1)), clapVol:(weather._qv==null?null:+weather._qv.toFixed(3)) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   aimAt(x,y,z){ const dx=x-player.pos.x, dz=z-player.pos.z, dy=y-(player.pos.y+EYE), L=Math.hypot(dx,dy,dz)||1; player.yaw=Math.atan2(-dx,-dz); player.pitch=clamp(Math.asin(dy/L),-1.2,1.2); return {yaw:+player.yaw.toFixed(2),pitch:+player.pitch.toFixed(2)}; },
   hbPos(){ const h=herobrine; return h.mesh?{x:+h.x.toFixed(2),y:+h.y.toFixed(2),z:+h.z.toFixed(2),state:h.state||'',cuffed:!!h.cuffed}:null; },
   _visBox(root){ root.updateMatrixWorld(true); const bb=new THREE.Box3(), b=new THREE.Box3();   // Box3 over VISIBLE meshes only (setFromObject would count the hidden muzzle-flash sprite)
