@@ -23044,7 +23044,12 @@ function spawnSpider(){ const ang=Math.random()*6.283, r=6+Math.random()*10, x=p
 function spawnSnail(){ const ang=Math.random()*6.283, r=6+Math.random()*12, x=player.pos.x+Math.cos(ang)*r, z=player.pos.z+Math.sin(ang)*r, gy=groundYAt(x,z);
   if(gy<=CFG.SEA-1) return; const sb=getBlock(Math.floor(x),gy-1,Math.floor(z)), n=B[sb]?B[sb].name:''; if(n!=='sand'&&n!=='grass') return;   // beach sand (primarily) or forest grass
   const mesh=buildAnimalMesh('snail'); mesh.position.set(x,gy,z); animals.push({type:'snail',mesh,x,y:gy,z,yaw:Math.random()*6.283,hp:2,timer:0,flee:0,dead:false}); }
-function spawnAnimal(){ if(animals.length>=9)return;   // cap raised with the +15% spawn pressure (Ben 07-20)
+// #55: THE CAP COUNTS WILDLIFE, NOT CONGREGATIONS. This is a cap of 9 on `animals`, and monks live in the same array —
+// so a cathedral at its new quota of six plus a chapel's four would leave the deer, boar and sheep spawner permanently
+// blocked, and the island would empty of animals as you walked toward a church. Monks are placed by spawnMonkNear and
+// never by this function, so excluding them here costs nothing and keeps the two populations independent.
+function spawnAnimal(){ let _wild=0; for(const a of animals) if(a.type!=='monk') _wild++;
+  if(_wild>=9)return;   // cap raised with the +15% spawn pressure (Ben 07-20)
   const ang=Math.random()*6.283, r=24+Math.random()*24, x=player.pos.x+Math.cos(ang)*r, z=player.pos.z+Math.sin(ang)*r;
   const gy=groundYAt(x,z); if(gy<=CFG.SEA+1)return;
   const sb=getBlock(Math.floor(x),gy-1,Math.floor(z)); if(!B[sb]||B[sb].name!=='grass')return;   // forest/meadow floor only — never the beach/water
@@ -23108,6 +23113,13 @@ function animalMarks(a, dt){
   if(typeof bleedTick==='function' && ANIMALS[a.type]) bleedTick(a, dt, a.hp, ANIMALS[a.type].hp, 0.34); }
 function hurtAnimal(a,dmg){
   if(a.type==='jesus'){ { const hs=heldSlot(); if(hs&&ITEMS[hs.id]&&ITEMS[hs.id].gun)achUnlock('jesus'); } const now=clock.elapsedTime; if(now-(a._provT||-9)>1.0){ a._provT=now; if(typeof spawnDrop==='function')spawnDrop(Math.random()<0.5?'bread':'wine',1,a.x,a.y+0.7,a.z); spawnParticles(a.x,a.y+1.7,a.z,0xffe680,10,1.6,0.9); flashName('he provides'); } return; }   // JESUS CANNOT DIE — struck, he yields bread & wine instead
+  // #55: ONE SHOT ROUSES THE WHOLE COMMUNITY. hurtAnimal is the only choke point every weapon goes through, so the flag
+  // is set here rather than in each of them. It is the site that is roused, not the man: the others saw it happen, and a
+  // monastery where one brother is shot and the rest keep pacing their cloister is the version that reads as a bug.
+  if(a.type==='monk' && a.site && _monkSite[a.site] && !_monkSite[a.site].roused){
+    _monkSite[a.site].roused=true;
+    for(const m of animals) if(m.type==='monk' && !m.dead && m.site===a.site){ m.flee=Math.max(m.flee||0,4); m.goal=null; }
+  }
   a.hp-=dmg; a.flee=6; spawnParticles(a.x,a.y+0.4,a.z,0xcc2018,5,1.5,1.1);
   const hp={x:a.x,y:a.y+0.4,z:a.z}; if(!playSample('hurt',hp,0.7)) sfxHurt(hp);                                    // Minecraft-style animal hurt sample if present, else grunt
   if(a.hp<=0) killAnimal(a); }
@@ -23252,19 +23264,34 @@ function updateAnimalsFrame(dt){
   // him appear. The sites in the order Ben named them: the monastery (the Athos cathedral on the east highland), the
   // beach chapel, and — one alone, and rarely — the ruin. Each site is only populated once its builder has run, so a
   // monk cannot be left standing in ground that has not been carved out yet.
-  _monkT-=dt; if(_monkT<=0){ _monkT=22;
-    if(animals.filter(a=>a.type==='monk'&&!a.dead).length<MONK_CAP){
-      const sites=[];
-      if(typeof _cathedralSpot!=='undefined' && _cathedralSpot && _cathedralDone) sites.push({x:_cathedralSpot.x, z:_cathedralSpot.z, r:10});
-      if(typeof _churchSpot!=='undefined' && _churchSpot && _churchDone) sites.push({x:_churchSpot.x, z:_churchSpot.z, r:7});
-      let placed=false;
-      for(const s of sites){ const d=Math.hypot(player.pos.x-s.x, player.pos.z-s.z);
-        if(d>14 && d<95){ if(spawnMonkNear(s.x,s.z,s.r)){ placed=true; break; } } }
-      // THE RUIN: one hermit, no more, and only a 1-in-5 tick — Ben said "very occasionally one alone".
-      if(!placed && typeof _shrineSpot!=='undefined' && _shrineSpot && Math.random()<0.2){
-        const d=Math.hypot(player.pos.x-_shrineSpot.x, player.pos.z-_shrineSpot.z);
-        if(d>14 && d<95 && !animals.some(a=>a.type==='monk'&&!a.dead&&Math.hypot(a.x-_shrineSpot.x,a.z-_shrineSpot.z)<24))
-          spawnMonkNear(_shrineSpot.x,_shrineSpot.z,5); } } }
+  // #55: EVERY SITE FILLS ITS OWN QUOTA, AS A GROUP, ON ONE TICK. The old loop placed at most ONE monk per 22 seconds
+  // across the whole world, so a monastery took two minutes to reach a cap of three that the chapel was also drawing
+  // from. The tick is 6 s now because the work it does is bounded by the deficit, and a community that is already full
+  // costs one count per site.
+  // THE WINDOW IS INSIDE THE CULL RADIUS, which it was not: monks were spawned out to 95 blocks while
+  // updateAnimalsFrame culls anything past 82, so the far half of that window built monks that were deleted before the
+  // next frame — and a player standing at 83 could watch one vanish. 16..74 leaves a margin at both ends: far enough
+  // that nobody sees a body appear, near enough that it survives to be met.
+  _monkT-=dt; if(_monkT<=0){ _monkT=6;
+    const sites=[];
+    if(typeof _cathedralSpot!=='undefined' && _cathedralSpot && _cathedralDone) sites.push(_monkSiteOf('cathedral',_cathedralSpot.x,_cathedralSpot.z,MONK_SITES.cathedral.r));
+    if(typeof _churchSpot!=='undefined' && _churchSpot && _churchDone) sites.push(_monkSiteOf('chapel',_churchSpot.x,_churchSpot.z,MONK_SITES.chapel.r));
+    let total=0; for(const a of animals) if(a.type==='monk'&&!a.dead) total++;
+    for(const s of sites){ if(total>=MONK_MAX) break;
+      const d=Math.hypot(player.pos.x-s.x, player.pos.z-s.z);
+      if(d<=16 || d>=74) continue;
+      let have=_monkAlive(s.id);
+      // The whole deficit in one pass. spawnMonkNear can fail on a bad spot (a roof, a pillar, a tree), so the attempts
+      // are bounded rather than looped until success: a site that cannot place its last man tries again in six seconds.
+      for(let k=0; k<s.quota-have+2 && have<s.quota && total<MONK_MAX; k++){
+        if(spawnMonkNear(s.x,s.z,s.r,{x:s.x,z:s.z,site:s.id,r:s.r})){ have++; total++; } }
+    }
+    // THE RUIN: one hermit, no more, and only a 1-in-5 tick — Ben said "very occasionally one alone".
+    if(typeof _shrineSpot!=='undefined' && _shrineSpot && Math.random()<0.2 && total<MONK_MAX){
+      const s=_monkSiteOf('ruin',_shrineSpot.x,_shrineSpot.z,MONK_SITES.ruin.r);
+      const d=Math.hypot(player.pos.x-s.x, player.pos.z-s.z);
+      if(d>16 && d<74 && _monkAlive('ruin')<s.quota)
+        spawnMonkNear(s.x,s.z,s.r,{x:s.x,z:s.z,site:'ruin',r:s.r}); } }
   for(let i=animals.length-1;i>=0;i--){ const a=animals[i]; if(a.dead){ a._held=false; animals.splice(i,1); continue; }
     if(typeof animalMarks==='function') animalMarks(a, dt);   // paw prints on distance walked + a blood trail once it is properly hurt
     if(a._held) continue;                                                                          // intimidation-kill: the Wretch owns this animal's transform this frame — its own AI must not fight gripPrey
@@ -26930,7 +26957,18 @@ window.__hc={
                          mean:+(sh.reduce((a,b)=>a+b,0)/sh.length).toFixed(1) } }; }
     catch(e){ return {err:String(e.message||e)}; } },
   // ---- MONKS. `animals` is module-scoped, so a harness cannot read a monk without these. ----
-  monks(){ try{ return { wrath:HORROR.monkWrath|0, gate:MONK_WRATH_KILLS, cap:MONK_CAP,
+  monks(){ try{ return { wrath:HORROR.monkWrath|0, gate:MONK_WRATH_KILLS, max:MONK_MAX,
+      // #55: the cap is per SITE now, so `cap` is gone and this is what replaced it — every site's quota, how many it
+      // actually has, its leash, and whether it has been fired upon. A harness asserting a global cap of 3 is asserting
+      // the bug this item removed.
+      sites:Object.keys(MONK_SITES).map(id=>{ const s=_monkSite[id];
+        return { id, lo:MONK_SITES[id].lo, hi:MONK_SITES[id].hi, r:MONK_SITES[id].r,
+                 known:!!s, quota:s?s.quota:null, alive:_monkAlive(id), roused:!!(s&&s.roused),
+                 x:s?Math.round(s.x):null, z:s?Math.round(s.z):null,
+                 dist:s?+Math.hypot(player.pos.x-s.x,player.pos.z-s.z).toFixed(1):null,
+                 // how far the furthest brother has strayed from his own church — the leash, measured
+                 stray:(()=>{ let m=0; for(const a of animals) if(a.type==='monk'&&!a.dead&&a.site===id&&a.home) m=Math.max(m,Math.hypot(a.x-a.home.x,a.z-a.home.z)); return +m.toFixed(1); })() }; }),
+      wild:animals.filter(a=>a.type!=='monk'&&!a.dead).length,
       shrine:_shrineSpot?{x:_shrineSpot.x,z:_shrineSpot.z}:null,
       live:animals.filter(a=>a.type==='monk'&&!a.dead).map(a=>({x:+a.x.toFixed(1),y:+a.y.toFixed(1),z:+a.z.toFixed(1),hp:a.hp,
         home:a.home?{x:Math.round(a.home.x),z:Math.round(a.home.z)}:null,
@@ -26940,7 +26978,22 @@ window.__hc={
         chantIn:+(a.chantT||0).toFixed(1), chanting:+(a._chant||0).toFixed(1),
         parts:(()=>{ let n=0; a.mesh.traverse(o=>{ if(o.isMesh)n++; }); return n; })(),
         gold:(()=>{ let n=0; a.mesh.traverse(o=>{ if(o.isMesh&&o.material&&o.material.color&&o.material.color.getHex()===0xd4af37)n++; }); return n; })(),
+        site:a.site||null, leashR:a.leashR||null, strayed:a.home?+Math.hypot(a.x-a.home.x,a.z-a.home.z).toFixed(1):null,
         book:!!a.mesh.userData.monkBook })) }; }catch(e){ return {err:e.message}; } },
+  // #55 QA: fill a site's quota now, without walking into its window and waiting for a 6 s tick. Returns what it placed.
+  monkFill(id){ try{ const spot = id==='cathedral' ? (typeof _cathedralSpot!=='undefined'&&_cathedralSpot) :
+                                  id==='chapel' ? (typeof _churchSpot!=='undefined'&&_churchSpot) :
+                                  (typeof _shrineSpot!=='undefined'&&_shrineSpot);
+      if(!spot) return {err:'no '+id+' sited yet'};
+      const s=_monkSiteOf(id, spot.x, spot.z, MONK_SITES[id].r); let placed=0;
+      for(let k=0;k<s.quota*3 && _monkAlive(id)<s.quota;k++) if(spawnMonkNear(s.x,s.z,s.r,{x:s.x,z:s.z,site:id,r:s.r})) placed++;
+      return { id, quota:s.quota, alive:_monkAlive(id), placed, x:Math.round(s.x), z:Math.round(s.z) }; }catch(e){ return {err:e.message}; } },
+  // …and shoot one, through the real damage path, so the roused flag is exercised the way a gun exercises it.
+  monkShoot(id){ try{ const m=animals.find(a=>a.type==='monk'&&!a.dead&&(!id||a.site===id)); if(!m) return {err:'no monk alive'};
+      const before={site:m.site, roused:!!(m.site&&_monkSite[m.site]&&_monkSite[m.site].roused)};
+      hurtAnimal(m,1);
+      return { before, after:{ site:m.site, roused:!!(m.site&&_monkSite[m.site]&&_monkSite[m.site].roused),
+               fleeing:animals.filter(a=>a.type==='monk'&&!a.dead&&a.site===m.site&&(a.flee||0)>0).length } }; }catch(e){ return {err:e.message}; } },
   monkSpawn(dx,dz){ try{ const x=player.pos.x+(+dx||0), z=player.pos.z+(+dz||0); const m=spawnMonkAt(x,z,{x,z}); return m?{x:+m.x.toFixed(1),y:+m.y.toFixed(1),z:+m.z.toFixed(1)}:null; }catch(e){ return {err:e.message}; } },
   // A monk paces. A frame measured a second after the camera was aimed at him found 20000 black pixels and 212 blue ones,
   // because he had walked 4 blocks out of the box while the shot was being taken. Parking him is the fix: grazeT>0 with no
