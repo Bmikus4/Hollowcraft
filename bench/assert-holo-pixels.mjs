@@ -15,11 +15,6 @@ const CHROME=['C:','Program Files','Google','Chrome','Application','chrome.exe']
 let fails=0; const ok=(n,c,g)=>{ if(!c)fails++; console.log(`  ${c?'ok  ':'FAIL'}  ${n}   ${JSON.stringify(g)}`); };
 const GUNS=['ar15_dot','ar15_suppressed_dot','minigun_dot','minigun_suppressed_dot','hunting_rifle_dot','hunting_rifle_suppressed_dot'];
 const W=1280,H=720;
-// The reticle is the only saturated red in an ADS frame of grey metal and daylight terrain: r well over g and b.
-function redStats(buf){
-  const png=buf; // raw RGBA from CDP screenshot decoded by sharp-free path below
-  return png;
-}
 (async()=>{
   const port=await freePort();
   const server=spawn(process.execPath,[path.join(ROOT,'mp-server.js')],{cwd:ROOT,env:{...process.env,MP_PORT:String(port),MP_DISC:String(port+1)},stdio:'ignore'});
@@ -37,39 +32,60 @@ function redStats(buf){
     for(const g of GUNS){
       await page.evaluate(`(()=>{ __hc.aim(false); __hc.hold('${g}'); })()`); await sleep(500);
       await page.evaluate(`__hc.aim(true)`); await sleep(1600);
-      await page.evaluate(`__hc.cam({yaw:0,pitch:0})`); await sleep(900);
-      // Read the reticle straight off the WebGL canvas: every pixel where red dominates by a wide margin is holographic ring.
-      const m = await page.evaluate(`(()=>{
-        const cv=document.querySelector('canvas');
-        const c2=document.createElement('canvas'); c2.width=cv.width; c2.height=cv.height;
-        const x=c2.getContext('2d'); x.drawImage(cv,0,0);
-        const d=x.getImageData(0,0,c2.width,c2.height).data;
-        const cx=c2.width/2, cy=c2.height/2;
-        let n=0,sx=0,sy=0,x0=1e9,x1=-1e9,y0=1e9,y1=-1e9; const quad=[0,0,0,0]; const pts=[];
-        for(let py=0;py<c2.height;py++) for(let px=0;px<c2.width;px++){
-          const i=(py*c2.width+px)*4, r=d[i],gg=d[i+1],bb=d[i+2];
-          if(r>110 && r-gg>60 && r-bb>50){ n++; sx+=px; sy+=py;
-            if(px<x0)x0=px; if(px>x1)x1=px; if(py<y0)y0=py; if(py>y1)y1=py;
-            const dx=px-cx, dy=py-cy;
-            if(Math.abs(dx)<Math.abs(dy)) quad[dy<0?0:1]++; else quad[dx<0?2:3]++;
-            if(pts.length<4000) pts.push([px,py]); } }
-        return { n, w:c2.width, h:c2.height, cx, cy,
-                 cen: n?[+(sx/n).toFixed(2),+(sy/n).toFixed(2)]:null,
-                 box: n?[x0,y0,x1,y1]:null, quad };
-      })()`);
+      // POINTED AT THE SKY. The sight picture does not care where it is aimed, but the measurement does: with terrain behind the
+      // glass a foxglove or a berry bush reads redder than a 15 px hologram, and which flora has streamed in differs run to run —
+      // the same gun measured a clean centred ring on one run and a 13 px blob off in the lower right on the next. Sky has no red
+      // in it, so the mask can be simple and the number means one thing.
+      await page.evaluate(`__hc.cam({yaw:0,pitch:-1.05})`); await sleep(900);
+      // Two frames: with the hologram, and with __hc.holoHide dropping it and NOTHING else. Whatever the mask counts has to
+      // vanish in the second one, or it was never the reticle. drawImage of the live WebGL canvas is no use — preserveDrawingBuffer
+      // is off, so it hands back a cleared buffer and every gun reads zero — so both frames are real screenshots decoded back
+      // through an Image.
+      const shotOn=(await page.screenshot()).toString('base64');
+      await page.evaluate(`__hc.holoHide(true)`); await sleep(400);
+      const shotOff=(await page.screenshot()).toString('base64');
+      await page.evaluate(`__hc.holoHide(false)`); await sleep(300);
+      // A function value, not a string: page.evaluate('(a)=>{...}', arg) evaluates the string as an EXPRESSION and drops the
+      // arguments, so a string form returns the function itself and the result comes back undefined.
+      const m = await page.evaluate(async ([bOn,bOff])=>{
+        const scan=async b64=>{
+          const im=new Image(); im.src='data:image/png;base64,'+b64; await im.decode();
+          const c=document.createElement('canvas'); c.width=im.naturalWidth; c.height=im.naturalHeight;
+          const x=c.getContext('2d'); x.drawImage(im,0,0);
+          const d=x.getImageData(0,0,c.width,c.height).data, cx=c.width/2, cy=c.height/2;
+          // 40 px crop: the ring's radius is 7.6 px, and at 160 px the crop swallowed the rifle's own wooden stock.
+          const R=40, px0=(cx-R)|0, px1=(cx+R)|0, py0=(cy-R)|0, py1=(cy+R)|0;
+          let n=0,sx=0,sy=0,rs=0; const sec=new Array(12).fill(0);
+          for(let py=py0;py<py1;py++) for(let px=px0;px<px1;px++){
+            const i=(py*c.width+px)*4, r=d[i], g=d[i+1], b=d[i+2];
+            if(r>90 && r-g>40 && b>=g-20){ n++; sx+=px; sy+=py;
+              const dx=px-cx, dy=py-cy; rs+=Math.hypot(dx,dy);
+              sec[Math.min(11,Math.floor((Math.atan2(dy,dx)+Math.PI)/(Math.PI/6)))]++; } }
+          return { n, w:c.width, cx, cy, sectors:sec, secFilled:sec.filter(v=>v>0).length,
+                   meanR:n?+(rs/n).toFixed(2):null, cen:n?[+(sx/n).toFixed(2),+(sy/n).toFixed(2)]:null };
+        };
+        const on=await scan(bOn), off=await scan(bOff);
+        return { ...on, offN:off.n };
+      }, [shotOn,shotOff]);
       out[g]=m;
       const scale=m.w/W;
       const cenOff = m.cen ? [ +(m.cen[0]-m.cx).toFixed(2), +(m.cen[1]-m.cy).toFixed(2) ] : null;
-      const box=m.box; const top=box?m.cy-box[1]:0, bot=box?box[3]-m.cy:0, lef=box?m.cx-box[0]:0, rig=box?box[2]-m.cx:0;
-      console.log('   ', g.padEnd(30), JSON.stringify({n:m.n, cenOff, arms:[+top.toFixed(1),+bot.toFixed(1),+lef.toFixed(1),+rig.toFixed(1)], quad:m.quad}));
-      ok(g+': the reticle is actually on screen', m.n>200, {redPx:m.n});
-      if(m.n>200){
+      console.log('   ', g.padEnd(30), JSON.stringify({n:m.n, offN:m.offN, cenOff, meanR:m.meanR, secFilled:m.secFilled, sectors:m.sectors}));
+      // A 68 MOA ring at 62 deg FOV is 15 device px across at 720p, so the whole ring plus its bloom is a few dozen
+      // pixels, not hundreds. 40 is well above the 3-9 stray texels the unmipmapped 256 px drawing used to leave.
+      ok(g+': the reticle is actually on screen', m.n>=25, {redPx:m.n});
+      if(m.n>=25){
         // Centred: the red centroid within 3 device px of frame centre. A whole circle: no cardinal quadrant empty, and the
         // top reach within 15% of the bottom reach — a cut-off top shows up as a short top arm, not as a missing ring.
-        ok(g+': centred on the frame', Math.hypot(cenOff[0],cenOff[1]) < 3*scale, {cenOff});
-        ok(g+': all four arcs drawn', Math.min(...m.quad) > m.n*0.10, {quad:m.quad});
-        ok(g+': the top is not cut off', top > bot*0.85 && bot > top*0.85, {top:+top.toFixed(1),bot:+bot.toFixed(1)});
-        ok(g+': and it is not cut left or right', lef > rig*0.85 && rig > lef*0.85, {lef:+lef.toFixed(1),rig:+rig.toFixed(1)});
+        ok(g+': centred on the frame', Math.hypot(cenOff[0],cenOff[1]) < 4*scale, {cenOff});
+        // A whole ring lights at least 10 of the 12 sectors round the clock — an arc clipped off by the window rim empties three
+        // or four adjacent ones.
+        ok(g+': the ring is not cut off anywhere', m.secFilled>=10, {secFilled:m.secFilled, sectors:m.sectors});
+        // …and it is the ring, at 68 MOA: a 7.6 px radius at this FOV and resolution. A blob at the centre or a bloom smeared
+        // across the glass would both pass a presence count and fail this.
+        ok(g+': and it is ring-shaped at the true 68 MOA', m.meanR>4.5 && m.meanR<11, {meanR:m.meanR});
+        // The control: hide the hologram and the pixels have to go. Anything left was scenery wearing the mask.
+        ok(g+': …and those pixels ARE the hologram', m.offN < m.n*0.15, {on:m.n, off:m.offN});
       }
       await page.evaluate(`__hc.aim(false)`); await sleep(350);
     }
