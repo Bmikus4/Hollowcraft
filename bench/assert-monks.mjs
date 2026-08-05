@@ -136,7 +136,11 @@ const ok=(n,c,d)=>{ checks++; if(!c){fails++; console.log('  FAIL  '+n+'   '+JSO
     ok('kill 1 counts and makes no creature', k[0] && k[0].wrath===1 && k[0].hwAfter===k[0].hwBefore, k[0]);
     ok('kill 1 rouses the beast instead', k[0] && k[0].armed===true && k[0].menace>0.4, k[0]&&[k[0].armed,k[0].menace]);
     ok('kill 2 counts and still makes no creature', k[1] && k[1].wrath===2 && k[1].hwAfter===k[1].hwBefore, k[1]);
-    ok('kill 3 makes the Horrific Wretch', k[2] && k[2].wrath===3 && k[2].hwAfter>k[2].hwBefore, k[2]);
+    // OWED COUNTS. The conversion dresses the PRIME wretch and only on a frame where it is active: dressing a dormant one put a
+    // creature in the world that nothing drew (871f77a), so the third kill records the debt in HORROR.hwPending and it is paid on
+    // the first frame the beast is out. In this bench the wretch is asleep in its lair, so asserting hwAfter>hwBefore here was
+    // asserting the bug that fix removed.
+    ok('kill 3 makes the Horrific Wretch, or owes it', k[2] && k[2].wrath===3 && (k[2].hwAfter>k[2].hwBefore || k[2].pending===1), k[2]);
 
     console.log('\n[6] the counter survives a reload');
     const rt=await page.evaluate('__hc.monkSaveRoundTrip(2)');
