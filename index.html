@@ -2683,7 +2683,7 @@ function _riverField(wx,wz){
   const wzo = wz + 34*fbm2(wx*0.0041+11.3, wz*0.0041+7.7, 733, 4);
   return fbm2(wxo*0.0020, wzo*0.0020, 91, 3);
 }
-const FLOW_RIVER=1.0;        // blocks a second the surface pattern travels downstream in a river
+const FLOW_RIVER=1.6;        // blocks a second the surface pattern travels downstream in a river — it has to beat the surface's own 2.57 blocks/s of fixed wave drift, which is why the shader cuts that drift where there is a current
 const FLOW_IN=0.62;          // the ocean's inflow gain at the waterline (see the sign flip below)
 const FLOW_SLACK=18;         // distance from land where inflow has died to nothing and the drift turns seaward
 const FLOW_REACH=72;         // how far the land/sea rays look; past this the open ocean is dead flat and #59's business
@@ -2706,12 +2706,16 @@ function _flowSample(cx,cz){
     const d=6, gx=_riverField(x+d,z)-_riverField(x-d,z), gz=_riverField(x,z+d)-_riverField(x,z-d);
     let tx=-gz, tz=gx; const L=Math.hypot(tx,tz);
     if(L>1e-9){ tx/=L; tz/=L;
-      // WHICH WAY IS DOWNSTREAM cannot be read off the channel floor either, for the same reason. Rivers end in the sea,
-      // so downstream is whichever end of the tangent takes you toward it: the nearest-land bearing is inverted to get a
-      // seaward one. A channel with no coast in reach keeps the arbitrary sign — an inland run of river that has to look
-      // like it is going somewhere, and either answer does.
-      if(landTh!=null){ const sx=-Math.sin(landTh), sz=-Math.cos(landTh); if(tx*sx+tz*sz < 0){ tx=-tx; tz=-tz; } }
-      fx=tx*FLOW_RIVER; fz=tz*FLOW_RIVER; }
+      // WHICH WAY IS DOWNSTREAM, and this is the part that has to be SMOOTH. The first version chose the sign by the
+      // inverted nearest-land bearing, which is a ray scan and therefore jumps: two lattice cells eight blocks apart
+      // picked opposite ends of the same channel and the river ran into itself, measured as a 0.25 step in the field
+      // across one block where the ceiling for the whole lattice is 0.16. The island is the smooth fact available here —
+      // ISLE_X/ISLE_Z are generator constants and the terrain descends radially outward — so downstream is the outward
+      // end of the tangent, and the choice is made with a SOFT sign rather than a hard flip: where a river runs around
+      // the island instead of down it, the current eases to nothing rather than reversing between two samples.
+      const rx=x-ISLE_X, rz=z-ISLE_Z, rL=Math.hypot(rx,rz)||1;
+      const w=clamp((tx*rx/rL + tz*rz/rL)/0.25, -1, 1);
+      fx=tx*FLOW_RIVER*w; fz=tz*FLOW_RIVER*w; }
   } else if(landTh!=null && enclosed<11){
     // THE OCEAN'S INFLOW IS THE ROSTER'S INVERTED MASK, WRITTEN AS A SIGN FLIP RATHER THAN A SECOND FIELD (Q4 ruling:
     // static, no tide). One signed magnitude along the landward axis: positive at the waterline, through zero at
@@ -2940,6 +2944,13 @@ const globalU = {
   uCloudShadow:{ value:1 },
   uCloudScroll:{ value:new THREE.Vector2(0,0) },
   uWhiteTile:{ value:(typeof TILEIDX!=='undefined'&&TILEIDX.vantawhite!=null)?TILEIDX.vantawhite:-1 },   // SHARED vantawhite-glow uniform (Ben 07-21): one reference every chunk material + clone points at, so the unlit-white override can never go stale across recompiles / composer rebuilds / VFX-setting toggles
+  // THE LIGHT IN YOUR HAND, for the scotopic gate only (see injectAtlas). The gate reads the BAKED block-light volume, and a torch
+  // you are carrying is a PointLight that was never baked into it — so walking a lantern through the world left everything it lit
+  // grey, which is the whole reason the washout read as "most of the world is grey at night" (Ben 08-05). Position and reach are
+  // pushed here every frame beside heldLight's own update.
+  uHandPos:{ value:new THREE.Vector3(0,-9999,0) },
+  uHandK:  { value:0 },
+  uHandR:  { value:26 },
   // DIRECTIONAL SKYLIGHT — see injectAtlas. amt 0 is the A/B off; up/dn are the hemisphere fraction reaching a face pointing
   // straight up and straight down, and a vertical face lands on their midpoint.
   uSkyDirAmt:{ value:1 },
@@ -2991,6 +3002,7 @@ function injectAtlas(mat, opts={}){
     // cloud shadows and the measurement is of nothing.
     sh.uniforms.uCloudTex = globalU.uCloudTex; sh.uniforms.uCloudShadow = globalU.uCloudShadow;
     sh.uniforms.uCloudScroll = globalU.uCloudScroll; sh.uniforms.uSunDirC = globalU.uSunDir;
+    sh.uniforms.uHandPos = globalU.uHandPos; sh.uniforms.uHandK = globalU.uHandK; sh.uniforms.uHandR = globalU.uHandR;
     sh.uniforms.uChunkTint = { value:new THREE.Color(LIGHT_PAL[0][0],LIGHT_PAL[0][1],LIGHT_PAL[0][2]) };   // PER CLONE, deliberately: _chunkMat overwrites it with that chunk's own dominant light colour
     sh.uniforms.uSkyDirAmt = globalU.uSkyDirAmt; sh.uniforms.uSkyDirUp = globalU.uSkyDirUp; sh.uniforms.uSkyDirDn = globalU.uSkyDirDn;
     sh.uniforms.uScotDay = globalU.uDay; sh.uniforms.uScotAmt = globalU.uScotAmt; sh.uniforms.uScotLo = globalU.uScotLo; sh.uniforms.uScotHi = globalU.uScotHi;   // SHARED refs, same reason as uWhiteTile
@@ -3012,7 +3024,7 @@ function injectAtlas(mat, opts={}){
           '\nfloat wsw = sin(uTime*spd1 + transformed.x*0.6 + transformed.z*0.5)*amp1*aw; transformed.x += wsw; transformed.z += cos(uTime*spd2 + transformed.x*0.4)*amp2*aw;'):''));   // stashed on the material so a harness can assert the RELATIONSHIP (kelp slower, kelp wider) against the source that actually compiled
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>',
-        '#include <common>\nprecision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform float uScotAmt;\nuniform float uScotLo;\nuniform float uScotHi;\nuniform float uScotDay;\nuniform vec3 uChunkTint;\nuniform float uSkyDirAmt;\nuniform float uSkyDirUp;\nuniform float uSkyDirDn;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
+        '#include <common>\nprecision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform float uScotAmt;\nuniform float uScotLo;\nuniform float uScotHi;\nuniform float uScotDay;\nuniform vec3 uChunkTint;\nuniform vec3 uHandPos;\nuniform float uHandK;\nuniform float uHandR;\nuniform float uSkyDirAmt;\nuniform float uSkyDirUp;\nuniform float uSkyDirDn;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
       // ---- NIGHT VOLUMETRIC DARKNESS ON REAL FOLIAGE (Ben 07-29) ----
       // "volumetric darkness at night is applied to horizon pines, but not to forest trees." Correct, and the two fade to
       // different targets. The horizon backdrop fades to _uPineFog, which is scene.fog.color pulled toward storm blue and
@@ -3110,7 +3122,14 @@ function injectAtlas(mat, opts={}){
     // two light terms already sampled above, so this costs one max and one smoothstep and needs no extra fetch.
     sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>',
       '#include <dithering_fragment>\n'+
-      '{ float _slit=max(_bl, vSky*uScotDay);\n'+
+      // THE LIGHT YOU CARRY COUNTS (Ben 08-05: "the nighttime chroma thing may look better if held light changed the colors").
+      // It is the fix for the complaint, not a garnish: the gate reads the BAKED volume, a carried torch is a PointLight that was
+      // never baked, so every surface a player actually lit stayed washed out and the night read as a grey world. One distance
+      // against the hand's own position, squared so the colour is strongest in the pool's core and gone by its edge — where the
+      // eye has nothing to see a colour with anyway.
+      '{ float _hd=length(vWPos-uHandPos)/max(uHandR,0.001);\n'+
+      '  float _hand=uHandK*(1.0-clamp(_hd*_hd,0.0,1.0));\n'+
+      '  float _slit=max(max(_bl, vSky*uScotDay), _hand);\n'+
       '  float _sk=uScotAmt*(1.0-smoothstep(uScotLo,uScotHi,_slit));\n'+
       '  float _sl=dot(gl_FragColor.rgb,vec3(0.2126,0.7152,0.0722));\n'+
       '  gl_FragColor.rgb=mix(gl_FragColor.rgb, vec3(_sl), _sk); }\n'+
@@ -4383,7 +4402,15 @@ const waterMat = new THREE.ShaderMaterial({
         float y=0.0; vec2 n=vec2(0.0);
         vec2 D0=normalize(vec2(1.0,0.3)),D1=normalize(vec2(-0.7,1.0)),D2=normalize(vec2(0.5,-0.9)),D3=normalize(vec2(-1.0,-0.4));
         vec2 ap=wp.xz-fo;
-        float p0=dot(D0,ap)*0.35+uTime*0.9, p1=dot(D1,ap)*0.6+uTime*1.15, p2=dot(D2,ap)*1.3+uTime*1.6, p3=dot(D3,ap)*2.4+uTime*2.1;
+        // A CURRENT CARRIES THE PATTERN INSTEAD OF ADDING TO IT, and without this line the item does not read at all.
+        // Those four uTime terms are phase speeds: 0.9 rad/s over a 0.35 rad/block wave is 2.57 BLOCKS A SECOND, and the
+        // other three run at 1.9, 1.2 and 0.9. A river advecting at 1.6 is a small perturbation on top of four fast wave
+        // trains already crossing it in fixed compass directions — measured, the still surface shifts 6 px in 150 ms on
+        // its own — so the water looked exactly as busy as before and no faster downstream. Where there is a current the
+        // fixed drift is cut to a quarter and the flow does the moving, which is also the physical truth: ripples travel
+        // in their own directions on still water, and in a current the whole surface is carried.
+        float still = 1.0 - 0.75*clamp(length(vFlow), 0.0, 1.0);
+        float p0=dot(D0,ap)*0.35+uTime*0.9*still, p1=dot(D1,ap)*0.6+uTime*1.15*still, p2=dot(D2,ap)*1.3+uTime*1.6*still, p3=dot(D3,ap)*2.4+uTime*2.1*still;
         y+=sin(p0)*0.14+sin(p1)*0.09+sin(p2)*0.045+sin(p3)*0.02;
         y=min(y,0.10);   // CLAMP crests below the block top (rest surface sits 0.12 under it) → waves never rise over adjacent land
         n+=D0*cos(p0)*0.14*0.35+D1*cos(p1)*0.09*0.6+D2*cos(p2)*0.045*1.3+D3*cos(p3)*0.02*2.4;
@@ -6282,8 +6309,9 @@ function assignPointLights(){
     else heldLight.position.set(camera.position.x + _m[0]*0.34*_side, camera.position.y-0.15 + _m[1]*0.34*_side, camera.position.z + _m[2]*0.34*_side);   // NO held light while grabbed — it blows out the throat jumpscare with glare
     const strong=hl>=15; heldLight.color.setHex(strong?0xff9838:0xff6a22);
     heldLight.intensity=(strong?58:46)*(1+Math.sin(t*11)*0.07+Math.sin(t*1.9)*0.05); heldLight.distance=strong?32:26; heldLight.decay=1.3;
-    heldLight.castShadow=false; }
-  else { heldLight.intensity=0; heldLight.castShadow=false; }
+    heldLight.castShadow=false;
+    globalU.uHandPos.value.copy(heldLight.position); globalU.uHandK.value=1; globalU.uHandR.value=heldLight.distance*0.72; }   // 0.72 of the light's own reach: colour comes back inside the bright core of the pool, not out at its last glimmer
+  else { heldLight.intensity=0; heldLight.castShadow=false; globalU.uHandK.value=0; }
 }
 function disposeChunkMeshes(c){
   if(!c.group) return;
@@ -11891,6 +11919,9 @@ function updateWretch(dt){
   const fogAggro=(1+0.25*(typeof weather!=='undefined'?(weather.fog||0):0))*(player.hunger<4?1.15:1);   // FOG EMBOLDENS IT — every hunt window widens 25% in a full bank; and it SMELLS starvation — a starving player reads as prey (+15%, Ben 07-20)
   if(!wretch.committed && !wretch.sneaking && wantHunt && s.seen && near<34*fogAggro && dayAllows){ wretch.committed=true; wretch.commitT=0; wretchVoice&&wretchVoice('sting',wretch.pos); }
   if(!wretch.committed && (s.seen||near<6) && near<12 && (wretch._summoned || HORROR.huntArmed) && (!wretch.sneaking||near<6)){ wretch.committed=true; wretch.commitT=0; }   // POINT-BLANK COMMIT — a sneak holds its nerve until arm's reach, THEN the grab machinery fires
+  // A BEAT AFTER A CONNECTED CHARGE. Set where a charge lands on a creative player (see the grab branch): without it the two
+  // commit rules above re-commit on the very next frame from arm's reach, and the creature strikes on a loop instead of circling.
+  if((wretch._recommitT||0)>0){ wretch._recommitT-=dt; wretch.committed=false; }
   if(wretch.committed){ wretch.commitT+=dt; if((s.seenAge>4 && !s.heard && wretch.commitT>3) || wretch.wound>0.85) wretch.committed=false; }
   // routed damage decays if it's left alone (so chip damage across separate encounters doesn't stack forever)
   wretch.lastHitT=(wretch.lastHitT==null?99:wretch.lastHitT)+dt; if(wretch.lastHitT>10){ wretch.encDmg=0; wretch.routed=false; }
@@ -12030,7 +12061,24 @@ function updateWretch(dt){
     if(_canGrab && (_pb || (near<3.2 && Math.abs(_gp.y-wretch.pos.y)<2.4 && _gLOS && !_roofed) || (wretch._reachT>0.16 && near<4.2 && Math.abs(_gp.y-wretch.pos.y)<2.4 && _gLOS && !_roofed))){ wretch._reachT=0; HORROR.encounters++; HORROR.sinceScare=0; wretch.committed=false;
       if(NET.on && huntId!==NET.id){ wretch.owner=huntId; netSend({t:'own',owner:huntId}); netSend({t:'grab',tid:huntId}); return; }   // grabbed a PEER → hand them the capture
       if(!player.creative || wretch._summoned){ beginDrag(); return; }               // creative players are normally immune to capture — but a SUMMONED wretch grabs anyway (so you can test it)
-      damage(4,'the Wretch tore into you'); despawnWretch(true); return; } }
+      // A CONNECTED CHARGE MUST NOT DELETE THE CREATURE (Ben 08-04: "he would run towards me screaming... then run into me and
+      // disappear, teleport away and do nothing"). This branch is a creative player on a natural spawn, and it read
+      // `damage(4); despawnWretch(true)` — but damage() returns on its first line for a creative player, so the whole encounter
+      // was: it reaches you, nothing happens, and then it removes itself and re-spawns 45-85 s away. Every charge ended in the
+      // creature vanishing with no consequence, which is exactly the report.
+      //   Creative keeps its immunity to CAPTURE — that is the point of the branch above — but the charge now resolves in the
+      // world instead: it lands the blow it came for, recoils, and goes back to stalking you, so it is still there afterwards.
+      // THE COOLDOWN HAS TO GATE THE BLOW, not just the commit. HUNT arms from proximity alone in the state ladder — no
+      // `committed` required — so clearing that flag does not stop this branch re-entering on the very next frame. Measured
+      // before this guard: ten strikes inside one 60 ms poll, which would be ten screams and ten banners a second.
+      if((wretch._recommitT||0)>0){ wretch._reachT=0; return; }                        // still recoiling from the last blow
+      damage(4,'the Wretch tore into you');
+      HORROR.creativeHits=(HORROR.creativeHits||0)+1;
+      wretch.state='STALK'; wretch.crawl=Math.max(wretch.crawl,0.75); wretch._riseD0=0;   // still low and close, and the rise restarts with the next charge
+      wretch._reachT=0; wretch.commitT=0; wretch._recommitT=2.2;                          // a beat before it can commit again, or it re-charges every frame from arm's reach
+      wretchVoice&&wretchVoice('shriek',wretch.pos);
+      if(typeof flashName==='function') flashName('it strikes, and circles back');
+      return; } }
   else if(st==='FLEE'){ wretch.fleeing=true; wretch.stealth=1.0;
     const fleePanic = watched ? (1.4 + Math.min(0.6,(wretch.observed||0)*0.12)) : 1.0;   // bolts even HARDER when it feels your eyes on its back — and the longer you stare, the faster it scrambles
     speed=(wretch.routed?24:19)*fleePanic; wretch.crawl=Math.min(1,wretch.crawl+dt*4.0);   // PANIC SCAMPER — bolts flat-out for the treeline
@@ -14658,6 +14706,12 @@ function dislodgePlant(x,y,z){ const b=getBlock(x,y,z); if(b===AIR)return; const
   setBlockWorld(x,y,z,AIR,true); netEdit(x,y,z,AIR); }
 function breakBlock(h){
   if(inDungeon(h.x,h.y,h.z)) return;                                                            // foolproof: nothing breaks a dungeon block, ever (covers creative-instant too)
+  // THE HALLS ARE NOT MINEABLE (Ben 08-05: "i should not be able to break any blocks in the backrooms"). Same reasoning as
+  // the dungeon guard above, and it has to sit at the TOP for the same reason: creative-instant break reaches this
+  // function directly. It is also a correctness guard, not only a design one — the floor and lid here are re-laid from
+  // scratch by brSlabColumn whenever the storey grid moves (see brReslabStaleAny), so a hole you dug is silently filled
+  // back in and the pick never had any effect anyway.
+  if(BR.inside) return;
   if(B[h.b].use==='vault' && _vaultBreak(h, ()=>spawnDrop('vault_door_x',1,h.x+0.5,h.y+0.5,h.z+0.5))) return;
   if(h.b===BID.door||h.b===BID.door_top||h.b===BID.door_open||h.b===BID.door_top_open){ const by=(h.b===BID.door||h.b===BID.door_open)?h.y:h.y-1;   // door: remove both halves, drop one
     if(!player.creative) spawnDrop('door',1,h.x+0.5,h.y+0.5,h.z+0.5); setBlockWorld(h.x,by,h.z,AIR,true); setBlockWorld(h.x,by+1,h.z,AIR,true); netEdit(h.x,by,h.z,AIR); netEdit(h.x,by+1,h.z,AIR); spawnParticles(h.x+0.5,h.y+0.5,h.z+0.5,0x8a7048,8,1.8,1.2); return; }
@@ -19481,6 +19535,10 @@ function brxUnion(){ const keep=BR.loaded||[];
     // id spaces silently disagreed, so brxUpdateLights culled essentially every fixture as "not in a room you can see" and
     // the Backrooms had NO pooled light at all — measured as litNear:0 while standing directly under a tube in a lit room.
     // Rebased from a stored original so repeated unions cannot drift.
+    // DO NOT ADD dy TO f.y HERE. It looks like the missing sibling of the ceil/ty shifts above and it is not: fixture y is
+    // already stamped in world space at generation, so shifting it again puts the light a storey ABOVE the ceiling. Tried
+    // and reverted 08-05 — the A/B moved nothing (4 fixtures reading below their room's floor on both arms, y 47.9 against
+    // a floor of 50, identical), which is the proof it was not the cause.
     for(const f of rec.fixtures){ if(f._room0===undefined) f._room0=f.room; if(f._room0!=null) f.room=f._room0+base; }
     for(const b of rec.bulbs){ if(b._room0===undefined) b._room0=b.room; if(b._room0!=null) b.room=b._room0+base; }
     for(const f of BRX_FIELDS){ if(f==='rooms')continue; const a=rec[f]; for(let i=0;i<a.length;i++) BR[f].push(a[i]); } }
@@ -22264,6 +22322,7 @@ function updateLampHalos(dt){
 // their y is altitude, and a bird would stamp a shadow into the air.
 // The radius comes from ANIMALS[type].h, which already carries each creature's height, rather than a second table to keep in sync.
 const CS_MAX=32, CS_R=44;
+let CS_LIFT=0.04, CS_SCALE=2.0;   // height above the surface, and the shadow's width in units of the creature's own radius — both tunable through __hc.csTune while this is being judged
 let _csMesh=null, _csTex=null, _csOn=true, _csLive=0;
 const _csM=new THREE.Matrix4(), _csQ=new THREE.Quaternion(), _csP=new THREE.Vector3(), _csS=new THREE.Vector3();
 function _csTexture(){
@@ -22291,7 +22350,7 @@ function updateContactShadows(dt){
     if(n>=CS_MAX) return;
     const d=Math.hypot(x-px, z-pz); if(d>CS_R) return;
     const fade=clamp((CS_R-d)/10, 0, 1);                       // fades out over the last 10 blocks of range so one never pops in
-    _csP.set(x, y+0.04, z); _csQ.identity(); _csS.set(rad*2.0*fade, 1, rad*2.0*fade);
+    _csP.set(x, y+CS_LIFT, z); _csQ.identity(); _csS.set(rad*CS_SCALE*fade, 1, rad*CS_SCALE*fade);
     if(_csS.x<0.02) return;
     _csM.compose(_csP,_csQ,_csS); _csMesh.setMatrixAt(n++, _csM);
   };
@@ -22656,7 +22715,12 @@ function monkWrath(a){
   flashName(left===1 ? 'the gods are angry. one more and they will answer.' : 'you have angered the gods.');
   return null; }
 let _jesusIntro=0, _jesusRisen=0;   // after the intro departure he NEVER returns until the boss's death resurrects him
+let _qaFreezeAnimals=false;   // QA/bench only: see __hc.freezeAnimals. Nothing in the game sets it.
 function updateAnimalsFrame(dt){
+  // A BENCH CANNOT MEASURE A MOVING TARGET. Animals flee the player, so a harness that teleports next to one to photograph its
+  // contact shadow has already scared it away by the time it aims: three separate attempts framed nothing. Freezing the sim leaves
+  // every mesh exactly where it is, which is all a screenshot needs.
+  if(_qaFreezeAnimals) return;
   _animLodTick++;                                                                                // drives far-animal movement LOD (see farLod below)
   if(!_jesusIntro){ try{ const jx=spawnX+2.5, jz=spawnZ+2.0, jy=(typeof groundYAt==='function')?groundYAt(jx,jz):0;
     if(jy>CFG.SEA){ _jesusIntro=1;   // WAIT for the spawn chunks to exist — an early groundYAt returns bedrock and buries him 40 blocks under the terrain, frozen forever
@@ -25157,10 +25221,29 @@ window.__hc={
       return { built:true, visible:!!_ffPts.visible, live:_ffLive, lit, maxBright:+mx.toFixed(3),
         day:+globalU.uDay.value.toFixed(4), hush:(typeof worldHush==='function')?+worldHush().toFixed(3):null,
         rain:(typeof weather!=='undefined')?+(weather.rain||0).toFixed(3):null }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: stop animal simulation where it stands, so a frame pair can be taken of the same creature in the same place.
+  // QA/bench: the shadow's three knobs, so "it is drawing but invisible" can be taken apart without a rebuild.
+  csTune(o){ try{ if(o){ if(o.opacity!=null && _csMesh) _csMesh.material.opacity=+o.opacity;
+        if(o.lift!=null) CS_LIFT=+o.lift; if(o.scale!=null) CS_SCALE=+o.scale; }
+      if(o&&o.mode&&_csMesh){ const M=_csMesh.material;
+        if(o.mode==='red'){      M.color.setHex(0xff0000); M.map=null;          M.transparent=false; }
+        else if(o.mode==='redmap'){ M.color.setHex(0xff0000); M.map=_csTexture(); M.transparent=true; }
+        else if(o.mode==='blacknomap'){ M.color.setHex(0x000000); M.map=null;    M.transparent=true; }
+        else if(o.mode==='flagged'){ M.color.setHex(0x000000); M.map=null; M.transparent=true; M.opacity=1.0; }
+        else if(o.mode==='mult'){ M.color.setHex(0x333333); M.map=null; M.transparent=true; M.blending=THREE.MultiplyBlending; }
+        else {                   M.color.setHex(0x000000); M.map=_csTexture(); M.transparent=true; }
+        M.needsUpdate=true; }
+      return { opacity:_csMesh?_csMesh.material.opacity:null, lift:CS_LIFT, scale:CS_SCALE, live:_csLive,
+               dbg:_csMesh?('#'+_csMesh.material.color.getHexString()+' map:'+(!!_csMesh.material.map)+' depthTest:'+_csMesh.material.depthTest+' side:'+_csMesh.material.side):null };
+    }catch(e){ return {err:String(e.message||e)}; } },
+  freezeAnimals(v){ try{ if(v!=null) _qaFreezeAnimals=!!v; return { frozen:_qaFreezeAnimals, animals:(typeof animals!=='undefined')?animals.length:null }; }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: creature contact shadows. live is how many instances the one draw call is carrying this frame.
   contactShadows(o){ try{ if(o&&o.on!=null){ _csOn=!!o.on; if(!_csOn&&_csMesh) _csMesh.visible=false; }
+      // `at` carries each instance's own foot position. A bench cannot find a shadow without it: hunting the darkest patch of ground
+      // instead found tree shade, because a wandering animal is rarely where a fixed crop is looking.
+      const at=[]; for(let i=0;i<_csLive;i++){ _csMesh.getMatrixAt(i,_csM); _csM.decompose(_csP,_csQ,_csS); at.push([+_csP.x.toFixed(2),+_csP.y.toFixed(2),+_csP.z.toFixed(2),+_csS.x.toFixed(2)]); }
       return { on:_csOn, built:!!_csMesh, visible:!!(_csMesh&&_csMesh.visible), live:_csLive, max:CS_MAX, range:CS_R,
-               animals:(typeof animals!=='undefined')?animals.length:null };
+               animals:(typeof animals!=='undefined')?animals.length:null, at };
     }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: the remembered-lamp halos. `reg` is how many chunks are in the registry and `emitters` how many lights it holds in
   // total — the two that say whether a lamp survived its chunk unloading, which is the whole feature. on:false is the A/B off.
@@ -26377,6 +26460,7 @@ window.__hc={
                riseB:+(w._riseB||0).toFixed(3), riseD0:+(w._riseD0||0).toFixed(2), reachT:+(w._reachT||0).toFixed(3),
                summoned:!!w._summoned, huntArmed:!!HORROR.huntArmed, canGrab:!!(w._summoned||HORROR.huntArmed),
                posture:w.posture, active:!!w.active, hp:w.hp,
+               creativeHits:(HORROR.creativeHits||0), recommitT:+(w._recommitT||0).toFixed(2),
                // animateWretch returns on its first line when the rig is absent, so riseB and riseD0 are only meaningful when
                // this is true. A creature stood up by a QA hook may have no rig at all, and zeros then mean "not animated",
                // not "not reared" — a bench that cannot tell those apart passes for the wrong reason.
@@ -27616,13 +27700,18 @@ window.__hc={
     const x=(o&&o.x!=null)?o.x:player.pos.x, z=(o&&o.z!=null)?o.z:player.pos.z, v=flowVec(x,z);
     return { x:+x.toFixed(1), z:+z.toFixed(1), fx:+v.x.toFixed(4), fz:+v.z.toFixed(4), mag:+Math.hypot(v.x,v.z).toFixed(4),
              river:Math.abs(_riverField(x,z))<0.05, h:surfaceH(Math.round(x),Math.round(z)), sea:CFG.SEA,
-             gain:waterMat.uniforms.uFlow.value, cells:_flowCache.size }; },
+             gain:waterMat.uniforms.uFlow.value, cells:_flowCache.size, riverSpeed:FLOW_RIVER, inflow:FLOW_IN, slack:FLOW_SLACK, reach:FLOW_REACH }; },
   // Does the field the GPU is running actually carry a current? Reads the baked attribute off the meshes in the scene,
   // not the CPU function — a flowVec that works while waterMesh forgets the attribute is the failure this catches.
   flowMesh(){ let verts=0, moving=0, mx=0, sumx=0, sumz=0, meshes=0, chunks=0, withWater=0;
     // Walk `world`, not chunkRoot.children: a chunk being re-meshed is removed from the scene graph and re-added, so the
     // graph is momentarily short of the map and a probe that reads it can report zero water in a sea.
-    world.forEach(c=>{ chunks++; const g=c.group; if(!g) return; const m=g.userData&&g.userData.water; if(!m||!m.geometry) return; withWater++; const a=m.geometry.attributes.aFlow; if(!a) return; meshes++;
+    // IDENTIFY WATER BY ITS MATERIAL, not by where it hangs. c.group.userData.water is set on the chunk group, but a
+    // probe keyed to that reported zero water while the sea was plainly on screen — the graph is not the inventory.
+    // Every water mesh in the world shares the one waterMat, and the far-sea disc is skipped by name.
+    chunks=world.size;
+    chunkRoot.traverse(o=>{ if(!o.isMesh || o.material!==waterMat || o===farSea) return; withWater++;
+      const a=o.geometry&&o.geometry.attributes.aFlow; if(!a) return; meshes++;
       for(let i=0;i<a.count;i++){ const fx=a.getX(i), fz=a.getY(i), mg=Math.hypot(fx,fz); verts++; sumx+=fx; sumz+=fz; if(mg>0.01)moving++; if(mg>mx)mx=mg; } });
     return { chunks, withWater, meshes, verts, moving, maxMag:+mx.toFixed(3), meanX:verts?+(sumx/verts).toFixed(4):0, meanZ:verts?+(sumz/verts).toFixed(4):0,
              hasAttr:meshes>0 && meshes===withWater }; },
@@ -27641,6 +27730,32 @@ window.__hc={
       else if(!riv && !out.shore && landR<=10 && mg>0.05) out.shore=rec;
       else if(!riv && !out.open && landR>1e8) out.open=rec; }
     return out; },
+  // The three field properties a harness cannot check from outside, because flowVec, surfaceH and _farSeaGeo all live in
+  // module scope: sample a line, sample the same point twice, and sample two adjacent blocks.
+  flowLine(x,z,dx,dz,n,step){ const out=[], st=step||4, N=n||16, L=Math.hypot(dx,dz)||1;
+    for(let i=1;i<=N;i++){ const d=i*st, px=x+dx/L*d, pz=z+dz/L*d;
+      if(surfaceH(Math.round(px),Math.round(pz))>CFG.SEA) continue;
+      const v=flowVec(px,pz); out.push({d, fx:+v.x.toFixed(4), fz:+v.z.toFixed(4), mag:+Math.hypot(v.x,v.z).toFixed(4)}); }
+    return out; },
+  flowPurity(n){ let same=0, cnt=0, worst=0;
+    for(let i=0;i<(n||300);i++){ const x=(i*37.7)%800-200, z=(i*61.3)%800-200;
+      const a=flowVec(x,z), ax=a.x, az=a.z, b=flowVec(x,z), d=Math.hypot(b.x-ax,b.z-az);
+      cnt++; if(d===0) same++; if(d>worst) worst=d; }
+    return {n:cnt, same, worst}; },
+  flowStep(x,z,r){ const R=r||10; let worst=0, at=null;
+    for(let ox=-R;ox<=R;ox++)for(let oz=-R;oz<=R;oz++){ const px=x+ox, pz=z+oz;
+      const a=flowVec(px,pz), ax=a.x, az=a.z, b=flowVec(px+1,pz), d=Math.hypot(b.x-ax,b.z-az);
+      if(d>worst){ worst=d; at=[px,pz]; } }
+    return {worst:+worst.toFixed(4), at}; },
+  // Read the advection off the shader that COMPILED, not off the screen: like sway, it lives in the pipeline, so no
+  // CPU-side number moves and a frame diff can only report "something changed".
+  flowSrc(){ const v=waterMat.vertexShader, f=waterMat.fragmentShader;
+    return { vAttr:/attribute vec2 aFlow/.test(v), vAdvect:/wp\.xz-fo/.test(v), vGain:/aFlow\*uFlow/.test(v),
+             fVary:/varying vec2 vFlow/.test(f), fAdvect:/vec2 uv=vW\.xz - vFlow\*uTime/.test(f),
+             gain:waterMat.uniforms.uFlow.value }; },
+  flowDisc(){ const a=_farSeaGeo.attributes.aFlow; if(!a) return {missing:true};
+    let mx=0; for(let i=0;i<a.count;i++) mx=Math.max(mx, Math.abs(a.getX(i)), Math.abs(a.getY(i)));
+    return {count:a.count, max:mx}; },
   shallowWater(depth){ const d=depth||2; for(let r=8;r<220;r+=4)for(let a=0;a<16;a++){ const th=a*0.3927, x=Math.round(player.pos.x+Math.cos(th)*r), z=Math.round(player.pos.z+Math.sin(th)*r);   // QA: nearest water exactly `depth` blocks deep — the shelf makes chest-deep the common case and a deep-water rule can behave differently in it
     if(surfaceH(x,z)===CFG.SEA-d){ let lx=null,lz=null;                                   // …WITH dry land in reach, or the spot is useless for testing a climb-out: the shelf is a long ramp and chest-deep can sit a dozen blocks off any bank, which is why this rejects the candidate rather than returning a null shore
       for(let rr=1;rr<=16&&lx==null;rr++)for(let aa=0;aa<24;aa++){ const t2=aa*0.2618, ux=Math.round(x+Math.cos(t2)*rr), uz=Math.round(z+Math.sin(t2)*rr);
