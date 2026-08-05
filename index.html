@@ -3177,6 +3177,11 @@ const globalU = {
   uHandPos:{ value:new THREE.Vector3(0,-9999,0) },
   uHandK:  { value:0 },
   uHandR:  { value:26 },
+  // How much delivered direct light counts as "a light source touches this". 1.0 means a fragment reads fully coloured once
+  // three.js has put roughly 0.45 of luminance on it (uScotHi), which for a torch at intensity 46 and decay 1.3 is well inside
+  // the visible pool. Raise it to make colour reach further out into the dim edge of a lamp; 0 is the A/B off, and 0 restores
+  // the pre-fix behaviour of colour ONLY where the baked volume or the sky says so.
+  uScotLitK:{ value:1.0 },
   // DIRECTIONAL SKYLIGHT — see injectAtlas. amt 0 is the A/B off; up/dn are the hemisphere fraction reaching a face pointing
   // straight up and straight down, and a vertical face lands on their midpoint.
   uSkyDirAmt:{ value:1 },
@@ -3240,7 +3245,7 @@ function injectAtlas(mat, opts={}){
     // cloud shadows and the measurement is of nothing.
     sh.uniforms.uCloudTex = globalU.uCloudTex; sh.uniforms.uCloudShadow = globalU.uCloudShadow;
     sh.uniforms.uCloudScroll = globalU.uCloudScroll; sh.uniforms.uSunDirC = globalU.uSunDir;
-    sh.uniforms.uHandPos = globalU.uHandPos; sh.uniforms.uHandK = globalU.uHandK; sh.uniforms.uHandR = globalU.uHandR;
+    sh.uniforms.uHandPos = globalU.uHandPos; sh.uniforms.uHandK = globalU.uHandK; sh.uniforms.uHandR = globalU.uHandR; sh.uniforms.uScotLitK = globalU.uScotLitK;
     sh.uniforms.uChunkTint = { value:new THREE.Color(LIGHT_PAL[0][0],LIGHT_PAL[0][1],LIGHT_PAL[0][2]) };   // PER CLONE, deliberately: _chunkMat overwrites it with that chunk's own dominant light colour
     sh.uniforms.uSkyDirAmt = globalU.uSkyDirAmt; sh.uniforms.uSkyDirUp = globalU.uSkyDirUp; sh.uniforms.uSkyDirDn = globalU.uSkyDirDn;
     sh.uniforms.uScotDay = globalU.uDay; sh.uniforms.uScotAmt = globalU.uScotAmt; sh.uniforms.uScotLo = globalU.uScotLo; sh.uniforms.uScotHi = globalU.uScotHi;   // SHARED refs, same reason as uWhiteTile
@@ -3262,7 +3267,7 @@ function injectAtlas(mat, opts={}){
           '\nfloat wsw = sin(uTime*spd1 + transformed.x*0.6 + transformed.z*0.5)*amp1*aw; transformed.x += wsw; transformed.z += cos(uTime*spd2 + transformed.x*0.4)*amp2*aw;'):''));   // stashed on the material so a harness can assert the RELATIONSHIP (kelp slower, kelp wider) against the source that actually compiled
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>',
-        '#include <common>\nprecision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform float uScotAmt;\nuniform float uScotLo;\nuniform float uScotHi;\nuniform float uScotDay;\nuniform vec3 uChunkTint;\nuniform vec3 uHandPos;\nuniform float uHandK;\nuniform float uHandR;\nuniform float uSkyDirAmt;\nuniform float uSkyDirUp;\nuniform float uSkyDirDn;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
+        '#include <common>\nprecision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform float uScotAmt;\nuniform float uScotLo;\nuniform float uScotHi;\nuniform float uScotDay;\nuniform vec3 uChunkTint;\nuniform vec3 uHandPos;\nuniform float uHandK;\nuniform float uHandR;\nuniform float uScotLitK;\nuniform float uSkyDirAmt;\nuniform float uSkyDirUp;\nuniform float uSkyDirDn;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
       // ---- NIGHT VOLUMETRIC DARKNESS ON REAL FOLIAGE (Ben 07-29) ----
       // "volumetric darkness at night is applied to horizon pines, but not to forest trees." Correct, and the two fade to
       // different targets. The horizon backdrop fades to _uPineFog, which is scene.fog.color pulled toward storm blue and
@@ -3384,9 +3389,29 @@ function injectAtlas(mat, opts={}){
       // never baked, so every surface a player actually lit stayed washed out and the night read as a grey world. One distance
       // against the hand's own position, squared so the colour is strongest in the pool's core and gone by its edge — where the
       // eye has nothing to see a colour with anyway.
-      '{ float _hd=length(vWPos-uHandPos)/max(uHandR,0.001);\n'+
-      '  float _hand=uHandK*(1.0-clamp(_hd*_hd,0.0,1.0));\n'+
-      '  float _slit=max(max(_bl, vSky*uScotDay), _hand);\n'+
+      // ---- THE GATE IS THE LIGHT THE RENDERER ACTUALLY DELIVERED HERE ----
+      // Ben, 08-05: "we want a genuinely black night, BUT we also want realism in the contrast that light provides at night...
+      // everything that light touches should become a warm orange glow, it should not stay dark. Chroma wash should become
+      // colorful everywhere a light source touches." So the rule is: unlit stays black, and ANYTHING a light reaches goes
+      // fully warm and fully chromatic. That raises contrast rather than compromising the black, which is why nothing here
+      // touches the night ambient and assert-night-crush still holds.
+      //
+      // WHAT WAS WRONG, and it was mine (bcb9ba1). The gate read a hand-rolled sphere: _hand = uHandK*(1 - d^2/uHandR^2)
+      // against uHandR = heldLight.distance*0.72 = 23 blocks. With uScotHi 0.45 that switches the washout FULLY OFF inside
+      // 0.74*R, about 17 blocks, for every fragment in the ball — through walls, on faces turned away from the lamp, and out
+      // past where the light visibly dies. So near the player the raw AgX chroma hash came straight back: saturated RED texels
+      // along the falloff edge of lantern-lit wood and neon yellow-green foliage, which is exactly what Ben photographed. And
+      // pointPool lights (every PLACED or spawned torch, 16 slots since 2a6112d) were not in the gate at all, so a lit room
+      // stayed grey no matter how many lamps were in it: "spawned lights have no affect on the chromatic greying/whitewash".
+      //
+      // reflectedLight is still in scope at dithering_fragment (it is declared in lights_fragment_begin, same function body),
+      // and its directDiffuse is the sum over EVERY light three.js just evaluated for this fragment. Reading it is strictly
+      // better than re-deriving any of it: it carries all 16 pool slots and the held light, with their real decay, and it is
+      // already multiplied by N dot L, so a face turned away from a lamp is correctly NOT lit and correctly stays washed.
+      // It costs one dot product and no new fetch, and it cannot drift from the lighting the player sees, because it IS that
+      // lighting. The sun rides in the same term, which is harmless: by day the washout is gated off by uScotDay anyway.
+      '{ float _dlit=dot(reflectedLight.directDiffuse,vec3(0.2126,0.7152,0.0722))*uScotLitK;\n'+
+      '  float _slit=max(max(_bl, vSky*uScotDay), _dlit);\n'+
       '  float _sk=uScotAmt*(1.0-smoothstep(uScotLo,uScotHi,_slit));\n'+
       '  float _sl=dot(gl_FragColor.rgb,vec3(0.2126,0.7152,0.0722));\n'+
       '  gl_FragColor.rgb=mix(gl_FragColor.rgb, vec3(_sl), _sk); }\n'+
@@ -3396,6 +3421,10 @@ function injectAtlas(mat, opts={}){
     if(Q.get('dbg')==='nrm') sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\ngl_FragColor=vec4(abs(normalize(vObjN)),1.0);');   // DBG: face normal (black pixel = zero/degenerate normal → normalize NaN)
     if(Q.get('dbg')==='sdir') sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\ngl_FragColor=vec4(vec3(clamp(_sdir,0.0,2.0)*0.5),1.0);');   // DBG: the directional-skylight factor itself, 0.5 grey = 1.0 (a face taking the sky unchanged)
     if(Q.get('dbg')==='bl') sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\ngl_FragColor=vec4(clamp(_bl,0.0,1.0),clamp(_bl,0.0,1.0),clamp(_bl,0.0,1.0),1.0);');   // DBG: sampled block-light
+    // DBG ?dbg=lit: the delivered-direct-light gate itself, the term that decides where colour comes back. Grey 1.0 (white) is
+    // "fully coloured"; black is "washed". This is what to look at when a surface is the wrong colour at night — it separates a
+    // gate that never fired from a gate that fired on the wrong pixels, which is the distinction two sessions of statistics missed.
+    if(Q.get('dbg')==='lit') sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\n{ float _d=dot(reflectedLight.directDiffuse,vec3(0.2126,0.7152,0.0722))*uScotLitK; gl_FragColor=vec4(vec3(clamp(_d,0.0,1.0)),1.0); }');
   };
   mat.userData.atlas = true;   // marks this as a voxel-atlas material → chunks bind their per-chunk light volume to it
   return mat;
@@ -11202,7 +11231,12 @@ function loop(){ try{
   if(typeof _tpsHideHands==='function') _tpsHideHands(_tpsAct && !player.grabbed);
   // THE HORRIFIC WRETCH's drift loop writes render targets the scene below then samples, so it steps here — before the
   // world pass, and after every camera update this frame.
-  if(wretchExtra.length){ T.begin(TID.drift); try{ stepHorrificDrift(dt); }catch(e){ if(!window._hwErr){ window._hwErr=String(e&&e.stack||e); console.error('[horrific] drift step crashed — caught so the game keeps running:', e); } } T.end(TID.drift); }
+  // THE GATE, NOT THE LOOP, WAS WHY A MONK-MADE HORRIFIC WRETCH WAS INVISIBLE (Ben 08-05). Both this condition and the loop inside
+  // assumed the changed creature is always a wretchExtra — and the monk sacrifice does not add one, it DRESSES wretchPrime. With no
+  // extras in the world this early-out meant the drift loop never ran at all, so the prime's group sat detached from the world
+  // scene (driftAttach removed it) with nothing drawing it. Measured: attached true, active true, steps 0 and staying 0.
+  // wretchPrime.horrific is the other way in. Still gated, so an ordinary night pays nothing for this.
+  if(wretchExtra.length || (wretchPrime&&wretchPrime.horrific)){ T.begin(TID.drift); try{ stepHorrificDrift(dt); }catch(e){ if(!window._hwErr){ window._hwErr=String(e&&e.stack||e); console.error('[horrific] drift step crashed — caught so the game keeps running:', e); } } T.end(TID.drift); }
   if(_mbMode){ if(PERF.on) PERF.gpu.mark(2); renderer.setRenderTarget(_sceneRT); renderer.render(scene, camera); renderer.setRenderTarget(null); }   // scene → our depth-carrying target (feeds motionPass); classic path renders inside composer
   if(PERF.on) PERF.gpu.mark(3);
   composer.render();
@@ -11813,11 +11847,21 @@ function hwOnSacrifice(){
   if(wretchExtra.some(w=>w.active && w.horrific)) return null;      // a deliberately spawned one is already the thing this makes
   // THE WRETCH HAS TO BE OUT TO BECOME IT. On a quiet day it may be dormant, and a trigger that quietly did nothing is how
   // "the horrific wretch doesnt seem to convert when a monk is killed" reads from the outside even when the code ran.
+  // AND "OUT" MEANS ACTIVE, NOT MERELY BUILT (Ben 08-05: "cant see the horrific wretch when it is spawned via the monks").
+  // This called spawnWretch and then dressed the prime in the SAME tick, which is one tick too early: neither spawnWretch nor
+  // spawnT=0 makes the creature active immediately. So the sacrifice dressed a dormant Wretch — and dressing hands its group to
+  // the drift loop (driftAttach), which does not step an inactive instance. Detached from the world scene and rendered by nobody
+  // is exactly invisible, and measured that way: attached true, steps 0, and staying 0.
+  // So a dormant Wretch is not dressed at all now; the conversion is OWED and the consumer in updateWretch pays it on the first
+  // frame the creature is actually out. Same flag, same persistence — this just stops the early attempt from winning.
   if(wretchPrime && !wretchPrime.active){
     if(typeof spawnWretch==='function'){ try{ spawnWretch(); }catch(e){} }
     else if(wretchPrime.spawnT!=null) wretchPrime.spawnT=0;
+    HORROR.hwPending=1;
+    flashName('three of them. something is coming for what you took.');
+    return null;
   }
-  if(wretchPrime && wretchPrime.group && hwDress(wretchPrime,true)){
+  if(wretchPrime && wretchPrime.active && wretchPrime.group && hwDress(wretchPrime,true)){
     wretchPrime._hwNightly=false;                                   // an EVENT change is not the nightly one: dawn does not undo it, only the cross does
     HORROR.hwPending=0;
     flashName('something was made of what you gave it');
@@ -11950,7 +11994,13 @@ function stepHorrificDrift(dt){
   // close-up cannot work through a flat billboard sampled from a private scene, so for those frames the rig is handed back
   // to the world and the REAL model does the scare — the hallucination breaks exactly when the thing has hold of you. The
   // eye sprites and their light are drawn in the world either way, so the pair stays lit right through it.
-  for(const inst of wretchExtra){ const k=hwKey(inst); if(!driftHas(k)) continue;
+  // THE PRIME WRETCH IS IN THIS LOOP TOO (Ben 08-05: "cant see the horrific wretch when it is spawned via the monks").
+  // This iterated wretchExtra alone, and the monk sacrifice does not ADD a creature — hwOnSacrifice DRESSES wretchPrime. So the
+  // conversion did everything it was supposed to: driftAttach took the prime's group out of the world scene to be drawn by the
+  // drift loop, and then no loop ever stepped it. Detached from the world, rendered by nobody, invisible. Spawning one through
+  // __hc.hw or the egg has always worked because those make a wretchExtra, which is what this loop could see.
+  // driftHas(k) already skips anything not attached, so including the prime costs one failed lookup a frame when it is ordinary.
+  for(const inst of (wretchPrime?[wretchPrime]:[]).concat(wretchExtra||[])){ const k=hwKey(inst); if(!driftHas(k)) continue;
     const closeUp = inst.grabPhase==='jumpscare' || inst.grabPhase==='devour';
     driftHostWorld(k, closeUp);
     driftStep(k, dt, inst.pos, inst.active); }
@@ -12615,8 +12665,17 @@ function updateWretch(dt){
             // crouched on its floor with five blocks of headroom. Cover-seeking belongs to the woods, where losing you is
             // the norm and the walls are trees. Here it knows the graph by construction, so no sight means creep, not stop:
             // the waypoint aim above IS the route, and it keeps it.
-            if(wretch._dunHunt){ if(_los){ speed=Math.max(speed, reckless?20:16); }   // it has CLEAR SIGHT of you → it RUNS
-              else { speed=Math.max(5.0, Math.min(speed, 9)); wretch.crawl=Math.min(1,(wretch.crawl||0)+dt*2); } } } }   // no sight → low and slow, but still closing
+            // 20% SLOWER IN HERE (Ben 08-05: "The wretch should be 20% slower when hunting in the labrynth"). Applied to both
+            // the sighted sprint and the creep, so the whole maze pursuit is scaled rather than only its top speed — a maze is
+            // won by cutting corners, not by outrunning it down a straight.
+            // AND IT DROPS ONTO ALL FOURS TO DO IT (Ben: "he is standing up without running, statically sliding towards the
+            // player at some times in the labrynth"). The no-sight branch already drove crawl up; the SIGHTED one set a speed of
+            // 16-20 and never touched it, so with clear line of sight down a corridor the creature translated at a sprint while
+            // its rig was still stood upright — the gait is keyed off crawl, so nothing was striding and it slid. Charging in the
+            // open has always done this (the commit branch sets crawl 0.75 "so the gallop always plays from frame one"); the
+            // tunnel chase is the one pursuit that never did.
+            if(wretch._dunHunt){ if(_los){ speed=Math.max(speed, (reckless?20:16)*LAB_SLOW); wretch.crawl=Math.max(wretch.crawl||0,0.85); }   // it has CLEAR SIGHT of you → it RUNS
+              else { speed=Math.max(5.0*LAB_SLOW, Math.min(speed, 9*LAB_SLOW)); wretch.crawl=Math.min(1,(wretch.crawl||0)+dt*2); } } } }   // no sight → low and slow, but still closing
         else { wretch._cryptAscend=false;                                      // ABOVE GROUND → squeeze down the 1x1 DROP-SHAFT into the hall (prefer the hole; valley only if MUCH nearer)
           const dEnt=(L.entX!=null)?Math.hypot(L.entX-ex,L.entZ-ez):1e9, dWf=L.waterfall?Math.hypot(L.waterfall.x-ex,L.waterfall.z-ez):1e9;
           if(dWf<dEnt*0.5 && L.waterfall){ aim(L.waterfall.x,L.waterfall.z); }
@@ -12630,7 +12689,11 @@ function updateWretch(dt){
   if(!wretch.committed && !wretch.fleeing && !wretch.dragging && near<44 && surfaceH(Math.floor(ex),Math.floor(ez))<=CFG.SEA){
     const c=findCoverNear(cam.x,cam.z, Math.max(12, near*0.55));
     if(c){ wretch.target.set(c.x,c.gy,c.z); speed=Math.max(speed,4.5); freeze=false; } }
-  wretch.posture = wretch._scooping ? 'CROUCH' : wretch._tunPursue ? 'CRAWL' : (st==='HUNT'||st==='CHASE'||st==='TRACK'||st==='FLEE')?'CRAWL' : (s.onWall&&wretch.crawl>0.6)?'CLING'
+  // A MAZE PURSUIT IS NEVER A STANDING POSE. _tunPursue is deliberately cleared at the end of the lair branch above (floor-crawl
+  // only, never the ceiling), so the tunnel chase fell through to the STATE test — and while it creeps without sight the state can
+  // be STALK, which reads CROUCH or STAND. Position was being driven the whole time, so it stood up and slid. _dunHunt is the
+  // pursuit itself and says so directly.
+  wretch.posture = wretch._scooping ? 'CROUCH' : (wretch._tunPursue||wretch._dunHunt) ? 'CRAWL' : (st==='HUNT'||st==='CHASE'||st==='TRACK'||st==='FLEE')?'CRAWL' : (s.onWall&&wretch.crawl>0.6)?'CLING'
     : (watched&&near<18)?'PRESS' : (near<26?'CROUCH':'STAND');                        // posture axis → pose + stealth
 
   // VOICE CADENCE — a state-appropriate vocal presence. Sparse & low while stalking (protect the silence-dread;
@@ -23617,6 +23680,9 @@ function _seaYaw(x,z){ let best=null; for(let k=0;k<24;k++){ const th=k*0.2618; 
 // later monk is inert. So the first two kills ARE the anger — the sky turns, a toll sounds, the beast is roused — and
 // the third is the sacrifice. The crypt ritual is untouched and still converts on ONE offering; this is the second,
 // slower road to the same creature, and it costs three.
+// Ben 08-05: "The wretch should be 20% slower when hunting in the labrynth." One number, applied to both the sighted sprint and
+// the sightless creep in the tunnel chase — see the _dunHunt speeds in updateWretch.
+const LAB_SLOW=0.80;
 const MONK_WRATH_KILLS=3;                             // three kills to the conversion. NOT changed by #55: with 4-6 monks in a room this is easier to trip by accident than it was under a global cap of 3, Ben has been told, and he has not asked for a different number.
 // #55 — A MONASTERY IS A COMMUNITY, AND IT WAS THREE MEN SHARED BETWEEN THREE BUILDINGS.
 // What was wrong: MONK_CAP was 3 GLOBAL, so the cathedral, the chapel and the ruin competed for the same three bodies —
@@ -24934,7 +25000,7 @@ function initAudio(){ if(AC)return; try{
 //      (procedural fallback still fires). All 50 SFX + music ship generated (sounds/gen-sfx.js). ----
 const SFX={};                                        // base -> [AudioBuffers]
 let _gameMusicEl=null, _bossMusicEls=null, _bossMusicIdx=0, _musicBus=null, _bossMusicOn=false;
-const SFX_COUNTS={grass:3,stone:3,wood:3,sand:3,water:3,break_wood:2,break_stone:2,break_leaves:2,drip:3,wind:2,creak:2,branch:2,owl:2,crow:2,bird:2,sheep:1,deer:1,growl:2,shriek:2,clicks:2,call:2,hurt:2,thunder:2,scream:5,twig:3,grunt:4,rain:1,gun_ar:1,gun_rifle:1,bush:3,seraph_horn:1,seraph_choir:1,seraph_charge:1,seraph_beam:1,seraph_toll:1,fluor:3,fluorout:2,cord:2,collapse:3,vending:1};   // scream/twig/grunt/rain/gun/bush = real CC0 recordings; seraph_* = synth boss cues (sounds/gen-boss-sfx.js); fluor/fluorout = fluorescent tube strike + dropout (sounds/gen-fluor.js); cord/collapse/vending = pull-cord switch, ceiling-tile fall, vending machine (sounds/gen-cord.js, gen-collapse.js, gen-vending.js) — generated ahead of the features that will use them so they are decoded and ready
+const SFX_COUNTS={grass:3,stone:3,wood:3,sand:3,water:3,break_wood:2,break_stone:2,break_leaves:2,drip:3,wind:2,creak:2,branch:2,owl:4,crow:2,bird:6,insect:3,sheep:1,deer:1,growl:2,shriek:2,clicks:2,call:2,hurt:2,thunder:2,scream:5,twig:3,grunt:4,rain:1,gun_ar:1,gun_rifle:1,bush:3,seraph_horn:1,seraph_choir:1,seraph_charge:1,seraph_beam:1,seraph_toll:1,fluor:3,fluorout:2,cord:2,collapse:3,vending:1};   // scream/twig/grunt/rain/gun/bush = real CC0 recordings; seraph_* = synth boss cues (sounds/gen-boss-sfx.js); fluor/fluorout = fluorescent tube strike + dropout (sounds/gen-fluor.js); cord/collapse/vending = pull-cord switch, ceiling-tile fall, vending machine (sounds/gen-cord.js, gen-collapse.js, gen-vending.js) — generated ahead of the features that will use them so they are decoded and ready
 // ---- BACKROOMS AUDIO ISOLATION (Ben 07-27): the halls are a SEALED environment. Nothing from the overworld's
 //   soundscape bleeds in — no wind, owls, crows, insects, rumble, crackle, thunder, animals, the Wretch, guns, music.
 //   Only the halls' own palette plus your own footsteps on the carpet. Enforced centrally in playSample/tone/burst so
@@ -25136,13 +25202,23 @@ function resumeMusic(){ _ensureMusicEls();
 let _ambT=4, _chimeT=3;
 let _encT=0, _encCov=0;   // the enclosure probe's timer and its last reading — see the reverb/lowpass block in _audioFrame
 let _ambN=0, _cricketN=0;   // cues actually emitted — __hc.ambCount. "The birds stop" is a rate, and a rate has to be counted.
-function ambientOneShot(){ if(!AC)return; const cp=camera.position; const under=opaqueTop(Math.floor(cp.x),Math.floor(cp.z))>cp.y+2;
+let _ambSpy=null;   // QA only: see __hc.ambRoll. Nothing in the game arms it.
+function ambientOneShot(){ if(!AC && !_ambSpy)return; const cp=camera.position; const under=opaqueTop(Math.floor(cp.x),Math.floor(cp.z))>cp.y+2;
   if(under) return;                                   // underground drips are owned by caveDrip
   _ambN++;
-  const day=globalU.uDay.value, night=day<0.32, dusk=day>=0.32&&day<0.55;
+  // #71: THE SCHEDULER COULD NOT TELL DAWN FROM DUSK, and that is the "time-of-day correctness" the item calls the most
+  // noticeable thing to get right. uDay is not a clock — updateSky sets it to smooth(-0.46,0.46, sun elevation), a
+  // DAYLIGHT AMOUNT — so `day>=0.32 && day<0.55` is true twice a day, once going up and once coming down. Every owl the
+  // evening got, the dawn got too; there was no dawn chorus, and nothing could be scheduled for the evening alone.
+  // The missing bit of information is the SIGN of the sun's motion, and it is one cosine: elevation is sin(ang), so the
+  // sun is rising exactly while cos(ang) is positive.
+  const day=globalU.uDay.value;
+  const _ang=(typeof worldTime!=='undefined'?worldTime:0)/CFG.DAY_LEN*Math.PI*2, rising=Math.cos(_ang)>0;
+  const night=day<0.30, twi=day>=0.30&&day<0.62, dawn=twi&&rising, dusk=twi&&!rising, bright=day>=0.62;
   const behind=Math.random()<0.32, fwd=lookDir();     // FAKE-OUTS often emit from BEHIND you (the "something's back there" instinct)
   const ang=behind?(Math.atan2(-fwd.x,-fwd.z)+(Math.random()-0.5)*0.8):Math.random()*6.283, r=6+Math.random()*16;
-  const pos={x:cp.x+Math.cos(ang)*r, y:cp.y+(Math.random()-0.3)*3, z:cp.z+Math.sin(ang)*r}, p=panAt(pos.x,pos.y,pos.z);
+  const pos={x:cp.x+Math.cos(ang)*r, y:cp.y+(Math.random()-0.3)*3, z:cp.z+Math.sin(ang)*r};
+  const p=AC?panAt(pos.x,pos.y,pos.z):null;   // the spy path below runs with no audio context at all, and panAt needs one
   // 18 procedural cues (some indistinguishable from the Wretch → apophenia)
   const gust =()=>{ burst(p,0.5,1.5,320,0.6,150,'lowpass'); burst(p,0.18,1.2,900,0.5,400,'lowpass'); };
   const rustle=()=>{ burst(p,0.22,0.5,2600,1.2,-1400,'bandpass'); burst(p,0.14,0.35,1800,1.0,-900,'bandpass'); };       // leaves rustling
@@ -25163,14 +25239,47 @@ function ambientOneShot(){ if(!AC)return; const cp=camera.position; const under=
   const stone=()=>{ for(let i=0;i<4;i++)burst(p,0.2+Math.random()*0.1,0.05,300+Math.random()*300,3,-100,'bandpass'); };          // a stone tumbles
   const call =()=>{ tone(p,{f:150,type:'sawtooth',dur:0.5,vol:0.16,to:110,atk:0.1}); tone(p,{f:150,type:'sawtooth',dur:0.4,vol:0.12,to:90,delay:0.5}); };   // distant indistinct CALL (fake-out — mimics the lure)
   const chime=()=>{ for(const f of [1046,1318,1568]) tone(p,{f,type:'sine',dur:1.2,vol:0.05,atk:0.02,delay:Math.random()*0.3}); };   // faint wind chime
+  // #71: the dusk/night insect bed. Its real form is the three insect*.ogg files (a ring-modulated pulse train, three
+  // densities); this is the fallback for a build without them, and it is deliberately thin — a synth cricket is the one
+  // cue that gives itself away instantly.
+  const insect=()=>{ for(let i=0;i<6;i++) tone(p,{f:3900+Math.random()*500,type:'square',dur:0.012,vol:0.05,delay:i*0.09+Math.random()*0.02}); };
   const R=Math.random(); let cue, sample=null;
   if(night){ cue = R<0.12?owl : R<0.21?frog : R<0.29?crow : R<0.40?gust : R<0.50?creak : R<0.58?howl : R<0.66?moan : R<0.75?knock : R<0.87?bush : R<0.93?grunt : R<0.97?call : snap;   // bush = something moving through the brush; broken sticks now rare (~3%)
              sample = cue===owl?'owl':cue===crow?'crow':cue===gust?'wind':cue===creak?'creak':null; }
-  else if(dusk){ cue = R<0.15?crow : R<0.28?gust : R<0.41?owl : R<0.55?bush : R<0.66?creak : R<0.76?frog : R<0.85?pop : R<0.94?knock : R<0.98?snap : twig;   // sticks ~6% (was ~11%)
-             sample = cue===crow?'crow':cue===gust?'wind':cue===owl?'owl':cue===creak?'creak':null; }
+  // DUSK IS THE INSECT HOUR. Crickets start as the light goes and carry into the night, thinning as it gets cold — the
+  // three insect beds are three densities, and dusk gets the thick ones. The frogs and the first owl belong here too.
+  else if(dusk){ cue = R<0.20?insect : R<0.30?crow : R<0.42?gust : R<0.52?owl : R<0.64?bush : R<0.72?creak : R<0.82?frog : R<0.89?pop : R<0.95?knock : R<0.98?snap : twig;
+             sample = cue===insect?'insect':cue===crow?'crow':cue===gust?'wind':cue===owl?'owl':cue===creak?'creak':null; }
+  // DAWN IS A CHORUS. Birds, loudly and often, one last owl going quiet, and none of the evening's insects.
+  else if(dawn){ cue = R<0.34?bird : R<0.52?trill : R<0.60?owl : R<0.70?crow : R<0.80?gust : R<0.88?bush : R<0.94?creak : R<0.98?pop : twig;
+             sample = cue===bird?'bird':cue===trill?'bird':cue===owl?'owl':cue===crow?'crow':cue===gust?'wind':cue===creak?'creak':null; }
   else     { cue = R<0.24?bird : R<0.40?trill : R<0.54?gust : R<0.68?bush : R<0.78?creak : R<0.86?pop : R<0.93?stone : R<0.97?snap : chime;   // sticks ~4% (was ~6%)
              sample = cue===bird?'bird':cue===gust?'wind':cue===creak?'creak':null; }
-  if(sample && playSample(sample,pos, night?0.9:0.7)) return;   // real sample if present, else the synth cue
+  // AND THE DISTANCE IS THE OTHER HALF OF THE ITEM: "sparse distant owls at night, denser closer birds by day". An owl
+  // that hoots six blocks from your ear is a pet. Birds by day stay where they were; owls and the night's insects are
+  // pushed back out, and because the position was already chosen above, this re-aims the same cue rather than rolling a
+  // new one — panAt is fed a recomputed point, never an unchecked one.
+  if(cue===owl || cue===insect){ const far=(cue===owl? 22+Math.random()*30 : 10+Math.random()*14)/r;
+    pos.x=cp.x+(pos.x-cp.x)*far; pos.z=cp.z+(pos.z-cp.z)*far; pos.y=cp.y+(pos.y-cp.y)*0.5+(cue===owl?4:0); }
+  // Rain and heavy cloud eat an ambience bed: a cricket at the bottom of a downpour is not audible, and the rain track
+  // is already carrying the scene.
+  // QA: with the spy armed, the cue that WOULD have played is recorded and nothing is emitted. A harness can then ask
+  // "does the evening get insects and the dawn get birds" as a distribution over a few hundred rolls, which is the only
+  // way to test a scheduler made of random thresholds — one roll tells you nothing.
+  if(typeof _ambSpy!=='undefined' && _ambSpy){
+    const nm = cue===owl?'owl' : cue===insect?'insect' : cue===bird?'bird' : cue===trill?'trill' : cue===frog?'frog'
+             : cue===crow?'crow' : cue===gust?'gust' : cue===bush?'bush' : cue===creak?'creak' : cue===howl?'howl' : 'other';
+    _ambSpy.n++; _ambSpy.cues[nm]=(_ambSpy.cues[nm]||0)+1;
+    _ambSpy.phase = night?'night' : dawn?'dawn' : dusk?'dusk' : 'day';
+    _ambSpy.dist = (_ambSpy.dist||0) + Math.hypot(pos.x-cp.x, pos.z-cp.z);
+    if(nm==='owl'){ _ambSpy.owlDist=(_ambSpy.owlDist||0)+Math.hypot(pos.x-cp.x,pos.z-cp.z); _ambSpy.owlN=(_ambSpy.owlN||0)+1; }
+    if(nm==='bird'){ _ambSpy.birdDist=(_ambSpy.birdDist||0)+Math.hypot(pos.x-cp.x,pos.z-cp.z); _ambSpy.birdN=(_ambSpy.birdN||0)+1; }
+    return;
+  }
+  const _wx=(typeof weather!=='undefined')?clamp((weather.rain||0)*0.8+(weather.overcast||0)*0.25,0,1):0;
+  const _gain=(night?0.9:0.7)*(1-_wx*0.75)*(cue===owl?0.85:1);
+  if(_wx>0.55 && (cue===insect||cue===bird||cue===trill)) return;                      // in real rain, nothing small is singing
+  if(sample && playSample(sample,pos,_gain)) return;   // real sample if present, else the synth cue
   cue(); }
 audioResume=()=>{ initAudio(); if(AC&&AC.state==='suspended')AC.resume(); applyVolume(); if(typeof resumeMusic==='function')resumeMusic(); };   // RESUME music in place (never restart) on every gesture — fixes boss music restarting on inventory/respawn
 function panAt(x,y,z){ const p=panners[pIdx=(pIdx+1)%panners.length];
@@ -26356,7 +26465,13 @@ window.__hc={
   // 93-second crypt ritual to reach it is not something a check can wait on, so this exercises the branch it ends in.
   hwSacrifice(){ try{ const before=wretchExtra.filter(w=>w.active).length, r=hwOnSacrifice();
     return { spawned:!!r, activeBefore:before, activeAfter:wretchExtra.filter(w=>w.active).length }; }catch(e){ return {err:String(e.message||e)}; } },   // QA: A/B the eye glow's cost — off parks the light and hides the trail, the same path as no creature   // QA: freeze the extras' AI so the image can be checked without being captured mid-check
-  hwProbe(){ try{ return wretchExtra.map(w=>Object.assign({hid:w._hid}, driftProbe(hwKey(w)))); }catch(e){ return {err:String(e.message||e)}; } },
+  // THE PRIME IS REPORTED TOO, and it has to be: the monk sacrifice converts wretchPrime rather than adding a creature, so a probe
+  // over wretchExtra alone reported an empty list for the one case that was broken — a changed Wretch that was drawn by nothing.
+  // `steps` climbing is the proof the drift loop is actually running for it; attached-but-never-stepped is exactly invisible.
+  hwProbe(){ try{ return (wretchPrime?[wretchPrime]:[]).concat(wretchExtra||[])
+      .filter(w=>driftHas(hwKey(w)))
+      .map(w=>Object.assign({hid:w._hid, prime:w===wretchPrime, active:!!w.active, horrific:!!w.horrific}, driftProbe(hwKey(w)))); }
+    catch(e){ return {err:String(e.message||e)}; } },
   hwFraming(){ try{ return wretchExtra.map(w=>Object.assign({hid:w._hid}, driftFraming(hwKey(w)))); }catch(e){ return {err:String(e.message||e)}; } },   // QA: how much of the render target the creature covers, and whether it is being cropped   // QA: mean luma/alpha of both loop stages — tells "producing nothing" apart from "too dark to see"
   hwKill(){ try{ const n=wretchExtra.length; for(let i=wretchExtra.length-1;i>=0;i--) despawnHorrific(wretchExtra[i]); return n; }catch(e){ return {err:String(e.message||e)}; } },
   // QA: prove the AI instance is genuinely separate — the primary must be untouched by anything the extra does.
@@ -27550,6 +27665,23 @@ window.__hc={
   // radius is random, so waiting twelve seconds and measuring the furthest brother reports the dice: one run showed 39.7
   // blocks of stray and the next 7.1, from identical code. This asks _monkGoal directly, a few hundred times, and reports
   // how far the targets it hands out actually reach.
+  // ---- #71 AMBIENCE ----
+  // The cue distribution at a given hour, without playing anything: a scheduler built from random thresholds cannot be
+  // tested one roll at a time. Also reports the mean distance the cue was placed at, which is the other half of the item
+  // ("sparse distant owls at night, denser closer birds by day").
+  ambRoll(n,t){ try{ if(t!=null) worldTime=CFG.DAY_LEN*t;
+      _ambSpy={n:0,cues:{},phase:null,dist:0};
+      for(let i=0;i<(n||300);i++) ambientOneShot();
+      const s=_ambSpy; _ambSpy=null;
+      return { phase:s.phase, n:s.n, cues:s.cues, meanDist:s.n?+(s.dist/s.n).toFixed(1):null,
+               owlDist:s.owlN?+(s.owlDist/s.owlN).toFixed(1):null, owlN:s.owlN||0,
+               birdDist:s.birdN?+(s.birdDist/s.birdN).toFixed(1):null, birdN:s.birdN||0,
+               day:+globalU.uDay.value.toFixed(3), clock:+(worldTime/CFG.DAY_LEN).toFixed(3) }; }
+    catch(e){ _ambSpy=null; return {err:String(e.message||e)}; } },
+  // Which ambience files actually decoded. A generator that wrote nine .ogg files and a game that never loaded them
+  // look identical from inside the game.
+  ambAssets(){ const out={}; for(const k in SFX_COUNTS){ const b=SFX[k]; out[k]={want:SFX_COUNTS[k], got:b?b.length:0}; }
+    return { owl:out.owl, bird:out.bird, insect:out.insect, crow:out.crow, wind:out.wind, creak:out.creak }; },
   // ---- FIRE (Ben 08-05: a new flame, embers alongside it, and the light flickering with it) ----
   embers(){ let rising=0, hot=0; const CA=_emIM.instanceColor.array;
     for(let i=0;i<_emN;i++){ if(_emVel[i*3+1]>0) rising++; if(CA[i*3+1]>0.4) hot++; }
@@ -28042,7 +28174,11 @@ window.__hc={
   // max(blockLight, bakedSky*day), 0..1 — not on the pixel, which is albedo-weighted and left bright sand coloured at midnight.
   scot(o){ try{ if(o&&o.amt!=null) globalU.uScotAmt.value=+o.amt; if(o&&o.lo!=null) globalU.uScotLo.value=+o.lo; if(o&&o.hi!=null) globalU.uScotHi.value=+o.hi;
       if(o&&o.on!=null) globalU.uScotAmt.value=o.on?1:0;
-      return { amt:+globalU.uScotAmt.value.toFixed(3), lo:+globalU.uScotLo.value.toFixed(5), hi:+globalU.uScotHi.value.toFixed(5) };
+      // litK: how much DELIVERED direct light counts as a light source touching the surface. 0 is the pre-08-05-late gate,
+      // which saw only the baked volume and the sky — placed lamps could not restore colour and the hand did it by radius.
+      if(o&&o.litK!=null) globalU.uScotLitK.value=+o.litK;
+      return { amt:+globalU.uScotAmt.value.toFixed(3), lo:+globalU.uScotLo.value.toFixed(5), hi:+globalU.uScotHi.value.toFixed(5),
+               litK:+globalU.uScotLitK.value.toFixed(3) };
     }catch(e){ return {err:String(e.message||e)}; } },
   cloudShadow(o){ try{ if(o&&o.on!=null) _cloudShadowOn=!!o.on;
       return { on:_cloudShadowOn, amt:+globalU.uCloudShadow.value.toFixed(4), scroll:[+globalU.uCloudScroll.value.x.toFixed(3),+globalU.uCloudScroll.value.y.toFixed(3)],
