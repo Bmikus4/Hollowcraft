@@ -30,16 +30,16 @@ const sleep = ms => new Promise(r=>setTimeout(r,ms));
 
     // stand back from a broadleaf and photograph it, then find high ground and photograph the treeline
     const spot = await page.evaluate(`(()=>{ const P=__hc.probe(), px=Math.round(P.x), pz=Math.round(P.z);
-      for(let r=8;r<220;r+=4) for(let a=0;a<16;a++){ const th=a*0.3927, x=px+Math.round(Math.sin(th)*r), z=pz+Math.round(Math.cos(th)*r);
-        const g=__hc.treeGates(x,z); if(g.emits && g.kind===1) return {x,z,h:g.h,kind:g.kindName}; } return null; })()`);
+      for(let r=8;r<600;r+=4) for(let a=0;a<16;a++){ const th=a*0.3927, x=px+Math.round(Math.sin(th)*r), z=pz+Math.round(Math.cos(th)*r);
+        const g=__hc.treeGates(x,z); if(g.emits && g.kind===2) return {x,z,h:g.h,kind:g.kindName}; } return null; })()`);
     console.log('broadleaf ' + JSON.stringify(spot));
     if(spot){
-      await page.evaluate('__hc.tpAt('+(spot.x+9)+','+(spot.h+3)+','+(spot.z+9)+')');
+      await page.evaluate('__hc.tpAt('+(spot.x+16)+','+(spot.h+4)+','+(spot.z+16)+')');
       await page.waitForFunction('(()=>{try{const f=__hc.fill(); return f.meshed>=f.want;}catch(e){return false;}})()', null, {timeout:90000}).catch(()=>{});
       await sleep(4000);
       await page.evaluate('__hc.look('+spot.x+','+(spot.h+6)+','+spot.z+')'); await sleep(1500);
-      fs.writeFileSync(path.join(ROOT,'bench','results','tree-broadleaf.png'), await page.screenshot());
-      console.log('wrote tree-broadleaf.png');
+      fs.writeFileSync(path.join(ROOT,'bench','results','tree-birch.png'), await page.screenshot());
+      console.log('wrote tree-birch.png');
       // and the wood around it from above
       await page.evaluate('__hc.tpAt('+spot.x+','+(spot.h+34)+','+(spot.z+44)+')'); await sleep(3500);
       await page.evaluate('__hc.look('+spot.x+','+spot.h+','+spot.z+')'); await sleep(1500);
