@@ -16658,8 +16658,10 @@ function icbmRocket(){ const g=new THREE.Group();
   // apex (y=190, ~240 blocks of slant range) the missile came out at exp(-40) of itself — not dim, gone. fog:false on every
   // material is the whole fix: the one object in the game that is deliberately hundreds of blocks away is the one object that
   // cannot be allowed to obey distance fog. The hull also darkens to 0x6f757c so it reads as a silhouette against a bright
-  // overcast rather than matching it; the red bands carry it against terrain and night sky.
-  const body=new THREE.MeshLambertMaterial({color:0x6f757c,fog:false}), band=new THREE.MeshLambertMaterial({color:0x9c2f26,fog:false}), fin=new THREE.MeshLambertMaterial({color:0x3d4147,fog:false});
+  // overcast rather than matching it; the red bands carry it against terrain and night sky. The hull is 0x2b2f35 and not a
+  // mid grey for the same reason the smoke commits: the frame is tonemapped, so a 0.45-luma hull composited at ~0.7 against a
+  // 0.80 bank and read as part of the weather.
+  const body=new THREE.MeshLambertMaterial({color:0x2b2f35,fog:false}), band=new THREE.MeshLambertMaterial({color:0x8e2a22,fog:false}), fin=new THREE.MeshLambertMaterial({color:0x191c20,fog:false});
   const hull=new THREE.Mesh(new THREE.CylinderGeometry(0.9,0.9,9,12), body); hull.position.y=4.5; g.add(hull);
   const nose=new THREE.Mesh(new THREE.ConeGeometry(0.9,2.6,12), band); nose.position.y=10.3; g.add(nose);
   for(const b of [2.2,6.4]){ const r=new THREE.Mesh(new THREE.CylinderGeometry(0.93,0.93,0.5,12), band); r.position.y=b; g.add(r); }
@@ -16695,7 +16697,11 @@ function icbmSmokePuff(x,y,z){
 // of the background has room holds the contrast at every hour and in any weather. Do not replace this with a fixed grey.
 function icbmSmokeShade(){
   const c=scene.fog.color, L=0.2126*c.r+0.7152*c.g+0.0722*c.b;
-  const t=(L>0.5)?Math.max(0.05,L-0.34):Math.min(0.97,L+0.34);
+  // A 0.34 STEP IS NOT ENOUGH, because material luma is not screen luma: the renderer tonemaps, so smoke set to 0.514 against a
+  // 0.854 fog came out of the composite at 0.782 against 0.798 — a 0.016 delta, still invisible. The choice is therefore
+  // committed, not nudged: near-black against a bright bank, near-white against a dark one. Exhaust against overcast really is
+  // almost black, so this is also the truer look.
+  const t=(L>0.5)?0.07:0.95;
   _icbmSmokeMesh.material.color.setRGB(t,t*0.99,t*0.96);   // a hair warm, so it is smoke and not a grey card
   return +t.toFixed(3); }
 function icbmSmokeTick(dt){
@@ -20111,12 +20117,25 @@ function brPortalDue(){
   return false; }
 function _brPortalSnap(){ const p=camera.position, q=camera.quaternion, P=_brPortalPrev;
   P.x=p.x; P.y=p.y; P.z=p.z; P.qx=q.x; P.qy=q.y; P.qz=q.z; P.qw=q.w; }
+// How much of the screen resolution the portal's second scene render is worth paying for. The door is a 1x2 hole a
+// few metres away; it is never worth a full-resolution render of the entire world. 0.5 quarters the fill.
+const BR_PORTAL_SCALE=0.5;
 function brRenderPortal(){ if(typeof renderer==='undefined'||!renderer||!BR.door||typeof camera==='undefined')return;
   // The skip is counted BEFORE _portalFrames, and does not increment it: a frame that rendered nothing is not a portal render,
   // and counting it would make __hcPERF.portalRate report a healthy Hz while the door was painting flat black.
   if(!BR.rooms||!BR.rooms.length){ BR._warmDue=true; BR._portalSkips=(BR._portalSkips|0)+1; return; }   // NEVER build from inside the render — that was the 364 ms frame. brPortalWarm does it, off this path.
   BR._portalFrames=(BR._portalFrames|0)+1;                                   // QA: proves the gate below did not switch the portal off for good
-  renderer.getDrawingBufferSize(_bSize); const rw=Math.max(2,_bSize.x|0), rh=Math.max(2,_bSize.y|0);
+  // THE PORTAL IS A SECOND FULL RENDER OF THE WHOLE SCENE, and it ran at the full drawing-buffer size — so facing a Void
+  // Door cost very nearly two frames' fill for one frame's worth of picture. Measured: 13.51 ms facing the door against
+  // 6.72 ms overworld on the same machine, at 73 portal renders/sec, i.e. one per frame; the 120 Hz gate never binds.
+  //
+  // uRes IS THE SCREEN, NOT THE TARGET, and the two are no longer the same number. The door quad's fragment shader indexes
+  // the texture by gl_FragCoord.xy/uRes, and gl_FragCoord is in SCREEN space — feeding it the render-target size at any
+  // scale below 1 makes the uv run off the end of the quad and the window slides across the doorway as you move. It only
+  // ever worked because rw happened to equal the screen width.
+  renderer.getDrawingBufferSize(_bSize); const sw=Math.max(2,_bSize.x|0), sh=Math.max(2,_bSize.y|0);
+  const ps=(BR._portalScale==null?BR_PORTAL_SCALE:BR._portalScale);
+  const rw=Math.max(2,(sw*ps)|0), rh=Math.max(2,(sh*ps)|0);
   if(!_brPortalRT){ _brPortalRT=new THREE.WebGLRenderTarget(rw,rh,{depthBuffer:true}); _brPortalCam=new THREE.PerspectiveCamera(); }
   else if(_brPortalRT.width!==rw||_brPortalRT.height!==rh)_brPortalRT.setSize(rw,rh);
   const d=BR.door, dy=d.y+1;                                                                                 // source portal (door) centre
@@ -20142,10 +20161,10 @@ function brRenderPortal(){ if(typeof renderer==='undefined'||!renderer||!BR.door
   // light count oscillate 0<->N once per frame, which is precisely the recompile churn brStableLightCount
   // exists to stop. A stable configuration matters more than a tidy one.
   // paint the RT onto the door quad by SCREEN-SPACE uv → the window lines up exactly with the hole in the world (real parallax)
-  if(!_brPortalMat){ _brPortalMat=new THREE.ShaderMaterial({ uniforms:{uTex:{value:_brPortalRT.texture},uRes:{value:new THREE.Vector2(rw,rh)}}, side:THREE.DoubleSide, toneMapped:false, fog:false,
+  if(!_brPortalMat){ _brPortalMat=new THREE.ShaderMaterial({ uniforms:{uTex:{value:_brPortalRT.texture},uRes:{value:new THREE.Vector2(sw,sh)}}, side:THREE.DoubleSide, toneMapped:false, fog:false,
     vertexShader:'void main(){ gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
     fragmentShader:'uniform sampler2D uTex; uniform vec2 uRes; void main(){ vec2 uv=clamp(gl_FragCoord.xy/uRes, 0.0015, 0.9985); gl_FragColor=texture2D(uTex, uv); }' }); }   // clamp inset avoids sampling the RT edge (white sliver when moving)
-  _brPortalMat.uniforms.uTex.value=_brPortalRT.texture; _brPortalMat.uniforms.uRes.value.set(rw,rh);
+  _brPortalMat.uniforms.uTex.value=_brPortalRT.texture; _brPortalMat.uniforms.uRes.value.set(sw,sh);   // SCREEN, not the target — see brRenderPortal
   const q=d.grp&&d.grp.userData&&d.grp.userData.quad; if(q&&q.material!==_brPortalMat)q.material=_brPortalMat; }
 
 // ---- VHS TEAR overlay (2–3 frame full-screen flash, only on entity/key events) ----
@@ -21029,6 +21048,7 @@ if(typeof window!=='undefined'){ window.__hcBR={
       return { inBRdoors:D.length, withPivots:piv, withCasing:cas, byStoreyY:byY, sumOverLoadedChunkRecords:rec,
                loadedChunks:(BR.loaded||[]).length }; }catch(e){ return {err:String(e.message||e)}; } },
   // (orch point 4) how many DISTINCT tubes are making that noise, and how far away.
+  portalScale:(v)=>{ BR._portalScale=(v==null?null:+v); return BR._portalScale==null?BR_PORTAL_SCALE:BR._portalScale; },
   sndFix:(on)=>{ BR._sndFix=(on!==false); return BR._sndFix; },
   fluorLog:(on)=>{ if(on===false){ const L=_brFluorLog; _brFluorLog=null; return L; } _brFluorLog=[]; return true; },
   fluorCensus:()=>{ const L=_brFluorLog||[]; const byF={}; for(const e of L){ byF[e.k]=(byF[e.k]||0)+1; }
