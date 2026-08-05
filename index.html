@@ -3398,9 +3398,11 @@ function foliageMesh(c){
     // wants around 16000 quads, and the measured cost of the whole cutout-plus-sprig pass in deep woods is inside
     // the noise of the frame. If this ever binds, something is wrong with the canopy, not with the budget.
     for(let ly=1;ly<WH-1 && sprigs<60000;ly++) for(let lz=0;lz<CK;lz++) for(let lx=0;lx<CK;lx++){
-      const id=g(lx,ly,lz); if(!isLeafId(id)) continue;
-      const SPRIG_TILE = (id===BID.birch_leaves||id===BID.birch_leaves_core) ? SPRIG.birch
-                       : (id===BID.oak_leaves  ||id===BID.oak_leaves_core)   ? SPRIG.oak : SPRIG.pine;
+      // CUT LEAVES ONLY (Ben 08-05: "leaves core DO NOT NEED foliage on them"). The core is the opaque block behind
+      // the shell — anywhere it is visible at all is a place the canopy is thin, and dressing it just pays for
+      // geometry on a surface that is meant to read as mass.
+      const id=g(lx,ly,lz); if(!LEAF_CUT.has(id)) continue;
+      const SPRIG_TILE = (id===BID.birch_leaves) ? SPRIG.birch : (id===BID.oak_leaves) ? SPRIG.oak : SPRIG.pine;
       const sky=clamp(_ssky(lx,ly,lz),0,1);
       for(const [ox,oy,oz] of NB){
         const nx=lx+ox, ny=ly+oy, nz=lz+oz;
@@ -4547,9 +4549,10 @@ const _horizVert='varying vec3 vPos; void main(){ vPos=position; gl_Position=pro
 const _uSeaBow={value:0.13};
 const oceanMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, side:THREE.BackSide, fog:false,
   uniforms:{ uWater:_uWater, uSky:_uSky, uHorizonBlend:_uHorizonBlend, uTime:globalU.uTime, uCamYaw:{value:0}, uSeaBow:_uSeaBow,
-    uFogCol:{value:scene.fog.color}, uDay:globalU.uDay, uWx:{value:0} },
+    uFogCol:{value:scene.fog.color}, uDay:globalU.uDay, uWx:{value:0},
+    uScotG:{value:_scotG}, uScotH:{value:_scotH} },   // the SAME arrays the land and the chunk water wash from — see the wash at the end of this shader
   vertexShader:_horizVert, fragmentShader:[
-  'precision highp float; varying vec3 vPos; uniform vec3 uWater, uSky, uHorizonBlend, uFogCol; uniform float uTime, uCamYaw, uSeaBow, uDay, uWx;',
+  'precision highp float; varying vec3 vPos; uniform vec3 uWater, uSky, uHorizonBlend, uFogCol; uniform float uTime, uCamYaw, uSeaBow, uDay, uWx; uniform vec4 uScotG, uScotH;',
   'float hash(float n){ return fract(sin(n)*43758.5453); }',
   'float nz(float x){ float i=floor(x),f=fract(x); return mix(hash(i),hash(i+1.0),f*f*(3.0-2.0*f)); }',
   'void main(){ vec3 d=normalize(vPos); float az=atan(vPos.z,vPos.x);',
@@ -4572,6 +4575,13 @@ const oceanMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, si
   // vanishes into flat grey with a visible seam where the far-sea disc still draws under it.
   '  water=mix(water, uFogCol, clamp(uWx*1.15, 0.0, 0.95));',
   '  float a=smoothstep(0.0,-0.010,elev);',                                      // feathered a touch wider than before, so the join dissolves instead of stepping
+  // THE FAR DISC WASHES WITH THE CHUNK WATER (Ben 08-05: "the night wash pass should also apply to the ocean"). It has to be the
+  // same expression on both or the horizon TEARS at the render wall — a washed near sea meeting a coloured far sea is the same
+  // class of fault as the fog-parity item, and it would show as a line exactly where the two hand over.
+  // Gated on the day factor through the land's own ramp, and no descent: open sea has full sky openness.
+  '  { float _nw=1.0-smoothstep(uScotG.y,uScotG.z,uScotG.w);',
+  '    float _nl=dot(water,vec3(0.2126,0.7152,0.0722));',
+  '    water=mix(water, vec3(_nl), uScotG.x*_nw); }',
   '  gl_FragColor=vec4(water,a); }'].join('\n') });
 const oceanLayer=new THREE.Mesh(_horizGeo, oceanMat); oceanLayer.frustumCulled=false; oceanLayer.renderOrder=-6; scene.add(oceanLayer);
 // THE BAND IS OFF (Ben 08-04, pointing an arrow at it: "all of this needs removed and replaced with sky, this is the dark
@@ -5116,6 +5126,9 @@ const waterMat = new THREE.ShaderMaterial({
   transparent:true, side:THREE.DoubleSide, fog:false,   // manual exp2 fog (scene uses FogExp2)
   uniforms:Object.assign({
     uTime:globalU.uTime, uSunDir:globalU.uSunDir, uMoonDir:globalU.uMoonDir,
+    // THE SCOTOPIC VECTORS, by reference — a ShaderMaterial's uniforms object is used directly (three clones only ShaderLib's), so
+    // the same Float32Array __hc.scot writes for the land is live here too. That is the whole reason the sea cannot drift from it.
+    uScotG:{value:_scotG}, uScotH:{value:_scotH},
     uDay:globalU.uDay, uCamPos:globalU.uCamPos, uFogColor:{value:scene.fog.color},
     // 0.80 -> 0.42, AND THE REASON IS THE CERAPHIM FIGHT (Ben 08-05: "look at how water is made to look during the ceraphim boss
     // battle, can we use that?"). It can be used, and it is free, because NOTHING about the water changes during that fight — every
@@ -5459,6 +5472,20 @@ const waterMat = new THREE.ShaderMaterial({
         // asked for two items ago.
         col += vec3(0.86,0.90,0.92) * _foam * 0.55;
       }
+      // ---- THE NIGHT WASH REACHES THE SEA (Ben 08-05: "the night wash pass should also apply to the ocean") ----
+      // The global scotopic pass is patched into three's own LIT shader chunks, and water is a ShaderMaterial with its own
+      // lighting — so the sea was the one large surface in frame that kept its full chroma after dark while every solid thing
+      // around it washed out. At night that reads as a coloured sea against a grey world.
+      // SAME UNIFORMS, SAME RAMP, no new dials: on land an unlit sky-open face gates on vSky*day, and the open sea IS sky-open, so
+      // its gate is the day factor through the identical smoothstep. __hc.scot({amt}) moves land and sea together by construction.
+      // NO DESCENT. uScotH.y is the cave floor and the sea has full sky openness, so the land's own formula multiplies it by
+      // (1 - vSky) = 0 there. Writing it out rather than reusing the term keeps that explicit: the sea desaturates, it never darkens
+      // — night water already needed an in-scatter floor to stop it going to black texels (61fe516) and this must not undo it.
+      // LAST, AFTER the ring landing above. That landing is unconditional and overwrites everything before it at distance, which is
+      // the trap that has eaten two features already; a wash applied earlier would simply vanish out at the horizon.
+      { float _nw=1.0-smoothstep(uScotG.y,uScotG.z,uScotG.w);
+        float _nl=dot(col,vec3(0.2126,0.7152,0.0722));
+        col=mix(col, vec3(_nl), uScotG.x*_nw); }
       gl_FragColor=vec4(col,alpha);
     }`
 });
@@ -28843,7 +28870,7 @@ window.__hc={
         if(!m||!m.geometry) return; chunks++; sprigVerts+=m.geometry.attributes.position.count;
         // the exposed leaf faces this chunk SHOULD have decorated
         for(let ly=1;ly<WH-1;ly++)for(let lz=0;lz<CK;lz++)for(let lx=0;lx<CK;lx++){
-          const id=c.blocks[idx(lx,ly,lz)]; if(!isLeafId(id)) continue;
+          const id=c.blocks[idx(lx,ly,lz)]; if(!LEAF_CUT.has(id)) continue;   // the probe counts the faces that SHOULD get a sprig, and the core no longer does
           for(const [ox,oy,oz] of [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]]){
             const nx=lx+ox, ny=ly+oy, nz=lz+oz;
             if(nx<0||nx>=CK||nz<0||nz>=CK||ny<0||ny>=WH) continue;
