@@ -7180,7 +7180,14 @@ function damage(n,cause,kind){ if(player.creative||player.dead)return;
   player.noDmgT=0;                                                                        // the 60s untouched-clock that gates natural regen restarts on ANY hit
   const def=(typeof armorDefense==='function')?armorDefense():0;                          // leather set (7) → ~28% off
   if(def>0){ n=n*(1-Math.min(0.8,def*0.04));
-    for(let i=0;i<4;i++){ const a=armor[i]; if(a&&ITEMS[a.id]&&ITEMS[a.id].armor){ a.dur=(a.dur==null?ITEMS[a.id].armor.dur:a.dur)-1; if(a.dur<=0){ armor[i]=null; flashName(ITEMS[a.id].name+' broke'); if(typeof updateArmorView==='function')updateArmorView(); } } } }   // armor wears down, then snaps
+    // dur:0 MEANS IT DOES NOT WEAR (Ben 08-05: "night vision goggles should not be able to break"). The NVGs are declared
+    // armor:{slot:0,def:1,dur:0} — zero was written to mean "no durability" — and this loop read it as zero durability remaining:
+    // 0-1 = -1, which is <=0, so the goggles broke on the FIRST hit the player took and flashed "Night Vision Goggles broke".
+    // Anything with a positive dur still wears down and snaps exactly as before.
+    for(let i=0;i<4;i++){ const a=armor[i]; if(!a||!ITEMS[a.id]||!ITEMS[a.id].armor) continue;
+      const D=ITEMS[a.id].armor.dur; if(!(D>0)) continue;
+      a.dur=(a.dur==null?D:a.dur)-1;
+      if(a.dur<=0){ armor[i]=null; flashName(ITEMS[a.id].name+' broke'); if(typeof updateArmorView==='function')updateArmorView(); } } }   // armor wears down, then snaps
   // THE SHIELD eats a fraction of what armour left, and wears for it. Applied after armour rather than folded into
   // armorDefense() because that function is armour-only by contract — a shield parked in the offhand must not read as
   // armour anywhere, or the same bug the equip slots were built to avoid comes back through a different door.
@@ -8205,7 +8212,7 @@ function saveGame(){
       creative:player.creative, blessT:player.blessT||0, sick:player.sick||0, rads:(typeof RADS!=='undefined'?RADS.level:0) },
     selSlot, inv, armor, backpackStore, edits, chests, localChests:[...localChests], furnaces, campfires, screens, craters,
     drops: drops.filter(d=>d&&!d.dead).slice(0,150).map(d=>({id:d.id,n:d.n,x:+d.x.toFixed(2),y:+d.y.toFixed(2),z:+d.z.toFixed(2)})),
-    horror:{ nightsSurvived:HORROR.nightsSurvived, tier:HORROR.tier, menace:HORROR.menace, monkWrath:HORROR.monkWrath|0 } };
+    horror:{ nightsSurvived:HORROR.nightsSurvived, tier:HORROR.tier, menace:HORROR.menace, monkWrath:HORROR.monkWrath|0, hwPending:HORROR.hwPending|0 } };
   try{ localStorage.setItem(SAVE_KEY, JSON.stringify(s)); }
   catch(e){ flashName('save failed — browser storage is full'); return false; }
   return true; }
@@ -8229,7 +8236,7 @@ function applySave(s){
   if(typeof _vaultOpenSync==='function') _vaultOpenSync();   // a door loaded OPEN needs its leaf's hitbox back with it
   if(Array.isArray(s.craters)){ craters.length=0; for(const c of s.craters) craters.push({x:+c.x,z:+c.z,r:+c.r,d:+c.d}); _hmCache.clear(); }
   setTimeout(()=>{ try{ scrRebuildAll(); }catch(e){} }, 1200);   // …and rebuild their screen quads once the chunks holding them exist; a monitor restored by applySave was never placed, so it never built one
-  if(s.horror){ HORROR.nightsSurvived=s.horror.nightsSurvived|0; HORROR.tier=s.horror.tier||1; HORROR.menace=s.horror.menace||0; HORROR.monkWrath=s.horror.monkWrath|0; }   // the monk count MUST come back: it is a gate, and a gate that forgets is not one
+  if(s.horror){ HORROR.nightsSurvived=s.horror.nightsSurvived|0; HORROR.tier=s.horror.tier||1; HORROR.menace=s.horror.menace||0; HORROR.monkWrath=s.horror.monkWrath|0; HORROR.hwPending=s.horror.hwPending|0; }   // the monk count MUST come back: it is a gate, and a gate that forgets is not one — and nor is an owed conversion (hwPending, see hwOnSacrifice)
   const P=s.player;
   player.pos.set(P.x,P.y,P.z); player.vel.set(0,0,0); player.yaw=P.yaw||0; player.pitch=P.pitch||0;
   player.health=Math.max(1,P.health!=null?P.health:20); player.hunger=P.hunger!=null?P.hunger:20;
@@ -11584,8 +11591,19 @@ function hwOnSacrifice(){
   }
   if(wretchPrime && wretchPrime.group && hwDress(wretchPrime,true)){
     wretchPrime._hwNightly=false;                                   // an EVENT change is not the nightly one: dawn does not undo it, only the cross does
+    HORROR.hwPending=0;
     flashName('something was made of what you gave it');
     return wretchPrime; }
+  // THE DEBT IS REMEMBERED (Ben 08-05, second report: "the wretch isnt converted into the horrific wretch when a monk is killed").
+  // Everything above can run and still change nothing. hwDress needs inst.group AND inst.P — the built rig — and the branch above
+  // that handles a dormant Wretch calls spawnWretch()/sets spawnT=0, neither of which produces a rig in THIS tick. So on the
+  // common case (three monks killed while the Wretch is not out) the third kill spent itself against a creature that had no body
+  // yet, and the conversion was simply lost. The comment above already knew the dormant case was the risk; what was missing is
+  // that noticing it is not the same as surviving it.
+  // A flag instead of a retry loop, because the trigger is a one-off event and the rig may be minutes away: the conversion is now
+  // owed, and the Wretch takes the form the moment it has a body to take it in (see updateWretch). Persisted with monkWrath, or
+  // saving between the third kill and the next spawn would forgive it.
+  HORROR.hwPending=1;
   return null;
 }
 // ONE CREATURE, TWO FORMS. Anything that spawns or re-spawns the Wretch has to see the changed one as the Wretch already being
@@ -12048,6 +12066,11 @@ function updateWretch(dt){
   if(window.__qaFreeze){ if(!wretch.group){const b=buildWretch();wretch.group=b.group;wretch.P=b.P;} wretch.active=true; wretch.group.visible=true; wretch.phase+=dt; try{ placeWretch(dt, window.__qaMoving!==false); }catch(e){} return; }   // QA: placeWretch drives animateWretch internally (single pass, matches live path)
   if(NET.on && wretchOwner()!==NET.id){ netWretchTick(dt); return; }   // co-op: only the Wretch's owner runs the AI; everyone else mirrors it
   if(NET.on) computeHuntTarget();                                      // owner hunts the NEAREST connected player
+  // AN OWED CONVERSION IS PAID AS SOON AS THERE IS A BODY TO PAY IT INTO (see hwOnSacrifice). Cheap: one falsy check per frame
+  // in the overwhelming case, and the flag is cleared by the dressing itself.
+  if(HORROR.hwPending && wretchPrime && wretchPrime.group && wretchPrime.P && !wretchPrime.horrific){
+    if(hwDress(wretchPrime,true)){ wretchPrime._hwNightly=false; HORROR.hwPending=0;
+      flashName('something was made of what you gave it'); } }
   if(wretch.boss && wretch.active && !player.dead){ bossUpdate(dt); return; }   // THE MEGA-WRETCH runs FIRST — nothing else (lurk/dawn/despawn/grab) can touch it, so it never gets stuck or vanishes
   const P=wretch.P;
   if(HORROR._firstNight) wretch.hunger=clamp(wretch.hunger-dt*0.14,0,100);   // gentle hunger tick (~8 min from full to the forage threshold) — the old 0.66/s drained it to starving in ~80s, which read as "always starving"
@@ -27157,7 +27180,7 @@ window.__hc={
   // session, so the snapshot must carry the live player and inventory or it reads s.player.x off undefined.
   monkSaveRoundTrip(n){ try{ HORROR.monkWrath=+n||0;
       const snap={ seed:CFG.SEED, edits:{}, worldTime, player:{x:player.pos.x,y:player.pos.y,z:player.pos.z,yaw:player.yaw,pitch:player.pitch},
-                   inv:inv.slice(), armor:armor.slice(), horror:{ nightsSurvived:HORROR.nightsSurvived, tier:HORROR.tier, menace:HORROR.menace, monkWrath:HORROR.monkWrath|0 } };
+                   inv:inv.slice(), armor:armor.slice(), horror:{ nightsSurvived:HORROR.nightsSurvived, tier:HORROR.tier, menace:HORROR.menace, monkWrath:HORROR.monkWrath|0, hwPending:HORROR.hwPending|0 } };
       const inSnap=snap.horror.monkWrath;
       HORROR.monkWrath=0;                                                      // wipe it the way a page reload would
       applySave(snap);
