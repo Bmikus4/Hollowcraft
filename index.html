@@ -16013,7 +16013,10 @@ function aimWorld(v, out){
 function _viewLocalBox(root){ const box=new THREE.Box3(), v=new THREE.Vector3(), m=new THREE.Matrix4();
   root.updateMatrixWorld(true);
   const inv=new THREE.Matrix4().copy(root.matrixWorld).invert();
-  root.traverse(o=>{ if(!o.isMesh||!o.geometry) return; if(!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+  // _noBB subtrees are excluded: the gun's own arm is a child of the gun and reaches back behind the eye, and it is not part of the
+  // item's footprint for the near-plane guard or the wall block-out.
+  const _skip=o=>{ for(let p=o;p;p=p.parent){ if(p.userData&&p.userData._noBB) return true; } return false; };
+  root.traverse(o=>{ if(!o.isMesh||!o.geometry) return; if(_skip(o)) return; if(!o.geometry.boundingBox) o.geometry.computeBoundingBox();
     const b=o.geometry.boundingBox; if(!b) return; m.multiplyMatrices(inv,o.matrixWorld);
     for(let i=0;i<8;i++){ v.set((i&1)?b.max.x:b.min.x,(i&2)?b.max.y:b.min.y,(i&4)?b.max.z:b.min.z).applyMatrix4(m); box.expandByPoint(v); } });
   return box; }
@@ -16975,13 +16978,22 @@ function attachGunHand(mesh, side){
   //   AND THE GRIP IS PER GUN, not one constant for five models. Each builder records userData.gripAt where it makes its grip
   // box (the revolver's is at y-0.088 z+0.11, the AR's at y-0.07 z+0.115, the bolt rifle's wrist at y-0.09 z+0.15, the shotgun's
   // at y-0.04 z+0.145, the minigun's spade at y-0.15 z+0.19). A single hardcoded point could not be right for more than one.
-  const f=buildFist(); const SC=0.42; f.scale.setScalar(SC);
+  // A NORMAL SIZED ARM (Ben 08-05: "FIRST PERSON: ALL HELD GUNS should be held by a normal sized arm"). This was 0.42, so every
+  // gun was held by a forearm 22 cm long — a doll's arm, and visibly a different limb from the one that carries a torch or a block,
+  // which is buildFist at its authored size. 1.0 is that same size. The placement solves for the TIP, and _armL is read off the
+  // scale, so the palm stays exactly on the grip whatever this number is; what changes is where the elbow ends up, which is now
+  // behind the eye where a real one is.
+  const f=buildFist(); const SC=1.0; f.scale.setScalar(SC);
   const _grip=(mesh.userData.gripAt||[0.012*side,-0.075,0.09]);
   const _armL=0.515*SC;                                                       // the tip of buildFist's own box, scaled
   const _back=new THREE.Vector3(0.10*side, -0.54, 0.84).normalize();          // back, down, and slightly outboard toward the shoulder
   f.position.set(_grip[0]+0.012*side + _back.x*_armL, _grip[1]+_back.y*_armL, _grip[2]+_back.z*_armL);
   f.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,-1), _back.clone().negate());   // -z runs from the shoulder to the grip
   f.userData.palmLocal=[_grip[0]+0.012*side,_grip[1],_grip[2]];               // where the palm is meant to land, for the probe to check against
+  // AND IT IS NOT PART OF THE GUN'S FOOTPRINT. A full-length arm runs back past the eye by design, so the near-plane guard would
+  // read the elbow as "inside the near plane" and shove every gun ~0.5 forward to fix it, and the block-out would think the item is
+  // half a metre longer than it is. An arm cut by the near plane at the edge of frame is what every first-person game does.
+  f.userData._noBB=1;
   mesh.add(f); mesh.userData._gunHand=f; applyViewFog(f);
   return f; }
 function setViewItem(id){ if(view.id===id)return; view.id=id;
@@ -17832,7 +17844,13 @@ function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id
       startReload(held); return false; }
     magSet(_mk, GUNMAG[_mk]-1, held); if(bolt)view.boltT=0.95; }                                                     // fire from THIS gun's MAG (per-instance); inventory ammo is consumed at reload
   const KP=(bolt?0.056 : rev?0.049 : (it.gun==='auto'?0.006 : it.gun==='shotgun'?0.062 : 0.019))*5;   // the 12 gauge kicks hardest of all — a cylinder-bore pump against the shoulder                            // camera recoil per shot ×5 (Ben 07-20): rifle 16° / Python 14° / AR 5.4° / minigun 1.7° — the gun OWNS your aim
-  kickRecoil(KP, KP*0.32);                                                                        // every shot climbs the aim for keeps — manage your muzzle
+  // THE MINIGUN FIGHTS BACK WHEN YOU AIM IT (Ben 08-05: "the minigun needs more recoil when ADS"). Its per-shot kick is the
+  // smallest in the game — 0.006, a thirtieth of the shotgun's — because it fires 38 rounds a second and anything else would put
+  // the aim in the sky. That is right from the hip. Sighted, holding a spun-up rotary cannon steady is the one thing it should not
+  // let you do, so the kick scales to triple over the raise. Only the minigun, and only by adsT: the rest of the guns' recoil is a
+  // set of numbers Ben tuned by feel and none of them asked for this.
+  const _mgAds = (it.auto && it.rof>=30) ? (1 + 2.0*Math.min(1, view.adsT||0)) : 1;
+  kickRecoil(KP*_mgAds, KP*_mgAds*0.32);                                                          // every shot climbs the aim for keeps — manage your muzzle
   // THE HAND THAT FIRED IS THE HAND THAT SHOWS IT (Ben 08-04: "when two guns are equipped, and the off hand slotted one is fired,
   // it looks like the main hand gun is shooting, muzzle flash, recoil, all of it"). fireGun takes the SLOT it is firing, so it
   // already knows which gun went off — but every visual it triggered was written to `view`, the main-hand model, because that was
