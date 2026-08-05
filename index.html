@@ -18565,8 +18565,18 @@ if(BR_SEED_FIXED!=null && !BR.seed) BR.seed=BR_SEED_FIXED;   // the load-time pr
 // The door's height is computed from the voxels immediately before this call, and a reseed here invalidates it: measured,
 // a door computed at y=41 on the player's own floor ended up in a column whose floor had become 58, solid concrete
 // through 41. Fixing where the height came from was not enough while this line could move the world under it.
+// A RESEED MUST TAKE THE GEOMETRY CACHE WITH IT. BR.envCache and BR.gen key on gx_gz alone, and brEnter nulls BR.gen
+// while leaving envCache standing — so after this reseed the nine entry chunks were served with the LOAD-TIME PREWARM'S
+// MESHES (built under the fallback seed 99991) and freshly generated RECORDS from the new seed. Measured on entry:
+// all nine chunks cached, and the cached door rig's openings matched the live door records at 3 of 43 doors. Walls,
+// fixtures and doors from one maze, collision and records from another — which is every symptom Ben reported from
+// playing it: doors that do not open, doorways you cannot walk through, blocks with nothing rendered on them, lights
+// that never appear. Clearing here also re-arms the prewarm, so the halls are built AHEAD of entry as before — for the
+// maze that will actually be entered instead of one nobody ever walks into.
 function brSpawnDoor(x,y,z,yaw){ brClearDoor();
-  if(!BR.inside){ BR.seed = BR_SEED_FIXED!=null ? BR_SEED_FIXED : (Math.random()*4294967296)>>>0; BR.rooms=[]; }
+  if(!BR.inside){ BR.seed = BR_SEED_FIXED!=null ? BR_SEED_FIXED : (Math.random()*4294967296)>>>0; BR.rooms=[];
+    brEnvCacheClear(); BR.gen=null; BR._cgx=null;
+    try{ BR._prewarmQ=null; brPrewarmEntry(); }catch(e){ console.error('[BRX] prewarm', e); } }
   const grp=new THREE.Group(); grp.position.set(x,y+1.0,z); grp.rotation.y=yaw;
   const quad=new THREE.Mesh(new THREE.PlaneGeometry(1.0,2.0), new THREE.MeshBasicMaterial({color:0x000000,side:THREE.DoubleSide,fog:false,toneMapped:false})); grp.add(quad);   // NO border/frame (Ben 07-27) — just the see-through window painted by the portal RT
   grp.userData={quad}; grp.renderOrder=6; scene.add(grp); BR.door={grp,x,y,z,yaw,t:0}; brSubBassTear(); brVHS();
@@ -19299,17 +19309,24 @@ function brxChunkGen(gx,gz){ if(!BR.gen) BR.gen=new Map();
 // group it finds in BR.envCache instead of rebuilding, so every door in a cached chunk kept its generated record and lost
 // its pivots — and brTryToggleDoor SKIPS a door with no pivots and returns false, silently. Measured on entry, with all
 // nine chunks served from the load-time prewarm's cache: 53 doors, 0 pivots, i.e. not one door in the halls could open.
-// So the rig travels with the group it belongs to. Index correspondence is safe because a chunk's generation is a pure
-// function of (gx, gz, seed): the door array comes back in the same order for the same chunk, always.
+// So the rig travels with the group it belongs to. The rig is matched to a live door BY THE DOOR'S OWN OPENING
+// (centre + orientation), NEVER by array index: generation reads BR.seed, and the seed moves after the prewarm has run
+// (brSpawnDoor reseeds), so the prewarmed door array for a chunk can differ in length and order from the live one.
+// Index matching would then hand door j's pivots to door i and every door would still open — wired to the wrong leaf,
+// which looks exactly like success. A key that cannot silently mismatch is worth more than the handful of rigs it drops:
+// a door that finds no rig is rebuilt, a door wired to someone else's mesh is a bug nothing reports.
 const BR_DOOR_RIG=['pivots','pivot','base','a','target','hs','dbl','leafW','swing','_casing'];
-function brDoorRigSave(doors){ return (doors||[]).map(d=>{ const o={}; for(const k of BR_DOOR_RIG) o[k]=d[k]; return o; }); }
-function brDoorRigApply(doors, saved){ if(!saved||!doors) return 0; let n=0;
-  for(let i=0;i<Math.min(doors.length,saved.length);i++){ const d=doors[i], sv=saved[i];
-    if(!sv || !sv.pivots || !sv.pivots.length) continue;                  // nothing to hand over
+function brDoorKey(d){ return (Math.round(d.cx*100)/100)+'|'+(Math.round(d.cz*100)/100)+'|'+(d.vert?1:0); }
+function brDoorRigSave(doors){ return (doors||[]).map(d=>{ const o={k:brDoorKey(d)}; for(const k of BR_DOOR_RIG) o[k]=d[k]; return o; }); }
+function brDoorRigApply(doors, saved){ if(!saved||!doors) return 0; let n=0, miss=0;
+  const by=new Map(); for(const sv of saved){ if(sv && sv.k!==undefined && !by.has(sv.k)) by.set(sv.k, sv); }
+  for(const d of doors){
     if(d.pivots && d.pivots.length) continue;                             // already rigged — never overwrite a live rig
+    const sv=by.get(brDoorKey(d));
+    if(!sv || !sv.pivots || !sv.pivots.length){ miss++; continue; }       // no rig at this opening: this door was not in the cached generation
     for(const k of BR_DOOR_RIG) if(sv[k]!==undefined) d[k]=sv[k];
     n++; }
-  BR._rigReapplied=(BR._rigReapplied|0)+n; return n; }
+  BR._rigReapplied=(BR._rigReapplied|0)+n; BR._rigMissed=(BR._rigMissed|0)+miss; return n; }
 function brxUnion(){ const keep=BR.loaded||[];
   for(const f of BRX_FIELDS) BR[f]=[];
   for(const rec of keep){ const base=BR.rooms.length, dy=brxLevelDy(rec.gx,rec.gz);
