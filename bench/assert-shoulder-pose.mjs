@@ -40,7 +40,11 @@ const SH_R=-0.29, SH_L=0.29;
       ok(g+': the shouldering arm is near straight forward', Math.abs(p.armRx+1.5708)<0.10, {armRx:p.armRx, straight:-1.5708});
       // "rotated out": out of its own shoulder rather than angled across the chest. The old pose splayed +0.40 and put the hand
       // 0.11 inboard of the shoulder; both hands then sat on the centre line, 0.001 apart in x.
-      ok(g+': …and it comes out of its own shoulder', Math.abs(p.armRz)<0.16 && p.handAt[0]<SH_R+0.06, {armRz:p.armRz, handX:p.handAt[0], shoulder:SH_R});
+      // Out of its own shoulder rather than angled across the chest — but the gun is deliberately NOT on the arm's centre line:
+      // Ben asked for it "moved to the left slightly in respect to the players arms" (08-05), which is the hand offset moving
+      // toward the body while the arm stays where it is. So the bound is "clearly on its own side of the body", not "under the
+      // shoulder to the centimetre". The old pose put both hands at -0.176: that is the failure this still guards.
+      ok(g+': …and it comes out of its own shoulder', Math.abs(p.armRz)<0.16 && p.handAt[0]<-0.20 && p.handAt[0]>=SH_R, {armRz:p.armRz, handX:p.handAt[0], shoulder:SH_R});
       // "gun on the forward arm": the gun hangs off that hand, so this is the same statement measured at the muzzle end.
       ok(g+': the gun rides on that arm', p.forendAt[0]<-0.12, {forendX:p.forendAt[0]});
       // "the other arm reaching over": the support hand starts at +0.29 and has to end up on the gun's side of the body…
