@@ -44,14 +44,24 @@ function luma(file,x0,y0,w,h){ const P=decodePNG(fs.readFileSync(file)); const c
     await sleep(3500);
     // flat treeless ground, 5x5 of equal height (a 7x7 does not exist within 140 blocks of spawn)
     const site=await page.evaluate(`(()=>{ const P=__hc.probe();
-      for(let r=10;r<220;r+=3) for(let a=0;a<24;a++){ const th=a*0.2618;
+      // OUT TO 400 AND KEEP THE BEST, rather than demanding perfection and dying: no 25x25 clearing exists within 220
+      // blocks of spawn (the island is wooded), and 'no flat treeless site' is a harness that cannot run at all.
+      let best=null;
+      for(let r=10;r<400;r+=3) for(let a=0;a<24;a++){ const th=a*0.2618;
         const x=Math.round(P.x+Math.sin(th)*r), z=Math.round(P.z+Math.cos(th)*r);
         const g0=__hc.treeGates(x,z); const h=g0&&g0.h; if(h==null) continue;
         let flat=true, clear=true;
         for(let dx=-2;dx<=2&&flat;dx++)for(let dz=-2;dz<=2;dz++){ const gg=__hc.treeGates(x+dx,z+dz);
-          if(!gg||gg.h!==h){ flat=false; break; } if(gg.emits) clear=false; }
-        if(flat&&clear&&h>P.sea+3) return {x,z,h};
-      } return {err:'no flat treeless site'}; })()`);
+          if(!gg||gg.h!==h){ flat=false; break; } }
+        // CLEAR FOR 12 BLOCKS, NOT 2. A canopy reaches about 11 blocks, so a 5x5 treeless check left the camera — nine
+        // blocks off the box — standing inside a wood, and every crop in the first run of this harness photographed
+        // leaves. Nothing about the box was in the frame.
+        let trees=0;
+        for(let dx=-12;dx<=12;dx++)for(let dz=-12;dz<=12;dz++){ const gg=__hc.treeGates(x+dx,z+dz); if(gg&&gg.emits) trees++; }
+        clear = trees===0;
+        if(flat && h>P.sea+3 && (!best || trees<best.trees)) best={x,z,h,trees};
+        if(flat&&clear&&h>P.sea+3) return {x,z,h,trees:0};
+      } return best || {err:'no flat site at all'}; })()`);
     if(site.err) throw new Error(site.err);
     console.log('site ' + JSON.stringify(site));
     // A 4x4x4 STONE BOX. Its -x wall and its -z wall are the pair: same block, same height, same hour, one frame.
@@ -74,14 +84,22 @@ function luma(file,x0,y0,w,h){ const P=decodePNG(fs.readFileSync(file)); const c
       const f=path.join(ROOT,'bench','results','wallaz-'+String(t).replace('.','')+'.png');
       await page.screenshot({path:f});
       // left half of the box is its -x wall, right half its -z wall; the crops sit inside the silhouette
+      // IS THE BOX EVEN IN SHOT? Stone is grey — r, g and b within a few levels of each other — and leaves and grass are
+      // not. A rig that cannot see its own subject must say so instead of reporting the luma of whatever it did see.
+      const grey=await (async()=>{ const P=decodePNG(fs.readFileSync(f)); const ch=P.ch; let g=0,n=0;
+        for(let y=140;y<280;y++) for(let x=230;x<560;x++){ const i=(y*P.w+x)*ch, r=P.data[i], gg=P.data[i+1], b=P.data[i+2];
+          n++; const mx2=Math.max(r,gg,b), mn=Math.min(r,gg,b); if(mx2>18 && mx2-mn<12) g++; }
+        return +(g/n).toFixed(3); })();
       const mx=luma(f, 250,150, 120,120), mz=luma(f, 430,150, 120,120);
-      rows.push({t, negX:mx, negZ:mz});
-      console.log('  t='+t+'   -x wall '+mx+'   -z wall '+mz);
+      rows.push({t, negX:mx, negZ:mz, greyShare:grey});
+      if(grey<0.15) console.log('    (only '+(100*grey).toFixed(1)+'% of the crop area is stone-grey — the box is not in shot)');
+      console.log('  t='+t+'   -x wall '+mx+'   -z wall '+mz+'   stone-grey share of the crop area '+grey);
     }
     const xs=rows.map(r=>r.negX), zs=rows.map(r=>r.negZ);
     const spread=a=>+(Math.max(...a)-Math.min(...a)).toFixed(2);
     console.log('  luma spread across the day:  -x '+spread(xs)+'   -z '+spread(zs));
     // THE INVARIANT: a wall that the sun crosses changes through the day. A wall the sun can never reach does not.
+    ok(rows.every(r=>r.greyShare>=0.15), 'the box is actually in shot at every hour', rows.map(r=>r.greyShare));
     ok(spread(xs)>6, 'the -x wall is lit differently at different hours (the sun crosses it)', {xs});
     ok(spread(zs)>6, 'the -z wall is lit differently at different hours - RED until the sunless-wall fix lands', {zs});
     console.log('\n'+pass+' ok, '+fail+' failed   frames bench/results/wallaz-*.png');
