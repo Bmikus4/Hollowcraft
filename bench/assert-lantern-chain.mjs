@@ -59,6 +59,15 @@ const partsAt=async(page,dx,dy,dz)=>{ let r=null; for(let i=0;i<30;i++){ await s
     ok('the two-block lantern really is hanging (air under it)', col.dy0===0, col);
     ok('a lantern two blocks under its ceiling gets a longer chain', links(hang2).some(p=>p.top>=1.85), links(hang2).map(p=>p.top));
     ok('a lantern standing on the ground gets no chain', links(stood).length===0, links(stood));
+    // EVERY LINK STANDS UP, AND THEY INTERLOCK (Ben 08-05: "some chains on the top of lanterns arent rotated correctly, certain
+    // links"). Read out of the merged geometry's vertices, because the chain is one mesh with no object per link: an upright torus of
+    // R 0.038 / r 0.013 is 0.102 tall, a link laid flat is 0.026 tall. Half the chain was flat — rotateX(PI/2) was applied to every
+    // link and rotateZ(PI/2) stood only the odd ones back up.
+    const ch=await page.evaluate(`__hc.lanternChain(0,1,-3)`);
+    console.log('    chain', JSON.stringify(ch));
+    ok('the chain is read link by link', ch && ch.links>=4, {links:ch&&ch.links, no:ch&&(ch.no||ch.err)});
+    ok('no link is lying flat', ch && ch.flat===0, {flat:ch&&ch.flat, of:ch&&ch.links, rows:ch&&ch.rows});
+    ok('...and consecutive links interlock at ninety degrees', ch && ch.alternates===true, {rows:ch&&ch.rows});
     ok('no page errors', errors.length===0, errors);
     await b.close();
   } finally { server.kill(); }
