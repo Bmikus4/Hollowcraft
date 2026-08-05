@@ -20,22 +20,28 @@ function freePort(){ return new Promise((res,rej)=>{ const s=createServer(); s.l
 function waitHttp(u,t=15000){ return new Promise((res,rej)=>{ const t0=Date.now(); (function poll(){ const rq=http.get(u,r=>{r.resume();res();}); rq.on('error',()=>{ if(Date.now()-t0>t)rej(new Error('down')); else setTimeout(poll,250); }); })(); }); }
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 
-// The fog colour is read from the frame itself: the sky just above the horizon in a full bank IS the fog. Then every
-// pixel's distance from it, split by whether the pixel is green-dominant (a leaf) or not (terrain, rock, trunk).
-function fogDist(file, fogRow){
+// THE REFERENCE IS THE SKY, AND IT HAS TO BE FOUND RATHER THAN ASSUMED. A fixed row read the canopy on the first two
+// runs of this harness and reported the fog colour as dark green, which made every number meaningless. The sky is the
+// BRIGHTEST thing in the top of a daylight frame, so the reference is the mean of the top decile of the top 60 rows.
+// Then how far each population sits from it: green-dominant pixels (leaf) against the rest (terrain, trunk, rock). Fog
+// pulls everything toward the sky, so if the leaves are under-fogged their distance falls by less than the terrain's.
+function fogDist(file){
   const P=decodePNG(fs.readFileSync(file)); const ch=P.ch;
-  let fr=0,fg=0,fb=0,fn=0;
-  for(let x=0;x<P.w;x++){ const i=(fogRow*P.w+x)*ch; fr+=P.data[i]; fg+=P.data[i+1]; fb+=P.data[i+2]; fn++; }
-  fr/=fn; fg/=fn; fb/=fn;
-  let gs=0,gn=0, os=0,on=0;
-  for(let y=fogRow+20;y<400;y++) for(let x=0;x<P.w;x++){
+  const top=[];
+  for(let y=0;y<60;y++) for(let x=0;x<P.w;x++){ const i=(y*P.w+x)*ch; top.push([(P.data[i]+P.data[i+1]+P.data[i+2])/3, i]); }
+  top.sort((a,b)=>b[0]-a[0]);
+  const keep=top.slice(0, Math.max(1, top.length/10|0));
+  let fr=0,fg=0,fb=0; for(const [,i] of keep){ fr+=P.data[i]; fg+=P.data[i+1]; fb+=P.data[i+2]; }
+  fr/=keep.length; fg/=keep.length; fb/=keep.length;
+  let gs=0,gn=0, os=0,on=0, gl=0, ol=0;
+  for(let y=80;y<400;y++) for(let x=0;x<P.w;x++){
     const i=(y*P.w+x)*ch, r=P.data[i], g=P.data[i+1], b=P.data[i+2];
-    const d=Math.hypot(r-fr,g-fg,b-fb);
-    if(g>r && g>b){ gs+=d; gn++; } else { os+=d; on++; }
+    const d=Math.hypot(r-fr,g-fg,b-fb), L=(r+g+b)/3;
+    if(g>r && g>b){ gs+=d; gl+=L; gn++; } else { os+=d; ol+=L; on++; }
   }
-  return { fog:[+fr.toFixed(1),+fg.toFixed(1),+fb.toFixed(1)],
-           greenDist: gn?+(gs/gn).toFixed(2):null, greenPx:gn,
-           otherDist: on?+(os/on).toFixed(2):null, otherPx:on };
+  return { sky:[+fr.toFixed(1),+fg.toFixed(1),+fb.toFixed(1)],
+           leafDist: gn?+(gs/gn).toFixed(2):null, leafLuma: gn?+(gl/gn).toFixed(1):null, leafPx:gn,
+           terrDist: on?+(os/on).toFixed(2):null, terrLuma: on?+(ol/on).toFixed(1):null, terrPx:on };
 }
 
 (async()=>{
@@ -58,16 +64,19 @@ function fogDist(file, fogRow){
     await page.waitForFunction('(()=>{try{const f=__hc.fill(); return f.meshed>=f.want;}catch(e){return false;}})()',null,{timeout:120000}).catch(()=>{});
     await sleep(5000);
     const out={};
-    for(const fg of [0,1]){
-      await page.evaluate('__hc.fog('+fg+')');
-      await sleep(2500); await page.evaluate('__hc.setTime(0.25)');
+    for(const fg of [0,0.8]){   // 0.8 is the value assert-band-fog forces; 1 is not necessarily reachable
+      // AND CHECK THE SETTER TOOK. __hc.fog returns the bank it actually holds; the first version of this harness compared
+      // two arms that were both clear and reported them identical, which they were.
+      const got=await page.evaluate('__hc.fog('+fg+')');
+      console.log('    fog asked ' + fg + ' -> bank ' + JSON.stringify(got));
+      await sleep(4000); await page.evaluate('__hc.setTime(0.25)');
       await page.evaluate('__hc.look('+spot.x+','+(spot.h+12)+','+spot.z+')');
       await sleep(900);
       await page.evaluate('__hc.look('+spot.x+','+(spot.h+12)+','+spot.z+')');   // aim twice: the eye must have settled first
       await page.evaluate('__hc.setTime(0.25)'); await sleep(400);
       const f=path.join(ROOT,'bench','results','leaffog-'+tag+'-fog'+fg+'.png');
       await page.screenshot({path:f});
-      out['fog'+fg]=fogDist(f, 24);   // row 24 is sky on a level look, and in a full bank the sky at the horizon IS the fog colour
+      out['fog'+fg]=fogDist(f);
     }
     await page.context().close();
     return { spot, out };
@@ -79,11 +88,14 @@ function fogDist(file, fogRow){
     const b=await run('&folfloor=0','nofloor');
     console.log('tree ' + JSON.stringify(a.spot));
     for(const [tag,r] of [['shipped',a],['folfloor=0',b]]){
-      for(const k of ['fog0','fog1']){
-        const v=r.out[k];
-        console.log('  '+tag.padEnd(11)+' '+k+'  fog colour '+JSON.stringify(v.fog)+
-          '   green pixels sit '+v.greenDist+' from it ('+v.greenPx+' px), everything else '+v.otherDist+' ('+v.otherPx+' px)');
+      for(const k of ['fog0','fog0.8']){
+        const v=r.out[k]; if(!v) continue;
+        console.log('  '+tag.padEnd(11)+' '+k.padEnd(7)+' sky '+JSON.stringify(v.sky)+
+          '   leaf '+v.leafDist+' from sky (luma '+v.leafLuma+', '+v.leafPx+' px)   terrain '+v.terrDist+' (luma '+v.terrLuma+', '+v.terrPx+' px)');
       }
+      const a0=r.out['fog0'], a1=r.out['fog0.8'];
+      if(a0&&a1) console.log('  '+tag.padEnd(11)+' fog closed the gap to the sky by: leaf '+
+        (100*(1-a1.leafDist/a0.leafDist)).toFixed(1)+'%   terrain '+(100*(1-a1.terrDist/a0.terrDist)).toFixed(1)+'%');
     }
   } finally { await browser.close(); server.kill(); }
 })();
