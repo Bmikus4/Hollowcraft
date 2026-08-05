@@ -73,15 +73,21 @@ const PACK = ['vault_door_x','concrete','warning_block','metal_bench','reinforce
     // ---- 3. PLACED AND DRAWN. A block that meshes to nothing is the failure this catches: put each one in front of the camera
     // in open air and require the frame to change. Open air at height, because at ground level the subject lands inside a hill.
     const spot=await page.evaluate('(()=>{ const p=__hc.probe(); return {x:Math.round(p.x), z:Math.round(p.z), y:118}; })()');
-    // FROZEN, or the subject is not where the sweep looks for it. This teleports to open air at y=118 and then waits 2.5 s;
-    // physics runs unlocked now (gravity does not pause for a menu — Ben 08-04), so the player was thirty blocks below the test
-    // cell by the time the yaw sweep ran and no yaw could ever put it on screen. It was reading as "the pack does not draw".
-    // A FLOOR, not a freeze. Physics runs unlocked now (gravity does not pause for a menu — Ben 08-04), so the player was
-    // thirty-eight blocks below the test cell by the time the yaw sweep ran and no yaw could put it on screen — it read as
-    // "the pack does not draw". __hc.freeze does not hold the PLAYER, so the honest fix is to give it something to stand on.
-    await page.evaluate('__hc.tpExact('+spot.x+','+spot.z+','+spot.y+')'); await sleep(500);
-    await page.evaluate(`(()=>{ for(let dx=-2;dx<=2;dx++) for(let dz=-2;dz<=2;dz++) __hc.setBlock(dx,-2,dz,'stone'); })()`);
-    await sleep(600); await page.evaluate('__hc.tpExact('+spot.x+','+spot.z+','+spot.y+')'); await sleep(1400);
+    // A FLOOR AT AN ABSOLUTE HEIGHT, AND A CHECK THAT IT HELD. Physics runs while unlocked now (gravity does not pause for a
+    // menu - Ben 08-04) and __hc.freeze does not hold the PLAYER, so this cell has to be stood on, not hovered in.
+    //   The previous attempt DID build a floor but built it with __hc.setBlock, which is relative to the player - and the player
+    // had already been falling for 500 ms when it ran, so the floor was laid four or five blocks BELOW spot.y. Landing on it put
+    // the eye that far under the test cell, and a cell 5 blocks up and 6.5 blocks out sits 40 degrees above a -0.05 rad sweep:
+    // never on screen, reported as "the pack does not draw". Absolute /setblock, then land one block, then verify.
+    for(let dx=-3;dx<=3;dx++) for(let dz=-3;dz<=3;dz++)
+      await page.evaluate('__hc.cmdRun("/setblock '+(spot.x+dx)+' '+(spot.y-1)+' '+(spot.z+dz)+' stone")');
+    await sleep(700);
+    await page.evaluate('__hc.tpExact('+spot.x+','+spot.z+','+spot.y+')');
+    await sleep(1200);
+    const stood=await page.evaluate('__hc.probe()');
+    // The sweep below is worthless if this is not true, so it fails HERE, where the reason is visible, instead of as a mystery
+    // "not on screen" twenty lines later.
+    ok('the player is standing at the test height', Math.abs(stood.y-spot.y)<1.6, {want:spot.y, got:+stood.y.toFixed(2)});
     await page.evaluate('__hc.setTime(0.35)'); await page.evaluate('__hc.pinScene()'); await sleep(1200);
     console.log('    where the player actually is:', JSON.stringify(await page.evaluate('__hc.probe()')));
     console.log('    the cell it is looking for:', JSON.stringify(await page.evaluate('__hc.screenOf('+spot.x+'+6.5,'+spot.y+'+0.5,'+spot.z+'+0.5)')));
