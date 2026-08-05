@@ -3878,6 +3878,15 @@ const globalU = {
   // is the A/B flag §5 asks for — one flag per change, toggled inside a single page through __hc.cloudShadow().
   uCloudShadow:{ value:1 },
   uCloudScroll:{ value:new THREE.Vector2(0,0) },
+  // THE CUTOUT THRESHOLD, AND IT IS A UNIFORM BECAUSE IT HAS TO BE ONE TO EXIST AT ALL. The atlas discard was the
+  // literal `_tex.a < 0.5`, so leafMat.alphaTest reached nothing and __hc.leafCut - documented for two days as "the
+  // cutout dial", and the instrument three harnesses were built around - moved no pixel at any value (measured at
+  // 0.5, 0.65 and 0.8: identical frames). The tile's alpha is BINARY, 0 or 255, so no threshold between them can
+  // differ; what the dial was always for is the value 0, which discards nothing and renders a hole as opaque tile
+  // colour. That is the only honest A/B of what a canopy's cutout costs, and it was not reachable.
+  // SHARED ref, same reason as uWhiteTile: every chunk material clone has to move together or half the world keeps its
+  // holes and the measurement is of nothing.
+  uCut:{ value:0.5 },
   uWhiteTile:{ value:(typeof TILEIDX!=='undefined'&&TILEIDX.vantawhite!=null)?TILEIDX.vantawhite:-1 },   // SHARED vantawhite-glow uniform (Ben 07-21): one reference every chunk material + clone points at, so the unlit-white override can never go stale across recompiles / composer rebuilds / VFX-setting toggles
   // THE HAND-LIGHT SPHERE IS GONE, and this is the answer to the open question about it. uHandPos/uHandK/uHandR fed the scotopic
   // gate a hand-rolled ball around the PLAYER — uHandR = heldLight.distance*0.72 = 23 blocks — which switched the washout fully
@@ -3962,6 +3971,7 @@ function injectAtlas(mat, opts={}){
     sh.uniforms.uCloudScroll = globalU.uCloudScroll; sh.uniforms.uSunDirC = globalU.uSunDir;
     sh.uniforms.uChunkTint = { value:new THREE.Color(LIGHT_PAL[0][0],LIGHT_PAL[0][1],LIGHT_PAL[0][2]) };   // PER CLONE, deliberately: _chunkMat overwrites it with that chunk's own dominant light colour
     sh.uniforms.uSkyDirAmt = globalU.uSkyDirAmt; sh.uniforms.uSkyDirUp = globalU.uSkyDirUp; sh.uniforms.uSkyDirDn = globalU.uSkyDirDn;
+    sh.uniforms.uCut = globalU.uCut;
     sh.uniforms.uWhiteTile = globalU.uWhiteTile;   // SHARED ref → the vantawhite glow survives every material clone / recompile / composer rebuild / VFX toggle (was a fresh per-material uniform that a pre-tile-index recompile could latch at -1)
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>',
@@ -4000,7 +4010,7 @@ function injectAtlas(mat, opts={}){
         // HC_SCOT_ATLAS routes the GLOBAL scotopic pass (patched into three's own lights/dithering chunks at the top of this
         // file) down the atlas branch, where `_bl` and `vSky` exist. Without it the wash still runs here, on the non-atlas
         // branch, and the cave descent would never fire on the one material that can tell a cave from a field.
-        '#include <common>\n#define HC_SCOT_ATLAS 1\n'+(opts.leafTrans?'uniform float uFolTrans;\n':'')+'precision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform vec3 uChunkTint;\nuniform float uSkyDirAmt;\nuniform float uSkyDirUp;\nuniform float uSkyDirDn;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
+        '#include <common>\n#define HC_SCOT_ATLAS 1\n'+(opts.leafTrans?'uniform float uFolTrans;\n':'')+'precision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform vec3 uChunkTint;\nuniform float uSkyDirAmt;\nuniform float uSkyDirUp;\nuniform float uSkyDirDn;\nuniform float uCut;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
       // ---- NIGHT VOLUMETRIC DARKNESS ON REAL FOLIAGE (Ben 07-29) ----
       // "volumetric darkness at night is applied to horizon pines, but not to forest trees." Correct, and the two fade to
       // different targets. The horizon backdrop fades to _uPineFog, which is scene.fog.color pulled toward storm blue and
@@ -4037,7 +4047,7 @@ function injectAtlas(mat, opts={}){
         'vec2 _fr=fract(vBUV); _fr.y=1.0-_fr.y;\n'+
         'vec2 _gx=dFdx(vBUV), _gy=dFdy(vBUV);\n'+   // derivatives of the CONTINUOUS uv (not fract) → correct mip LOD, kills the black seam/edge pixels at block boundaries
         'vec4 _tex=textureGrad(uAtlas, vec3(_fr, vTile), vec2(_gx.x,-_gx.y), vec2(_gy.x,-_gy.y));\n'+
-        (opts.cutout?'if(_tex.a<0.5) discard;\n':'')+
+        (opts.cutout?'if(_tex.a<uCut) discard;\n':'')+
         // PANE: keep the tile's own alpha instead of testing it, so a partly-transparent texel BLENDS. This is what makes
         // stained glass genuinely clear coloured glass rather than a 50% checkerboard of discarded pixels pretending to be
         // see-through -- the dither read as speckle and tinted nothing behind it.
@@ -30102,10 +30112,16 @@ window.__hc={
       return { faceNormals:_SPRIG_FACE_N, remeshed:n }; }catch(e){ return {err:String(e.message||e)}; } },
   foliageMeshes(){ const out=[]; try{ chunkRoot.traverse(o=>{ if(o.userData&&o.userData.foliage&&o.userData.foliage.geometry) out.push(o.userData.foliage); }); }catch(e){} return out; },
   leafMeshes(){ const out=[]; try{ chunkRoot.traverse(o=>{ if(o.userData&&o.userData.leaf&&o.userData.leaf.geometry) out.push(o.userData.leaf); }); }catch(e){} return out; },
-  leafCut(v){ try{ const a=(v==null?0.5:+v); leafMat.alphaTest=a; leafMat.needsUpdate=true;
-      let n=0; world.forEach(c=>{ const g=c.group; if(!g) return; const m=g.userData&&g.userData.leaf;
-        if(m&&m.material&&m.material!==leafMat){ m.material.alphaTest=a; m.material.needsUpdate=true; n++; } });
-      return { alphaTest:a, clones:n }; }catch(e){ return {err:String(e.message||e)}; } },
+  // ONE UNIFORM, NOT A WALK OVER EVERY CLONE. This used to set leafMat.alphaTest and then the alphaTest of every
+  // per-chunk clone, and none of it reached the GPU: the atlas discard was a hardcoded `_tex.a < 0.5` and three's own
+  // alphatest_fragment tests diffuseColor.a, which is 1 here. globalU.uCut is a SHARED reference, so assigning it moves
+  // the base material and every clone in the same frame with no remesh and no recompile.
+  // 0 DISCARDS NOTHING, which is the value the dial exists for: the holes render as opaque tile colour, which is the
+  // canopy as the rasteriser saw it before the cutout, and the only honest A/B of what the cutout costs. Values between
+  // 0 and 1 are all equivalent because the tiles' alpha is binary.
+  leafCut(v){ try{ const a=(v==null?0.5:+v); globalU.uCut.value=a;
+      return { cut:a, cutoutOff:a<=0, note:'globalU.uCut is shared by every atlas cutout material and its clones' }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   // ---- #71 AMBIENCE ----
   // The cue distribution at a given hour, without playing anything: a scheduler built from random thresholds cannot be
   // tested one roll at a time. Also reports the mean distance the cue was placed at, which is the other half of the item
