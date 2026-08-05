@@ -95,6 +95,23 @@ function luma(file,x0,y0,w,h){ const P=decodePNG(fs.readFileSync(file)); const c
       if(grey<0.15) console.log('    (only '+(100*grey).toFixed(1)+'% of the crop area is stone-grey — the box is not in shot)');
       console.log('  t='+t+'   -x wall '+mx+'   -z wall '+mz+'   stone-grey share of the crop area '+grey);
     }
+    // WHICH HALF OF THE FRAME IS WHICH WALL, PROVED BY CONSTRUCTION. Reasoning about screen handedness from a view
+    // direction is exactly the kind of thing that is wrong half the time, and a swapped label would invert every
+    // conclusion this rig can reach. So: take the -z wall away and see which crop moves. The one that changes IS the -z
+    // wall, whatever the geometry argument says.
+    await page.evaluate('__hc.setTime(0.18)');
+    const before=(()=>{ const f=path.join(ROOT,'bench','results','wallaz-018.png'); return {L:luma(f,250,150,120,120), R:luma(f,430,150,120,120)}; })();
+    await page.evaluate(`(()=>{ for(let dx=0;dx<4;dx++) for(let dy=1;dy<=4;dy++) __hc.setBlockAt(${site.x}+dx, ${site.h}+dy, ${site.z}, 'air'); })()`);
+    await sleep(2500);
+    await page.evaluate('__hc.tpAt('+cam.join(',')+')'); await sleep(1500);
+    await page.evaluate('__hc.look('+at.join(',')+')'); await sleep(800);
+    await page.evaluate('__hc.look('+at.join(',')+')'); await page.evaluate('__hc.setTime(0.18)'); await sleep(400);
+    const fAfter=path.join(ROOT,'bench','results','wallaz-nozwall.png');
+    await page.screenshot({path:fAfter});
+    const after={L:luma(fAfter,250,150,120,120), R:luma(fAfter,430,150,120,120)};
+    const dL=Math.abs(after.L-before.L), dR=Math.abs(after.R-before.R);
+    console.log('  removing the -z wall moved: left crop '+dL.toFixed(2)+'   right crop '+dR.toFixed(2));
+    ok(dR>dL*1.5, 'the RIGHT crop is the -z wall (removing that wall moves it, and not the left one)', {before, after, dL:+dL.toFixed(2), dR:+dR.toFixed(2)});
     const xs=rows.map(r=>r.negX), zs=rows.map(r=>r.negZ);
     const spread=a=>+(Math.max(...a)-Math.min(...a)).toFixed(2);
     console.log('  luma spread across the day:  -x '+spread(xs)+'   -z '+spread(zs));
