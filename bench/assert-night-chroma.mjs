@@ -92,7 +92,7 @@ function readCrop(file, crop){
     const page=await setup('');
     const S=await page.evaluate(`__hc.scot()`);
     console.log(`  live: amt ${S.amt} lo ${S.lo} hi ${S.hi}`);
-    check('the washout is on by default', S.amt>0.99 && S.hi>0.05, JSON.stringify(S));
+    check('the washout is on by default', S.amt>0.5 && S.hi>0.05, JSON.stringify(S));
 
     await page.evaluate(`__hc.scot({amt:0})`); const nOff=await shot(page,0.94,'chroma-night-off.png');
     await page.evaluate(`__hc.scot({amt:1})`); const nOn =await shot(page,0.94,'chroma-night-on.png');
@@ -109,7 +109,9 @@ function readCrop(file, crop){
     // THE ARTEFACT EXISTS, in this build, at this vantage. A check that has only ever run against the fix is not evidence:
     // amt 0 is the shipped shader with the term switched off, and it has to show the saturated hues Ben photographed.
     check('with the washout off, night ground is saturated', NoffD.sat>0.85 && NoffG.sat>0.80, `dirt ${NoffD.sat}, grass ${NoffG.sat}`);
-    check('with it on, night ground is near-grey',           NonD.sat<0.32 && NonG.sat<0.32,   `dirt ${NonD.sat}, grass ${NonG.sat}`);
+    // 0.45, not 0.32: the amount is 0.85 rather than 1.0 on Ben's word — "most of the world is grey at night" — so a trace of hue
+    // is meant to survive in the deep dark, and the light the player CARRIES restores the rest (see the hand-light check below).
+    check('with it on, night ground loses most of its chroma', NonD.sat<0.45 && NonG.sat<0.45, `dirt ${NonD.sat}, grass ${NonG.sat}`);
     // AND THE NIGHT DID NOT GET BRIGHTER. Ben has asked four separate times for night to be genuinely black, so the fix has to be
     // chroma-only. The mix is luminance-preserving in linear space; the residual +1 level is the grade's own per-channel curves
     // (S-curve, vibrance, split-tone) landing differently on a grey than on a saturated colour of the same luminance.

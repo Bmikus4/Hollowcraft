@@ -2961,7 +2961,10 @@ const globalU = {
   uSkyDirUp: { value:1.06 },
   uSkyDirDn: { value:0.80 },
   // SCOTOPIC WASHOUT — see injectAtlas. Shared refs so every per-chunk material clone moves at once; uScotAmt 0 is the A/B off.
-  uScotAmt:{ value:1 },
+  // 0.85, NOT 1.0 (Ben 08-05: "most of the world is grey at night"). The washout is right about what the tone curve does to an
+  // unlit surface's hue, and wrong to take all of it: a trace of colour left in the deep dark reads as night rather than as
+  // greyscale, and the light you CARRY now restores the rest (uHandPos below).
+  uScotAmt:{ value:0.85 },
   uScotLo: { value:0.02 },
   // 0.20, not 0.35: colour has to be fully back by the time a torch's own falloff reaches a face, or a torch-lit cellar goes
   // grey where it should read amber. At 0.35 the measured night chroma is lower still (sat 0.155 vs 0.234) and the interior
@@ -3929,8 +3932,9 @@ const _farSeaGeo=(()=>{ const g=new THREE.RingGeometry(0.0005, 16.0, 128, 44);  
   // aFlow is declared and left at zero. It has to exist: an attribute the shader declares but the geometry omits reads
   // whatever was last bound to that slot, so the disc would inherit some sea chunk's current and the open ocean would
   // scroll. Zero is also the honest value — this disc is water past the render wall, where the flow field stops.
-  g.setAttribute('aFlow', new THREE.BufferAttribute(new Float32Array(n*2), 2));
+  { const fa=new THREE.BufferAttribute(new Float32Array(n*2), 2); fa.setUsage(THREE.DynamicDrawUsage); g.setAttribute('aFlow', fa); }   // rewritten from the camera's own column in updateHorizon — see the note there
   return g; })();
+const _discFlow={x:0,z:0};   // the current last written into the disc, so it is only re-uploaded when it changes
 // Built on FIRST USE, not here: waterMat is declared a few hundred lines further down, and naming it at this point is a
 // use-before-initialisation that stops the file dead. The geometry above has no such dependency, so only the mesh waits.
 // HOW FAR OUT THE WATER HAS FINISHED BECOMING THE RING COLOUR, as a multiple of the render wall. 16 was the annulus's own outer
@@ -4231,6 +4235,23 @@ function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.p
     const _colH=(typeof surfaceH==='function')?surfaceH(_fx,_fz):(CFG.SEA+1);
     _farSeaAllow = !(_colH > CFG.SEA+2 && camera.position.y < CFG.SEA+0.85);
     farSea.visible = _farSeaWant && _farSeaAllow;
+    // …AND IT IS A STILL WATER SURFACE THREE CENTIMETRES UNDER EVERY FLOWING ONE (Ben 08-05: "there is another mesh on it
+    // that isn't flowing... I think this is something with the horizon plane"). He is right, and #74 caused it. This disc
+    // shares waterMat with chunk water, is drawn FIRST (renderOrder -5.5 against 3) and the material is transparent, so it
+    // shows through the water above it — and its aFlow is a hard zero, deliberately, because a baked attribute on a mesh
+    // that follows the camera would slide with the camera. A river's surface sits at exactly this height, so every river
+    // and every coastal shallow had a motionless copy of itself underneath.
+    // The fix that does not need the disc to know where it is: give it the CAMERA'S OWN current, uniformly. It is one
+    // value for the whole plane, which is wrong in principle out at the horizon and free in practice — the water has
+    // faded to the flat ring colour by about 250 blocks, so there is no detail out there for a current to carry. Written
+    // only when the current actually changes: this is 5805 vertices, and re-uploading them every frame to say the same
+    // thing would cost more than the artefact did.
+    if(farSea.visible && typeof flowVec==='function'){ const fv=flowVec(camera.position.x, camera.position.z);
+      if(Math.abs(fv.x-_discFlow.x)>0.02 || Math.abs(fv.z-_discFlow.z)>0.02){
+        _discFlow.x=fv.x; _discFlow.z=fv.z;
+        const a=_farSeaGeo.attributes.aFlow, arr=a.array;
+        for(let i=0;i<arr.length;i+=2){ arr[i]=fv.x; arr[i+1]=fv.z; }
+        a.needsUpdate=true; } }
     waterMat.uniforms.uRingFade.value = wall*_ringFadeMul; }   // where the water has finished becoming the ring colour — see _ringFadeMul
   { // ---- THE HORIZON COLOUR: THE NIGHT SEA, AT EVERY HOUR ----
     // Ben 07-28: "much darker even during the day ... zero blending on this even during the day, just make sure it is colour
@@ -5998,14 +6019,16 @@ function buildModelBlocks(c,g){
       im.instanceMatrix.needsUpdate=true; im.userData.modelMat=mat; if(extra)extra(im); g.add(im); return im; };
     let arr;
     for(const idk in byId){ const id=+idk, bd=B[id], m=bd.model; arr=byId[idk];
-      if(m==='torch'){ const wd=new THREE.MeshLambertMaterial({color:0x4a3520});                                                            // faceted 2-segment box shaft (not a cylinder), longer
+      if(m==='torch'){ const wd=torchWoodMat();                                                                                              // faceted 2-segment box shaft (not a cylinder), longer
         addIM(box(0.09,0.34,0.09), wd, 0.17); addIM(box(0.07,0.26,0.07), wd, 0.43);
         _WRAP_YS.forEach((yo,i)=>{ const az=i*1.95; const tg=new THREE.TorusGeometry(0.08,0.042,6,12);                                        // fat rag tube-rings wrapped around the stick like bacon (rotation baked in for instancing)
           tg.rotateX(Math.PI/2 + _WRAP_TILT*Math.cos(az)); tg.rotateZ(_WRAP_TILT*Math.sin(az));
-          addIM(tg, new THREE.MeshBasicMaterial({color:_WRAP_COLS[i%4]}), 0.52+yo, true); }); continue; }                                     // UNLIT wrapped-rag head; flame emerges from it
-      if(m==='lantern'){ const metal=new THREE.MeshPhongMaterial({color:0x241f18,shininess:40,specular:0x50493a});
+          addIM(tg, ragRingMat(_WRAP_COLS[i%4]), 0.52+yo, true); }); continue; }                                                              // UNLIT wrapped-rag head; flame emerges from it
+      // A CAGE WITH GLASS PANES IN IT. The frame parts share ONE material (one dispose, one program) while the glass gets its own,
+      // which is also the only part of a lantern you are supposed to see through — see lanternPaneMat for why it writes no depth.
+      if(m==='lantern'){ const metal=lanternMetalMat();
         addIM(box(0.34,0.05,0.34),metal,0.03); addIM(box(0.34,0.05,0.34),metal,0.5);
-        addIM(box(0.3,0.42,0.3), new THREE.MeshPhongMaterial({color:0xffb860,transparent:true,opacity:0.28,side:THREE.DoubleSide,emissive:0x3a1e06,shininess:60}),0.28,false);
+        addIM(box(0.3,0.42,0.3), lanternPaneMat(),0.28,false);
         addIM(cyl(0.018,0.018,0.1,4),metal,0.58); continue; }
       if(m==='candle'){ addIM(cyl(0.06,0.07,0.3,6), new THREE.MeshPhongMaterial({color:0xe8dcc0,shininess:10}), 0.15); continue; }
       if(m==='campfire'){ const wood=new THREE.MeshLambertMaterial({color:0x3a2a1a}); const logGeo=cyl(0.07,0.07,0.92,5);
@@ -7474,6 +7497,20 @@ function drawIcon(cx,id){
     cx.fillStyle='rgba(210,225,230,.35)'; cx.beginPath(); cx.moveTo(4,6); cx.lineTo(12,6); cx.lineTo(11,14); cx.lineTo(5,14); cx.closePath(); cx.fill();   // rounded flask body
     cx.fillStyle=c; cx.beginPath(); cx.moveTo(5,9); cx.lineTo(11,9); cx.lineTo(10.5,13); cx.lineTo(5.5,13); cx.closePath(); cx.fill();   // glowing tincture
     cx.fillStyle='#7a5a34'; cx.fillRect(6,1,4,2); }                            // cork
+  // THE RELIC HAD NO PAINTER AT ALL, so it fell to the circle at the bottom of this chain (Ben 08-05: "the monks cross is still a
+  // circle as its inventory item and in the main hand, but can be seen in the off hand"). Both halves of that report are this one
+  // omission: the offhand goes through itemModel, which has built the real 3D cross since 08-04, while the slot icon comes from
+  // here and the MAIN hand extrudes what this function draws. So a missing branch cost two of the three places it appears.
+  // Drawn as the same Orthodox silhouette buildMonkCross models — titulus, main bar, slanted footrest — because a plus sign in
+  // the hotbar next to a three-barred cross in the hand is still two crosses.
+  else if(s.t==='cross'){ const g='rgba(255,255,255,.35)', d='rgba(60,44,10,.55)';
+    rect(7,1,2,14,c);                                    // the upright, full height
+    rect(5,4,6,2,c);                                     // titulus — the short board above
+    rect(3,7,10,2,c);                                    // the main bar
+    cx.save(); cx.translate(8,11.5); cx.rotate(-0.34); rect(-3.5,-0.9,7,1.8,c); cx.restore();   // the slanted footrest, the detail that names the tradition
+    rect(6,7,4,2,c); rect(6.5,7.5,3,1,g);                // centre boss, catching the light
+    rect(7,1,1,14,g); rect(3,7,10,1,g); rect(8,14,1,1,d);
+  }
   else { circ(8,8,5,c); }
 }
 function iconURL(id){ if(iconCache[id])return iconCache[id]; const cv=document.createElement('canvas'); cv.width=cv.height=32; const cx=cv.getContext('2d'); cx.imageSmoothingEnabled=false; cx.save(); cx.scale(2,2); drawIcon(cx,id); cx.restore(); iconCache[id]=cv.toDataURL(); return iconCache[id]; }
@@ -15088,14 +15125,41 @@ const TOOL_BUILDERS={ sword:buildGreatsword, pickaxe:buildPickaxe, axe:buildAxe,
 const SPEAR_HELD_SCALE=0.26, SPEAR_HELD_Z=-1.05;
 const TOOL_POSE={ sword:{x:0.30,y:-0.12,s:0.60,rx:0.20,rz:0.24}, pickaxe:{x:0.30,y:0.28,s:1.08,rx:0.12,rz:0.14},
   axe:{x:0.30,y:0.28,s:1.08,rx:0.12,rz:0.14}, shovel:{x:0.30,y:0.28,s:1.08,rx:0.12,rz:0.14} };
+// ===== A TORCH AND A LANTERN'S SURFACES, ONE DESCRIPTION EACH (Ben 08-05: "texture lanterns", "texture torches") =====
+// Both were flat colour: a torch's shaft a plain Lambert brown with MeshBasic rings for the rag, a lantern's frame a plain Phong
+// black. Both are also drawn TWICE — once as the placed block's instanced model, once as the held/dropped/icon model — so a
+// texture added to one of them is an object that changes finish when you set it down. These are the single description.
+//
+// MATERIALS FRESH PER CALL, TEXTURES CACHED, and that split is load-bearing rather than tidy. A chunk's teardown calls
+// modelMat.dispose() on every model material it built, so a material shared between chunks is one that some other chunk will
+// dispose out from under this one — while the maps survive it, because disposing a material does not touch its textures (the
+// same reason tileTex can hand the same canvas to everybody). Do not "optimise" these into cached materials.
+//
+// THE TORCH KEEPS ITS MATERIAL CLASSES: Lambert stays Lambert and Basic stays Basic, so it gains grain and nothing else moves.
+// Turning the rag Lambert would take a torch's own flame off its head and leave every torch in the game dark at night, which is a
+// lighting change wearing a texture change's clothes. The HELD LANTERN is the deliberate exception — its frame was Lambert and its
+// glass an opaque Basic brick, and both are replaced here on purpose, because matching the placed block is the fix (see
+// buildHeldLantern).
+let _ragTex=null;
+function ragTex(){ if(!_ragTex) _ragTex=_clothTex('#8a7452','#b9a67e',[12,50]); return _ragTex; }   // oiled sackcloth: the weave the player's shirt is made of, in linen
+function torchWoodMat(){ return new THREE.MeshLambertMaterial({color:0x4a3520, map:woodTex(2)}); }  // grain along the twig; the tint is the shipped colour, so the shaft only gains figure
+function ragRingMat(col){ return new THREE.MeshBasicMaterial({color:col, map:ragTex()}); }          // per-ring tint kept — four shades up the head is what stops it reading as one tube
+function lanternMetalMat(){ return new THREE.MeshPhongMaterial({color:0x241f18,shininess:40,specular:0x50493a,map:metalTex()}); }   // brushed iron, dark-tinted: the same map the handcuffs use
+// THE PANE IS THE TEXTURE THAT WAS ALREADY DRAWN AND NEVER USED. paintTile('lantern') paints exactly this — a dark cage border
+// around a hot amber centre — and the block declares tile:'lantern', but a cat:'model' block never reaches the atlas, so the
+// tile has been dead since it was painted. Mapping it onto the glass is the whole texture.
+// depthWrite:false because the flame lives INSIDE this box: a transparent surface that writes depth is drawn first and then
+// rejects everything behind it, so the pane would erase the very flame it is meant to be glass in front of.
+function lanternPaneMat(){ return new THREE.MeshPhongMaterial({color:0xffb860, map:tileTex('lantern'), transparent:true, opacity:0.34,
+  side:THREE.DoubleSide, emissive:0x3a1e06, shininess:60, depthWrite:false}); }
 const _WRAP_COLS=[0x7a6444,0x6a5638,0x87724d,0x6f5a3c], _WRAP_YS=[-0.055,-0.014,0.028,0.066], _WRAP_TILT=0.5;   // yOffsets up the stick
 function buildClothWrap(scale){ const g=new THREE.Group();
   _WRAP_YS.forEach((y,i)=>{ const az=i*1.95;                                                                  // azimuth advances per ring → the tilt direction spirals (bacon wrap)
-    const t=new THREE.Mesh(new THREE.TorusGeometry(0.05,0.027,6,12), new THREE.MeshBasicMaterial({color:_WRAP_COLS[i%4]}));
+    const t=new THREE.Mesh(new THREE.TorusGeometry(0.05,0.027,6,12), ragRingMat(_WRAP_COLS[i%4]));
     t.position.y=y; t.rotation.x=Math.PI/2 + _WRAP_TILT*Math.cos(az); t.rotation.z=_WRAP_TILT*Math.sin(az); g.add(t); });
   if(scale)g.scale.setScalar(scale); return g; }
 function buildHeldTorch(lit, red){ if(lit===undefined)lit=true; const g=new THREE.Group();
-  const wood=new THREE.MeshLambertMaterial({color:0x4a3520});                                                             // longer, faceted twig shaft — segmented boxes with a slight zig-zag, not one smooth cylinder
+  const wood=torchWoodMat();                                                                                              // longer, faceted twig shaft — segmented boxes with a slight zig-zag, not one smooth cylinder
   const seg=(y,w,h,rz,rx)=>{ const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,w),wood); m.position.y=y; if(rz)m.rotation.z=rz; if(rx)m.rotation.x=rx; g.add(m); };
   seg(-0.12,0.056,0.18,0.05,0); seg(0.02,0.05,0.18,-0.06,0.02); seg(0.15,0.044,0.16,0.04,-0.02); seg(0.26,0.038,0.10,-0.03,0.02);
   const cloth=buildClothWrap(); cloth.position.y=0.30; g.add(cloth);                                                     // wrapped-rag head at the TOP of the stick
@@ -15104,8 +15168,16 @@ function buildHeldTorch(lit, red){ if(lit===undefined)lit=true; const g=new THRE
   g.rotation.set(0.15,0,0.12); return g; }
 // held LANTERN — a metal-framed glass box with an inner glow, corner posts, top/base plates and a ring handle (NOT a torch)
 function buildHeldLantern(){ const g=new THREE.Group();
-  const metal=new THREE.MeshLambertMaterial({color:0x3a2f22}), glass=new THREE.MeshBasicMaterial({color:0xffcf7a});
+  // THE HELD ONE HAD NO GLASS, it had a solid amber brick (Ben 08-05: "make sure held lanterns also have transparent glass on
+  // them"). MeshBasicMaterial at full opacity, 0.22 across, with the flame built at y=0.08 — i.e. INSIDE it. So the lantern you
+  // carry was the one lantern in the game with no flame visible in it, and the placed block's translucent pane made the pair look
+  // like two different objects. Same frame material and same pane as the placed block now, so they are one lantern.
+  const metal=lanternMetalMat(), glass=lanternPaneMat();
   const glow=new THREE.Mesh(new THREE.BoxGeometry(0.22,0.28,0.22),glass); glow.position.y=0.1; g.add(glow);
+  // AND SOMETHING BEHIND THE GLASS TO SEE. Transparent panes over an empty box read as a wire cage, not a lamp: the flame is
+  // 0.12 wide inside a 0.22 box and does not fill it. This is the burner's body — small, unlit-material so it holds its glow in
+  // a dark cellar, and inside the pane rather than through it.
+  const core=new THREE.Mesh(new THREE.BoxGeometry(0.1,0.13,0.1), new THREE.MeshBasicMaterial({color:0xffd9a0})); core.position.y=0.06; g.add(core);
   for(const o of [[-0.11,-0.11],[0.11,-0.11],[-0.11,0.11],[0.11,0.11]]){ const p=new THREE.Mesh(new THREE.BoxGeometry(0.028,0.32,0.028),metal); p.position.set(o[0],0.1,o[1]); g.add(p); }   // corner posts
   const top=new THREE.Mesh(new THREE.BoxGeometry(0.3,0.05,0.3),metal); top.position.y=0.27; g.add(top);
   const base=new THREE.Mesh(new THREE.BoxGeometry(0.28,0.05,0.28),metal); base.position.y=-0.06; g.add(base);
@@ -15470,7 +15542,19 @@ camera.add(offView.group);
 // THE LEFT HAND HANGS LOW (Ben 08-04: "i want the left hand down by default"). It used to rest at the same height as the right,
 // which put two hands across the middle of the screen; a carried torch or shield belongs down at your side until something needs
 // it. The arm follows the hand down by the same amount, so the two stay attached to each other.
-const OFF_VIEW_Y=-0.26, OFF_ARM_Y=-0.34;
+// AN ARM DOES NOT MOVE WHEN YOU PICK SOMETHING UP (Ben 08-05: "holding a block does NOT mean your arm should sit lower in the
+// frame, ever, applies to both arms. arms shouldnt move when something is equipped (other than a gun)").
+// The empty hand draws buildFist through view.group at y=-0.22 (the fist branch in updateView); equip anything that is not a gun
+// and that fist is replaced by the SAME mesh in mainArm.group, which sat at -0.34. So the arm fell 0.12 at the moment of equipping
+// and rose again when you put the item away — one forearm, two heights, decided by whether your hand was full.
+// FIST_REST_Y is now the single source and the fist branch reads it too, so the two cannot be edited apart. What made them drift
+// is that OFF_ARM_Y was authored for the LEFT hand, where hanging low is deliberate, and the main arm was then defined as "offArm
+// with x negated" — inheriting a number chosen for a hand that is meant to be down at your side.
+// The offhand ITEM keeps its low rest (OFF_VIEW_Y): "the left hand down by default" was about the thing you carry, not about
+// the limb. Guns are exempt by construction, not by a test here — updateMainArm/updateOffArm hide these groups for a gun,
+// because a gun carries its own hand (attachGunHand) and that hand rides the weapon.
+const FIST_REST_Y=-0.22;
+const OFF_VIEW_Y=-0.26, OFF_ARM_Y=FIST_REST_Y;
 offView.group.position.set(-0.22,OFF_VIEW_Y,-0.35);
 // Yaw is Ben's, OFFHAND ONLY (-0.45 -> -0.10): "spun counterclockwise a bit" seen from the top down, which about +Y is a
 // POSITIVE rotation. The main-hand shield keeps its own -0.30 in setViewItem; this group is only ever the left hand, so
@@ -15689,6 +15773,13 @@ function setViewItem(id){ if(view.id===id)return; view.id=id;
     view.mesh.scale.setScalar(SPEAR_HELD_SCALE); view.mesh.position.z=SPEAR_HELD_Z; }   // carried cocked behind the shoulder — see updateView
   else if(it.book){ view.mesh=it.healBook?buildHealBook():buildBook(); view.mesh.userData.bookHeld=true; }   // held open, readable — see updateView
   else if(it.bible){ view.mesh=buildBible(); view.mesh.userData.bookHeld=true; }  // THE BIBLE — same held-open reading pose
+  // THE RELIC, FROM THE SAME BUILDER THE OTHER HAND USES. This branch exists because the paragraph 20 lines below is right: the
+  // viewmodel is a SECOND dispatch, and monk_cross had no entry in it, so the main hand extruded the 2D icon while the offhand
+  // showed the real cross. Calling itemModel rather than buildMonkCross directly is the point — the relic in your right hand is
+  // then literally the object in your left, on the ground and in the 3D icon, and there is no fourth copy to keep in step.
+  else if(id==='monk_cross'){ const mm=itemModel(id);
+    const bb=new THREE.Box3().setFromObject(mm), sz=bb.getSize(new THREE.Vector3()), ctr=bb.getCenter(new THREE.Vector3()), sc=0.34/(Math.max(sz.x,sz.y,sz.z)||1);
+    mm.scale.setScalar(sc); mm.position.set(-ctr.x*sc,-ctr.y*sc,-ctr.z*sc); view.mesh=mm; }
   else if(it.block!=null && B[it.block] && B[it.block].cat==='model'){ const mm=itemModel(id);   // MODEL blocks held as their REAL 3D model (fence/chest/gate/bars/bed/…), centred + scaled — not a tiny cube
     const bb=new THREE.Box3().setFromObject(mm), sz=bb.getSize(new THREE.Vector3()), ctr=bb.getCenter(new THREE.Vector3()), s=0.34/(Math.max(sz.x,sz.y,sz.z)||1);
     mm.scale.setScalar(s); mm.position.set(-ctr.x*s,-ctr.y*s,-ctr.z*s); view.mesh=mm; }
@@ -16178,7 +16269,8 @@ function updateView(dt){ updateRecoil(dt);                                      
   else {
     const loopArc=using?Math.max(0,Math.sin(view.swingPhase)):0;                                 // repeating 0→1→0 strike while held
     const sw=Math.max(view.swing*Math.sin(view.swing*Math.PI), loopArc);
-    if(view.id==null){ view.group.position.set(0.32, -0.22+b, 0.12); view.group.rotation.set(0.06 - sw*0.95, sw*0.12, 0); }   // FIST: shoulder pivot sits behind the eye; the swing arcs the HAND (far end) down-forward while the elbow stays anchored to the body
+    if(view.id==null){ view.group.position.set(0.32, FIST_REST_Y+b, 0.12); view.group.rotation.set(0.06 - sw*0.95, sw*0.12, 0); }   // FIST: shoulder pivot sits behind the eye; the swing arcs the HAND (far end) down-forward while the elbow stays anchored to the body. y is FIST_REST_Y so the arm groups cannot drift off it — see there
+
     else { view.group.position.set(0.34,-0.30+b,-0.62); view.group.rotation.set(-sw*1.3,0,0); }
     if(view.mesh&&view.mesh.isMesh) view.mesh.rotation.y = (ITEMS[view.id]&&ITEMS[view.id].block!=null)?0.6:0;
     /* held flame no longer bounces — it holds a steady big flame (the flameMat still shimmers subtly on its own) */ }
@@ -19592,6 +19684,84 @@ function brxPrefetch(){
   _brPfCool = PERF.brPrefetchCooldown;                                // let the frame budget recover before the next one
   return 1; }
 let _brDoorMat=null;
+// ---- PROCEDURAL SURFACE DETAIL for the fittings and the doors (Ben 08-05: "texture lights and all doors better") ----
+// The troffer diffuser was a flat MeshBasicMaterial colour, and the housing, the door paint and the architrave were flat
+// colours with NO map at all — which is why a fitting read as a bright rectangle and every door read as the same slab.
+// DRAWN, NOT LOADED: no new asset files to ship, and one shared instance per surface. Sharing is not a nicety here — a
+// per-chunk material is exactly what leaked programs at ~7 a minute before brTrofferMats was cached, and every extra
+// material pins a shader program, which is the same currency the chunk-load stall is paid in.
+// The LCG is fixed so two runs draw the same pixels and an A/B stays honest.
+const _brTexCache=new Map();
+function _brTex(key, size, draw){
+  const hit=_brTexCache.get(key); if(hit) return hit;
+  const c=document.createElement('canvas'); c.width=c.height=size; const g=c.getContext('2d');
+  let sd=0x9e3779b9; const rnd=()=>{ sd=(Math.imul(sd,1664525)+1013904223)>>>0; return sd/4294967296; };
+  draw(g, size, rnd);
+  const t=new THREE.CanvasTexture(c); t.wrapS=t.wrapT=THREE.RepeatWrapping; t.anisotropy=8;
+  t.colorSpace=THREE.SRGBColorSpace; _brTexCache.set(key,t); return t; }
+// A PRISMATIC ACRYLIC DIFFUSER, which is what you are actually looking at when you look up in here: ribbed plastic, not a
+// glowing rectangle. The ribs sell it — they catch the eye at a grazing angle and give the panel a direction. The specks
+// are deliberate: dead insects inside the diffuser are the most recognisable detail of a real suspended-ceiling
+// fluorescent, and they read at any distance because they are the only dark thing on a bright field.
+function _brDiffuserTex(){ return _brTex('diffuser', 256, (g,S,rnd)=>{
+  g.fillStyle='#fff6e2'; g.fillRect(0,0,S,S);
+  const rib=S/26;
+  for(let x=0; x<S; x+=rib){ const grd=g.createLinearGradient(x,0,x+rib,0);
+    grd.addColorStop(0,'rgba(255,255,255,0.55)'); grd.addColorStop(0.45,'rgba(246,236,210,0.15)');
+    grd.addColorStop(0.55,'rgba(214,203,175,0.35)'); grd.addColorStop(1,'rgba(255,252,240,0.5)');
+    g.fillStyle=grd; g.fillRect(x,0,rib,S); }
+  for(let y=0; y<S; y+=rib*2){ g.fillStyle='rgba(226,215,188,0.13)'; g.fillRect(0,y,S,1.2); }
+  g.fillStyle='rgba(120,110,86,0.5)';
+  for(let i=0;i<11;i++){ const x=rnd()*S, y=rnd()*S, r=0.8+rnd()*2.4;
+    g.beginPath(); g.ellipse(x,y,r,r*(0.4+rnd()*0.7),rnd()*3.14,0,6.283); g.fill(); }
+  g.strokeStyle='rgba(120,110,86,0.32)'; g.lineWidth=0.7;
+  for(let i=0;i<3;i++){ const x=rnd()*S, y=rnd()*S; g.beginPath(); g.moveTo(x,y);
+    g.quadraticCurveTo(x+8-rnd()*16, y+6-rnd()*12, x+14-rnd()*28, y+10-rnd()*20); g.stroke(); }
+  const v=g.createRadialGradient(S/2,S/2,S*0.2,S/2,S/2,S*0.62);
+  v.addColorStop(0,'rgba(0,0,0,0)'); v.addColorStop(1,'rgba(90,80,58,0.30)'); g.fillStyle=v; g.fillRect(0,0,S,S); }); }
+// PAINTED SHEET STEEL for the housing, and the same base for the architrave: roller stipple, a brushed direction, grime
+// gathering where two faces meet, and a few scratches down to bare metal.
+function _brPaintedTex(key, base, grime){ return _brTex(key, 256, (g,S,rnd)=>{
+  g.fillStyle=base; g.fillRect(0,0,S,S);
+  for(let i=0;i<2600;i++){ const a=0.02+rnd()*0.05; g.fillStyle=(rnd()<0.5?'rgba(255,255,255,':'rgba(60,54,40,')+a+')';
+    g.fillRect(rnd()*S, rnd()*S, 1, 1); }
+  g.strokeStyle='rgba(255,255,255,0.05)'; g.lineWidth=1;
+  for(let i=0;i<70;i++){ const y=rnd()*S; g.beginPath(); g.moveTo(0,y); g.lineTo(S,y+(rnd()-0.5)*2); g.stroke(); }
+  const e=[[0,0,S,10],[0,S-10,S,10],[0,0,10,S],[S-10,0,10,S]];
+  for(const q of e){ const grd=g.createLinearGradient(q[0],q[1],q[0]+(q[2]<S?q[2]:0),q[1]+(q[3]<S?q[3]:0));
+    grd.addColorStop(0,grime); grd.addColorStop(1,'rgba(0,0,0,0)'); g.fillStyle=grd; g.fillRect(q[0],q[1],q[2],q[3]); }
+  g.strokeStyle='rgba(255,255,255,0.22)'; g.lineWidth=0.6;
+  for(let i=0;i<9;i++){ const x=rnd()*S, y=rnd()*S, l=6+rnd()*26, a=rnd()*3.14;
+    g.beginPath(); g.moveTo(x,y); g.lineTo(x+Math.cos(a)*l, y+Math.sin(a)*l); g.stroke(); } }); }
+// A DOOR THAT HAS BEEN USED. Office paint takes its wear in specific places: shoe marks low down, a greasy halo at handle
+// height, hairline craze in the paint film. Both banded and scattered marks, because a leaf, a stile and a rail do not
+// all receive their UVs the same way up.
+function _brDoorPaintTex(){ return _brTex('doorpaint', 256, (g,S,rnd)=>{
+  g.fillStyle='#ded5bd'; g.fillRect(0,0,S,S);
+  for(let i=0;i<3400;i++){ const a=0.02+rnd()*0.06; g.fillStyle=(rnd()<0.5?'rgba(255,255,255,':'rgba(88,78,58,')+a+')';
+    g.fillRect(rnd()*S, rnd()*S, 1, 1); }
+  const kick=g.createLinearGradient(0,S,0,S*0.78);
+  kick.addColorStop(0,'rgba(74,66,50,0.34)'); kick.addColorStop(1,'rgba(74,66,50,0)');
+  g.fillStyle=kick; g.fillRect(0,S*0.78,S,S*0.22);
+  for(let i=0;i<14;i++){ g.fillStyle='rgba(70,62,46,'+(0.05+rnd()*0.13)+')';
+    const y=S*(0.6+rnd()*0.4), x=rnd()*S, w=4+rnd()*22, h=1.5+rnd()*4;
+    g.beginPath(); g.ellipse(x,y,w,h,(rnd()-0.5)*0.5,0,6.283); g.fill(); }
+  const hand=g.createRadialGradient(S*0.82,S*0.46,2,S*0.82,S*0.46,S*0.22);
+  hand.addColorStop(0,'rgba(96,84,62,0.20)'); hand.addColorStop(1,'rgba(96,84,62,0)');
+  g.fillStyle=hand; g.fillRect(0,0,S,S);
+  g.strokeStyle='rgba(120,108,82,0.20)'; g.lineWidth=0.5;
+  for(let i=0;i<16;i++){ let x=rnd()*S, y=rnd()*S; g.beginPath(); g.moveTo(x,y);
+    for(let k=0;k<3;k++){ x+=(rnd()-0.5)*22; y+=(rnd()-0.5)*22; g.lineTo(x,y); } g.stroke(); } }); }
+// BRUSHED STEEL for the industrial leaf, with the kickplate every service door in the world has.
+function _brSteelTex(){ return _brTex('steel', 256, (g,S,rnd)=>{
+  g.fillStyle='#9a9da2'; g.fillRect(0,0,S,S);
+  for(let i=0;i<900;i++){ const y=rnd()*S, l=20+rnd()*S, x=rnd()*S;
+    g.strokeStyle=(rnd()<0.5?'rgba(255,255,255,':'rgba(40,44,50,')+(0.03+rnd()*0.07)+')';
+    g.lineWidth=0.6+rnd()*0.9; g.beginPath(); g.moveTo(x,y); g.lineTo(x+l,y+(rnd()-0.5)*1.2); g.stroke(); }
+  g.fillStyle='rgba(52,56,62,0.30)'; g.fillRect(0,S*0.84,S,S*0.16);
+  g.strokeStyle='rgba(30,33,38,0.45)'; g.lineWidth=1; g.beginPath(); g.moveTo(0,S*0.84); g.lineTo(S,S*0.84); g.stroke();
+  for(let i=0;i<26;i++){ g.fillStyle='rgba(120,100,70,'+(0.05+rnd()*0.12)+')';
+    const r=0.8+rnd()*2.2; g.beginPath(); g.arc(rnd()*S, rnd()*S, r, 0, 6.283); g.fill(); } }); }
 function brDoorMats(){ if(_brDoorMat)return _brDoorMat; const TL=new THREE.TextureLoader(), base='./assets/backrooms/';
   const tx=(p,srgb)=>{ const t=TL.load(base+p); t.wrapS=t.wrapT=THREE.RepeatWrapping; t.anisotropy=8; if(srgb)t.colorSpace=THREE.SRGBColorSpace; return t; };
   const wood=new THREE.MeshStandardMaterial({ map:tx('wood/Planks011_1K-JPG_Color.jpg',true), normalMap:tx('wood/Planks011_1K-JPG_NormalGL.jpg'), roughnessMap:tx('wood/Planks011_1K-JPG_Roughness.jpg'), aoMap:tx('wood/Planks011_1K-JPG_AmbientOcclusion.jpg'), color:0xb98b55, roughness:0.9, metalness:0, side:THREE.DoubleSide });
@@ -19599,10 +19769,15 @@ function brDoorMats(){ if(_brDoorMat)return _brDoorMat; const TL=new THREE.Textu
   // A DOOR, NOT A PLANK SLAB (Ben 07-27): the old slab was the raw Planks011 map tiled across a box, which read as
   // stacked logs. A Backrooms door is a painted office door — flat cream paint, stiles and rails standing proud of two
   // recessed panels. The panelling is GEOMETRY, so it reads correctly at every angle and under the pooled fluorescents.
-  const paint=new THREE.MeshStandardMaterial({ color:0xd6cdb4, roughness:0.55, metalness:0, normalMap:tx('wood/Planks011_1K-JPG_NormalGL.jpg') });   // the wood normal survives as a faint grain under the paint
+  // THE WEAR IS IN THE MAP NOW, not in a flat colour. roughnessMap is the same canvas on purpose: the places that take
+  // scuffs and grease are the places that stop being matt, so one drawing carries both and costs one texture.
+  const _dp=_brDoorPaintTex();
+  const paint=new THREE.MeshStandardMaterial({ map:_dp, roughnessMap:_dp, color:0xf2ecdd, roughness:0.62, metalness:0, normalMap:tx('wood/Planks011_1K-JPG_NormalGL.jpg') });   // the wood normal survives as a faint grain under the paint
   paint.normalScale=new THREE.Vector2(0.22,0.22);
-  const casing=new THREE.MeshStandardMaterial({ color:0xc8bda0, roughness:0.6, metalness:0 });   // architrave around the opening
-  const steel=new THREE.MeshStandardMaterial({ color:0x8d9095, roughness:0.42, metalness:0.75, normalMap:tx('concrete/Concrete048_1K-JPG_NormalGL.jpg') });   // industrial door: brushed grey steel
+  const _cs=_brPaintedTex('casingpaint','#d4c9ac','rgba(78,68,50,0.34)');
+  const casing=new THREE.MeshStandardMaterial({ map:_cs, roughnessMap:_cs, color:0xe8dfc6, roughness:0.62, metalness:0 });   // architrave around the opening
+  const _st=_brSteelTex();
+  const steel=new THREE.MeshStandardMaterial({ map:_st, roughnessMap:_st, color:0xa8abb0, roughness:0.5, metalness:0.7, normalMap:tx('concrete/Concrete048_1K-JPG_NormalGL.jpg') });   // industrial door: brushed grey steel
   steel.normalScale=new THREE.Vector2(0.25,0.25);
   const glassLite=new THREE.MeshStandardMaterial({ color:0x9fb0ad, roughness:0.22, metalness:0, transparent:true, opacity:0.42 });   // wired vision light in the flush door
   _brDoorMat={wood,brass,paint,casing,steel,glassLite}; return _brDoorMat; }
@@ -20137,13 +20312,19 @@ function brBuildEnv(){ if(!BR.rooms||!BR.rooms.length)brxGenerate(); const grp=n
   const pw=2.0, pd=0.86, ph=0.18, ipw=1.72, ipd=0.62;
   let yt=y1, yb=y1-ph, ey=yb+0.008;                                                                      // reassigned per fixture — a troffer hangs from ITS room's ceiling, not a global one
   const _tm=brTrofferMats(), frameMat=_tm.frame, panelMat=_tm.panel;   // SHARED, not per chunk — see brTrofferMats
-  const hP=[],hI=[]; let hv=0; const gP=[],gI=[]; let gv=0; BR.flickers=[];
+  const hP=[],hI=[],hU=[]; let hv=0; const gP=[],gI=[],gU=[]; let gv=0; BR.flickers=[];
   const housing=(cx,cz)=>{ const x0=cx-pw/2,x1=cx+pw/2,z0=cz-pd/2,z1=cz+pd/2;                                              // 4 sides + bottom (top flush with ceiling)
-    const q=(a,b,c,d)=>{ hP.push(a[0],a[1],a[2],b[0],b[1],b[2],c[0],c[1],c[2],d[0],d[1],d[2]); hI.push(hv,hv+1,hv+2,hv,hv+2,hv+3); hv+=4; };
+    // UVs SCALED IN METRES, not a unit square per quad. These faces are 2.0 x 0.86 x 0.18, so a 0..1 square per face would
+    // stretch the paint eight times further across the bottom than up a side and the grime would smear into stripes. And
+    // with NO uv attribute at all a map samples one texel, so every drawing above would be invisible.
+    const q=(a,b,c,d)=>{ hP.push(a[0],a[1],a[2],b[0],b[1],b[2],c[0],c[1],c[2],d[0],d[1],d[2]); hI.push(hv,hv+1,hv+2,hv,hv+2,hv+3); hv+=4;
+      const L=(p,r)=>Math.hypot(p[0]-r[0],p[1]-r[1],p[2]-r[2]);
+      const su=L(b,a)/0.6, sv=L(d,a)/0.6; hU.push(0,0, su,0, su,sv, 0,sv); };
     q([x0,yb,z0],[x1,yb,z0],[x1,yt,z0],[x0,yt,z0]); q([x1,yb,z1],[x0,yb,z1],[x0,yt,z1],[x1,yt,z1]);
     q([x0,yb,z1],[x0,yb,z0],[x0,yt,z0],[x0,yt,z1]); q([x1,yb,z0],[x1,yb,z1],[x1,yt,z1],[x1,yt,z0]);
     q([x0,yb,z0],[x1,yb,z0],[x1,yb,z1],[x0,yb,z1]); };
-  const panelQuad=(arr,ii,base,cx,cz)=>{ arr.push(cx-ipw/2,ey,cz-ipd/2, cx+ipw/2,ey,cz-ipd/2, cx+ipw/2,ey,cz+ipd/2, cx-ipw/2,ey,cz+ipd/2); ii.push(base,base+2,base+1, base,base+3,base+2); };
+  const panelQuad=(arr,ii,base,cx,cz)=>{ arr.push(cx-ipw/2,ey,cz-ipd/2, cx+ipw/2,ey,cz-ipd/2, cx+ipw/2,ey,cz+ipd/2, cx-ipw/2,ey,cz+ipd/2); ii.push(base,base+2,base+1, base,base+3,base+2);
+    gU.push(0,0, 1,0, 1,1, 0,1); };                                                                                        // one whole diffuser drawing per panel, so the ribs run the length of the fitting
   const deadPanel=_tm.dead;
   for(const f of (BR.fixtures||[])){
     { const rc=_roomCeil(f.x,f.z); yt=rc; yb=rc-ph; ey=yb+0.008; f.y=yb-0.9+dyB; }                                        // the housing is LOCAL (the group carries the storey); f.y is read by brxUpdateLights in WORLD space, so it carries the storey itself
@@ -20151,8 +20332,8 @@ function brBuildEnv(){ if(!BR.rooms||!BR.rooms.length)brxGenerate(); const grp=n
     if(f.dead){ const m=new THREE.Mesh(new THREE.PlaneGeometry(ipw,ipd), deadPanel); m.rotation.x=-Math.PI/2; m.position.set(f.x,ey,f.z); m.frustumCulled=false; grp.add(m); }
     else if(f.flick){ const m=new THREE.Mesh(new THREE.PlaneGeometry(ipw,ipd), panelMat); /* NOT a clone: a flicker toggles mesh.visible, never its material */ m.rotation.x=-Math.PI/2; m.position.set(f.x,ey,f.z); m.frustumCulled=false; grp.add(m); f.mesh=m; BR.flickers.push({m,f}); }
     else { panelQuad(gP,gI,gv,f.x,f.z); gv+=4; } }
-  if(hP.length){ const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.Float32BufferAttribute(hP,3)); g.setIndex(hI); g.computeVertexNormals(); const m=new THREE.Mesh(g,frameMat); m.frustumCulled=false; grp.add(m); }
-  if(gP.length){ const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.Float32BufferAttribute(gP,3)); g.setIndex(gI); const m=new THREE.Mesh(g,panelMat); m.frustumCulled=false; grp.add(m); }
+  if(hP.length){ const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.Float32BufferAttribute(hP,3)); g.setAttribute('uv',new THREE.Float32BufferAttribute(hU,2)); g.setIndex(hI); g.computeVertexNormals(); const m=new THREE.Mesh(g,frameMat); m.frustumCulled=false; grp.add(m); }
+  if(gP.length){ const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.Float32BufferAttribute(gP,3)); g.setAttribute('uv',new THREE.Float32BufferAttribute(gU,2)); g.setIndex(gI); const m=new THREE.Mesh(g,panelMat); m.frustumCulled=false; grp.add(m); }
   brBuildDoors(grp);
   grp.traverse(o=>{ if(o.isMesh||o.isInstancedMesh){ o.receiveShadow=true; if(o.material!==panelMat && o.material!==deadPanel && !(o.material&&o.material.isMeshBasicMaterial)) o.castShadow=true; } });   // walls / lintels / pillars / doors / housings CAST; floor+ceiling only receive. The emissive diffusers must not cast — they'd shadow their own light.
   return grp; }
@@ -20168,10 +20349,15 @@ const BR_SHADOW_LIGHTS=2;
 // flicker toggles mesh.visible, not material.
 let _brTrofferMat=null;
 function brTrofferMats(){ if(_brTrofferMat) return _brTrofferMat;
+  // The diffuser keeps MeshBasic — it is the light source and must not be lit by the pool it feeds — but it is a RIBBED
+  // ACRYLIC PANEL WITH DEAD FLIES IN IT now, rather than a cream rectangle. The dead tube reuses the same drawing at a
+  // grey tint, because an unlit fitting is the same object with the lamp out; a different silhouette would read as a
+  // different fitting.
+  const _dif=_brDiffuserTex(), _hs=_brPaintedTex('trofferframe','#eae6da','rgba(70,64,48,0.40)');
   return _brTrofferMat = {
-    frame: new THREE.MeshStandardMaterial({color:0xe6e2d6, roughness:0.55, metalness:0.15, side:THREE.DoubleSide}),
-    panel: new THREE.MeshBasicMaterial({color:0xfff3da, fog:false, toneMapped:true, side:THREE.DoubleSide}),
-    dead:  new THREE.MeshStandardMaterial({color:0x6d6a60, roughness:0.8, metalness:0.05, side:THREE.DoubleSide}) }; }
+    frame: new THREE.MeshStandardMaterial({map:_hs, roughnessMap:_hs, color:0xf0ece2, roughness:0.6, metalness:0.15, side:THREE.DoubleSide}),
+    panel: new THREE.MeshBasicMaterial({map:_dif, color:0xfff3da, fog:false, toneMapped:true, side:THREE.DoubleSide}),
+    dead:  new THREE.MeshStandardMaterial({map:_dif, color:0x7c7970, roughness:0.8, metalness:0.05, side:THREE.DoubleSide}) }; }
 function brEnsureLightPool(){ const want=Math.max(1,PERF.brLightPool|0);
   if(BR.lightPool && BR.lightPool.length===want) return;
   if(BR.lightPool) for(const L of BR.lightPool){ if(L.parent)L.parent.remove(L); if(L.shadow&&L.shadow.map){ L.shadow.map.dispose(); L.shadow.map=null; } }   // resizing disposes the old set, or the shadow maps of the discarded lights leak
@@ -22322,7 +22508,9 @@ function updateLampHalos(dt){
 // their y is altitude, and a bird would stamp a shadow into the air.
 // The radius comes from ANIMALS[type].h, which already carries each creature's height, rather than a second table to keep in sync.
 const CS_MAX=32, CS_R=44;
-let CS_LIFT=0.04, CS_SCALE=2.0;   // height above the surface, and the shadow's width in units of the creature's own radius — both tunable through __hc.csTune while this is being judged
+// 0.75 opacity and 2.8x the creature's radius, measured: in a 24-pixel box at a deer's feet from four blocks away, 2.2x at 0.62
+// moved the ground 2.8 luminance and this moves it about 5, while 6.0x moves 14.6 and reads as a puddle rather than contact.
+let CS_LIFT=0.04, CS_SCALE=2.8;   // height above the surface, and the shadow's width in units of the creature's own radius — both tunable through __hc.csTune while this is being judged
 let _csMesh=null, _csTex=null, _csOn=true, _csLive=0;
 const _csM=new THREE.Matrix4(), _csQ=new THREE.Quaternion(), _csP=new THREE.Vector3(), _csS=new THREE.Vector3();
 function _csTexture(){
@@ -22340,7 +22528,18 @@ function updateContactShadows(dt){
   if(!_csOn){ if(_csMesh) _csMesh.visible=false; return; }
   if(!_csMesh){
     const g=new THREE.PlaneGeometry(1,1); g.rotateX(-Math.PI/2);   // rotated ONCE, in the geometry, so no instance carries a rotation
-    const m=new THREE.MeshBasicMaterial({map:_csTexture(), transparent:true, depthWrite:false, opacity:0.62, color:0x000000, fog:true});
+    // THE FALLOFF IS COMPUTED, NOT SAMPLED. A canvas texture as the alpha map rendered NOTHING — the quad was provably there (the
+    // same material with the map removed and opacity 1 draws a solid black diamond, and the texture read back 64x64 with a centre
+    // texel of (0,0,0,213), so neither the mesh nor the texture was the problem), and no combination of blending, lift, scale,
+    // depth test or opacity brought it back. Six frames were spent on it. A radial term in the shader costs less than the fetch it
+    // replaces, so the cause stops mattering: `1 - r^1.6` off the plane's own uv, which is exactly the profile the gradient had.
+    const m=new THREE.MeshBasicMaterial({ transparent:true, depthWrite:false, opacity:0.75, color:0x000000, fog:true });
+    m.onBeforeCompile=(sh)=>{
+      sh.vertexShader=sh.vertexShader.replace('#include <common>','#include <common>\nvarying vec2 vCsUv;')
+        .replace('#include <begin_vertex>','#include <begin_vertex>\nvCsUv=uv;');
+      sh.fragmentShader=sh.fragmentShader.replace('#include <common>','#include <common>\nvarying vec2 vCsUv;')
+        .replace('#include <color_fragment>','#include <color_fragment>\n{ float _r=length(vCsUv-0.5)*2.0; diffuseColor.a *= 1.0 - clamp(pow(_r,1.6),0.0,1.0); }');
+    };
     _csMesh=new THREE.InstancedMesh(g,m,CS_MAX); _csMesh.frustumCulled=false; _csMesh.renderOrder=1; _csMesh.count=0; scene.add(_csMesh);
   }
   _csMesh.visible=true;
@@ -22521,7 +22720,15 @@ function buildAnimalMesh(type,corrupt){ const spec=ANIMALS[type], g=new THREE.Gr
     // robe"). The rason is a cone: radius 0.33 at its hem (y 0.01) tapering to 0.16 at the collar (y 0.95), so at the cross's own
     // height of 0.66 the cloth is at 0.33 + (0.16-0.33)*((0.66-0.01)/0.94) = 0.213 — and the cross was pinned at 0.245, floating
     // three centimetres off the chest. Half the cross's thickness past the surface seats it against the weave without z-fighting.
-    { const c=cross(0.2*s,0.038*s,0.016*s); c.position.set(0,0.66*s,0.219*s); g.add(c); }                                               // gold pectoral cross on the robe
+    // AND IT LIES ALONG THE CLOTH, not plumb against a sloping chest (Ben 08-05: "moved slightly closer to its robe, and rotated
+    // back ever so slightly to line up with the angle of its robe"). The angle is the cone's own and therefore not a dialled
+    // number: the rason runs from r=0.33 at y=0.01 to r=0.16 at y=0.95, so dr/dy = -0.1809 and the surface leans back
+    // atan(0.1809) = 0.179 rad from vertical. A cross hung plumb on that touches at its centre and lifts at both tips —
+    // 0.018 of daylight under the titulus over the 0.1 above the pin, which is the gap that reads as broken. Rotated by the
+    // slope it makes contact along its whole length instead. -x, because R_x(θ) takes the top to z=+y·sinθ and the top has to
+    // go BACK. Then 0.211 instead of 0.219 seats it INTO the weave rather than just touching: the cloth is at 0.213 here and
+    // the centre boss stands 0.015 proud of the face, so the front still reads and nothing z-fights.
+    { const c=cross(0.2*s,0.038*s,0.016*s); c.rotation.x=-0.179; c.position.set(0,0.66*s,0.211*s); g.add(c); }                          // gold pectoral cross on the robe
     // ARMS held in front, cradling the bible — the hands are inside the sleeves, so the book sits on the sleeve ends.
     for(const sx of [-1,1]){ const arm=new THREE.Mesh(new THREE.BoxGeometry(0.085*s,0.4*s,0.11*s),robe); arm.position.set(sx*0.2*s,0.66*s,0.09*s); arm.rotation.x=-0.5; g.add(arm); }
     const book=new THREE.Mesh(new THREE.BoxGeometry(0.26*s,0.06*s,0.19*s),bookM); book.position.set(0,0.62*s,0.25*s); book.rotation.x=-0.22; g.add(book);
@@ -25234,7 +25441,10 @@ window.__hc={
         else {                   M.color.setHex(0x000000); M.map=_csTexture(); M.transparent=true; }
         M.needsUpdate=true; }
       return { opacity:_csMesh?_csMesh.material.opacity:null, lift:CS_LIFT, scale:CS_SCALE, live:_csLive,
-               dbg:_csMesh?('#'+_csMesh.material.color.getHexString()+' map:'+(!!_csMesh.material.map)+' depthTest:'+_csMesh.material.depthTest+' side:'+_csMesh.material.side):null };
+               dbg:_csMesh?('#'+_csMesh.material.color.getHexString()+' map:'+(!!_csMesh.material.map)+' depthTest:'+_csMesh.material.depthTest+' side:'+_csMesh.material.side+' blend:'+_csMesh.material.blending+' img:'+(_csMesh.material.map&&_csMesh.material.map.image?(_csMesh.material.map.image.width+'x'+_csMesh.material.map.image.height):'none')):null,
+               // the texture's own centre pixel, read back off its canvas: a map whose alpha is 0 everywhere renders nothing at all,
+               // which looks exactly like a mesh that is not being drawn.
+               texel:(function(){ try{ const im=_csTexture().image; const c2=im.getContext('2d'); const d=c2.getImageData(im.width>>1, im.height>>1, 1,1).data; return [d[0],d[1],d[2],d[3]]; }catch(e){ return String(e.message||e); } })() };
     }catch(e){ return {err:String(e.message||e)}; } },
   freezeAnimals(v){ try{ if(v!=null) _qaFreezeAnimals=!!v; return { frozen:_qaFreezeAnimals, animals:(typeof animals!=='undefined')?animals.length:null }; }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: creature contact shadows. live is how many instances the one draw call is carrying this frame.
@@ -26184,6 +26394,31 @@ window.__hc={
   // or the flat TOOLPIX sprite. Held via __hc.hold(id) first, or heldSig signs whatever was in hand.
   toolSig(id){ try{ return _sigModel(itemModel(id)); }catch(e){ return {err:String(e.message||e)}; } },
   heldSig(){ try{ const s=_sigModel(view.mesh); s.id=view.id; return s; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: the SURFACE of what is in your hands, per part. _sigModel counts meshes and material TYPES, which cannot tell a
+  // textured lantern from a flat-coloured one, nor glass from a painted brick — the two things "texture it" and "give it
+  // transparent glass" actually mean. which: 'main' | 'off'.
+  heldMats(which){ try{ const m=(which==='off')?offView.mesh:view.mesh; if(!m) return {mesh:false};
+      const parts=[]; m.traverse(o=>{ if(!o.isMesh) return;
+        for(const mt of (Array.isArray(o.material)?o.material:[o.material])){ if(!mt) continue;
+          parts.push({ t:mt.type, col:mt.color?'#'+mt.color.getHexString():null, map:!!mt.map,
+                       transparent:!!mt.transparent, opacity:+(mt.opacity!=null?mt.opacity:1).toFixed(2), depthWrite:mt.depthWrite!==false }); } });
+      return { id:(which==='off')?offView.id:view.id, parts }; }catch(e){ return {err:String(e.message||e)}; } },
+  // …and the same question for a block that has been PLACED, which is drawn by a different builder entirely (buildModelBlocks).
+  // A held torch and a placed torch wearing different finishes is the failure this is here to catch.
+  placedMats(cols){ try{ const want=(cols||[]).map(c=>String(c).replace('#','').toLowerCase()); const parts=[];
+      chunkRoot.traverse(o=>{ if(!o.isInstancedMesh) return; const mt=o.material; if(!mt||!mt.color) return;
+        const c=mt.color.getHexString().toLowerCase(); if(want.length && !want.includes(c)) return;
+        parts.push({ t:mt.type, col:'#'+c, map:!!mt.map, transparent:!!mt.transparent, opacity:+(mt.opacity!=null?mt.opacity:1).toFixed(2),
+                     depthWrite:mt.depthWrite!==false, n:o.count }); });
+      return { parts }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: an ITEM ICON as numbers. Rows and columns of set pixels are enough to tell a silhouette apart from the circle that
+  // drawIcon falls back to when an icon type has no painter — a circle of r=5 about (8,8) cannot reach row 1 or row 14, and a
+  // cross reaches both. Same rasterising trick ammoIcons uses.
+  iconPix(id){ try{ const cv=document.createElement('canvas'); cv.width=cv.height=16;
+      const cx=cv.getContext('2d'); cx.imageSmoothingEnabled=false; drawIcon(cx,id);
+      const d=cx.getImageData(0,0,16,16).data; const rows=[], cols=new Array(16).fill(0); let tot=0;
+      for(let y=0;y<16;y++){ let n=0; for(let x=0;x<16;x++){ if(d[(y*16+x)*4+3]>40){ n++; cols[x]++; tot++; } } rows.push(n); }
+      return { tot, rows, cols }; }catch(e){ return {err:String(e.message||e)}; } },
   iconRoute(id){ try{ const u=slotIconURL(id); return { threeD: _icon3D[id]===u }; }catch(e){ return {err:String(e.message||e)}; } },
   toolDmg(id){ try{ const it=ITEMS[id]; return (it&&it.tool)?WEAPON_DMG(it.tool):null; }catch(e){ return {err:String(e.message||e)}; } },
   // #66: fire the footfall the SOUND fires, and read where all four hand groups actually sit. Four, because the way
@@ -27754,8 +27989,12 @@ window.__hc={
              fVary:/varying vec2 vFlow/.test(f), fAdvect:/vec2 uv=vW\.xz - vFlow\*uTime/.test(f),
              gain:waterMat.uniforms.uFlow.value }; },
   flowDisc(){ const a=_farSeaGeo.attributes.aFlow; if(!a) return {missing:true};
-    let mx=0; for(let i=0;i<a.count;i++) mx=Math.max(mx, Math.abs(a.getX(i)), Math.abs(a.getY(i)));
-    return {count:a.count, max:mx}; },
+    let mx=0, uni=true; const x0=a.getX(0), z0=a.getY(0);
+    for(let i=0;i<a.count;i++){ const x=a.getX(i), z=a.getY(i); mx=Math.max(mx, Math.abs(x), Math.abs(z));
+      if(Math.abs(x-x0)>1e-6 || Math.abs(z-z0)>1e-6) uni=false; }
+    const cam=flowVec(camera.position.x, camera.position.z);
+    return {count:a.count, max:+mx.toFixed(4), uniform:uni, fx:+x0.toFixed(4), fz:+z0.toFixed(4),
+            camFx:+cam.x.toFixed(4), camFz:+cam.z.toFixed(4), visible:!!(farSea&&farSea.visible)}; },
   shallowWater(depth){ const d=depth||2; for(let r=8;r<220;r+=4)for(let a=0;a<16;a++){ const th=a*0.3927, x=Math.round(player.pos.x+Math.cos(th)*r), z=Math.round(player.pos.z+Math.sin(th)*r);   // QA: nearest water exactly `depth` blocks deep — the shelf makes chest-deep the common case and a deep-water rule can behave differently in it
     if(surfaceH(x,z)===CFG.SEA-d){ let lx=null,lz=null;                                   // …WITH dry land in reach, or the spot is useless for testing a climb-out: the shelf is a long ramp and chest-deep can sit a dozen blocks off any bank, which is why this rejects the candidate rather than returning a null shore
       for(let rr=1;rr<=16&&lx==null;rr++)for(let aa=0;aa<24;aa++){ const t2=aa*0.2618, ux=Math.round(x+Math.cos(t2)*rr), uz=Math.round(z+Math.sin(t2)*rr);

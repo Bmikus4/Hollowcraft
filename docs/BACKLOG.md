@@ -1,7 +1,6 @@
 # Backlog — light, sky, water, horizon, atmosphere
 
 ## Open
-- Entity contact shadows
 - Shadow distance / cascades
 - Planar or screen-space water reflection
 - TAA instead of FXAA
@@ -13,6 +12,8 @@
 - `shore` at 7.70 ms, 805 draw calls, unattributed
 
 ## Awaiting Ben's eye (shipped)
+- Entity contact shadows: one instanced quad per creature, at its own feet, one draw call
+- Night chroma: the light you CARRY brings the colour back, and the washout is 0.85 not 1.0
 - Shoreline foam: patchy surf at the waterline, driven off the water's own depth
 - Coloured block light: shrine torches red, industrial lamps cold; warm lights unchanged
 - God rays: only empty sky seeds one, so lanterns cannot
