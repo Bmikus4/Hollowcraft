@@ -17,6 +17,22 @@
 // ISOLATED black, not black: a pixel <= 1 with a neighbour over 14. A run of black is a shadow or a silhouette; a single black
 // pixel in a lit neighbourhood is the artefact Ben is pointing at.
 //
+// RESULT, 2026-08-05, AND IT RULES OUT BOTH THE BAKE AND THE TEXTURE. At the BEACH vantage (spawn +18.5 z, pitch -0.42, t=0.94)
+// the graded frame holds 13,868 px of flat dark patch — 9.68% of the crop — and following that exact pixel SET through the other two
+// passes:
+//        the SET        whole crop
+//   graded   med 4.42        32.84
+//   dbg=sky  med 202.55     209.97     <- near-FULL baked sky, a hair under the crop's own
+//   albedo   med 82.59       89.02     <- ordinary mid albedo, a hair under the crop's own
+// So the pixels that render at luminance 4 sit on faces with essentially full sky and ordinary texture. NOTHING about aSky or the
+// atlas singles them out. That KILLS the neighbour-chunk / stale-aSky theory (see fleet/resume, marked refuted) and it also clears the
+// descent knee, because _open is ~1 on a face at vSky 0.8.
+// WHAT IS LEFT is the third branch: the lighting and the grade. Note the distribution is BIMODAL — 10.87% of the crop under luminance
+// 8 while the crop median is 32.84 — which is the signature of a THRESHOLD somewhere, not of a smooth curve.
+// NEXT STEP, cheap, and it reuses the pixel set this run already identified: difference the graded frame against itself with
+// __hc.scot({amt:0}) and again with __hc.scot({floor:1}) at this same vantage. That separates the wash from the descent from the grade
+// in one pair each. Do that before proposing any fourth theory.
+//
 //   node bench/tmp-black-texel-locate.mjs
 import { spawn } from 'node:child_process'; import { createServer } from 'node:net';
 import http from 'node:http'; import fs from 'node:fs'; import path from 'node:path';
@@ -36,10 +52,13 @@ function isolated(file,c){
   const L=(x,y)=>lum(P.data,(y*P.w+x)*P.ch);
   const idx=[]; let n=0, black=0;
   for(let y=y0;y<y1;y++) for(let x=x0;x<x1;x++){ n++; const l=L(x,y);
-    if(l<=1){ black++; let hi=0;
+    // FLAT DARK PATCHES, not isolated pixels. The isolated test (a black pixel with a bright neighbour) found NOTHING here, because
+    // what Ben is looking at and what caveblack-field-night-floor1.png shows are BROAD flat black quads on open ground — greedy-merged
+    // faces carrying one wrong aSky. So the signature is the opposite: dark, and surrounded by dark.
+    if(l<=8){ black++; let darkN=0;
       for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){ if(!dx&&!dy) continue; const xx=x+dx,yy=y+dy;
-        if(xx<x0||xx>=x1||yy<y0||yy>=y1) continue; const q=L(xx,yy); if(q>hi)hi=q; }
-      if(hi>14) idx.push(y*P.w+x); } }
+        if(xx<x0||xx>=x1||yy<y0||yy>=y1) continue; if(L(xx,yy)<=8) darkN++; }
+      if(darkN>=6) idx.push(y*P.w+x); } }
   return { idx, n, blackPct:+(100*black/n).toFixed(3), isoPct:+(100*idx.length/n).toFixed(3), w:P.w };
 }
 // what a given pixel set reads in another frame
@@ -80,7 +99,7 @@ function readCrop(file,c){
       const S=await page.evaluate(`__hc.st()`);
       const gy=await page.evaluate(`__hc.groundY(${S.sx},${S.sz})`);
       // the tmp-grain-black vantage, to the digit
-      await page.evaluate(`__hc.tpAt(${S.sx}+0.5, ${gy}+2.6, ${S.sz}+9.5)`);
+      await page.evaluate(`__hc.tpAt(${S.sx}+0.5, ${gy}+2.6, ${S.sz}+18.5)`);   // the BEACH vantage where the flat black patches are visible (caveblack-field-night-floor1.png), not tmp-grain-black's closer one
       for(let i=0;i<24;i++){ const f=await page.evaluate(`__hc.fill()`); if(f&&f.meshed>=f.want) break; await sleep(400); }
       await sleep(1800);
       await page.evaluate(`__hc.cam({yaw:${Math.PI}, pitch:-0.42})`);
@@ -91,8 +110,8 @@ function readCrop(file,c){
     }
     // the ground crop, clear of the HUD band and of the crosshair
     const CROP=[0.10,0.90,0.30,0.62];
-    const iso=isolated(shots.graded,CROP);
-    console.log(`\n  graded frame: black ${iso.blackPct}%, ISOLATED black ${iso.isoPct}%  (${iso.idx.length} px)`);
+    const iso=isolated(shots.graded,CROP);   // now: flat dark patches
+    console.log(`\n  graded frame: black ${iso.blackPct}%, FLAT-DARK-PATCH ${iso.isoPct}%  (${iso.idx.length} px)`);
     if(!iso.idx.length){ console.log('  no isolated black pixels in this crop — nothing to locate'); return; }
     for(const tag of ['graded','sky','albedo']){
       const set=readSet(shots[tag],iso.idx), all=readCrop(shots[tag],CROP);
