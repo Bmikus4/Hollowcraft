@@ -325,7 +325,13 @@ if(IS_MAIN) await (async()=>{
         // the frame is tight, so a slow site quietly renders a CHEAPER game and reads faster than it is.
         // Pin it to full at the start of the window and report where it ended up — a "win" that is really
         // adaptive handing resolution back is the easiest false positive there is.
-        await page.evaluate(`__hc.lock(true); __hc.pinScene(); __hcPERF.reset();`);
+        // PIN THE FRAMERATE THE ADAPTIVE LADDER READS, or this bench measures a game that is SHEDDING while it measures. Without
+        // this the census prints its own warning — "ADAPTIVE SHED QUALITY HERE: pixelScale 1->0.94" — and lists `adapt` among the
+        // top systems, and the ms it reports is a cheaper game than the one that started. Measured consequence: the same scene at
+        // the same settings gave 6.595 ms in one 8-second window and 15.37 in the next, which makes every number here
+        // incomparable against a number captured on another day. 240 is well over any real framerate, so the ladder never sheds.
+        // __hc.fpsPin is the only way in: the ladder is inline in the frame loop behind a 75-frame tick (index.html ~10894).
+        await page.evaluate(`__hc.lock(true); __hc.pinScene(); try{__hc.fpsPin(240);}catch(e){} __hcPERF.reset();`);
         const q0 = await page.evaluate(`({ px:__hc.sceneState().pixelScale, rd:__hc.rd() })`);
         await sleep(DUR*1000);
         const r = await page.evaluate(`(()=>{ const f=__hcPERF.live(), p=__hc.frameProf(4000), i=__hc.perf(), L=__hc.lights(), c=__hcPERF.census();
