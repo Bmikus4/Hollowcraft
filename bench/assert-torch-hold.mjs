@@ -38,13 +38,16 @@ let fails=0; const ok=(n,c,g)=>{ if(!c)fails++; console.log(`  ${c?'ok  ':'FAIL'
       // 6 cm: the palm is a point and the fist is a 9 cm box, so anything under half its width is a hand closed on the shaft.
       ok(id+': …and the palm is on the shaft', r.gripGap!=null && r.gripGap<0.06, {gripGap:r.gripGap, palm:r.palm});
     }
-    // NOTHING ELSE MOVED. Only items that declare a grip are reached for, and the rest of the game's held poses are Ben's.
+    // ITEMS WITHOUT A DECLARED GRIP ARE ALSO IN THE HAND NOW, by their bounding box (backlog item 19). This check used to assert the
+    // opposite — that their palm stayed at exactly -0.394 — which was true when only the torch and the candle were reached for and is
+    // deliberately false now. What still has to hold is that a declared grip is more precise than a box: the torch and candle land
+    // within 3 cm of the point their model names, and a boxed item lands on its own surface.
     const others={};
     // Guns are excluded: a gun declares a grip for the hand PARENTED TO IT (attachGunHand), which is a different mechanism, and the
     // camera-mounted arm stands down for them entirely.
     for(const id of ['lantern','planks','apple','field_guide']){ others[id]=await page.evaluate(`__hc.heldInHand('${id}')`); }
     console.log('    untouched items', JSON.stringify(Object.fromEntries(Object.entries(others).map(([k,v])=>[k,{palmZ:v.palm&&v.palm[2], grip:v.gripGap}]))));
-    ok('items with no declared grip keep the palm where it was', Object.values(others).every(v=>v.gripGap==null && v.palm && Math.abs(v.palm[2]+0.394)<0.01), Object.fromEntries(Object.entries(others).map(([k,v])=>[k,v.palm&&v.palm[2]])));
+    ok('items with no declared grip are held by their box', Object.values(others).every(v=>v.gripGap==null && v.gap!=null && v.gap<=0.06), Object.fromEntries(Object.entries(others).map(([k,v])=>[k,{gap:v.gap, palmZ:v.palm&&v.palm[2]}])));
     ok('no page errors', errors.length===0, errors);
     await b.close();
   } finally { server.kill(); }

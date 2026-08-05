@@ -18000,15 +18000,41 @@ function updateView(dt){ updateRecoil(dt);                                      
     // back toward the eye would read bigger. Only items that declare a grip point are touched, so nothing else in the game moves,
     // and the reach is clamped — an arm is not elastic. Rebased off the z assigned just above, never added to it, for the reason in
     // the paragraph above this one.
-    if(mainArm.group.visible && view.mesh && view.mesh.userData && view.mesh.userData.gripAt){
-      const g0=view._gripV||(view._gripV=new THREE.Vector3());
+    // EVERY ITEM, NOT JUST THE ONES WITH A DECLARED GRIP (Ben's backlog item 19: "every item must be held in a hand"). Swept over the
+    // whole item table: 223 of 304 held items sat more than 6 cm off the palm and the worst — a foxglove, a bloodroot — sat 23 cm out,
+    // floating in front of a fist that was holding air. Two hundred and twenty-three hand-tuned offsets is not a fix; a rule is.
+    //   A model that declares userData.gripAt (the torch, the candle, every gun) says exactly where a hand closes on it and keeps that
+    // precision. Everything else uses its own BOUNDING BOX: the palm goes to the nearest point of it, which is the honest general
+    // answer to "hold this" for a flower, a block cube, a trophy or a door. The box is cached in the model's local space and only its
+    // eight corners are transformed per frame — setFromObject every frame would walk the whole model on the render path.
+    if(mainArm.group.visible && view.mesh){
+      const UD=view.mesh.userData||{};
       view.mesh.updateWorldMatrix(true,false);
-      g0.fromArray(view.mesh.userData.gripAt).applyMatrix4(view.mesh.matrixWorld); camera.worldToLocal(g0);
       mainArm.group.updateMatrixWorld(true);
       const pv=view._palmV||(view._palmV=new THREE.Vector3());
       pv.set(0,0,-0.515).applyMatrix4(mainArm.group.matrixWorld); camera.worldToLocal(pv);
-      mainArm.group.position.z += clamp(g0.z-pv.z, -0.30, 0.30);
-      mainArm.group.position.y += clamp(g0.y-pv.y, -0.12, 0.12); }
+      const g0=view._gripV||(view._gripV=new THREE.Vector3());
+      let have=false;
+      if(UD.gripAt){ g0.fromArray(UD.gripAt).applyMatrix4(view.mesh.matrixWorld); camera.worldToLocal(g0); have=true; }
+      else { let bb=UD._hbb; if(!bb && typeof _viewLocalBox==='function'){ bb=_viewLocalBox(view.mesh); UD._hbb=bb; }
+        if(bb && isFinite(bb.min.x)){
+          const c=view._hbbC||(view._hbbC=new THREE.Vector3());
+          let lox=1e9,loy=1e9,loz=1e9,hix=-1e9,hiy=-1e9,hiz=-1e9;
+          for(let i=0;i<8;i++){ c.set((i&1)?bb.max.x:bb.min.x,(i&2)?bb.max.y:bb.min.y,(i&4)?bb.max.z:bb.min.z)
+              .applyMatrix4(view.mesh.matrixWorld); camera.worldToLocal(c);
+            if(c.x<lox)lox=c.x; if(c.y<loy)loy=c.y; if(c.z<loz)loz=c.z;
+            if(c.x>hix)hix=c.x; if(c.y>hiy)hiy=c.y; if(c.z>hiz)hiz=c.z; }
+          // The nearest point of the box to the palm, pulled a centimetre INSIDE it: a hand on the surface of a thing reads as a hand
+          // touching it, and a hand just inside reads as a hand holding it.
+          g0.set(Math.max(lox,Math.min(pv.x,hix)), Math.max(loy,Math.min(pv.y,hiy)), Math.max(loz,Math.min(pv.z,hiz)));
+          const cxm=(lox+hix)*0.5, cym=(loy+hiy)*0.5, czm=(loz+hiz)*0.5;
+          const dx2=cxm-g0.x, dy2=cym-g0.y, dz2=czm-g0.z, L=Math.hypot(dx2,dy2,dz2)||1;
+          g0.x+=dx2/L*0.01; g0.y+=dy2/L*0.01; g0.z+=dz2/L*0.01;
+          have=true; } }
+      if(have){
+        mainArm.group.position.x += clamp(g0.x-pv.x, -0.14, 0.14);
+        mainArm.group.position.y += clamp(g0.y-pv.y, -0.14, 0.14);
+        mainArm.group.position.z += clamp(g0.z-pv.z, -0.30, 0.30); } }
     const dof=offArm.group.visible?offView._boDX:null;
     offArm.group.position.z=ARM_REST_Z+(dof?dof.z:0);
     if(dof){ offArm.group.position.x+=dof.x; offArm.group.position.y+=dof.y; } }
@@ -29372,6 +29398,20 @@ window.__hc={
   // box whose far -z tip IS the palm — and the held item is a separate group on the camera, so nothing enforces that the two meet.
   // Reports the gap from the palm to the item's own bounding box: 0 means the palm is inside the item, which is what holding it
   // looks like. Camera space, because both are children of the camera and the world position is meaningless here.
+  // QA: THE WHOLE ITEM TABLE, one row per id (Ben's backlog item 19: "every item must be held in a hand"). heldInHand answers it for
+  // one item; this walks every id there is, because "every" is the whole of the ask and a spot check of five items is what let the
+  // monk's cross ship floating.
+  heldSweep(){ try{ const out=[]; const keep=inv[selSlot];
+      for(const id in ITEMS){ let r; try{ r=this.heldInHand(id); }catch(e){ r={err:String(e.message||e)}; }
+        out.push({ id, arm:!!r.armVisible, gunHand:!!r.gunHand, grip:r.gripGap==null?null:r.gripGap,
+                   gap:r.gap==null?null:r.gap, no:r.no||r.err||null }); }
+      inv[selSlot]=keep; refreshHotbar(); setViewItem(keep?keep.id:null);
+      const bad=out.filter(r=>!r.gunHand && (!r.arm || (r.grip==null && (r.gap==null || r.gap>0.06))));
+      return { total:out.length, held:out.filter(r=>!r.no).length,
+               noArm:out.filter(r=>!r.arm&&!r.gunHand).map(r=>r.id),
+               offPalm:out.filter(r=>!r.gunHand&&r.grip==null&&r.gap!=null&&r.gap>0.06).length,
+               worst:out.filter(r=>r.gap!=null).sort((a,b)=>b.gap-a.gap).slice(0,12), bad:bad.length, rows:out }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   heldInHand(id){ try{ if(id){ inv[selSlot]={id,n:1}; refreshHotbar(); setViewItem(id); }
       for(let i=0;i<20;i++) updateView(0.033);
       const M=(typeof mainArm!=='undefined')?mainArm:null;
