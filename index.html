@@ -2176,7 +2176,9 @@ function _mudSpots(px,pz,R,limit){
   const out=[]; const LIM=limit||6;
   for(let r=6;r<=R && out.length<LIM;r+=2)
     for(let k=0;k<24 && out.length<LIM;k++){ const th=k*0.2618, x=px+Math.round(Math.cos(th)*r), z=pz+Math.round(Math.sin(th)*r);
-      const h=surfaceH(x,z); if(h<=CFG.SEA+1 || h>CFG.SEA+3) continue; if(!_wetNear(x,z)) continue;
+      const h=surfaceH(x,z); if(h<=CFG.SEA+1) continue;
+      const riverBank = h<=CFG.SEA+6 && Math.abs(_riverField(x,z))<0.075;
+      if(h>CFG.SEA+3 && !riverBank) continue; if(!_wetNear(x,z)) continue;
       let wx=null,wz2=null;                                  // the water it stands beside, for the camera to aim at
       for(let rr=1;rr<=2 && wx==null;rr++) for(let a=0;a<8;a++){ const t2=a*0.7854, ax=x+Math.round(Math.cos(t2)*rr), az=z+Math.round(Math.sin(t2)*rr);
         if(surfaceH(ax,az)<=CFG.SEA){ wx=ax; wz2=az; break; } }
@@ -2303,9 +2305,37 @@ function surfaceH(wx, wz){
     if(d < SHELF_W){ const t=d/SHELF_W; elev = CFG.SEA - d*(SHELF_K + (1-SHELF_K)*t*t); } }
   // NUCLEAR CRATERS, before the river carve so a river still cuts its own channel through a glassed bowl.
   if(craters.length) elev -= craterDrop(wx,wz);
-  // rivers: carve narrow channels where a river field crosses zero
-  const rv = Math.abs(fbm2(wxo*0.0020, wzo*0.0020, 91, 3));
-  if (rv < 0.035){ const d=(0.035-rv)/0.035; elev = lerp(elev, CFG.SEA-3, d*d); }
+  // ---- RIVERS (Ben 08-05: "Inland streams need branching architecture on curves ... 3 blocks wider on average") ----
+  // The channel is where a noise field crosses zero, and its WIDTH is the threshold on |field|: 0.035 gave a channel of
+  // about four blocks. 0.055 gives about seven — his three wider — and the width is no longer constant, which is the
+  // other half of a river looking like one.
+  //
+  // BRANCHING ON THE CURVES, and it comes from the geometry rather than from a second river system. Where a river bends,
+  // the field's gradient turns, and a second much finer field is allowed to open side channels EXACTLY THERE: `bend` is
+  // how fast the direction of the gradient is changing, so it is near zero down a straight run and large on a meander.
+  // A braid that opened everywhere would be a marsh; one that opens only on the bends is a river dropping its load on
+  // the inside of a curve, which is what braiding actually is.
+  const rvS = fbm2(wxo*0.0020, wzo*0.0020, 91, 3);
+  const rv = Math.abs(rvS);
+  const RW = 0.055;
+  if (rv < RW*1.9){
+    // The gradient, and how much it is turning. Six extra samples of a 3-octave fbm, and only for columns already near
+    // a river — the whole island does not pay for this.
+    const e=6;
+    const gx=fbm2((wxo+e)*0.0020, wzo*0.0020, 91, 3) - fbm2((wxo-e)*0.0020, wzo*0.0020, 91, 3);
+    const gz=fbm2(wxo*0.0020, (wzo+e)*0.0020, 91, 3) - fbm2(wxo*0.0020, (wzo-e)*0.0020, 91, 3);
+    const gx2=fbm2((wxo+e*3)*0.0020, wzo*0.0020, 91, 3) - fbm2((wxo+e)*0.0020, wzo*0.0020, 91, 3);
+    const gz2=fbm2(wxo*0.0020, (wzo+e*3)*0.0020, 91, 3) - fbm2(wxo*0.0020, (wzo+e)*0.0020, 91, 3);
+    const g1=Math.hypot(gx,gz)||1e-6, g2=Math.hypot(gx2,gz2)||1e-6;
+    const bend = 1 - clamp((gx*gx2+gz*gz2)/(g1*g2), -1, 1);          // 0 straight, up to 2 where the channel doubles back
+    // The braid: a fine field that only counts on a bend, and only just off the main channel.
+    const braid = fbm2(wxo*0.0090, wzo*0.0090, 137, 3);
+    const wide = RW * (1 + 0.55*smooth(0.10,0.55,bend) * smooth(0.02,0.30,Math.abs(braid)));
+    if (rv < wide){ const d=(wide-rv)/wide; elev = lerp(elev, CFG.SEA-3, d*d); }
+    // …and a side channel proper: a second, narrower cut running beside the first, present only where the bend is real.
+    else if (bend>0.14 && Math.abs(braid) < 0.05*smooth(0.14,0.7,bend) && rv < RW*1.9){
+      const d=(0.05-Math.abs(braid))/0.05; elev = lerp(elev, CFG.SEA-2, d*d*0.85); }
+  }
   h = Math.max(3, Math.min(WH-26, Math.round(elev)));
   if (_hmCache.size>60000) _hmCache.clear();
   _hmCache.set(kk,h); return h;
@@ -2350,7 +2380,16 @@ function genColumn(c, lx, lz){
       // construction and a river runs through mud the whole way down; a pond does the same; the open coast does not,
       // because `beach` above has already claimed anything at or under SEA+1 for sand. That ordering is the reason
       // there is no mud on the shore, and it is deliberate — a sand beach with a mud rim reads as neither.
-      else if(h<=CFG.SEA+3 && _wetNear(wx,wz)) b=BID.mud;
+      // …AND ON THE INLAND STREAMS, which the first rule missed entirely (Ben 08-05: "mud doesnt appear on inland
+      // streams"). Water only ever fills to CFG.SEA, so an inland channel is a GORGE: the carve lerps toward SEA-3 by
+      // the square of the distance from the centreline, and from a bank at, say, 60 that puts the columns between
+      // SEA+2 and SEA+3 in the last tenth of the half-width — a band a fraction of a block wide, which most columns
+      // step straight over. So a stream had banks of grass going down to the water. The second clause tests the river
+      // FIELD instead of the absolute height, which is what "is this a stream bank" actually means, and allows six
+      // blocks of rise rather than three. It cannot leak onto the coast: the beach rule above owns everything at or
+      // under SEA+1, and this needs the river field, which the sea does not have.
+      else if((h<=CFG.SEA+3 && _wetNear(wx,wz)) ||
+              (h<=CFG.SEA+6 && Math.abs(_riverField(wx,wz))<0.075 && _wetNear(wx,wz))) b=BID.mud;
       else if(h>CFG.SEA+38) b=BID.stone;                              // bare STONE peaks (Ben 07-21: no snow/ice caps — Mount Athos is bare stone)
       else b=BID.grass;
     }
@@ -23866,6 +23905,9 @@ const FF_MAX=128, FF_R=60;
 // standing at should not be put out by the insects around it, and the pool takes the nearest candidates.
 const FF_LIGHTS=2;
 let _ffPts=null, _ffPos=null, _ffCol=null, _ffState=null, _ffLive=0, _ffLitN=0, _ffLight=true;
+// QA only (__hc.ffTune) — the light A/B, and a pin. A firefly drifts and blinks, so an unpinned one is never in the same place or
+// at the same brightness twice and a before/after pixel pair measures the insect's own wander instead of its light.
+let _ffPin=null;
 function _ffTex(){ return _starTex(); }   // the same round soft sprite the stars use — a firefly IS a pin-point glow
 function _ffSeat(i){
   // A seat over the forest floor: grass ground, a tree within a couple of blocks, and a height in the low canopy where they hover.
@@ -23921,13 +23963,16 @@ function updateFireflies(dt){
   let n=0; _ffLitN=0;
   for(let i=0;i<want;i++){
     const s=_ffState[i];
-    if(s.y<-900 || Math.hypot(s.x-player.pos.x, s.z-player.pos.z)>FF_R+6){ if(!_ffSeat(i)) continue; }
+    // A pinned one is never reseated: _ffSeat needs a wooded grass column and would refuse — or move it — wherever the bench put it.
+    if(!(i===0 && _ffPin) && (s.y<-900 || Math.hypot(s.x-player.pos.x, s.z-player.pos.z)>FF_R+6)){ if(!_ffSeat(i)) continue; }
     // A DRIFT, not a path: two slow sines per axis at its own phase, which is what a hovering insect looks like from ten metres.
     s.px+=dt*0.9; s.py+=dt*0.7;
     s.x+=Math.sin(s.px)*dt*0.42; s.z+=Math.cos(s.px*0.83+1.1)*dt*0.42; s.y+=Math.sin(s.py)*dt*0.22;
     // THE BLINK: mostly dark, with a short bright pulse. sin^8 is the cheap way to get a sharp flash out of a smooth curve, and
     // a floor of 0.06 keeps a hint of the swarm between flashes so it does not read as random pixels appearing.
-    const u=((t+s.ph)%s.per)/s.per, k=Math.pow(Math.max(0,Math.sin(u*Math.PI)),8)*0.94+0.06;
+    if(i===0 && _ffPin){ s.x=_ffPin.x; s.y=_ffPin.y; s.z=_ffPin.z; }                    // QA (__hc.ffTune): held still…
+    const u=((t+s.ph)%s.per)/s.per;
+    const k=(i===0 && _ffPin) ? 1 : Math.pow(Math.max(0,Math.sin(u*Math.PI)),8)*0.94+0.06;   // …and held at the top of its blink
     const d=Math.hypot(s.x-player.pos.x, s.y-(player.pos.y+EYE), s.z-player.pos.z);
     const fade=1-clamp((d-(FF_R-16))/16,0,1);                           // out of sight by the seat radius, so none pop as they recycle
     const w=k*fade*night;
@@ -27079,9 +27124,19 @@ window.__hc={
   audioNodes(){ try{ return { ctx:AC?AC.state:null, count:AC?(AC._nodeCount||null):null }; }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: the firefly swarm. Live count and the brightest sprite, because "are there fireflies" is answered by a draw range
   // and "can you see them" is answered by how bright the brightest one currently is — a swarm mid-blink is legitimately dim.
+  // QA/bench: the light A/B and the pin. `light:false` is the pre-08-05 behaviour (sprites only, lighting nothing), which is what a
+  // before/after pixel pair needs; `pin` holds firefly 0 at a world position with its blink at full, because an insect that drifts
+  // and blinks is never twice in the same place at the same brightness and the pair would measure its wander.
+  ffTune(o){ try{ if(o){ if(o.light!=null) _ffLight=!!o.light;
+        if(o.pin!==undefined) _ffPin=(o.pin?{x:+o.pin[0],y:+o.pin[1],z:+o.pin[2]}:null);
+        if(o.pin && _ffState && _ffState[0]){ const s=_ffState[0]; s.x=_ffPin.x; s.y=_ffPin.y; s.z=_ffPin.z; s.hue=1; } }
+      const g=(typeof glowPool!=='undefined')?glowPool.map(L=>({i:+L.intensity.toFixed(3), d:+L.distance.toFixed(2),
+                 c:'#'+L.color.getHexString(), at:[+L.position.x.toFixed(2),+L.position.y.toFixed(2),+L.position.z.toFixed(2)]})):null;
+      return { light:_ffLight, pin:_ffPin, litLights:_ffLitN, max:FF_LIGHTS, live:_ffLive, glowPool:g }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   fireflies(){ try{ if(!_ffPts) return { built:false, live:0, day:+globalU.uDay.value.toFixed(4) };
       let mx=0, lit=0; for(let i=0;i<_ffLive;i++){ const g=_ffCol[i*3+1]; if(g>mx)mx=g; if(g>0.25)lit++; }
-      return { built:true, visible:!!_ffPts.visible, live:_ffLive, lit, maxBright:+mx.toFixed(3),
+      return { built:true, visible:!!_ffPts.visible, live:_ffLive, lit, maxBright:+mx.toFixed(3), litLights:_ffLitN,
         day:+globalU.uDay.value.toFixed(4), hush:(typeof worldHush==='function')?+worldHush().toFixed(3):null,
         rain:(typeof weather!=='undefined')?+(weather.rain||0).toFixed(3):null }; }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: stop animal simulation where it stands, so a frame pair can be taken of the same creature in the same place.
@@ -28552,13 +28607,14 @@ window.__hc={
   // MUD: how much of the island is it, and is it where the water is? Reads the GENERATOR (surfaceH + the same wet test
   // genColumn uses), not the loaded chunks, so the answer does not depend on what has streamed in.
   mudCensus(r,step){ const R=r||120, ST=step||2, P={x:Math.round(player.pos.x), z:Math.round(player.pos.z)};
-    let dry=0, mud=0, sand=0, nearWater=0, minH=1e9, maxH=-1e9;
+    let dry=0, mud=0, sand=0, nearWater=0, river=0, minH=1e9, maxH=-1e9;
     for(let dx=-R;dx<=R;dx+=ST)for(let dz=-R;dz<=R;dz+=ST){ const x=P.x+dx, z=P.z+dz, h=surfaceH(x,z);
       if(h<=CFG.SEA) continue; dry++;
       if(h<=CFG.SEA+1){ sand++; continue; }                       // beach claims these before mud is asked
       const wet=_wetNear(x,z); if(wet) nearWater++;
-      if(h<=CFG.SEA+3 && wet){ mud++; if(h<minH)minH=h; if(h>maxH)maxH=h; } }
-    return { dry, sand, nearWater, mud, mudFrac:dry?+(mud/dry).toFixed(4):0,
+      const bank = h<=CFG.SEA+6 && Math.abs(_riverField(x,z))<0.075;
+      if(wet && (h<=CFG.SEA+3 || bank)){ mud++; if(bank && h>CFG.SEA+3) river++; if(h<minH)minH=h; if(h>maxH)maxH=h; } }
+    return { dry, sand, nearWater, mud, mudOnStreamBanks:river, mudFrac:dry?+(mud/dry).toFixed(4):0,
              mudH:mud?[minH,maxH]:null, sea:CFG.SEA, spots:_mudSpots(P.x,P.z,R) }; },
   // WHERE the mud is, not just how much: a handful of real columns to stand on. Every attempt to photograph mud so far
   // has aimed at a river cell and put the camera in the channel or under the bank — the bank is what you want to stand

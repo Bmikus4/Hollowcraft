@@ -86,10 +86,16 @@ function ring(file,px,py,rin=120,rout=260){
     // The first two attempts measured a ring of SKY around the sun and read -0.4 either way. A shaft adds a fixed wash in linear
     // HDR, and the sky beside a low sun already sits at 150-250 of 255 where the tone curve compresses hardest — so the one place
     // the addition can be seen is the dark terrain under it, which is also where a god ray reads in play.
+    // THE HUD IS THE DARKEST THING IN THE FRAME, AND IT NEVER CHANGES. This search ran to 0.80 of the frame height and kept
+    // choosing (180,438) — the COMPASS, a dark disc bottom-left — so both frames of every pair measured the same static widget and
+    // the pass read as doing nothing (87.06 -> 86.30). It is the trap this bench already has written down: the compass sits
+    // bottom-left, the hotbar bottom-centre, the held item bottom-right and the crosshair dead centre, all four static.
+    // 0.66 of the height clears the HUD band, and the crosshair box is skipped explicitly.
     const darkCrop=(file)=>{ // the darkest 120x60 patch within 340 px of the sun, chosen on the OFF frame and reused for both
       const P=decodePNG(fs.readFileSync(file)); let best=null;
-      for(let cy=(0.30*P.h)|0; cy<(0.80*P.h)|0; cy+=30) for(let cx=60; cx<P.w-180; cx+=60){
+      for(let cy=(0.30*P.h)|0; cy<(0.66*P.h)|0; cy+=30) for(let cx=60; cx<P.w-180; cx+=60){
         if(Math.hypot(cx+60-sunPx[0], cy+30-sunPx[1])>340) continue;
+        if(Math.abs(cx+60-P.w*0.5)<70 && Math.abs(cy+30-P.h*0.5)<50) continue;   // the crosshair
         let s2=0,n2=0; for(let y=cy;y<cy+60;y++) for(let x=cx;x<cx+120;x++){ s2+=lum(P.data,(y*P.w+x)*P.ch); n2++; }
         const m=s2/n2; if(m>4 && (!best||m<best.m)) best={m,cx,cy}; }
       return best; };
