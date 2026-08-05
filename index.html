@@ -9682,6 +9682,13 @@ function _meshBuried(o){
   const g=o.geometry; if(!g) return false;
   if(!g.boundingBox) g.computeBoundingBox();
   const bb=g.boundingBox; if(!bb) return false;
+  // A HEAD IS A SILHOUETTE, NOT A LIMB (Ben 08-05: "monk's head disappears when it intersects geometry"). Size was the only thing
+  // that decided how eager to be, and a head is small — the monk's is 0.25 — so one buried corner took his whole face while the
+  // beard, the kalimavkion and the veil each answered the question separately: a hat and a beard floating over an empty collar,
+  // which is a far worse artefact than a centimetre of skull in a doorframe. Same class as the robe, so the same answer: parts
+  // whose loss the eye reads as an injury rather than as a limb ending at a surface ask the honest question instead — is this part
+  // MOSTLY inside the world. Flagged at build time because "is this a head" is a fact about the model, not about its size.
+  if(o.userData && o.userData.clipCentreOnly) return false;
   bb.getSize(_clipSz);
   const sc=o.getWorldScale(_clipC);                                        // a scaled part is as big as it LOOKS, not as it was authored
   if(Math.max(_clipSz.x*Math.abs(sc.x), _clipSz.y*Math.abs(sc.y), _clipSz.z*Math.abs(sc.z)) > CLIP_BIG) return false;
@@ -9691,9 +9698,21 @@ function _meshBuried(o){
     if(_clipBuried(_clipC)) return true; }
   return false; }
 function clipRig(root, restoreOnly){ if(!root) return 0; let n=0;
+  // ONE VERDICT FOR A SET OF PARTS. A head is seven meshes — skull, beard, two eyes, hat, its crown, veil — and asking each of them
+  // separately is what leaves a hat and a beard hanging over nothing, or one eye missing off a face that stayed. Measured on a monk
+  // whose head hung 0.17 into a stone block: the skull's centre was in open air and an eye's centre was not. Parts flagged
+  // clipCentreOnly follow the one flagged clipAnchor (the head itself), so the whole silhouette goes or none of it does.
+  // Whether a rig HAS an anchor is a fact about the model, cached on the root: without that, every animal and every wretch — none
+  // of which are flagged — would pay a second full traverse per frame to discover there is nothing to find.
+  let anchor=null;
+  if(!restoreOnly && root.userData._clipAnchorMesh===undefined){ let f=null;
+    root.traverse(o=>{ if(f===null && o.isMesh && o.userData && o.userData.clipAnchor) f=o; });
+    root.userData._clipAnchorMesh=f; }
+  if(!restoreOnly && root.userData._clipAnchorMesh) anchor=_meshBuried(root.userData._clipAnchorMesh);
   root.traverse(o=>{ if(!o.isMesh) return;
     if(!o.visible && !o.userData._cclip) return;                                  // the game hid this one — not ours to touch
-    if(!restoreOnly && _meshBuried(o)){ if(o.visible){ o.visible=false; o.userData._cclip=1; n++; } return; }
+    const grouped = anchor!==null && o.userData && o.userData.clipCentreOnly;
+    if(!restoreOnly && (grouped ? anchor : _meshBuried(o))){ if(o.visible){ o.visible=false; o.userData._cclip=1; n++; } return; }
     if(o.userData._cclip){ o.visible=true; o.userData._cclip=0; } });
   return n; }
 function updateCreatureClip(){ if(_CLIP_OFF || player.grabbed) return;
@@ -24037,6 +24056,12 @@ function buildAnimalMesh(type,corrupt){ const spec=ANIMALS[type], g=new THREE.Gr
     const book=new THREE.Mesh(new THREE.BoxGeometry(0.26*s,0.06*s,0.19*s),bookM); book.position.set(0,0.62*s,0.25*s); book.rotation.x=-0.22; g.add(book);
     { const c=cross(0.09*s,0.018*s,0.01*s); c.rotation.x=-Math.PI/2+0.22; c.position.set(0,0.655*s,0.252*s); g.add(c); }                // gold cross on the bible's cover
     g.userData.monkBook=book; g.userData.monkHead=head;
+    // EVERYTHING FROM THE COLLAR UP IS ONE SILHOUETTE, as far as the creature-clip pass is concerned (see _meshBuried). Head,
+    // beard, eyes, kalimavkion, its crown, the hat cross and the veil are seven separate meshes that each used to answer "am I in
+    // a block" alone, so a head grazing a doorframe left a hat and a beard hanging over nothing. Selected by height rather than
+    // listed, because the list is exactly "above the rason's collar at 0.95" and a new part added up there should inherit this.
+    for(const ch of g.children) if(ch.isMesh && ch.position.y >= 0.90*s) ch.userData.clipCentreOnly=1;
+    head.userData.clipAnchor=1;   // …and the skull is the one they all answer to (see clipRig)
     g.traverse(o=>{ if(o.isMesh)o.castShadow=true; });
     animalGroup.add(g); return g; }
   if(type==='deer'){   // ACTUAL deer anatomy (Ben 07-20): slim raised barrel, deeper chest, long angled neck, small high head, tall thin legs, white tail — and 1-in-5 carries antlers
@@ -28176,6 +28201,34 @@ window.__hc={
   // flee is what the animal loop reads as "standing still", so this is the same stillness he shows while praying.
   monkPark(){ try{ const A=animals.filter(a=>a.type==='monk'&&!a.dead); A.forEach(a=>{ a.grazeT=1e9; a.goal=null; a.flee=0; });
       return A.map(a=>({x:+a.x.toFixed(2),y:+a.y.toFixed(2),z:+a.z.toFixed(2)})); }catch(e){ return {err:e.message}; } },
+  // QA: WHAT THE CREATURE-CLIP PASS IS HIDING on the first live monk, part by part. `_cclip` is the pass's own mark, so this
+  // distinguishes "the clip pass took this" from "the game hid it" — and the fault it exists for ("his head disappears") is one
+  // mesh of seven going invisible while the hat and the beard stay, which no count of hidden parts would identify.
+  monkClip(force){ try{ const m=animals.find(a=>a.type==='monk'&&!a.dead); if(!m||!m.mesh) return {err:'no monk'};
+      if(force) updateCreatureClip();
+      const parts=[]; let hidden=0;
+      m.mesh.traverse(o=>{ if(!o.isMesh) return;
+        const c=!!(o.userData&&o.userData._cclip); if(c) hidden++;
+        parts.push({ y:+o.position.y.toFixed(3), vis:!!o.visible, cclip:c, centreOnly:!!(o.userData&&o.userData.clipCentreOnly),
+                     size:+Math.max(...(o.geometry&&o.geometry.parameters?[o.geometry.parameters.width||0,o.geometry.parameters.height||0,o.geometry.parameters.depth||0,(o.geometry.parameters.radiusTop||0)*2]:[0])).toFixed(3) }); });
+      const head=m.mesh.userData.monkHead;
+      return { at:[+m.x.toFixed(2),+m.y.toFixed(2),+m.z.toFixed(2)], parts:parts.length, hidden,
+               headVisible:!!(head&&head.visible), headClipped:!!(head&&head.userData&&head.userData._cclip),
+               headCentreOnly:!!(head&&head.userData&&head.userData.clipCentreOnly),
+               // The head in WORLD space, with its half-extents: a bench cannot place a block that grazes a head without them, and
+               // one that guesses places it in the next cell and measures nothing. The monk is built at a scale, so the authored
+               // 0.23 x 0.25 is not the size on the ground.
+               headAt:(()=>{ if(!head) return null; const v=new THREE.Vector3(); head.getWorldPosition(v);
+                   const P=head.geometry&&head.geometry.parameters||{}, sc=head.getWorldScale(new THREE.Vector3());
+                   return { at:[+v.x.toFixed(3),+v.y.toFixed(3),+v.z.toFixed(3)],
+                            half:[+((P.width||0)*sc.x/2).toFixed(3), +((P.height||0)*sc.y/2).toFixed(3), +((P.depth||0)*sc.z/2).toFixed(3)] }; })(),
+               centreOnlyParts:parts.filter(p=>p.centreOnly).length,
+               // Hidden parts split by which rule they answer to. A limb corner in a wall SHOULD go — that is the approved eager
+               // behaviour — so "how many parts are hidden" cannot be the test; "is any of the head hidden" can.
+               hiddenFlagged:parts.filter(p=>p.cclip&&p.centreOnly).length,
+               hiddenLimbs:parts.filter(p=>p.cclip&&!p.centreOnly).length,
+               above:parts.filter(p=>p.y>=0.90), belowHidden:parts.filter(p=>p.y<0.90&&p.cclip).length }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   monkFace(){ try{ const m=animals.find(a=>a.type==='monk'&&!a.dead); if(!m)return {err:'no monk'};   // turn him to face the camera, so the crosses on his front are the side being measured
       m.yaw=Math.atan2(player.pos.x-m.x, player.pos.z-m.z); m.desYaw=m.yaw; m.mesh.rotation.y=m.yaw;
       return {yaw:+m.yaw.toFixed(2)}; }catch(e){ return {err:e.message}; } },
@@ -28204,6 +28257,52 @@ window.__hc={
   // radius is random, so waiting twelve seconds and measuring the furthest brother reports the dice: one run showed 39.7
   // blocks of stray and the next 7.1, from identical code. This asks _monkGoal directly, a few hundred times, and reports
   // how far the targets it hands out actually reach.
+  // #68 follow-up: the three things the species commits shipped unverified. Each one drives the REAL path — the break
+  // handler, groundStructure's own sweep, and saveGame/applySave — because a hook that re-implements the thing it is
+  // testing tests the hook.
+  leafSaplingTest(kind,n){ try{ const N=n||200;
+      const leaf = kind==='birch'?BID.birch_leaves : kind==='oak'?BID.oak_leaves : BID.leaves;
+      const x=Math.floor(player.pos.x)+2, y=Math.floor(player.pos.y)+3, z=Math.floor(player.pos.z)+2;
+      const before=drops.length; let breaks=0;
+      for(let i=0;i<N;i++){ setBlockWorld(x,y,z,leaf,true);
+        if(getBlock(x,y,z)!==leaf) continue;
+        breakBlock({x,y,z,b:leaf}); breaks++; }
+      const saplings=drops.filter(d=>d&&!d.dead&&d.id==='sapling').length;
+      return { leaf, breaks, saplings, dropsAdded:drops.length-before }; }catch(e){ return {err:String(e.message||e)}; } },
+  sweepTest(kind){ try{
+      // IT HAS TO BE A GENERATED TREE. The sweep erases by REPLAYING pineEmit — that is the whole design, and it is why
+      // it can remove a whole canopy exactly instead of flood-filling and truncating one. So a tree planted by hand is
+      // invisible to it by construction, and the first version of this test planted one and called the miss a bug: it
+      // measured 155 tree blocks before and 54 after, all of the difference being the pad levelling.
+      const want=(kind==null?2:kind|0);
+      const px0=Math.floor(player.pos.x), pz0=Math.floor(player.pos.z); let spot=null;
+      // WITHIN THE LOADED WORLD, or the count is of nothing: getBlock returns 0 for an unstreamed chunk, so a tree
+      // found 400 blocks away measures 0 before and 0 after and the test passes without ever touching a tree.
+      for(let r=12;r<56 && !spot;r+=4) for(let a=0;a<16;a++){ const th=a*0.3927, x=px0+Math.round(Math.sin(th)*r), z=pz0+Math.round(Math.cos(th)*r);
+        if(surfaceH(x,z)<=CFG.SEA+2) continue;
+        const sh=_pineShape(x,z); if(sh.kind!==want) continue;
+        if(!pineEmit(x,z,()=>{})) continue; spot={x,z,gy:surfaceH(x,z)}; break; }
+      if(!spot) return {err:'no generated tree of kind '+want+' in range'};
+      // COUNT THIS TREE'S OWN BLOCKS, not everything in a box. A box around one trunk contains its neighbours, and the
+      // sweep only clears what lands on the pad — so a box count reported 6865 before and 2322 after and looked like a
+      // two-thirds failure when the remainder was other trees standing outside the footprint entirely. The generator
+      // will tell us exactly which cells are this tree's: replay it.
+      const cells=[]; pineEmit(spot.x,spot.z,(bx,by,bz)=>cells.push([bx,by,bz]));
+      const count=()=>{ let n=0; for(const [bx,by,bz] of cells){ const b=getBlock(bx,by,bz); if(isLogId(b)||isLeafId(b))n++; } return n; };
+      const before=count();
+      if(!before) return {err:'the tree at '+spot.x+','+spot.z+' is not in a loaded chunk — nothing to sweep'};
+      beginBulk(); try{ groundStructure(spot.x,spot.z,spot.gy,6,0); } finally{ endBulk(); }
+      return { kind:want, x:spot.x, z:spot.z, gy:spot.gy, before, after:count() }; }catch(e){ return {err:String(e.message||e)}; } },
+  idRoundTrip(){ try{
+      const x=Math.floor(player.pos.x)+3, y=Math.floor(player.pos.y)+1, z=Math.floor(player.pos.z)+3;
+      setBlockWorld(x,y,z,BID.birch_log,true);
+      const savedId=getBlock(x,y,z);
+      if(!saveGame()) return {err:'saveGame refused'};
+      setBlockWorld(x,y,z,AIR,true);                       // wipe it locally so a stale world cannot pass this
+      const s=readSave(); if(!s) return {err:'no save read back'};
+      applySave(s);
+      const loadedId=getBlock(x,y,z);
+      return { savedId, loadedId, name:(B[loadedId]&&B[loadedId].name)||String(loadedId) }; }catch(e){ return {err:String(e.message||e)}; } },
   // #68: fell a trunk through the REAL path (treeFall), which is the one that walks the trunk and clears the canopy —
   // the two places a new species' log or leaf id has to be recognised or a birch is a tree you cannot chop.
   chopAt(x,y,z){ try{ x|=0; y|=0; z|=0; const before=getBlock(x,y,z);
