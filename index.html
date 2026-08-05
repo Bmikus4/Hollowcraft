@@ -1340,6 +1340,17 @@ window.__hcPERF = {
   // counterfactual, measured not guessed
   brPointShadows(on){ try{ PERF.brShadowLights = on ? BR_SHADOW_LIGHTS : 0; return brApplyShadowLights(); }catch(e){ return String(e); } },
   shadowLights(n){ try{ if(n!=null) PERF.brShadowLights=n|0; return brApplyShadowLights(); }catch(e){ return String(e); } },
+  // A REAL shadow-off arm for the halls. brPointShadows above is INERT as an A/B: brApplyShadowLights never demotes a
+  // caster ("the count is fixed for the process"), it only stops refreshing the map with autoUpdate=false — and
+  // brxUpdateLights raises needsUpdate again on every frame a tube is lit. Measured: 0 of 2258 draw calls dropped, and
+  // the 1.28 ms it appeared to save was warm-up. Flipping castShadow is what actually removes the six cube faces.
+  // three keys programs on shadow configuration, so this pays a recompile — settle before reading a frame time.
+  brShadowsHard(on){ try{ if(!BR.lightPool) return {err:'no pool'};
+      let n=0; for(const L of BR.lightPool){ if(L._csOrig===undefined) L._csOrig=!!L.castShadow;
+        const want = on ? L._csOrig : false; if(L.castShadow!==want){ L.castShadow=want; n++; } }
+      renderer.shadowMap.needsUpdate=true;
+      return { flipped:n, casters:BR.lightPool.filter(L=>L.castShadow).length, pool:BR.lightPool.length }; }
+    catch(e){ return {err:String(e&&e.message||e)}; } },
   // Resize the fluorescent pool LIVE, so one page can measure what a size is worth instead of comparing two runs.
   // Rebuilding changes the point-light count, which three.js keys shader programs on — so a resize costs a compile
   // storm on the next frames. That is a bench cost, not a play cost: in play the size is fixed at load.
@@ -7170,8 +7181,15 @@ function buildModelBlocks(c,g){
           const keep=arr;
           for(const [up,list] of byLen){
             const geos=[]; const y0=0.63, y1=up-0.02;
+            // EVERY LINK STANDS UP (Ben 08-05: "some chains on the top of lanterns arent rotated correctly, certain links"). A torus is
+            // built in the XY plane with its axis along Z — which is already an upright link on a chain that hangs down Y. The old code
+            // rotated EVERY link by rotateX(PI/2) first, laying its axis along Y: a washer lying flat, seen edge-on as a horizontal
+            // bar. Then every other link got a further rotateZ(PI/2), which stood THAT one up — so the chain alternated between a
+            // proper link and a flat disc, and the discs are the links Ben can see are wrong.
+            //   Now nothing is laid flat: the even links keep the built orientation and the odd ones turn about Y, so consecutive links
+            // interlock at ninety degrees like real chain, both upright.
             for(let y=y0; y<y1; y+=0.085){ const t=new THREE.TorusGeometry(0.038,0.013,5,8);
-              t.rotateX(Math.PI/2); if(Math.round((y-y0)/0.085)%2) t.rotateZ(Math.PI/2);
+              if(Math.round((y-y0)/0.085)%2) t.rotateY(Math.PI/2);
               t.translate(0,y-y0,0); geos.push(t); }
             if(!geos.length) continue;
             arr=list; addIM(_mergeGeos(geos), metal, y0, false); }
@@ -29772,6 +29790,41 @@ window.__hc={
   // QA: WHAT A CAMPFIRE IS ACTUALLY MADE OF (Ben 08-05: coals in the base, and the "little blip"). Reads the drawn scene rather than
   // the constants that built it: every instanced mesh in the chunk group whose instances sit within this block, with its material's
   // colour, emissive and the height its geometry reaches. A blob of unlit orange and a bed of glowing coal are two rows here.
+  // QA: WHICH WAY EACH LINK OF A LANTERN'S CHAIN FACES (Ben 08-05: "certain links"). The chain is ONE merged geometry, so there is no
+  // object per link to read a rotation off — the orientation has to come out of the vertices. Links are baked 0.085 apart, so grouping
+  // by that pitch recovers them, and a link's own extents say which way it points: a torus of R 0.038 and r 0.013 is 0.102 across its
+  // ring plane and 0.026 through its axis. An UPRIGHT link is therefore ~0.102 tall; a link lying flat is ~0.026 tall, and that flat
+  // one is the fault. "axis" is the small extent's name — consecutive upright links must alternate X and Z to interlock.
+  lanternChain(dx,dy,dz){ try{
+      const wx=Math.floor(player.pos.x)+(dx|0), wy=Math.floor(player.pos.y)+(dy|0), wz=Math.floor(player.pos.z)+(dz|0);
+      const c=getChunk(wx>>4,wz>>4); if(!c||!c.group) return {no:'no chunk'};
+      let best=null;
+      c.group.traverse(o=>{ if(!o.isInstancedMesh||!o.geometry||o.geometry.type!=='BufferGeometry')return;
+        const p=o.geometry.attributes.position; if(!p||p.count<48)return;                       // a chain is many links; a lid ring is not
+        o.updateWorldMatrix(true,false);
+        // THE RAW INSTANCE MATRIX, NOT the world one: chunk instances are placed in chunk-LOCAL x/z with WORLD y, because the group
+        // carries the chunk offset. Premultiplying by matrixWorld doubles that offset and matches nothing.
+        for(let i=0;i<o.count;i++){ const m=new THREE.Matrix4(); o.getMatrixAt(i,m);
+          const v=new THREE.Vector3().setFromMatrixPosition(m);
+          if(Math.abs(v.x-((wx&15)+0.5))>0.6 || Math.abs(v.z-((wz&15)+0.5))>0.6 || Math.abs(v.y-wy)>1.4) continue;
+          best=o; } });
+      if(!best) return {no:'no chain geometry at that cell'};
+      const p=best.geometry.attributes.position, band=new Map();
+      for(let i=0;i<p.count;i++){ const y=p.getY(i), k=Math.round(y/0.085);
+        let b=band.get(k); if(!b){ b={n:0,lo:[1e9,1e9,1e9],hi:[-1e9,-1e9,-1e9]}; band.set(k,b); }
+        b.n++;
+        const xyz=[p.getX(i),y,p.getZ(i)];
+        for(let a=0;a<3;a++){ if(xyz[a]<b.lo[a])b.lo[a]=xyz[a]; if(xyz[a]>b.hi[a])b.hi[a]=xyz[a]; } }
+      // BANDS WITH A HANDFUL OF VERTICES ARE NOT LINKS. A torus of 5x8 segments carries 90 vertices; rounding the pitch spills the
+      // few vertices at a ring's own top and bottom into the neighbouring band, and those one-vertex bands measured as zero extent in
+      // every axis — which reads as "lying flat" and would have failed this bench for a chain that is correct.
+      const links=[...band.entries()].filter(([k,b])=>b.n>=12).sort((a,b)=>a[0]-b[0]).map(([k,b])=>{
+        const e=[+(b.hi[0]-b.lo[0]).toFixed(3), +(b.hi[1]-b.lo[1]).toFixed(3), +(b.hi[2]-b.lo[2]).toFixed(3)];
+        const axis=(e[0]<=e[1]&&e[0]<=e[2])?'x':(e[1]<=e[2]?'y':'z');
+        return { i:k, n:b.n, ex:e[0], ey:e[1], ez:e[2], axis, upright:e[1]>0.05 }; });
+      return { links:links.length, flat:links.filter(l=>!l.upright).length,
+               alternates:links.every((l,i)=> i===0 || l.axis!==links[i-1].axis), rows:links.slice(0,8) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   campfireParts(dx,dy,dz){ try{
       const wx=Math.floor(player.pos.x)+(dx|0), wy=Math.floor(player.pos.y)+(dy|0), wz=Math.floor(player.pos.z)+(dz|0);
       const c=getChunk(wx>>4,wz>>4); if(!c||!c.group) return {no:'no chunk'};
