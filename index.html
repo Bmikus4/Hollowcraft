@@ -10754,6 +10754,7 @@ let _fpsPin=null;
 const _BUILDERS=[buildSpawnChest, buildMine, buildVillage, buildTowers, buildGraveyard, buildStandingStones, buildWell, buildCamp, buildFarm, buildApiary, buildBlind, buildShrine, buildWoodcutter, buildLighthouse, buildDock, buildTunnels, buildValley, buildGolgotha, buildChurch, buildPeakTowers, buildCathedral, buildSilo];
 let _builderIdx=0;
 let _mbInit=false;
+let _grForce=null;   // QA only: __hc.godrays({forceStrength}) latches the god-ray gain past its per-frame elevation curve. Nothing in the game sets it.
 const _cq=new THREE.Quaternion(), _ce=new THREE.Euler(0,0,0,'YXZ');
 // =====================================================================
 //  INTRO CINEMATIC — a flythrough of the island (world streams behind it) that resolves into waking, washed up on the beach
@@ -11673,7 +11674,7 @@ function loop(){ try{
     // A FLOOR AT NOON RATHER THAN NOTHING. The plan says "absent at noon"; 0.22 of full is kept instead, because a canopy with a
     // sun straight overhead does still throw short shafts through its gaps, and that dappling is the one thing this pass renders
     // that is not about the horizon. Deliberate deviation, and small enough that noon reads as haze rather than as beams.
-    godrayPass.uniforms.uStrength.value = 0.62*_above*(0.22+0.78*_low); }
+    godrayPass.uniforms.uStrength.value = (_grForce!=null) ? _grForce : 0.62*_above*(0.22+0.78*_low); }   // _grForce is the QA latch (__hc.godrays({forceStrength})): this line runs every frame and would overwrite a bare assignment
   if(_rtPath && motionPass){                                                           // depth-reprojection motion blur uniforms (uEnabled 0 = bridge only, blur off)
     camera.updateMatrixWorld();
     _curVP.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
@@ -23861,7 +23862,10 @@ function makeBird(){ const g=new THREE.Group(); const bm=_birdMat;
 // wrong). Gone by day, gone in rain, and thinned by worldHush(), so the same approach that takes the birds and the crickets away
 // takes the lights out of the trees. That last one is not decoration: the wood going dark and quiet together is the point of E2.
 const FF_MAX=128, FF_R=60;
-let _ffPts=null, _ffPos=null, _ffCol=null, _ffState=null, _ffLive=0;
+// TWO of the glow pool's three slots, at most. The third is left for whatever else is glowing near you — a cook fire you are
+// standing at should not be put out by the insects around it, and the pool takes the nearest candidates.
+const FF_LIGHTS=2;
+let _ffPts=null, _ffPos=null, _ffCol=null, _ffState=null, _ffLive=0, _ffLitN=0, _ffLight=true;
 function _ffTex(){ return _starTex(); }   // the same round soft sprite the stars use — a firefly IS a pin-point glow
 function _ffSeat(i){
   // A seat over the forest floor: grass ground, a tree within a couple of blocks, and a height in the low canopy where they hover.
@@ -23914,7 +23918,7 @@ function updateFireflies(dt){
   _ffPts.visible = want>0;
   if(!want){ _ffPts.geometry.setDrawRange(0,0); _ffLive=0; return; }
   const t=clock.elapsedTime;
-  let n=0;
+  let n=0; _ffLitN=0;
   for(let i=0;i<want;i++){
     const s=_ffState[i];
     if(s.y<-900 || Math.hypot(s.x-player.pos.x, s.z-player.pos.z)>FF_R+6){ if(!_ffSeat(i)) continue; }
@@ -23930,6 +23934,15 @@ function updateFireflies(dt){
     const o=n*3;
     _ffPos[o]=s.x; _ffPos[o+1]=s.y; _ffPos[o+2]=s.z;
     _ffCol[o]=w*0.85*s.hue; _ffCol[o+1]=w; _ffCol[o+2]=w*0.30*s.hue;    // green-gold: the g channel leads, the blue is nearly absent
+    // A REAL LIGHT, SMALL (Ben 08-05: "fireflies should be a real glowing light source at night, albeit small"). Additive sprites
+    // are a glow ON the screen and light nothing: the leaf a firefly is sitting on stayed as black as the rest of the wood.
+    // NOT a light per insect — the pool comment above this file's LIGHT_POOL says it plainly, and 128 lights would be 128 shader
+    // variants' worth of per-fragment cost. The nearest few ride the GLOW POOL instead, which exists for exactly this (cook fires,
+    // glowing drops): resident lights, producers register candidates each frame, the nearest win, and nothing is ever created.
+    // Only while its own blink is bright, because that is what a firefly does — the ground under it lights as it pulses and goes
+    // out with it. Distance 3.6 and a low intensity is the "albeit small": it reaches the leaf it is on and nothing further.
+    if(_ffLight && k>0.35 && d<14 && _ffLitN<FF_LIGHTS && typeof glowCand==='function'){
+      glowCand(s.x, s.y, s.z, 1.9*k*fade*night, 3.6, 0xbdff62); _ffLitN++; }
     n++;
   }
   _ffLive=n;
@@ -29377,6 +29390,14 @@ window.__hc={
     }catch(e){ return {err:String(e.message||e)}; } },
   godrays(o){ try{ if(o&&o.on!=null) _godraysOn=!!o.on;
       if(o&&o.seedMin!=null&&godrayPass) godrayPass.uniforms.uSeedMin.value=+o.seedMin;   // 0.62 is the pre-08-04 value, where any bright emitter seeded shafts
+      // FORCE THE GAIN, for the one question a pixel statistic cannot otherwise answer: is the pass DEAD or merely subtle? Ben
+      // 08-05 "god rays are gone from the sun", and at the dusk vantage assert-godray-seed uses, toggling the pass moves the
+      // darkest patch near the sun by half a level — which is equally consistent with a broken pass and with a working one whose
+      // addition is invisible against a 143-of-255 background. A 10x gain separates those two in one frame.
+      // NOTE the per-frame overwrite: uStrength is rewritten every frame from the sun's elevation (see the godrayPass block in
+      // the frame loop), so this holds only if that block is told to leave it alone — hence the latch, not a bare assignment.
+      if(o&&o.forceStrength!=null&&godrayPass){ _grForce = o.forceStrength<0?null:+o.forceStrength;
+        if(_grForce!=null) godrayPass.uniforms.uStrength.value=_grForce; }
       // THE THREE TERMS OF _grActive, each on its own, because "enabled:false" does not say which one said no.
       return { pass:!!godrayPass, on:_godraysOn, enabled:!!(godrayPass&&godrayPass.enabled),
                front:_sunProj.z<1.0, sunProjZ:+_sunProj.z.toFixed(3),
