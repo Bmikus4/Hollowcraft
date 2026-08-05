@@ -44,16 +44,29 @@ const J=v=>JSON.stringify(v);
     await sleep(7000);
     await ev('__hc.cmdRun("/gamemode creative")'); await ev('__hc.setTime(0.42)');
 
+    // DID THE LOAD-TIME PRECOMPILE EVEN RUN? If it did not, the 28-32 programs linked in play are simply the work it
+    // was meant to have done, and the fix is "make it run" rather than "extend it". That is a much cheaper answer and
+    // it has to be ruled out before touching brPrecompileStep.
+    console.log('precompile state: '+J(await ev('(()=>{ try{ return __hcPERF.precompile(); }catch(e){ return {err:String(e.message||e)}; } })()')));
+    console.log('prewarm state:    '+J(await ev('(()=>{ try{ return __hcBRX.prewarm(); }catch(e){ return {err:String(e.message||e)}; } })()')));
     console.log('before the door:  '+J(await ev('__hcBRX.portalProbe("far")')));
     // Spawn, then watch EVERY frame across the window in which brPortalWarm is expected to run.
     const t=await ev(`(async()=>{ const f=()=>new Promise(r=>requestAnimationFrame(t=>r(t)));
       window.__benchInfo=1;
       const spawnT0=performance.now(); __hcBR.door(); const spawnMs=+(performance.now()-spawnT0).toFixed(2);
-      let last=await f(); let worst=0, at=-1; const over=[];
+      // THE SAME CORRELATION, WIDENED. progs alone said "not compilation" for frame 0 but could not say what it WAS.
+      // __benchInfoSnap also carries memory.textures and memory.geometries, so a 16-second frame that uploads textures
+      // and a 16-second frame that builds geometry are distinguishable without guessing. Deltas, not totals: the
+      // question is what that FRAME did, not what the scene holds.
+      const S=()=>Object.assign({progs:0,tex:0,geoms:0,calls:0}, window.__benchInfoSnap||{});
+      let last=await f(); let worst=0, at=-1; const over=[]; let p=S();
       for(let i=0;i<240;i++){ const t2=await f(); const ms=t2-last; last=t2;
+        const s=S();
         if(ms>worst){ worst=ms; at=i; }
-        if(ms>60) over.push({frame:i, ms:+ms.toFixed(1), progs:(window.__benchInfoSnap||{}).progs}); }
-      return { spawnMs, worstMs:+worst.toFixed(2), atFrame:at, framesOver60ms:over }; })()`);
+        if(ms>60) over.push({frame:i, ms:+ms.toFixed(1),
+          dProgs:s.progs-p.progs, dTex:s.tex-p.tex, dGeom:s.geoms-p.geoms, calls:s.calls});
+        p=s; }
+      return { spawnMs, worstMs:+worst.toFixed(2), atFrame:at, framesOver60ms:over, finalCounts:S() }; })()`);
     console.log('spawn + watch:    '+J(t));
     console.log('after the warm:   '+J(await ev('__hcBRX.portalProbe("facing")')));
     console.log('\npage errors: '+(errs.length?errs.slice(0,6).join(' | '):'none'));
