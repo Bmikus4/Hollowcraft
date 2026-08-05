@@ -1669,7 +1669,7 @@ block('candelabra',  {cat:'model', opaque:false, solid:false, hard:0.8, light:13
 block('birdhouse',   {cat:'model', opaque:false, solid:true,  hard:0.6, tool:'axe', model:'birdhouse', col:0x8a6a40});
 block('flower_pot',  {cat:'model', opaque:false, solid:false, hard:0.4, model:'flower_pot', col:0x9a5a3a});
 block('potted_fern', {cat:'model', opaque:false, solid:false, hard:0.4, model:'potted_fern', col:0x9a5a3a});
-block('teapot',      {cat:'model', opaque:false, solid:false, hard:0.4, model:'teapot', col:0xcdd2d8});
+block('teapot',      {cat:'model', opaque:false, solid:false, hard:0.4, model:'teapot', col:0xcdd2d8, rotY:Math.PI/2});   // Ben 08-05: "rotate the teapot in the spawn cabin 90degrees" — the block's own yaw, so every teapot turns, spout across rather than along
 block('teacup',      {cat:'model', opaque:false, solid:false, hard:0.3, model:'teacup', col:0xe8e2d4});
 block('quilt',       {cat:'model', opaque:false, solid:true,  hard:0.4, model:'quilt', col:0x8a6a9a, use:'sleep'});     // cosy floor quilt you can nap on
 block('rocking_chair',{cat:'model', opaque:false, solid:false, hard:0.6, tool:'axe', model:'rocking_chair', col:0x6a4a28, use:'sit'});   // right-click to SIT and rock; move to stand
@@ -3150,6 +3150,10 @@ const _uFolNight={ value:new THREE.Color(0.006,0.008,0.014) };
 // ?nofolnight=1 compiles the foliage shaders WITHOUT the night term, so bench/assert-foliage-night.mjs can prove itself
 // capable of failing against this build. A check that has only ever run on working code is not evidence.
 const _NO_FOL_NIGHT = Q.get('nofolnight')!=null;
+// How much of its own colour an unlit foliage fragment keeps — the thin-leaf translucency floor. See the injection in injectAtlas.
+// 0.20 is enough that a blade turned away from the sun reads as dark green rather than a black slit, and low enough that it does
+// not flatten the difference between the lit and shaded faces of the same plant. ?folfloor=N overrides it for a side-by-side.
+const FOL_UNLIT_FLOOR = Math.max(0, Math.min(1, +(Q.get('folfloor') ?? 0.20)));
 function injectAtlas(mat, opts={}){
   mat.onBeforeCompile = (sh)=>{
     sh.uniforms.uTime = globalU.uTime;
@@ -3203,6 +3207,18 @@ function injectAtlas(mat, opts={}){
       .replace('uniform float uWhiteTile;', 'uniform float uWhiteTile;'+(opts.nightFoliage?'\nuniform float uDayF;\nuniform vec3 uFolNight;':''))
       .replace('#include <fog_fragment>', '#include <fog_fragment>'+((opts.nightFoliage&&!_NO_FOL_NIGHT)?
         '\n{ float _nt=1.0-uDayF; gl_FragColor.rgb=mix(gl_FragColor.rgb, uFolNight, clamp(fogFactor*_nt*0.94,0.0,1.0)); }':''))
+      // THE SHADED SIDE OF A LEAF IS STILL GREEN (Ben 08-05: "make the un-lit side of foliage look not solid black"). These quads
+      // are DoubleSide, so one of every crossed pair faces away from the sun; with N·L negative that face keeps only ambient and
+      // goes to black, and a blade of grass turns into a black slit. Real foliage does not do this because it is thin enough to
+      // transmit — the light comes THROUGH the leaf.
+      // A floor of the fragment's OWN texture colour, which is what makes this a translucency cheat rather than a grey wash:
+      // diffuseColor still holds the atlas texel at this point in three's main(), so a red flower floors to dark red and a leaf to
+      // dark green. A flat emissive would have tinted every plant in the game the same colour, and emissiveMap cannot be used at
+      // all here — the atlas is sampled by the injected code above, not by three's own map lookup.
+      // max(), not add: lit faces already exceed the floor and are left exactly as they were, so this only ever fills in black.
+      // Placed BEFORE the night tint above (the token is still present after that replace, so this lands first), because the
+      // distance darkening must be free to sink a floored leaf into the dark mass of a far wood.
+      .replace('#include <fog_fragment>', '\ngl_FragColor.rgb = max(gl_FragColor.rgb, diffuseColor.rgb * '+FOL_UNLIT_FLOOR.toFixed(3)+');\n#include <fog_fragment>')
       .replace('#include <color_fragment>',
         '#include <color_fragment>\n'+
         'vec2 _fr=fract(vBUV); _fr.y=1.0-_fr.y;\n'+
@@ -5554,10 +5570,62 @@ const flameMat=new THREE.ShaderMaterial({
       // which is the old 0..1 over the flame itself, and the sparks work in q, which is 0..1 over the whole quad.
       float q=vUv.y, y=q*${FLAME_QUAD_EXT.toFixed(2)}; float x=vUv.x-0.5;
       float t=uTime, ph=vSeed*12.0;
+      // ---- THE FLAME ITSELF (Ben 08-05: "I want fire to be absolutely beautiful") ----
+      // CANDLES ARE EXCLUDED BY HIS OWN RULING — "candles look good" — so type 2 keeps the #65 body below, untouched,
+      // and everything he named (torch, lantern, furnace, campfire, and the red shrine torch) gets this one.
+      //
+      // What it adds over #65, in the order it matters:
+      //   TWO LAYERS. An outer envelope and an inner core built from the SAME advected field at different thresholds,
+      //   so the flame has an inside — a bright tongue that moves within a cooler sheath — instead of one silhouette
+      //   with a colour ramp painted on it. This is most of the difference and it costs one extra smoothstep.
+      //   A BLUE ROOT. Real combustion is blue where the fuel is and only goes orange where the soot is. It is a
+      //   quarter of a block tall, it is where every reference photograph of a torch is coolest, and its absence is
+      //   why procedural fire reads as orange plastic.
+      //   A HALO. A wide, faint, additive falloff around the body, so the flame sits in its own light rather than
+      //   being cut out of the dark. Cheaper than a bloom pass and it survives on a machine with post disabled.
+      //   LICK. The lateral advection now carries a second, slower term, so the tongue leans and returns instead of
+      //   vibrating around its axis.
+      if(y<=1.0 && (vType<1.5 || vType>2.5)){
+        float rise=fbm(vec2(x*3.4, y*2.4 - t*1.85) + vSeed*9.0);            // the field the flame is made of, moving UP through it
+        float lick=nz(vec2(t*0.9+vSeed*4.0, y*1.3));                        // the slow one: which way the whole tongue is leaning this second
+        x -= (rise-0.5)*0.26*(0.22+y) + (lick-0.5)*0.30*y*y;
+        float wide=(vType>2.5&&vType<3.5)?0.68:0.54;                        // a campfire is a column, not a candle
+        float w=pow(max(0.0,1.0-y),0.72)*wide*(0.86+0.14*sin(t*2.6+ph));
+        float body=smoothstep(w, w*0.30, abs(x))*smoothstep(0.0,0.08,y);
+        float tear=smoothstep(0.30,1.0,y)*0.86;
+        body*=smoothstep(tear, tear+0.28, rise*1.15+0.16);
+        body*=smoothstep(1.0,0.78,y);
+        body*=0.74+0.16*sin(t*13.0+ph)+0.10*sin(t*8.3+ph*1.7)+0.14*nz(vec2(t*3.4,vSeed));
+        // THE INNER TONGUE: the same field, harder threshold, narrower envelope, and it stops lower — the hot part of
+        // a flame is short. It is drawn from the same numbers so it can never drift out of its own outer shell.
+        // NARROW, AND IT STOPS LOW. At half the width and reaching to 0.86 the tongue covered most of the flame and the
+        // photograph was a pale cone: a hot core that fills the body is not a core, it is a colour change.
+        float wI=w*0.40;
+        float core=smoothstep(wI, wI*0.15, abs(x))*smoothstep(0.0,0.06,y)*smoothstep(0.62,0.22,y);
+        core*=smoothstep(tear*0.75, tear*0.75+0.26, rise*1.2+0.20);
+        // THE HALO, outside everything: no noise, no tear, just distance. It must stay well under the body's own
+        // alpha or the flame turns into a lantern-shaped smudge.
+        float halo=exp(-abs(x)*(3.6/max(wide,0.2)))*smoothstep(1.12,0.0,y)*0.10;
+        if(body<0.03 && halo<0.012) discard;
+        float blue=smoothstep(0.20,0.0,y)*(0.55+0.45*rise)*step(vType,3.5);   // not on the shrine torch: that one is red by design
+        vec3 col=mix(vec3(0.36,0.03,0.0), vec3(1.0,0.34,0.03), smoothstep(0.0,0.42,body));   // soot edge → orange
+        col=mix(col, vec3(1.0,0.62,0.12), smoothstep(0.16,0.70,1.0-y)*0.80);                  // hot lower body
+        col=mix(col, vec3(1.0,0.93,0.62), clamp(core,0.0,1.0)*0.55);                          // the tongue: yellow-white
+        col=mix(col, vec3(0.34,0.62,1.0), blue*0.65*(1.0-core*0.5));                          // and the blue root under it
+        if(vType>3.5){ col=mix(vec3(0.86,0.02,0.0), vec3(1.0,0.20,0.10), smoothstep(0.0,0.5,body)); col=mix(col, vec3(1.0,0.58,0.46), core*0.9); }
+        // BRIGHTNESS IS A COLOUR DECISION HERE, because the grade has a bright-pass over it: at the first tuning the
+        // body went out at 1.34 with a 0.55 core, every pixel of a campfire cleared the bloom gate, and a photograph of
+        // it is a white cone with no fire in it — the ramp, the tongue and the blue root were all there and all
+        // invisible. Held just under that gate, the same shader reads as fire. Anything that raises these numbers has
+        // to be checked at NIGHT, four blocks away, which is where it blows out.
+        float a=clamp(body+halo*0.7,0.0,1.0);
+        gl_FragColor=vec4(col*(body*0.98+core*0.30)+vec3(1.0,0.46,0.12)*halo*0.55, a);
+        return;
+      }
       if(y<=1.0){
         float rise=fbm(vec2(x*3.4, y*2.4 - t*1.85) + vSeed*9.0);            // the field the flame is made of, moving UP through it
         x -= (rise-0.5)*0.30*(0.22+y);                                      // lean and curl, strongest at the tip
-        float wide=(vType>2.5&&vType<3.5)?0.68:0.54;                        // a campfire is a column, not a candle
+        float wide=0.54;
         float w=pow(max(0.0,1.0-y),0.72)*wide*(0.84+0.16*sin(t*2.6+ph));   // pow, not linear: a torch is FULL low down and only tapers near the tip — straight (1-y) is a needle
         float body=smoothstep(w, w*0.22, abs(x))*smoothstep(0.0,0.10,y);
         // THE TIP BREAKS. The threshold climbs with height and the noise field cuts into it, so the top tears into
@@ -6229,8 +6297,14 @@ function buildModelBlocks(c,g){
     const id=c.blocks[idx(lx,ly,lz)]; if(id===AIR) continue; const bd=B[id], m=bd.model;
     if(blockLight[id]>0){
       const fy = m==='torch'?0.6 : m==='campfire'?0.22 : 0.4;
-      c.emitters.push([cx0+lx+0.5, ly+fy, cz0+lz+0.5, blockLight[id]]);
       const seed=((lx*7+lz*13+ly*3)%97)/97;
+      // [4] EMBER KIND and [5] the flame's own SEED ride along with the emitter. Both are known here and nowhere else:
+      // the seed is what makes a light flicker in step with the flame standing in it (E5), and reconstructing it later
+      // from a world position means re-deriving lx/ly/lz through the +0.6 the emitter's y already carries — one of
+      // those recomputations that works until someone moves a flame by a tenth of a block. An open fire throws embers,
+      // a lantern and a candle are enclosed and do not; 2 is a fire you could cook on.
+      const emberKind = m==='torch' ? 1 : m==='campfire' ? 2 : 0;
+      c.emitters.push([cx0+lx+0.5, ly+fy, cz0+lz+0.5, blockLight[id], emberKind, seed]);
       if(m==='torch') flames.push({x:lx+0.5,y:ly+0.55,z:lz+0.5,w:0.32,h:0.66,type:(id===BID.red_torch?4:0),seed});   // torch flame — type 4 = red (shrine torch)
       // A FLAME INSIDE A LANTERN HAS TO FIT INSIDE THE LANTERN (Ben 08-05: "I CAN SEE A FLAme outside the top of lanterns").
       // buildFlameGeo anchors a flame at its BASE and builds the quad FLAME_QUAD_EXT (1.35) taller than h, so a flame declared
@@ -6461,7 +6535,17 @@ function buildModelBlocks(c,g){
           const _nb={ nx:getBlock(_wx-1,a[1],_wz)===id, px:getBlock(_wx+1,a[1],_wz)===id,
                       nz:getBlock(_wx,a[1],_wz-1)===id, pz:getBlock(_wx,a[1],_wz+1)===id };
           try{ grp=MODEL_ITEM_BUILDERS[m](bd,_nb); }catch(e){ continue; }   // rich decorative model → per-block clone (rare blocks; single source of truth with icon/drop/held)
-          grp.position.set(a[0]+0.5,a[1],a[2]+0.5); if(bd.rotY)grp.rotation.y=bd.rotY; grp.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } }); g.add(grp); } continue; }
+          if(bd.rotY)grp.rotation.y=bd.rotY;
+          // SEATED ON THE FACE IT STANDS ON (Ben 08-05: "make sure teapots are seated on actual block faces"). This path put the
+          // group's ORIGIN on the cell floor, which only seats a model whose lowest point is y=0 — and the teapot's is 0.054,
+          // because its body is a sphere of radius 0.3 scaled to 0.82 and centred at 0.3. So every teapot in the world hovered
+          // five centimetres over the table it was sitting on, and so did any other rich model whose base is not exactly zero.
+          // The instanced path below already solved this for its geometry (-boundingBox.min.y, "rest the model's BASE on the cell
+          // floor"); the rich per-block path never got the same treatment. Measured off the built group so it is true for every
+          // builder rather than a per-model fudge, and after the yaw above, which cannot change a y extent.
+          const _sb=new THREE.Box3().setFromObject(grp), _sy=isFinite(_sb.min.y)?_sb.min.y:0;
+          grp.position.set(a[0]+0.5, a[1]-_sy, a[2]+0.5);
+          grp.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } }); g.add(grp); } continue; }
       const geo=modelMeshFor(id); geo.computeBoundingBox();
       const col=bd.col!=null?bd.col:((id===BID.chest||id===BID.barrel)?0x6b4e2e:(id===BID.bed)?0x7a3b3b:(bd.pale?0xb9ad8c:0x8a7048));   // bd.col lets cottagecore decoratives set their own tint
       // TEXTURED, NOT TINTED (Ben 08-04: "fences, scarecrows, trapdoors, and gates should all be textured" / "also texture doors").
@@ -6494,8 +6578,24 @@ function _lightBlocked(ex,ey,ez,px,py,pz){ const dx=px-ex,dy=py-ey,dz=pz-ez, dis
 // almost nothing, so the sweep is new work that removes no draws. `drawables` falling is not `draws` falling.
 // What the hall's median actually needs is fewer objects ON SCREEN — merging static dressing per material, the
 // way PERF.brMergeRigid did for the Backrooms door furniture — not distance culling.
+// ---- E5: ONE FLICKER, SHARED BY THE FLAME AND ITS LIGHT ----------------------------------------------------------
+// The pool has always flickered, and that was the problem: it flickered on its OWN three sines at about a tenth of a
+// stop while the flame beside it (#65) breathed on two incommensurate frequencies plus noise at nearly a third. Two
+// honest flickers that have nothing to do with each other read as a wobbling light next to a wobbling flame, which is
+// exactly what you see in a dark cellar — the shadows never move WITH the fire.
+// This is the flame shader's own expression, term for term:
+//     0.74 + 0.16 sin(13t + ph) + 0.10 sin(8.3t + 1.7ph) + 0.14 noise(3.4t, seed)     with ph = seed*12
+// The noise is a value-noise on the same lattice; it does not have to match the GPU's bit for bit (it cannot — nobody
+// is comparing pixels to floats), it has to move on the same timescale with the same amplitude, and it does.
+// The SEED is the flame's own, carried on the emitter, so a torch's light and a torch's flame are the same number.
+function _fh(x,y){ const s=Math.sin(x*41.3+y*289.1)*43758.5; return s-Math.floor(s); }
+function _fnz(x,y){ const ix=Math.floor(x), iy=Math.floor(y); let fx=x-ix, fy=y-iy;
+  fx=fx*fx*(3-2*fx); fy=fy*fy*(3-2*fy);
+  return (_fh(ix,iy)*(1-fx)+_fh(ix+1,iy)*fx)*(1-fy) + (_fh(ix,iy+1)*(1-fx)+_fh(ix+1,iy+1)*fx)*fy; }
+function fireFlicker(t,seed){ const ph=seed*12.0;
+  return 0.74 + 0.16*Math.sin(t*13.0+ph) + 0.10*Math.sin(t*8.3+ph*1.7) + 0.14*_fnz(t*3.4, seed); }
 // nearest torch/lantern emitters drive the warm point-light pool (smooth, per-fragment, flickering)
-const _plCand=[], _plPool=[];
+const _plCand=[], _plPool=[]; let _plDt=0.016;
 function assignPointLights(){
   const t=globalU.uTime.value;
   const _owShFire = ((_owShTick=(_owShTick+1)%OW_SHADOW_EVERY)===0);   // one shadow-cube refresh per OW_SHADOW_EVERY frames, counted here so it is independent of the sun's tick
@@ -6512,6 +6612,9 @@ function assignPointLights(){
       for(const e of c.emitters){ const dx=e[0]-px,dy=e[1]-py,dz=e[2]-pz; const d2=dx*dx+dy*dy+dz*dz;
         if(d2<1225){ let s=_plPool[_plCand.length]; if(!s){ s=[0,null]; _plPool[_plCand.length]=s; } s[0]=d2; s[1]=e; _plCand.push(s); } } });
     _plCand.sort((a,b)=>a[0]-b[0]);
+    // The embers ride this list rather than scanning the world again: it is already the nearest emitters, already
+    // sorted, already distance-culled. Six sources is enough — past that they overlap on screen and nobody counts them.
+    if(typeof emberEmit==='function') emberEmit(_plDt||0.016, _plCand, 6);
     // The last slot is RESERVED while a Horrific Wretch is alive (see _hwLightSlot). The pool is fixed-size and resident
     // from boot precisely so the light count never changes mid-game — adding a light for the creature would recompile every
     // lit material — so its eye-glow borrows a torch slot instead of creating one.
@@ -6528,7 +6631,13 @@ function assignPointLights(){
         // there is no swing state and it correctly falls back to the cell, which is also where the swing is invisible.
         const _lk=Math.floor(e[0])+','+Math.floor(e[1])+','+Math.floor(e[2]), _lf=(typeof _chimeFx2!=='undefined')?_chimeFx2[_lk]:null;
         if(_lf&&_lf.bulb){ _lf.bulb.getWorldPosition(_lampV); pl.position.copy(_lampV); }
-        const fl=1+Math.sin(t*10+e[0])*0.06+Math.sin(t*23.3+e[2])*0.03+Math.sin(t*1.7)*0.04;
+        // E5: the light now flickers on the FLAME'S curve, with the flame's own seed, normalised so 1.0 is the mean
+        // rather than the floor (the shader's expression averages about 0.87). A lantern and a candle are enclosed
+        // flames and barely move, so they keep a shallow version of it — the depth is a property of the fire, not of
+        // the maths: e[4] is 0 for anything behind glass or wax.
+        const _fseed = (e[5]!=null) ? e[5] : ((e[0]*7+e[2]*13+e[1]*3)%97)/97;
+        const _fdepth = (e[4]>1) ? 1.15 : (e[4]===1) ? 1.0 : 0.35;
+        const fl = 1 + (fireFlicker(t,_fseed)/0.87 - 1)*_fdepth;
         const dist=Math.sqrt(_plCand[i][0]), edge=clamp((34-dist)/12,0,1);
         const lvl=e[3], strong=lvl>=15, dim=lvl<=10;
         pl.color.setHex(strong?0xff9838:0xff6a22); pl.intensity=(strong?60:dim?18:46)*fl*edge; pl.distance=strong?34:dim?12:27; pl.decay=1.3;
@@ -10903,7 +11012,7 @@ function loop(){ try{
   T.end(TID.input);
   T.begin(TID.fx); applyWaterFog(); T.end(TID.fx);
   T.begin(TID.entities); T.begin(TID.props);
-  updateDrops(dt); updateSpears(dt); updateStuckSpears(dt); updateParticles(dt); updateBubbles(dt); updateShells(dt); updateView(dt); if(typeof updateWings==='function')updateWings(dt); updateWatchers(dt); checkNotes(dt); updateSkyBirds(dt); updateFireflies(dt); updateLampHalos(dt); updateContactShadows(dt); updateLeaves(dt); if(typeof updateDungeonBugs==='function')updateDungeonBugs(dt);  // floating items, thrown/stuck spears, particles, ejected shell casings, held viewmodel, angel wings, watching-eyes, notes, sky birds, dungeon arachnids
+  updateDrops(dt); updateSpears(dt); updateStuckSpears(dt); updateParticles(dt); updateBubbles(dt); updateEmbers(dt); updateShells(dt); updateView(dt); if(typeof updateWings==='function')updateWings(dt); updateWatchers(dt); checkNotes(dt); updateSkyBirds(dt); updateFireflies(dt); updateLampHalos(dt); updateContactShadows(dt); updateLeaves(dt); if(typeof updateDungeonBugs==='function')updateDungeonBugs(dt);  // floating items, thrown/stuck spears, particles, ejected shell casings, held viewmodel, angel wings, watching-eyes, notes, sky birds, dungeon arachnids
   netUpdate(dt);                                                             // co-op: send my transform, interpolate peers, host broadcasts the Wretch/time
   T.end(TID.props); T.end(TID.entities);
   T.begin(TID.audio); updateAudio(dt); T.end(TID.audio);
@@ -10915,7 +11024,7 @@ function loop(){ try{
   streamChunks(genB, meshB);
   _bulkRun(buildCabin);   // build the cabin even on the menu so the cinematic's cabin shot has something to frame
   if(started){ const B=_BUILDERS; _builderIdx=(_builderIdx+1)%B.length; _bulkRun(B[_builderIdx]); }   // ONE builder per frame, in bulk-edit mode: a village fires as ~3ms of array writes + a deferred remesh wave instead of a 50-90ms frame; a 16-frame poll rotation delays a structure's appearance imperceptibly
-  assignPointLights();
+  _plDt=dt; assignPointLights();   // the embers emit off the light pool's own candidate list and need the frame's dt (see emberEmit)
   updateBlockFx(dt); updateCookingFx(dt); updateChimes(dt); updateVaultDoors(dt); updateCreatureClip(); updateMusicSchedule(dt); updateLeafPiles(); updateMarks(dt); hwNightTick(); crossProxTick();
   scrUpdate();   // CCTV: point each monitor at its tile and re-render exactly ONE camera this frame (see SCR)
   icbmUpdate(dt);   // mushroom cloud growth/fade + the radiation dose
@@ -14942,6 +15051,83 @@ function updateBubbles(dt){
     MA[o+8]=0;  MA[o+9]=0;  MA[o+10]=r; MA[o+11]=0;
     MA[o+12]=_bPos[i3]; MA[o+13]=_bPos[i3+1]; MA[o+14]=_bPos[i3+2]; MA[o+15]=1; }
   _bIM.count=_bN; _bIM.instanceMatrix.needsUpdate=true; }
+// ---- EMBERS — what comes off a real fire, in the world rather than on the flame's own quad ----------------------
+// The flame already draws two sparks INSIDE its billboard (#65, the part of the quad above the fire). That was free and
+// it is still there, and it is not this: those sparks live on the flame's own two crossed planes, so they cannot drift
+// downwind, cannot pass in front of something, and stop existing a block and a half above the wick. Ben asked for an
+// ember particle alongside the new flame, and an ember is a thing in the world — it leaves the fire, it rides the air,
+// it cools from yellow to a dull red as it goes, and it goes out somewhere else.
+// One InstancedMesh, additive, no lighting, 220 slots, swap-remove on death: the same shape as the bubbles and the
+// particle pool, for the same reason — a THREE.Mesh per spark is a draw call per spark.
+const EMBER_MAX=220;
+const _emGeo=new THREE.BoxGeometry(1,1,1);
+const _emMat=new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, opacity:0.95, depthWrite:false, blending:THREE.AdditiveBlending, fog:true});
+const _emIM=new THREE.InstancedMesh(_emGeo,_emMat,EMBER_MAX);
+_emIM.instanceMatrix.setUsage(THREE.DynamicDrawUsage); _emIM.count=0; _emIM.frustumCulled=false;
+_emIM.setColorAt(0,new THREE.Color(1,1,1)); _emIM.instanceColor.setUsage(THREE.DynamicDrawUsage);
+fxGroup.add(_emIM);
+const _emPos=new Float32Array(EMBER_MAX*3), _emVel=new Float32Array(EMBER_MAX*3), _emAge=new Float32Array(EMBER_MAX),
+      _emTtl=new Float32Array(EMBER_MAX), _emR=new Float32Array(EMBER_MAX), _emPh=new Float32Array(EMBER_MAX);
+let _emN=0, _emWrap=0;
+const _emCol=new THREE.Color();
+function spawnEmbers(x,y,z,n,spread,up){
+  const CA=_emIM.instanceColor.array;
+  for(let i=0;i<(n||1);i++){
+    let s; if(_emN<EMBER_MAX){ s=_emN++; } else { s=_emWrap=(_emWrap+1)%EMBER_MAX; }
+    const s3=s*3, sp=spread||0.10;
+    _emPos[s3]=x+(Math.random()-0.5)*sp; _emPos[s3+1]=y+Math.random()*0.10; _emPos[s3+2]=z+(Math.random()-0.5)*sp;
+    _emVel[s3]=(Math.random()-0.5)*0.35; _emVel[s3+1]=(up||0.9)+Math.random()*0.7; _emVel[s3+2]=(Math.random()-0.5)*0.35;
+    _emAge[s]=0; _emTtl[s]=1.1+Math.random()*1.6; _emR[s]=0.012+Math.random()*0.020; _emPh[s]=Math.random()*6.283;
+    CA[s3]=1; CA[s3+1]=0.92; CA[s3+2]=0.66;
+  }
+  _emIM.instanceColor.needsUpdate=true;
+}
+// Fed from the point-light pool's own candidate list — see the call in assignPointLights. That list is already the
+// nearest emitters to the player, already sorted, already distance-culled, so embers cost no second scan of the world.
+let _emAcc=0;
+function emberEmit(dt, cands, n){
+  if(typeof BR!=='undefined' && BR.inside) return;                    // the halls have no sky and no fires of this kind
+  _emAcc+=dt;
+  if(_emAcc<0.05) return;                                             // 20 Hz is finer than the eye reads on a spark this size
+  const step=_emAcc; _emAcc=0;
+  for(let i=0;i<n && i<cands.length;i++){ const e=cands[i][1]; const kind=e[4]|0; if(!kind) continue;
+    if(cands[i][0]>576) break;                                        // 24 blocks: past that a spark is one dim pixel
+    const rate = kind>1 ? 7 : 1.6;                                    // a campfire throws them; a torch lets one go now and then
+    if(Math.random() < rate*step){
+      const big = kind>1;
+      spawnEmbers(e[0], e[1]+(big?0.25:0.12), e[2], 1, big?0.34:0.10, big?1.3:0.85);
+    } }
+}
+function updateEmbers(dt){
+  if(!_emN){ _emIM.count=0; return; }
+  const MA=_emIM.instanceMatrix.array, CA=_emIM.instanceColor.array;
+  const wind=(typeof weather!=='undefined' && weather.wind!=null)?weather.wind:0.35;
+  for(let i=_emN-1;i>=0;i--){ const i3=i*3;
+    _emAge[i]+=dt;
+    if(_emAge[i]>=_emTtl[i]){ const L=--_emN, L3=L*3;
+      if(i!==L){ _emPos[i3]=_emPos[L3];_emPos[i3+1]=_emPos[L3+1];_emPos[i3+2]=_emPos[L3+2];
+        _emVel[i3]=_emVel[L3];_emVel[i3+1]=_emVel[L3+1];_emVel[i3+2]=_emVel[L3+2];
+        _emAge[i]=_emAge[L]; _emTtl[i]=_emTtl[L]; _emR[i]=_emR[L]; _emPh[i]=_emPh[L];
+        CA[i3]=CA[L3];CA[i3+1]=CA[L3+1];CA[i3+2]=CA[L3+2]; }
+      if(_emWrap>=_emN) _emWrap=0;
+      continue; }
+    const a=_emAge[i]/_emTtl[i];
+    // A SPARK IS BUOYANT AND THEN IT IS NOT. It rises while it is hot, loses that as it cools, and the last of its
+    // life it is falling ash — which is what stops a fire looking like a fountain.
+    _emVel[i3+1] += (1.6*(1.0-a) - 1.5*a)*dt;
+    const sw=Math.sin(_emPh[i]+_emAge[i]*5.2)*0.35;
+    _emPos[i3]+=(_emVel[i3]+sw*0.4+wind*0.30)*dt; _emPos[i3+1]+=_emVel[i3+1]*dt; _emPos[i3+2]+=(_emVel[i3+2]+Math.cos(_emPh[i]+_emAge[i]*4.7)*0.35*0.4)*dt;
+    // COOLING: yellow-white → orange → a dull red that fades out. The colour IS the age, which is why there is no
+    // separate fade term: an ember that went out with its colour still bright would pop.
+    const k=1.0-a;
+    CA[i3]=Math.min(1,0.35+k*0.85); CA[i3+1]=k*k*0.80; CA[i3+2]=k*k*k*0.42;
+  }
+  for(let i=0;i<_emN;i++){ const i3=i*3, o=i*16, r=_emR[i]*(1.0-_emAge[i]/_emTtl[i]*0.45);
+    MA[o]=r;    MA[o+1]=0;  MA[o+2]=0;  MA[o+3]=0;
+    MA[o+4]=0;  MA[o+5]=r;  MA[o+6]=0;  MA[o+7]=0;
+    MA[o+8]=0;  MA[o+9]=0;  MA[o+10]=r; MA[o+11]=0;
+    MA[o+12]=_emPos[i3]; MA[o+13]=_emPos[i3+1]; MA[o+14]=_emPos[i3+2]; MA[o+15]=1; }
+  _emIM.count=_emN; _emIM.instanceMatrix.needsUpdate=true; _emIM.instanceColor.needsUpdate=true; }
 // ---- EJECTED SHELL CASINGS — a spent brass rectangle flips out of the receiver, tumbles, falls, and TINKS on the ground ----
 const _shellGeo=new THREE.BoxGeometry(0.02,0.02,0.055);
 const _shellMat=new THREE.MeshPhongMaterial({color:0xc9a24a, shininess:120, specular:0x6b5a20});
@@ -15823,7 +16009,17 @@ camera.add(offView.group);
 // the limb. Guns are exempt by construction, not by a test here — updateMainArm/updateOffArm hide these groups for a gun,
 // because a gun carries its own hand (attachGunHand) and that hand rides the weapon.
 const FIST_REST_Y=-0.22, ARM_REST_Z=0.12;   // ARM_REST_Z is also the base the block-out's arm-follow rebases off — see the end of updateView
-const OFF_VIEW_Y=-0.26, OFF_ARM_Y=FIST_REST_Y;
+// REVERTED (Ben 08-05: "for some reason you moved the players hand from its good postiion before, bring it back. it seems to be
+// ONLY when holding blocks in the main hand"). Earlier today this was tied to FIST_REST_Y so that equipping a non-gun item could
+// not change the forearm's height — the empty hand draws buildFist at -0.22 and the arm groups sat at -0.34, so the limb dropped
+// 0.12 the moment your hand was full. Raising the arm to match the fist did stop it moving, and it also moved the hand away from
+// the held block, which had been posed against -0.34 for as long as it has existed. The hand's position with a block in it is the
+// one Ben likes, so it wins and this goes back.
+// THE UNDERLYING CONFLICT IS UNRESOLVED, and it is a two-way choice about which height both states should share: bring the empty
+// fist DOWN to -0.34 (nothing moves on equip, held items keep their authored pose) or bring the block's pose UP to -0.22. Either
+// is a visible change to a pose Ben tuned by eye, so it is his call and not a thing to pick quietly. Until then the 0.12 step on
+// equipping a non-gun item is deliberate.
+const OFF_VIEW_Y=-0.26, OFF_ARM_Y=-0.34;
 offView.group.position.set(-0.22,OFF_VIEW_Y,-0.35);
 // Yaw is Ben's, OFFHAND ONLY (-0.45 -> -0.10): "spun counterclockwise a bit" seen from the top down, which about +Y is a
 // POSITIVE rotation. The main-hand shield keeps its own -0.30 in setViewItem; this group is only ever the left hand, so
@@ -22851,7 +23047,7 @@ let _lampPts=null, _lampPos=null, _lampCol=null, _lampLive=0, _lampT=0, _lampOn=
 function _lampRegister(c){
   const k=c.cx+','+c.cz;
   if(c.emitters&&c.emitters.length){ const a=new Array(c.emitters.length);
-    for(let i=0;i<c.emitters.length;i++){ const e=c.emitters[i]; a[i]=[e[0],e[1],e[2],e[3]]; }   // copied, not referenced: the chunk's own array is rebuilt on every remesh
+    for(let i=0;i<c.emitters.length;i++){ const e=c.emitters[i]; a[i]=[e[0],e[1],e[2],e[3],e[4],e[5]]; }   // copied, not referenced: the chunk's own array is rebuilt on every remesh
     _lampReg.set(k,a); }
   else _lampReg.delete(k);         // a remesh that finds no lights means they were mined out, not that the chunk went away
 }
@@ -27204,6 +27400,33 @@ window.__hc={
   // radius is random, so waiting twelve seconds and measuring the furthest brother reports the dice: one run showed 39.7
   // blocks of stray and the next 7.1, from identical code. This asks _monkGoal directly, a few hundred times, and reports
   // how far the targets it hands out actually reach.
+  // ---- FIRE (Ben 08-05: a new flame, embers alongside it, and the light flickering with it) ----
+  embers(){ let rising=0, hot=0; const CA=_emIM.instanceColor.array;
+    for(let i=0;i<_emN;i++){ if(_emVel[i*3+1]>0) rising++; if(CA[i*3+1]>0.4) hot++; }
+    return { n:_emN, cap:EMBER_MAX, drawn:_emIM.count, rising, hot,
+             y:_emN?+_emPos[1].toFixed(2):null }; },
+  // The light and the flame have to move TOGETHER, so this reports the light's own flicker factor beside the value the
+  // flame's shader is computing from the same seed at the same instant. A harness can then sample both over time.
+  fireLight(){ const t=globalU.uTime.value, out=[];
+    for(let i=0;i<Math.min(4,pointPool.length);i++){ const pl=pointPool[i];
+      if(pl.position.y<-900) continue;
+      out.push({ i, x:+pl.position.x.toFixed(1), y:+pl.position.y.toFixed(1), z:+pl.position.z.toFixed(1),
+                 intensity:+pl.intensity.toFixed(2), dist:+pl.distance.toFixed(1) }); }
+    // the candidate the pool is lit from, with the seed the flame beside it is using
+    const c=_plCand.length?{ d:+Math.sqrt(_plCand[0][0]).toFixed(2), lvl:_plCand[0][1][3], kind:_plCand[0][1][4]|0,
+                             seed:_plCand[0][1][5]!=null?+_plCand[0][1][5].toFixed(4):null } : null;
+    return { t:+t.toFixed(3), lights:out, nearest:c,
+             flicker:c&&c.seed!=null?+fireFlicker(t,c.seed).toFixed(4):null, poolSize:pointPool.length }; },
+  // Put a fire in front of the camera and look at it — every kind Ben named, on demand, without hunting for one.
+  fireStudio(kind,dist){ try{ const D=dist||2.2, d=lookDir(), x=Math.floor(player.pos.x+d.x*D), z=Math.floor(player.pos.z+d.z*D);
+      let y=Math.floor(player.pos.y); for(let k=0;k<6;k++){ if(!solidAt(x,y-1,z)) y--; else break; }
+      const id = kind==='campfire'?BID.campfire : kind==='lantern'?BID.lantern : kind==='candle'?BID.candle : kind==='red'?BID.red_torch : BID.torch;
+      if(id==null) return {err:'no block id for '+kind};
+      setBlockWorld(x,y,z,id,true);
+      player.yaw=Math.atan2(-(x+0.5-player.pos.x),-(z+0.5-player.pos.z));
+      const dy=(y+0.8)-(player.pos.y+EYE), L=Math.hypot(x+0.5-player.pos.x, dy, z+0.5-player.pos.z)||1;
+      player.pitch=clamp(Math.asin(dy/L),-1.2,1.2);
+      return { kind, x, y, z, id }; }catch(e){ return {err:String(e.message||e)}; } },
   monkGoals(id,n){ try{ const m=animals.find(a=>a.type==='monk'&&!a.dead&&(!id||a.site===id)); if(!m) return {err:'no monk'};
       const h=m.home||{x:m.x,z:m.z}; let mx=0, out=0, nulls=0, N=n||300;
       for(let k=0;k<N;k++){ const g=_monkGoal(m); if(!g){ nulls++; continue; }
