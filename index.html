@@ -2508,7 +2508,11 @@ function pineEmit(wx,wz,emit){
         const lump=fbm2((wx+ox)*0.31,(wz+oz)*0.31,977,2)*0.9;      // ±0.9 of a block on the rim
         if(rr > rad+0.45+lump) continue;
         if(ox===0&&oz===0&&yy<top-1) continue;                      // the trunk keeps its column
-        const core=(rr<=rad-2.0) && y>-cr+1 && y<cr;                // interior → the opaque core block, same as the pine
+        // THREE BLOCKS IN, like the pine, because that is the rule for the whole item and not a per-species taste:
+        // "up to 3 blocks from the outside in should be transparent". It was 2 here, so a broadleaf had a solid core one
+        // block closer to the light than a conifer of the same size. On a canopy of radius 3 or 4 this leaves almost no
+        // core at all, which is correct — a small tree IS all shell.
+        const core=(rr<=rad-3.0) && y>-cr+1 && y<cr;                // interior → the opaque core block, same as the pine
         if(!core && rng()<0.06) continue;                           // a few natural gaps in the shell
         emit(wx+ox, h+yy, wz+oz, core?LEAF_CORE:LEAF_SHELL, false);
       }
@@ -20522,7 +20526,9 @@ function brxDropBuriedWalls(){ const W=BR.walls; if(!W||W.length<2) return 0;
   // IDEMPOTENT, because brxUnion re-pushes the SAME record objects on every stream. Splicing only touches BR.walls, so the
   // next union starts from the chunk records again — but `by` is written ON the record and would otherwise be re-raised
   // relative to an already-raised base. `_by0` holds the original (usually undefined) and every run resets to it first.
-  for(let i=0;i<W.length;i++){ const w=W[i]; if(w._by0===undefined) w._by0=(w.by!==undefined?w.by:null); w.by=(w._by0===null?undefined:w._by0); }
+  for(let i=0;i<W.length;i++){ const w=W[i]; if(w._by0===undefined) w._by0=(w.by!==undefined?w.by:null); w.by=(w._by0===null?undefined:w._by0);
+    if(w._sp0===undefined) w._sp0=[w.x0,w.z0,w.x1,w.z1];                          // trimming rewrites the ends, so they are restored too — otherwise each union trims the trimmed wall again
+    else { w.x0=w._sp0[0]; w.z0=w._sp0[1]; w.x1=w._sp0[2]; w.z1=w._sp0[3]; } }
   // BUCKET BY THE LINE ONLY — axis plus fixed coordinate, never the heights. At generation time `ty` is still LOCAL and a
   // room wall carries its own varied `_roomCeil` while a lining carries BR_WY1 or roofFar, so keying on ty put the two
   // records of every real pair in DIFFERENT buckets and the pass dropped 3 of 14 instead of all of them.
@@ -20546,8 +20552,24 @@ function brxDropBuriedWalls(){ const W=BR.walls; if(!W||W.length<2) return 0;
       const ax=Math.abs(a.x1-a.x0)<1e-6, a0=Math.min(ax?a.z0:a.x0, ax?a.z1:a.x1), a1=Math.max(ax?a.z0:a.x0, ax?a.z1:a.x1);
       for(const j of idx){ if(j===i || kill.has(j)) continue; const b=W[j];
         const b0=Math.min(ax?b.z0:b.x0, ax?b.z1:b.x1), b1=Math.max(ax?b.z0:b.x0, ax?b.z1:b.x1);
-        if(b1-b0 <= BR_WT*1.5) continue;                                          // a ~BR_WT overlap is brxEmitWall's deliberate corner growth — leave it alone
-        if(b0 < a0-1e-6 || b1 > a1+1e-6) continue;                                 // b is not buried in a along the line
+        if(b1-b0 <= BR_WT*1.5) continue;
+        const o0=Math.max(a0,b0), o1=Math.min(a1,b1);
+        if(o1-o0 <= BR_WT*1.5) continue;                                          // a ~BR_WT overlap is brxEmitWall's deliberate corner growth — leave it alone
+        if(b0 < a0-1e-6 || b1 > a1+1e-6){
+          // PARTIAL, NOT BURIED — the two share a plane over o0..o1 but each sticks out past the other somewhere, which is
+          // what the 0.18 corner growth on a room wall's end guarantees. Dropping either would open a hole, so the shorter
+          // one is TRIMMED back to the edge of the overlap. Only when a covers b's full height, or trimming would expose
+          // the part of b that was doing the work above a's top; and only when b overhangs on ONE side, since a wall
+          // sticking out both ends would need splitting in two and no measured case does.
+          if(bot(b) < bot(a)-1e-6 || top(b) > top(a)+1e-6) continue;
+          const overLo = b0 < a0-1e-6, overHi = b1 > a1+1e-6;
+          if(overLo && overHi) continue;
+          const nLo = overLo ? b0 : a1, nHi = overLo ? a0 : b1;
+          if(nHi-nLo <= 0.01){ kill.add(j); n++; continue; }                       // nothing left of b outside a
+          const wasDesc = ax ? (b.z1<b.z0) : (b.x1<b.x0);
+          if(ax){ b.z0=wasDesc?nHi:nLo; b.z1=wasDesc?nLo:nHi; }
+          else { b.x0=wasDesc?nHi:nLo; b.x1=wasDesc?nLo:nHi; }
+          n++; continue; }
         const aLen=a1-a0, bLen=b1-b0;
         if(!(aLen > bLen+1e-6 || j>i)) continue;                                   // strictly shorter loses; equal length breaks by index so the pass is order-independent
         if(bot(b) >= top(a)-1e-6) continue;                                        // already stacked clear of a — no shared plane
@@ -28111,6 +28133,18 @@ window.__hc={
   // radius is random, so waiting twelve seconds and measuring the furthest brother reports the dice: one run showed 39.7
   // blocks of stray and the next 7.1, from identical code. This asks _monkGoal directly, a few hundred times, and reports
   // how far the targets it hands out actually reach.
+  // #68: fell a trunk through the REAL path (treeFall), which is the one that walks the trunk and clears the canopy —
+  // the two places a new species' log or leaf id has to be recognised or a birch is a tree you cannot chop.
+  chopAt(x,y,z){ try{ x|=0; y|=0; z|=0; const before=getBlock(x,y,z);
+      let logsBefore=0, leavesBefore=0;
+      for(let yy=y; yy<y+16; yy++) if(isLogId(getBlock(x,yy,z))) logsBefore++;
+      for(let yy=y+2; yy<y+16; yy++) for(let dx=-3;dx<=3;dx++) for(let dz=-3;dz<=3;dz++) if(isLeafId(getBlock(x+dx,yy,z+dz))) leavesBefore++;
+      beginBulk(); try{ treeFall(x,y,z); } finally{ endBulk(); }
+      let logsAfter=0, leavesAfter=0;
+      for(let yy=y; yy<y+16; yy++) if(isLogId(getBlock(x,yy,z))) logsAfter++;
+      for(let yy=y+2; yy<y+16; yy++) for(let dx=-3;dx<=3;dx++) for(let dz=-3;dz<=3;dz++) if(isLeafId(getBlock(x+dx,yy,z+dz))) leavesAfter++;
+      return { before, beforeName:(B[before]&&B[before].name)||before, logsBefore, logsAfter, leavesBefore, leavesAfter,
+               drops:drops.length }; }catch(e){ return {err:String(e.message||e)}; } },
   // #68: the canopy's alpha cutout, live. 0 turns the holes off as far as the rasteriser is concerned (the transparent
   // texels draw as opaque black), which is the ONLY way to A/B the discard cost against itself — same camera, same
   // chunks, same frame. Every chunk has its own material clone, so the base and all the clones have to be told.
@@ -28289,7 +28323,29 @@ window.__hc={
       return { armRx:+P.armR.rotation.x.toFixed(3), armRz:+P.armR.rotation.z.toFixed(3),
                handPos:P.hand.position?P.hand.position.toArray().map(n=>+n.toFixed(3)):null,
                armLx:P.armL?+P.armL.rotation.x.toFixed(3):null, armLz:P.armL?+P.armL.rotation.z.toFixed(3):null,
-               heldScale:P.heldMesh?+P.heldMesh.scale.x.toFixed(3):null, held:P.heldMesh?true:false }; }
+               heldScale:P.heldMesh?+P.heldMesh.scale.x.toFixed(3):null, held:P.heldMesh?true:false,
+               // WHERE THE HANDS ACTUALLY ARE, and where the forend they are supposed to be holding is. There is no IK here — the
+               // arms are two rotations and the gun hangs off one of them — so "the other arm reaches over to support it" is only
+               // true if the support hand ends up NEAR THE FOREND, and rotations alone cannot be read for that. Body-local, so the
+               // numbers do not move when the player turns.
+               ...(()=>{ try{ const inv=new THREE.Matrix4().copy(P.group.matrixWorld).invert();
+                   const w=o=>{ const v=new THREE.Vector3(); o.updateWorldMatrix(true,false); v.setFromMatrixPosition(o.matrixWorld); return v.applyMatrix4(inv); };
+                   const h=w(P.hand), oh=w(P.handOff);
+                   let fore=null, dist=null;
+                   if(P.heldMesh){ let bb=P.heldMesh.userData._tbb;
+                     // _viewLocalBox, NOT Box3.setFromObject: setFromObject returns a WORLD box, and feeding its min.z back in as a
+                     // local offset put the "forend" six blocks behind the player.
+                     if(!bb){ bb=_viewLocalBox(P.heldMesh); P.heldMesh.userData._tbb=bb; }
+                     // The forend is a third of the way down the barrel from the grip, not the muzzle: nobody supports a rifle by
+                     // its muzzle. The held wrapper carries rotation.y = PI, so the model's -z barrel points +z in the body.
+                     P.heldMesh.updateWorldMatrix(true,false);
+                     const local=new THREE.Vector3(0,0,bb.min.z*0.62).applyMatrix4(P.heldMesh.matrixWorld);
+                     fore=local.applyMatrix4(inv);
+                     dist=oh.distanceTo(fore); }
+                   return { handAt:h.toArray().map(n=>+n.toFixed(3)), offHandAt:oh.toArray().map(n=>+n.toFixed(3)),
+                            forendAt:fore?fore.toArray().map(n=>+n.toFixed(3)):null,
+                            offHandToForend:dist==null?null:+dist.toFixed(3) }; }
+                 catch(e){ return {poseErr:String(e.message||e)}; } })() }; }
     catch(e){ return {err:String(e.message||e)}; } },
   // QA: the numbers gunSpace would use for a shot fired HERE, right now. There is nothing to look at and nothing to listen to
   // in a headless run, so the only way to test "the reverb matches the place" is to read the levels the place produces.
