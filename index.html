@@ -386,13 +386,18 @@ const _scotG = new Float32Array([0.85, 0.01, 0.45, 1]);
 // setting (lum 116.9 -> 117.0, saturation 0.66), because a lit surface never enters the descent — which is why the black can
 // go this deep without taking the lights with it. 0.0 is not the floor to use: a trace of value is what keeps a surface's
 // form readable, and total black would lose the shape of the room. __hc.scot({floor}) is the dial.
-// [3] IS THE DESCENT'S OWN KNEE ON DELIVERED LIGHT, as a fraction of the wash's `hi` (0.45), so 0.35 puts it at 0.1575.
-// Ben 08-05: "in dark caves a held light shows nothing". A held lantern bakes nothing into the chunk volume, so its pool is carried
-// only by delivered light, which sits under the wash knee — and the descent then took the pool to 2% of its own luma. Above this
-// knee the descent is fully released, below the wash's `lo` nothing changes at all. 0 restores the pre-fix behaviour and is the A/B
-// (`__hc.scot({litKnee:0})`). Chosen as the lowest value that returns the corridor's min channel to within a few levels of
-// descent-off while leaving both unlit cases bit-identical — see bench/tmp-cave-held.mjs.
-const _scotH = new Float32Array([1.0, 0.02, 0.5, 0.35]);
+// [3] IS THE DESCENT'S OWN KNEE ON DELIVERED LIGHT, in the gate's own linear units — the delivered light at which the CAVE DESCENT
+// is fully released. Ben 08-05: "in dark caves a held light shows nothing". A held lantern bakes nothing into the chunk volume, so its
+// pool is carried by `_dlit` alone, `_dlit` across it is under the wash's `hi`, and the descent took the whole pool to 2% of its own
+// luminance. 0 restores the pre-fix behaviour and is the A/B (`__hc.scot({litKnee:0})`).
+// 0.009 IS SWEPT, NOT PICKED: bench/tmp-cave-held.mjs, a lantern in hand in a carved corridor at midnight, wall crop against the
+// descent-off ceiling of lum 38.9 / min 38 — knee 0.0023 gives 39.0/38, 0.0045 gives 39.1/38, 0.009 gives 38.7/38, 0.0225 gives
+// 38.7/38 but starts costing the far end, 0.045 gives 33.1/32, 0.09 gives 17.1/16, 0.1575 gives 9.4/8. So the pool's delivered light
+// is around 0.01 and this is the LARGEST knee that still returns the pool in full — largest on purpose, because every reduction of it
+// releases the descent on fainter light, and the faintest light in the game is the moon on open night ground, which Ben has signed off
+// as black four times. `?dbg=lit` cannot be used to read these values: it writes gl_FragColor before the post chain, so its 28/255 on
+// that same wall is a GRADED number and reading the knee off it put the first attempt 17x too high, moving the frame by 2 levels.
+const _scotH = new Float32Array([1.0, 0.02, 0.5, 0.009]);
 // ---- A PROP IN SHADE IS NOT A PROP AT NIGHT (Ben 08-05: the scarecrow near spawn "is completely black") ----
 // (r, g, b, -). The daylight SKY FILL that every non-atlas lit material was missing.
 //
@@ -502,8 +507,12 @@ const _propFill = new Float32Array([0.237, 0.267, 0.30, 0]);
     // fragment with NO delivered light — an unlit cave, open night ground under nothing but the moon — has `_dw` exactly 1 and takes
     // the identical path it took before, so Ben's black night and assert-cave-black's unlit interior cannot move.
     // uScotH.w was the unused fourth slot; 0 disables the release entirely, which is the A/B (`__hc.scot({litKnee:0})`).
-    '  float _dk=uScotG.z*uScotH.w;\n'+
-    '  float _dw=(_dk>0.0)? 1.0-smoothstep(uScotG.y,_dk,max(_dlit,_emi)) : 1.0;\n'+
+    '  float _dk=uScotH.w;\n'+
+    // FROM ZERO, not from the wash's `lo`. `?dbg=lit` writes gl_FragColor BEFORE the post chain, so its 28/255 on a hand-lit wall is
+    // a GRADED number, not the linear one the gate sees — the real `_dlit` across a held pool is an order of magnitude smaller, which
+    // is why a knee at 0.1575 moved the frame by 2 levels. The ramp therefore starts at no delivered light at all and the knee is
+    // swept against the picture (bench/tmp-cave-held.mjs).
+    '  float _dw=(_dk>0.0)? 1.0-smoothstep(0.0,_dk,max(_dlit,_emi)) : 1.0;\n'+
     '  float _des=mix(1.0, uScotH.y, min(_w,_dw)*(1.0-_open*uScotG.w));\n'+
     '  gl_FragColor.rgb=mix(gl_FragColor.rgb, vec3(_sl*_des), uScotG.x*_w);\n'+
     // ---- THE FOG BETWEEN YOU AND A LAMP IS LIT BY IT (Ben 08-05: "light should be visible through nighttime black fog") ----
@@ -3273,7 +3282,16 @@ function _sg(lx,ly,lz){ return (ly<0||ly>=WH) ? 0 : _snapB[(lx+1) + (lz+1)*_SW +
 //   - a genuine interior still reads 0: all nine columns capped, nothing to rescue it. Cave black is that case.
 // Nine heightfield reads per face instead of one to five, at mesh time only, and _snapT is padded by one column in every
 // direction so the 3x3 is always in range — that padding is why the neighbourhood is 3x3 and not 5x5.
-function _skyCol(lx,ly,lz){ const th=_snapT[(lx+1)+(lz+1)*_SW]; if(ly>=th)return 1; const v=1-(th-ly)/6; return v<0?0:v; }
+// CLAMPED INTO THE PAD, and this is the whole of Ben's "north and south facing block faces are completely blacked out,
+// ONLY north and south". _snapT is 18x18: the chunk plus ONE column of pad, so it holds -1..16 and nothing further. The
+// mesher samples a FACE by its air cell, which on a +Z boundary is lz=16, and the 3x3 then asks for lz+1=17 — off the end
+// of the array. undefined comes back, `ly >= undefined` is false, and `1-(undefined-ly)/6` is NaN, so the face packs a
+// NaN sky and renders black. Off the end in X lands on the next ROW instead: a wrong value, but finite, which is exactly
+// why the fault was visible on north and south faces and on no others.
+// A clamp, not a guard, because the pad column IS the right answer at a seam: it is the neighbouring chunk's own htop.
+function _skyCol(lx,ly,lz){
+  const cx = lx<-1?-1 : lx>16?16 : lx, cz = lz<-1?-1 : lz>16?16 : lz;
+  const th=_snapT[(cx+1)+(cz+1)*_SW]; if(ly>=th)return 1; const v=1-(th-ly)/6; return v<0?0:v; }
 function _skyNbr(lx,ly,lz){   // the eight columns around this one, each scored by its own top
   let m=0;
   for(let dz=-1;dz<=1;dz++) for(let dx=-1;dx<=1;dx++){ if(!dx&&!dz) continue;
@@ -29848,6 +29866,28 @@ window.__hc={
                shallowestCore:core?minCore:null, deepestCut:cut?maxCut:null }; }catch(e){ return {err:String(e.message||e)}; } },
   // #68: everything about the canopy that can be a number, in one place — the alpha in the TILES as painted, the
   // material's cutout, the sky flags, and the sprig count against the exposed faces that should each have one.
+  // EVERY BAKED SKY VALUE IN THE LOADED WORLD, counted. A face whose aSky is NaN renders BLACK and nothing anywhere
+  // reports it — the shader has no way to complain and a screenshot only shows it if you happen to be looking at that
+  // seam. This is what caught Ben's "north and south facing block faces are completely blacked out": the 3x3 sky
+  // neighbourhood read one column past the 18x18 pad, which on the Z axis falls off the end of the array.
+  // Any non-zero nan count is a bug, at any time, whatever the frame looks like.
+  skyCensus(){ try{ let meshes=0, verts=0, nan=0, zero=0, one=0; const bad=[];
+      const B={ '+x':[0,0], '-x':[0,0], '+y':[0,0], '-y':[0,0], '+z':[0,0], '-z':[0,0] };
+      chunkRoot.traverse(o=>{ const g=o.geometry; if(!g||!g.attributes||!g.attributes.aSky||!g.attributes.normal) return;
+        meshes++; const a=g.attributes.aSky.array, p=g.attributes.position.array, nm=g.attributes.normal.array;
+        for(let i=0;i<a.length;i++){ const v=a[i]; verts++;
+          // BY FACE NORMAL, which is the only way this census can see what Ben sees. The GLOBAL zero-sky share is 9%
+          // either way, because most faces in a loaded world are underground: the seam faces that blacken are a few
+          // hundred out of two million and invisible at four decimals. His report is literally per orientation.
+          const nx=nm[i*3], ny=nm[i*3+1], nz=nm[i*3+2];
+          const k = Math.abs(nx)>0.5 ? (nx>0?'+x':'-x') : Math.abs(ny)>0.5 ? (ny>0?'+y':'-y') : Math.abs(nz)>0.5 ? (nz>0?'+z':'-z') : null;
+          if(k){ B[k][1]++; if(!Number.isFinite(v)||v<=0) B[k][0]++; }
+          if(!Number.isFinite(v)){ nan++; if(bad.length<8) bad.push([+(p[i*3]+(o.parent?o.parent.position.x:0)).toFixed(0), +p[i*3+1].toFixed(0), +(p[i*3+2]+(o.parent?o.parent.position.z:0)).toFixed(0)]); }
+          else if(v<=0) zero++; else if(v>=1) one++; } });
+      const byFace={}; for(const kk in B) byFace[kk] = B[kk][1] ? +(B[kk][0]/B[kk][1]).toFixed(4) : null;
+      return { meshes, verts, nan, zeroShare:verts?+(zero/verts).toFixed(4):null, fullSkyShare:verts?+(one/verts).toFixed(4):null,
+               darkShareByFace:byFace, firstNaNAt:bad };
+    }catch(e){ return {err:String(e.message||e)}; } },
   canopyProbe(){ try{
       // Read the atlas back. The tiles are painted into one canvas at boot, so this is what the GPU is sampling, not
       // what the painter intended: a hole that was drawn and then overwritten by a later paintTile would show here.
@@ -30736,6 +30776,38 @@ window.__hc={
   // the BUILT geometry rather than off the placement code, because the glyphs are welded into one merged mesh per material and the merge
   // bakes their world matrices in — so every vertex in that mesh is a real world position and the block behind it can be sampled. Any
   // vertex whose backing wall block is not mossy is a corner of a symbol floating over a passage mouth.
+  // QA: HOW BRIGHT EACH WALL BLOCK OF THE HALL IS (Ben's backlog item 31: "certain dungeon main-room wall blocks are too bright").
+  // A wall face is lit by the AIR cell in front of it, so that is what is sampled: the chunk's own baked light volume (c._lvData, level
+  // x17) at the air cell, plus whether that column is roofed at all — htop/opaqueTop is what the shader's sky term reads, and a hole in
+  // the ceiling is the one thing that can make a handful of blocks in a sealed room brighter than the rest.
+  dunWallLight(){ try{ const L=wretch.lair; if(!L||L.fy==null) return {no:'no lair yet'};
+      const cx=L.cx, cz=L.cz, fy=L.fy, fw=fy+1, DR=13, DH=11;
+      const lightAt=(x,y,z)=>{ const c=world.get(key(x>>4,z>>4)); if(!c||!c._lvData) return null;
+        return c._lvData[(x&15) + CK*(y + WH*(z&15))]; };
+      const rows=[]; const hist={}; let skyOpen=0, n=0, air=0, noVol=0;
+      // WALKED OUT FROM THE CENTRE, not computed from DR. The room's inner faces are not symmetric about its centre (the glyph probe
+      // had to learn the same thing: c+DR+0.5 on one side, c-(DR-0.5) on the other), and a sampled coordinate that is one cell wrong is
+      // solid rock — the first version of this measured 0 cells and reported a perfectly even hall.
+      for(const [ax,az] of [[0,-1],[0,1],[-1,0],[1,0]]){                          // the four walls, by outward normal
+        for(let t=-(DR-1); t<=DR-1; t++) for(let y=fw+1; y<=fy+DH-2; y++){
+          let wx=(ax!==0)?cx:cx+t, wz=(az!==0)?cz:cz+t;
+          let steps=0; while(steps<DR+2){ const nx=wx+ax, nz=wz+az; if(getBlock(nx,y,nz)!==AIR) break; wx=nx; wz=nz; steps++; }
+          if(steps===0) continue;                                                 // no air along this ray at this height
+          const b=getBlock(wx,y,wz); if(b!==AIR) continue;                        // the last air cell before the wall
+          air++;
+          const lv=lightAt(wx,y,wz); if(lv==null){ noVol++; continue; } n++;
+          const q=Math.round(lv/17); hist[q]=(hist[q]||0)+1;
+          const roofedTo=opaqueTop(wx,wz), open=(roofedTo<=y);
+          if(open) skyOpen++;
+          if(rows.length<400) rows.push({x:wx,y,z:wz,lv:q,open,roofedTo}); } }
+      const levels=Object.keys(hist).map(Number).sort((a,b)=>a-b);
+      const top=levels.length?levels[levels.length-1]:null, med=levels.length?levels[(levels.length/2)|0]:null;
+      return { cells:n, airCells:air, cellsWithNoLightVolume:noVol, lair:{cx,cz,fy}, hist, brightest:top, median:med,
+               skyOpenCells:skyOpen,
+               // the cells at the top of the histogram, which are the ones Ben can see
+               hotspots:rows.filter(r=>r.lv>=top).slice(0,12),
+               openSample:rows.filter(r=>r.open).slice(0,10) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   dungeonGlyphs(){ try{ if(typeof _dungeonGroup==='undefined'||!_dungeonGroup) return {no:'no dungeon built'};
       const red=(wretch.symbolRedMats||[]); if(!red.length) return {no:'no symbol materials'};
       const c=_dungeonC; if(!c) return {no:'no dungeon centre'};
@@ -31054,9 +31126,9 @@ window.__hc={
       // glow: the fog's in-scatter. 0 is the A/B off — the pre-08-05 behaviour where a night fog bank deleted everything a lamp
       // lit (median 46.9 -> 7.9 at 20 blocks) and left the emitter as a bare dot. Night only, by construction.
       if(o&&o.glow!=null) _scotH[2]=+o.glow;
-      // litKnee: how much DELIVERED light releases a fragment from the CAVE DESCENT, as a fraction of the wash's own `hi`. This is
-      // what lets a HELD lantern light a cave: it bakes nothing, so its pool lives under the wash knee and used to descend with the
-      // rock around it. 0 is the A/B off — the pre-fix build.
+      // litKnee: the delivered light at which the CAVE DESCENT is fully released, in the gate's own linear units. This is what lets a
+      // HELD lantern light a cave: it bakes nothing, so its pool lives under the wash knee and used to descend with the rock around
+      // it. 0 is the A/B off — the pre-fix build. Lower releases the descent on fainter light, up to the moon on open ground.
       if(o&&o.litKnee!=null) _scotH[3]=+o.litKnee;
       // `global` is read back off three's own chunk rather than from a flag of mine: it is the one thing a harness cannot infer
       // from pixels, and it is how a reverted patch or a renamed chunk in a library upgrade gets caught instead of silently
