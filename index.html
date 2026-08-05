@@ -606,12 +606,15 @@ const PERF = {
   //   1213 environment meshes marked as casters and frustumCulled off, two of them multiplied the frame by 13.
   //   Measured: 20.23 ms -> 4.73 ms in the halls, 24.61 -> 8.05 at the portal. Ben's call, 07-28: cut them.
   //   The pooled fluorescent falloff and the dying-tube flicker are untouched — only the cast shadow goes.
-  //   BACK TO 2, because the reason for cutting them is gone and cutting them was never in force. Nothing acted on
-  //   this flag: brxUpdateLights set autoUpdate=true on every lit frame, so the one caster the overworld had promoted
-  //   went on drawing six cube faces for ever and the halls have been SHOWING that shadow the whole time. It now
-  //   refreshes on change instead of every frame, so two real casters measure 3.64 ms against 2.85 with none at all —
-  //   where one inert one cost 8.08. Set this to 0 for no troffer shadows at all; the flag is genuinely live now.
-  brShadowLights: 2,
+  //   The flag is genuinely live now (it was inert: brxUpdateLights re-enabled autoUpdate on every lit frame, so one
+  //   promoted caster drew six cube faces for ever — 1830 of the halls' 2263 draw calls). Raising it to 2 was tried and
+  //   REVERTED on the measurement: the refresh is cheap on the MEDIAN and brutal on the TAIL, because both casters
+  //   share the same backstop frame, so one frame in twenty submits 4100 draws instead of 430. Census, flag 0 -> 2:
+  //   halls p99 26.5 -> 76.6 ms, portal_turn 30.9 -> 76.7, portal_away 35.7 -> 99.3 with its draws doubling to 2210
+  //   for a portal it is not even rendering — the BR casters are promoted while the player is still in the OVERWORLD
+  //   near the door, and the portal's own brxUpdateLights call refreshes them there. Raise this only with the refresh
+  //   staggered per caster and the promotion gated on actually being inside.
+  brShadowLights: 0,
   //
   // P2 · brMergeRigid  (baseline: false)
   //   Merge the meshes hanging off a door pivot into one per material, in the pivot's own frame. They are rigid
@@ -16872,6 +16875,10 @@ function lanternMetalMat(){ return new THREE.MeshPhongMaterial({color:0x241f18,s
 // rejects everything behind it, so the pane would erase the very flame it is meant to be glass in front of.
 function lanternPaneMat(){ return new THREE.MeshPhongMaterial({color:0xffb860, map:tileTex('lantern'), transparent:true, opacity:0.34,
   side:THREE.DoubleSide, emissive:0x3a1e06, shininess:60, depthWrite:false}); }
+// A WASH OPT-OUT ON THIS PANE IS NOT THE ANSWER, measured 08-05: defining HC_SCOT_SKIP for it moves the midnight lamp from
+// 99.41 to 99.55 mean and its chroma from 0.351 to 0.350, i.e. nothing. The lamp is ABSENT from a midnight frame that shows
+// it plainly at noon from the identical camera (bench/tmp-lantern-night.mjs), so whatever hides it is not this pane's share
+// of the scotopic wash. HC_SCOT_SKIP is still there, in the wash itself, unused by anything.
 // WHERE A HANDGUN'S GRIP GOES, in camera space — the pose is solved to put userData.gripAt exactly here (see updateView).
 // HIP: on the strong side, level with the fist's own rest, far enough forward to read as held out rather than tucked in the ribs.
 // ADS: on the centre line at eye height with the arm extended — a pistol's sight picture, not a cheek weld.
@@ -17242,10 +17249,13 @@ const _veyeAmt={value:0.40};
 let _vfogHold=null;   // QA only (__hc.vfog) — pins the fog amount the weather would otherwise reassign every frame
 function applyViewFog(root){ if(!root)return; root.traverse(o=>{ if(!o.isMesh||!o.material)return; const mats=Array.isArray(o.material)?o.material:[o.material];
   mats.forEach(m=>{ if(!m||m._vfog||m.isMeshBasicMaterial||m.transparent)return; m._vfog=true; const prev=m.onBeforeCompile;
-    m.onBeforeCompile=(sh)=>{ if(prev)prev(sh); sh.uniforms.uVFogCol={value:scene.fog.color}; sh.uniforms.uVFogAmt=_vfogAmt; sh.uniforms.uVEye=_veyeAmt;   // shares the live fog colour by reference (tracks day/night/weather/underwater)
-      sh.vertexShader='varying float vVFogD;\n'+sh.vertexShader.replace('#include <project_vertex>','#include <project_vertex>\n vVFogD=-mvPosition.z;');
-      sh.fragmentShader='varying float vVFogD; uniform vec3 uVFogCol; uniform float uVFogAmt; uniform float uVEye;\n'+sh.fragmentShader
-        .replace('#include <dithering_fragment>','#include <dithering_fragment>\n gl_FragColor.rgb+=diffuseColor.rgb*(0.32+0.68*clamp(dot(normal,vec3(0.0,0.0,1.0)),0.0,1.0))*uVEye;\n gl_FragColor.rgb=mix(gl_FragColor.rgb, uVFogCol, clamp((vVFogD-0.32)/1.05,0.0,1.0)*0.42*uVFogAmt);');
+    // NO FOG ON WHAT IS IN YOUR HANDS (Ben 08-05: "remove fog on items held in the hand"). The patch used to mix the scene's live fog
+    // colour into the viewmodel by view depth, so a fog bank or a pale night sky greyed out a gun 30 cm from the eye — and the eye cannot
+    // be thirty centimetres of haze from its own hands. The mix, the depth varying that fed it and both fog uniforms are gone; what
+    // remains is the EYE FILL, the other half of this patch and Ben's own ask (a face turned away from the sun rendered black).
+    m.onBeforeCompile=(sh)=>{ if(prev)prev(sh); sh.uniforms.uVEye=_veyeAmt;
+      sh.fragmentShader='uniform float uVEye;\n'+sh.fragmentShader
+        .replace('#include <dithering_fragment>','#include <dithering_fragment>\n gl_FragColor.rgb+=diffuseColor.rgb*(0.32+0.68*clamp(dot(normal,vec3(0.0,0.0,1.0)),0.0,1.0))*uVEye;');
       m.needsUpdate=true; };
     m.onBeforeCompile._vfogPatch=true;   // a fact about the function that is installed, so an audit is not reading back the flag the patcher set
     m.needsUpdate=true; }); }); }
@@ -29227,9 +29237,28 @@ window.__hc={
   // QA/bench: the two uniforms the applyViewFog patch installs. amt is driven per frame from the weather in updateHorizon, so it
   // has to be held to be measured; eye is the constant fill. Reading them back through the SAME objects the shaders hold is what
   // makes a pixel change attributable to the patch rather than to the weather having moved.
+  // QA: WHAT THE VIEWMODEL PATCH ACTUALLY INSTALLS (Ben 08-05: "remove fog on items held in the hand"). onBeforeCompile is a pure
+  // function of the shader object three.js hands it, so calling it with a stand-in gives the exact fragment source a held item would
+  // compile — no renderer internals, no guessing. This exists because the obvious test does not work: measuring the gun's brightness
+  // with the fog lever thrown cannot separate the lever from the sun, the clouds and the auto-exposure, which move the same crop by
+  // twenty luminance in under a second.
+  viewFogShader(id){ try{ if(id){ inv[selSlot]={id,n:1}; refreshHotbar(); setViewItem(id); for(let i=0;i<8;i++)updateView(0.033); }
+      const m=view.mesh; if(!m) return {no:'nothing held'};
+      let mat=null; m.traverse(o=>{ if(mat||!o.isMesh||!o.material)return; const a=Array.isArray(o.material)?o.material:[o.material];
+        for(const x of a) if(x && x._vfog && typeof x.onBeforeCompile==='function'){ mat=x; break; } });
+      if(!mat) return {no:'no patched material on the held item', id:view.id};
+      const sh={ uniforms:{}, vertexShader:'#include <project_vertex>', fragmentShader:'#include <dithering_fragment>' };
+      mat.onBeforeCompile(sh);
+      return { id:view.id, uniforms:Object.keys(sh.uniforms),
+               fogTerm:/uVFogAmt|uVFogCol|vVFogD/.test(sh.fragmentShader+sh.vertexShader),
+               eyeFill:/uVEye/.test(sh.fragmentShader),
+               frag:sh.fragmentShader.slice(0,240) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   vfog(amt, eye, hold){ try{ if(amt!=null) _vfogAmt.value=+amt; if(eye!=null) _veyeAmt.value=+eye;
       if(hold!=null) _vfogHold=(hold===false?null:+hold);
-      return { amt:+_vfogAmt.value.toFixed(3), eye:+_veyeAmt.value.toFixed(3), hold:_vfogHold,
+      // `amt` IS NO LONGER WIRED TO THE VIEWMODEL (Ben 08-05 removed held-item fog), and it says so out loud — a probe that keeps
+      // returning a number for a uniform nothing reads is how a bench passes on a dead feature.
+      return { amt:+_vfogAmt.value.toFixed(3), viewFog:'removed', eye:+_veyeAmt.value.toFixed(3), hold:_vfogHold,
                fogColor:'#'+scene.fog.color.getHexString() }; }
     catch(e){ return {err:String(e.message||e)}; } },
   // QA: WHICH MATERIALS ON A VIEWMODEL CARRY THE VIEW FOG (Ben: the guns' fog effect needs reviewing). applyViewFog patches every

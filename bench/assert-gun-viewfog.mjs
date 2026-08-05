@@ -53,15 +53,26 @@ const W=900,H=600;
     };
     await page.evaluate(`(()=>{ __hc.aim(false); __hc.hold('ar15'); })()`); await sleep(900);
     await page.evaluate(`__hc.cam({yaw:0,pitch:-0.15})`); await sleep(600);
-    const dry=await look();
-    // HELD, not just set: the weather reassigns this uniform every frame, so a hook that only wrote it would be overwritten
-    // before the next draw and the measurement would show nothing.
-    const fogState=await page.evaluate(`__hc.vfog(1,0.40,1)`);
+    // AGAINST A MEASURED NOISE FLOOR, not against a fixed threshold. The crop contains sky and terrain around the gun, and the sun,
+    // the clouds and the auto-exposure move it by up to twenty luminance in a second and a half — the first inverted version of this
+    // assertion failed on a 21-point drift with the fog term already deleted. So the same interval is sampled twice with nothing
+    // touched, and the lever has to move the picture by no more than that drift does.
+    const d1=await look(); await sleep(700);
+    const d2=await look();
+    // THE FOG LEVER ONLY: this used to raise the EYE FILL in the same call (0.40), and the eye fill is deliberately still there.
+    const fogState=await page.evaluate(`__hc.vfog(1,null,1)`);
     console.log('\n    vfog lever', JSON.stringify(fogState));
     await sleep(700);
     const wet=await look();
-    console.log('    gun-quadrant luminance', JSON.stringify({dry, wet}));
-    ok('the fog term is really in the compiled shader (the gun changes with it)', Math.abs(wet-dry)>1.0, {dry, wet, fogState});
+    const noise=Math.abs(d2-d1), effect=Math.abs(wet-d2);
+    console.log('    gun-quadrant luminance', JSON.stringify({d1, d2, wet, noise:+noise.toFixed(2), effect:+effect.toFixed(2)}));
+    // THE LUMINANCE NUMBERS ARE PRINTED, NOT ASSERTED. The crop holds sky and terrain around the gun and the lever's 20-point swing
+    // could not be told apart from the sun and the auto-exposure moving the same crop by the same amount. What IS asserted is the
+    // shader the patch installs, read by calling onBeforeCompile with a stand-in shader object — it is a pure function of it.
+    const shd=await page.evaluate(`__hc.viewFogShader('ar15')`);
+    console.log('    installed patch', JSON.stringify({uniforms:shd.uniforms, fogTerm:shd.fogTerm, eyeFill:shd.eyeFill, no:shd.no}));
+    ok('a held item carries no fog term at all', shd.fogTerm===false, {fogTerm:shd.fogTerm, uniforms:shd.uniforms, no:shd.no||shd.err});
+    ok('...and the eye fill Ben asked for is still there', shd.eyeFill===true, {eyeFill:shd.eyeFill, frag:(shd.frag||'').slice(0,120)});
     await page.evaluate(`__hc.vfog(null,null,false)`);
     ok('no page errors', errors.length===0, errors);
     await b.close();
