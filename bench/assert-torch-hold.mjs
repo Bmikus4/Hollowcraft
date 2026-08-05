@@ -1,4 +1,4 @@
-// A TORCH IS HELD IN THE HAND, AND ITS RAG IS WRAPPED AROUND SOMETHING (Ben 08-05: "make sure torches are actually held in the
+// A TORCH — AND A CANDLE — IS HELD IN THE HAND, AND THE TORCH'S RAG IS WRAPPED AROUND SOMETHING (Ben 08-05: "make sure torches are actually held in the
 // hand" / "fix the top of torches").
 // The fist is buildFist, whose far -z tip is the palm, and the held item is a separate group on the camera — nothing made the two
 // meet: measured, the palm sat at camera z -0.394 while the torch's shaft was at -0.62, so the hand was 0.23 behind the torch on
@@ -30,7 +30,7 @@ let fails=0; const ok=(n,c,g)=>{ if(!c)fails++; console.log(`  ${c?'ok  ':'FAIL'
     for(const k of ['held','placed']){
       ok(k+' torch: the shaft reaches the top of the rag', fit[k] && fit[k].shaftCoversRag >= 0, fit[k]);
     }
-    for(const id of ['torch','torch_unlit','red_torch']){
+    for(const id of ['torch','torch_unlit','red_torch','candle']){
       const r=await page.evaluate(`__hc.heldInHand('${id}')`);
       console.log('   ', id.padEnd(12), JSON.stringify(r));
       ok(id+': the arm is drawn', r.armVisible===true, {armVisible:r.armVisible});
@@ -42,7 +42,7 @@ let fails=0; const ok=(n,c,g)=>{ if(!c)fails++; console.log(`  ${c?'ok  ':'FAIL'
     const others={};
     // Guns are excluded: a gun declares a grip for the hand PARENTED TO IT (attachGunHand), which is a different mechanism, and the
     // camera-mounted arm stands down for them entirely.
-    for(const id of ['lantern','candle','planks','apple','field_guide']){ others[id]=await page.evaluate(`__hc.heldInHand('${id}')`); }
+    for(const id of ['lantern','planks','apple','field_guide']){ others[id]=await page.evaluate(`__hc.heldInHand('${id}')`); }
     console.log('    untouched items', JSON.stringify(Object.fromEntries(Object.entries(others).map(([k,v])=>[k,{palmZ:v.palm&&v.palm[2], grip:v.gripGap}]))));
     ok('items with no declared grip keep the palm where it was', Object.values(others).every(v=>v.gripGap==null && v.palm && Math.abs(v.palm[2]+0.394)<0.01), Object.fromEntries(Object.entries(others).map(([k,v])=>[k,v.palm&&v.palm[2]])));
     ok('no page errors', errors.length===0, errors);
