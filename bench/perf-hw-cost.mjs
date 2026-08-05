@@ -44,8 +44,8 @@ const med = a => { const s=a.slice().sort((x,y)=>x-y); return s.length%2 ? s[(s.
     const page=await (await browser.newContext({viewport:{width:1920,height:1080},deviceScaleFactor:1})).newPage();
     page.on('pageerror',e=>console.log('  PAGEERROR:',String(e.message||e).slice(0,160)));
     await page.goto(base+'/index.html?perf=1&debug=1&brseed=20260728',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
-    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:120000});
+    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:240000});
     await page.evaluate(`window.__hcPERF.arm(); window.__benchInfo=1;`);
     await page.evaluate(`(()=>{ const H=window.__hc; window.H=H; window.pr=H.probe();
       window.park=()=>{ H.tp(pr.spawnX, pr.spawnZ); H.setTime(${NIGHT}); H.cam({yaw:0.7, pitch:0}); H.pinScene(); H.lock(true); return H.pos(); };

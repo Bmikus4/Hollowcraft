@@ -52,8 +52,8 @@ function foamShare(file,c,th=120){
     page.on('pageerror',e=>{ errs.push(String(e.message||e)); console.log('  PAGEERROR:',String(e.message||e).slice(0,160)); });
     const PAGE='/'+String(process.env.HC_PAGE||'index.html').replace(/^\/+/,'');
     await page.goto(base+PAGE+'?debug=1&rd=8',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:180000});
-    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`, null, {timeout:180000});
+    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`, null, {timeout:240000});
     await page.evaluate(`__hc.lock(true); __hc.pinScene(); __hc.cmdRun('/gamemode creative'); __hc.cmdRun('/fly on');`);
     const F0=await page.evaluate(`__hc.foam()`);
     check('foam is on by default', F0.amt>0.99, JSON.stringify(F0));

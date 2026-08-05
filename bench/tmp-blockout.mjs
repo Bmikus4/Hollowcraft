@@ -17,8 +17,8 @@ function waitHttp(url,t=20000){ return new Promise((res,rej)=>{ const t0=Date.no
     const page=await (await browser.newContext({viewport:{width:900,height:640}})).newPage();
     page.on('pageerror',e=>console.log('  PAGEERROR:',String(e.message||e).slice(0,160)));
     await page.goto(base+'/index.html?debug=1',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',{timeout:120000});
-    await page.waitForFunction("(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()",{timeout:240000});
+    await page.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',null,{timeout:120000});
+    await page.waitForFunction("(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()",null,{timeout:240000});
     await page.evaluate('(()=>{ __hc.lock(true); __hc.setTime(0.45); __hc.cmdRun("/gamemode creative"); })()').catch(()=>{});
     await sleep(2500);
     await page.evaluate('__hc.cmdRun("/clearinv"); __hc.cmdRun("/give hunting_rifle 1")'); await sleep(400);

@@ -26,8 +26,8 @@ const MODE = process.argv[2] || '';
     page.on('pageerror', e=>console.log('PAGEERROR:', String(e.message||e).slice(0,250)));
     const q = '?debug=1&t=210' + (MODE?('&dbg='+MODE):'');
     await page.goto(base+'/index.html'+q,{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null,{timeout:90000});
     const st = await page.evaluate(`__hc.st()`); const SX=st.sx, SZ=st.sz;
     console.log('spawn', SX, SZ, 'day', st.day, 'mode', MODE||'(normal)');
 

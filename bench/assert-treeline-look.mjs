@@ -121,8 +121,8 @@ function strip(file, top, from, to, crop=[0.04,0.96,0.02,0.62]){
     // known-good copy instead of waiting for the tree to be quiet. Leading slash added here; Git Bash rewrites a bare one.
     const PAGE='/'+String(process.env.HC_PAGE||'index.html').replace(/^\/+/,'');
     await page.goto(base+PAGE+'?debug=1&rd=8',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
-    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:120000});
+    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:240000});
     await page.evaluate(`__hc.lock(true); __hc.pinScene(); __hc.cmdRun('/gamemode creative'); __hc.cmdRun('/fly on');`);
     const S=await page.evaluate(`__hc.st()`);
     const gy=await page.evaluate(`__hc.groundY(${S.sx},${S.sz})`);

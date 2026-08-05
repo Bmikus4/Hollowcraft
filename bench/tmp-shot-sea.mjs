@@ -25,8 +25,8 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     page.on('pageerror', e=>console.log('PAGEERROR:', String(e.message||e).slice(0,250)));
     const T=process.argv[2]||'252';
     await page.goto(base+'/index.html?debug=1&t='+T,{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null,{timeout:90000});
     await page.evaluate(`__hc.tp(430,-370)`); await sleep(4500);
     await page.evaluate(`__hc.cam({yaw:Math.PI, pitch:0.02})`); await sleep(600);   // face +Z = open sea from the south beach
     console.log('st:', JSON.stringify(await page.evaluate(`__hc.st()`)));

@@ -60,8 +60,8 @@ function cropArea(img){ const c=CROP(img); return (c.x1-c.x0)*(c.y1-c.y0); }
       page.on('pageerror', e=>console.log('PAGEERROR:', String(e.message||e).slice(0,300)));
     }
     await page.goto(base+'/index.html?debug=1&rd=8', { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:90000});
-    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()', {timeout:90000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:90000});
+    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null, {timeout:90000});
     await sleep(7000);
     await page.evaluate('__hc.setTime(0.42)');
     await page.evaluate('__hc.pinScene()');

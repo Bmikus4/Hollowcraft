@@ -33,8 +33,8 @@ function boxDiff(fa,fb,px,py,rad=40){
     const page=await ctx.newPage();
     page.on('pageerror',e=>console.log('  PAGEERROR:',String(e.message||e).slice(0,180)));
     await page.goto(base+'/index.html?debug=1&rd=8',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
-    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`, null, {timeout:120000});
+    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`, null, {timeout:240000});
     await page.evaluate(`__hc.lock(true); __hc.pinScene(); __hc.cmdRun('/gamemode creative'); __hc.cmdRun('/fly on');`);
     const S=await page.evaluate(`__hc.st()`);
     const LX=Math.round(S.sx), LY=Number(process.env.HALO_Y||120), LZ=Math.round(S.sz);

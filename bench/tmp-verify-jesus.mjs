@@ -24,7 +24,7 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     const page = await ctx.newPage();
     const errors=[]; page.on('pageerror', e=>errors.push(String(e.message||e).slice(0,200)));
     await page.goto('http://127.0.0.1:'+port+'/index.html?debug=1', { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true; } catch(e){ return false; } })()`, { timeout:90000 });
+    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true; } catch(e){ return false; } })()`,null, { timeout:90000 });
 
     const seen = { spawned:false, leaving:false, overWater:false, maxDist:0, despawned:false, daddyOutside:false };
     const track = [];

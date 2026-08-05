@@ -77,8 +77,8 @@ async function run(flags){
     }
     const url = base+'/index.html?debug=1'+(flags?('&'+flags):'');
     await page.goto(url, { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`, { timeout:90000 });
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`, { timeout:90000 });
+    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`,null, { timeout:90000 });
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null, { timeout:90000 });
 
     // expose solidAt through a stable global so the probe does not depend on it being in scope
     await page.evaluate(`window.__hcSolid = (x,y,z)=>{ try{ return __hc.blockAt? !!__hc.blockAt(x,y,z) : false; }catch(e){ return false; } };`);

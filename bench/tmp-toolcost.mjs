@@ -43,7 +43,7 @@ TOOLS.push('wooden_spear','rusty_spear');
     const t0=Date.now();
     await page.goto(base+'/index.html?debug=1', { waitUntil:'load', timeout:120000 });
     const tLoad=Date.now()-t0;
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:180000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:180000});
     const tStart=Date.now()-t0;
     // the preload gate bakes icons in slices; let it drain
     let prev=-1, settled=0;

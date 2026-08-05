@@ -40,8 +40,8 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     // ?perf=1 turns on the game's own per-frame GPU/CPU timers. Wall-clock rAF deltas are useless here: this machine vsyncs
     // at ~144Hz, so both the old and the new shader measure exactly 6.96 ms and the difference is invisible.
     await page.goto(base+'/index.html?debug=1&perf=1&rd=10', { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:90000});
-    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()', {timeout:90000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:90000});
+    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null, {timeout:90000});
     await sleep(7000);
     await page.evaluate('__hc.setTime(0.30)');   // midday, where the clouds are meant to read
     await sleep(1200);

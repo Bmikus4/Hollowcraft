@@ -29,12 +29,12 @@ function check(name, ok, detail){ checks.push({name, ok:!!ok, detail}); console.
     const page = await ctx.newPage();
     const errors=[]; page.on('pageerror', e=>errors.push(String(e.message||e).slice(0,200)));
     await page.goto('http://127.0.0.1:'+port+'/index.html?debug=1&t=252', { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true && __hc.probe().chunkHere===true; } catch(e){ return false; } })()`, { timeout:90000 });
+    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true && __hc.probe().chunkHere===true; } catch(e){ return false; } })()`,null, { timeout:90000 });
     await sleep(3000);
     const shot = n => page.screenshot({ path: path.join(ROOT,'bench','results',`verify-props-${n}.png`) });
 
     // ---------- 1. GUN RACK ----------
-    await page.waitForFunction(`(() => { try { return !__hc.propsRifle().err; } catch(e){ return false; } })()`, { timeout:60000 });
+    await page.waitForFunction(`(() => { try { return !__hc.propsRifle().err; } catch(e){ return false; } })()`,null, { timeout:60000 });
     const rifle = await page.evaluate(`__hc.propsRifle()`);
     console.log('rifle:', JSON.stringify(rifle));
     check('rifle: clear of wall face', rifle.wallClear >= -0.005, {wallClear:rifle.wallClear});
@@ -70,7 +70,7 @@ function check(name, ok, detail){ checks.push({name, ok:!!ok, detail}); console.
     const lair = await page.evaluate(`__hc.lairInfo()`);
     console.log('lair:', JSON.stringify(lair));
     await page.evaluate(`__hc.qa(false); __hc.tp(${lair.x}, ${lair.z})`);
-    await page.waitForFunction(`(() => { try { const L=__hc.lairInfo(); return L && L.built && L.cuffs; } catch(e){ return false; } })()`, { timeout:120000 });
+    await page.waitForFunction(`(() => { try { const L=__hc.lairInfo(); return L && L.built && L.cuffs; } catch(e){ return false; } })()`,null, { timeout:120000 });
     await sleep(1500);   // let the bulk carve/remesh settle
     const floor = await page.evaluate(`__hc.propsCuffsFloor()`);
     console.log('dungeon cuffs:', JSON.stringify(floor));

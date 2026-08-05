@@ -26,7 +26,7 @@ const ev=(p,e)=>p.evaluate(e);
     page.on('pageerror',e=>errors.push(String(e.message||e).slice(0,220)));
     globalThis.__browser=browser;
     await page.goto(base+'/index.html?debug=1',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
     await sleep(800);
 
     // ---- OVERWORLD: cinematic grade + detailed skybox pines (midday, look at the horizon) ----

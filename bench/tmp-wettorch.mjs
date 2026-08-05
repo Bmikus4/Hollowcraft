@@ -32,8 +32,8 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     const page=await (await browser.newContext({ viewport:{width:1100,height:640} })).newPage();
     page.on('pageerror', e=>console.log('PAGEERROR:', String(e.message||e).slice(0,240)));
     await page.goto(base+'/index.html?debug=1&rd=12', { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:90000});
-    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()', {timeout:90000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:90000});
+    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null, {timeout:90000});
     await sleep(8000);
 
     const found = await page.evaluate(`(()=>{ const p=__hc.probe(), sea=p.sea;

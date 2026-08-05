@@ -40,8 +40,8 @@ function ok(n,c,d){ checks++; if(!c){ fails++; console.log('  FAIL  '+n+(d!==und
     const page=await (await browser.newContext({ viewport:{width:1000,height:640} })).newPage();
     page.on('pageerror', e=>errs.push(String(e.message||e).slice(0,200)));
     await page.goto(base+'/index.html?debug=1&rd=6',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',{timeout:90000});
-    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',{timeout:90000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null,{timeout:90000});
+    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null,{timeout:90000});
     await sleep(7000);
     await page.evaluate('__hc.cmdRun("/gamemode creative")').catch(()=>{});
     // NIGHT, and pinned: the whole effect is a light in the dark, and by day the sun swamps it.

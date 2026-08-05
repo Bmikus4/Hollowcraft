@@ -25,8 +25,8 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
       args:['--enable-gpu','--use-angle=d3d11','--mute-audio','--autoplay-policy=no-user-gesture-required']});
     const page=await (await browser.newContext({viewport:{width:900,height:600}})).newPage();
     await page.goto(base+'/index.html?debug=1',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',{timeout:120000});
-    await page.waitForFunction("(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()",{timeout:240000});
+    await page.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',null,{timeout:120000});
+    await page.waitForFunction("(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()",null,{timeout:240000});
     await page.evaluate('(()=>{ __hc.lock(true); __hc.cmdRun("/gamemode creative"); __hc.setTime(0.75); })()').catch(()=>{});
     await page.mouse.click(450,300);
     await page.evaluate('__hc.audioOn()');

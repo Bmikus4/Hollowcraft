@@ -27,8 +27,8 @@ const meanLum=(buf)=>{ const im=decodePNG(buf); const W=im.w,H=im.h,CH=im.ch; le
     const page=await (await browser.newContext({viewport:{width:1000,height:700}})).newPage();
     page.on('pageerror',e=>console.log('  PAGEERROR:',String(e.message||e).slice(0,160)));
     await page.goto(base+'/index.html?debug=1',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',{timeout:120000});
-    await page.waitForFunction("(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()",{timeout:240000});
+    await page.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',null,{timeout:120000});
+    await page.waitForFunction("(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()",null,{timeout:240000});
     await page.evaluate('(()=>{ __hc.lock(true); __hc.cmdRun("/gamemode creative"); })()').catch(()=>{});
     await page.evaluate('__hc.setTime(0.0)'); await sleep(3000);   // NIGHT — a light that adds nothing is only provable in the dark
     await page.evaluate('__hc.cam({yaw:0,pitch:-0.35})'); await sleep(1200);   // look down at the ground in front

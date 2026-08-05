@@ -51,8 +51,8 @@ function ok(label, cond, got){ checks++; if(!cond)fails++; console.log('  '+(con
     const SEED = process.argv[2]!=null ? String(process.argv[2]) : null;
     console.log(SEED!=null ? 'maze seed pinned to '+SEED : 'maze seed RANDOM (pass a seed as argv[2] to pin)');
     await page.goto(base+'/index.html?debug=1&rd=8'+(SEED!=null?'&brseed='+SEED:''), { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:90000});
-    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()', {timeout:90000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:90000});
+    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null, {timeout:90000});
     await sleep(6000);
     await page.evaluate('__hc.setTime(0.42)');
 
@@ -75,7 +75,7 @@ function ok(label, cond, got){ checks++; if(!cond)fails++; console.log('  '+(con
       // Wait until the player has LANDED. tp drops them at the entry chunk's floor height, which over a lower storey
       // means they are still falling; the door's storey is read from the floor under the player, and mid-air that is a
       // different storey from the one they end up standing on.
-      await page.waitForFunction('(()=>{try{return __hcBR.doorAt===undefined||__hc.st().onGround===true;}catch(e){return true;}})()',{timeout:12000}).catch(()=>console.log('  (never landed)'));
+      await page.waitForFunction('(()=>{try{return __hcBR.doorAt===undefined||__hc.st().onGround===true;}catch(e){return true;}})()',null,{timeout:12000}).catch(()=>console.log('  (never landed)'));
       await page.evaluate('__hcBR.door()'); await sleep(1200);
       const R = await page.evaluate('__hcBR.doorAt()');
       const lid = R && Math.abs(R.fromTop-R.y)>2; if(lid) withLid++;

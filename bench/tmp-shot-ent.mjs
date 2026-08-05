@@ -45,8 +45,8 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
       page.on('pageerror', e=>console.log('PAGEERROR:', String(e.message||e).slice(0,400)));
     }
     await page.goto(base+'/index.html?debug=1&t=252&rd=6', { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`, { timeout:90000 });
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`, { timeout:90000 });
+    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`,null, { timeout:90000 });
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null, { timeout:90000 });
     console.log('island', JSON.stringify(await page.evaluate(`__hc.island()`)));
 
     // (500,0) is the mid-island vantage the existing pine harness already proves shows a wrapping treeline. Teleporting to

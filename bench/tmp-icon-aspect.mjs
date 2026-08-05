@@ -22,8 +22,8 @@ const IDS=(process.argv[2]||'icbm,hunting_rifle,shotgun,launch_console,sandbag,c
     browser=await chromium.launch({executablePath:findBrowser(),headless:true,args:['--enable-gpu','--use-angle=d3d11','--mute-audio']});
     const page=await (await browser.newContext({viewport:{width:900,height:600}})).newPage();
     await page.goto(base+'/index.html?debug=1',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',{timeout:120000});
-    await page.waitForFunction("(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()",{timeout:240000});
+    await page.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',null,{timeout:120000});
+    await page.waitForFunction("(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()",null,{timeout:240000});
     await sleep(2000);
     // Read each icon's data URL straight out of the bake and measure the pixels: coverage (how much of the square is the object)
     // and the mean luminance of the covered pixels (is it lit or is it a silhouette).

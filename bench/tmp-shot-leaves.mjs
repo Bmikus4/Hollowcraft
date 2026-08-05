@@ -20,7 +20,7 @@ function findBrowser(){ for(const p of ['C:\\Program Files\\Google\\Chrome\\Appl
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
     page.on('pageerror',e=>console.log('ERR',String(e.message).slice(0,200)));
     await page.goto('http://127.0.0.1:'+port+'/index.html?debug=1&t=252',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true&&__hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true&&__hc.probe().chunkHere===true;}catch(e){return false;}})()`,null,{timeout:90000});
     await sleep(8000);
     await page.evaluate(`__hc.cam({yaw:0.6,pitch:0.35})`);   // look slightly up so the sky + drifting leaves fill the frame
     for(let i=0;i<3;i++){ await sleep(900); await page.screenshot({ path: path.join(OUT,'leaves-'+i+'.png') });

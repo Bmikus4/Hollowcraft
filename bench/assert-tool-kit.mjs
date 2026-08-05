@@ -61,7 +61,7 @@ const chk =(c,n,d)=> c?ok(n,d):bad(n,d);
       page.on('pageerror', e=>console.log('PAGEERROR:', String(e.message||e).slice(0,300)));
     }
     await page.goto(base+'/index.html?debug=1', { waitUntil:'load', timeout:120000 });
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:180000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:180000});
     await sleep(1500);
 
     // SYNCHRONOUS per item: the main loop calls setViewItem(inv[selSlot]) every frame and __hc.hold can only reach

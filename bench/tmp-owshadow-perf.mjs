@@ -45,8 +45,8 @@ const SAMPLE = (ms) => `(()=>new Promise(res=>{ const d=[]; let last=performance
       page.on('pageerror', e=>console.log('PAGEERROR:', String(e.message||e).slice(0,300)));
     }
     await page.goto(base+'/index.html?debug=1&rd=8', { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`, {timeout:90000});
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`, {timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`,null, {timeout:90000});
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null, {timeout:90000});
     console.log('GPU', await page.evaluate(gl));
     await page.evaluate(`__hc.setTime(0.72)`);           // night — the case where this caster is the only one
     await sleep(2000);

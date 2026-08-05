@@ -24,8 +24,8 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
     page.on('pageerror', e=>console.log('PAGEERROR:', String(e.message||e).slice(0,250)));
     await page.goto(base+'/index.html?debug=1&t=252',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null,{timeout:90000});
     const pk=await page.evaluate(`__hc.peaks()`);
     console.log('peaks:', JSON.stringify(pk));
     if(!pk.spots||!pk.spots.length){ console.log('NO PEAKS'); process.exit(1); }

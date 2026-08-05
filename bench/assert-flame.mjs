@@ -53,11 +53,11 @@ const corr=(a,b)=>{ const n=Math.min(a.length,b.length); if(n<3) return 0;
       page.on('pageerror', e=>console.log('PAGEERROR:', String(e.message||e).slice(0,300)));
     }
     await page.goto(base+'/index.html?debug=1', { waitUntil:'load', timeout:120000 });
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:180000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:180000});
     const pr=await page.evaluate('__hc.probe()');
     await page.evaluate(`__hc.tp(${pr.spawnX},${pr.spawnZ})`);
     await page.evaluate('__hc.setTime(0.70)');                 // uDay is 1 at t=0; 0.70 is night, which is the only time fire is what you see
-    await page.waitForFunction('(()=>{try{const f=__hc.fill(); return f.meshed>=f.want;}catch(e){return false;}})()',{timeout:60000}).catch(()=>{});
+    await page.waitForFunction('(()=>{try{const f=__hc.fill(); return f.meshed>=f.want;}catch(e){return false;}})()',null,{timeout:60000}).catch(()=>{});
     await sleep(4000);
 
     const fpsNow=async(ms=3500)=>{ const s=[]; const t0=Date.now();

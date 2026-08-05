@@ -245,8 +245,8 @@ if(IS_MAIN) await (async()=>{
     const errs=[]; page.on('pageerror',e=>{ const m=String(e.message||e).slice(0,180); errs.push(m); if(errs.length<=10) console.log('  PAGEERROR:',m); });
     const url = base+'/index.html?perf=1&debug=1&brseed=20260728'+(PERFOFF?('&perfoff='+PERFOFF):'');
     await page.goto(url,{waitUntil:'load',timeout:120000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
-    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:120000});
+    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:240000});
     // renderer.info resets per render() call, so an ordinary read reports only the composer's final quad
     // pass — draws came back as 1. __benchInfo makes the loop accumulate across every pass and snapshot it.
     await page.evaluate(`window.__hcPERF.arm(); window.__benchInfo = 1;`);
@@ -289,8 +289,8 @@ if(IS_MAIN) await (async()=>{
         if(dirty > BASE+150){
           console.log(`\n  ! scene did not clean up after the previous site (${dirty} non-chunk objects vs ${BASE} baseline) — reloading the page so ${site.name} is measured on a clean world`);
           await page.goto(url,{waitUntil:'load',timeout:120000});
-          await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
-          await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
+          await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:120000});
+          await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:240000});
           await page.evaluate(`window.__hcPERF.arm(); window.__benchInfo=1;`);
           await page.evaluate(HELPERS);
           BASE = await cleanBaseline();

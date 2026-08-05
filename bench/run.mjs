@@ -116,8 +116,8 @@ async function openGame(context, base, query, errors) {
   page.on('pageerror', e => errors.push(String(e.message || e).slice(0, 200)));
   page.on('crash', () => errors.push('PAGE CRASHED (renderer/GPU process died)'));
   await page.goto(base + '/index.html?' + query, { waitUntil: 'load', timeout: 90000 });
-  await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started === true; } catch (e) { return false; } })()`, { timeout: 90000 });
-  await page.waitForFunction(`(() => { try { return __hc.probe().chunkHere === true; } catch (e) { return false; } })()`, { timeout: 90000 });
+  await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started === true; } catch (e) { return false; } })()`,null, { timeout: 90000 });
+  await page.waitForFunction(`(() => { try { return __hc.probe().chunkHere === true; } catch (e) { return false; } })()`,null, { timeout: 90000 });
   return page;
 }
 const lockGame = page => page.evaluate(`document.dispatchEvent(new Event('pointerlockchange'))`);
@@ -304,10 +304,10 @@ async function scnMp2p(browser, base, meta) {
   // with no room code connects same-origin, so both pages use ?join.
   const q = 'join&debug=1&t=' + T_DAY;
   const pageA = await openGame(ctxA, base, q, errA);
-  await pageA.waitForFunction(`(window.__benchWS || []).some(w => w.readyState === 1)`, { timeout: 30000 });
+  await pageA.waitForFunction(`(window.__benchWS || []).some(w => w.readyState === 1)`,null, { timeout: 30000 });
   for (let i = 0; i < 6; i++) { await skipIntro(pageA); await sleep(400); }   // fast-forward the wake cinematic startGame() triggers
   const pageB = await openGame(ctxB, base, q, errB);
-  await pageB.waitForFunction(`(window.__benchWS || []).some(w => w.readyState === 1)`, { timeout: 30000 });
+  await pageB.waitForFunction(`(window.__benchWS || []).some(w => w.readyState === 1)`,null, { timeout: 30000 });
   for (let i = 0; i < 6; i++) { await skipIntro(pageB); await sleep(400); }
   const roleA = await pageA.evaluate(`window.__benchWelcome ? (window.__benchWelcome.host ? 'host' : 'guest') : 'unknown'`);
   const roleB = await pageB.evaluate(`window.__benchWelcome ? (window.__benchWelcome.host ? 'host' : 'guest') : 'unknown'`);

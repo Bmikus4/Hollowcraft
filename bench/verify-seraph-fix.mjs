@@ -43,7 +43,7 @@ async function setCam(page, pos) {
     page.on('console', m => { if (m.type() === 'error') errors.push('[console] ' + m.text().slice(0, 200)); });
 
     await page.goto('http://127.0.0.1:' + PORT + '/' + DEMO + '/boss-harness.html', { waitUntil: 'load', timeout: 60000 });
-    await page.waitForFunction('window.__diag && window.__boss', { timeout: 60000 });
+    await page.waitForFunction('window.__diag && window.__boss',null, { timeout: 60000 });
     await sleep(2500);   // let eye textures load + a couple seconds of animation
 
     // Angle A — LOW and CLOSE, looking UP at the boss front (the problem shot)

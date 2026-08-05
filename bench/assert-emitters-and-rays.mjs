@@ -61,8 +61,8 @@ function around(file, px, py, r=26, th=40){
     // path (it arrived as M:/Git/_headtest.html), so the env var is passed without one.
     const PAGE='/'+String(process.env.HC_PAGE||'index.html').replace(/^\/+/,'');
     await page.goto(base+PAGE+'?debug=1&rd=10',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
-    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:120000});
+    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:240000});
     await page.evaluate(`__hc.lock(true); __hc.pinScene(); __hc.cmdRun('/gamemode creative'); __hc.cmdRun('/fly on');`);
     const S=await page.evaluate(`__hc.st()`);
     // A ROW OF LANTERNS on one bearing, each one block above the local ground so none is buried. Built with the same

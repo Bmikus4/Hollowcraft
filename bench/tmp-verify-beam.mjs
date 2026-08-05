@@ -24,8 +24,8 @@ const ev=(p,e)=>p.evaluate(e);
     page.on('pageerror',e=>errors.push(String(e.message||e).slice(0,220)));
     page.on('console',m=>{ const t=m.text(); if(/shader|glsl|compile|program/i.test(t))errors.push('CONSOLE:'+t.slice(0,200)); });
     await page.goto(base+'/index.html?debug=1&t=252',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null,{timeout:90000});
     await ev(page,`__hc.setTime(0.4)`); await sleep(700);
     // raise the seraph in FRONT at a distance so we can see the whole body (gold-overlay / heavenly check)
     const b = await ev(page,`(()=>{ try{ if(typeof __hc.arm==='function')__hc.arm(); const r=__hc.boss?__hc.boss({dist:26}):'no boss'; return { r, wy:+wretch.pos.y.toFixed(1), boss:!!wretch.boss }; }catch(e){ return {err:e.message}; } })()`);

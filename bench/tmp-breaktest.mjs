@@ -18,7 +18,7 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     const page = await (await browser.newContext({ viewport:{width:1280,height:720} })).newPage();
     const errors=[]; page.on('pageerror', e=>errors.push(String(e.message||e).slice(0,220)));
     await page.goto('http://127.0.0.1:'+port+'/index.html?debug=1&t=210', { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true; } catch(e){ return false; } })()`, { timeout:90000 });
+    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true; } catch(e){ return false; } })()`,null, { timeout:90000 });
     await sleep(3000);
     await page.evaluate(`__hc.pitch && __hc.pitch(-0.25)`); await sleep(300);
     await page.screenshot({ path: path.join(OUT,'break-before.png') });

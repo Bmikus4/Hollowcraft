@@ -30,7 +30,7 @@ async function shot(page, tag, ROOTDIR){
     for(const [tag,q] of [['normal','?debug=1&t=252'],['sky','?debug=1&t=252&dbg=sky'],['bl','?debug=1&t=252&dbg=bl']]){
       const page=await (await b.newContext({viewport:{width:1280,height:720}})).newPage();
       await page.goto(base+'/index.html'+q,{waitUntil:'load',timeout:90000});
-      await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
+      await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
       await page.mouse.click(640,360); await sleep(2000);
       // the lair is only built once its chunks exist — walk the player there and wait for the builder
       await page.evaluate(`(()=>{ const p=__hc.pos(); __hc.tpExact(p.x+95, p.z+70); })()`);

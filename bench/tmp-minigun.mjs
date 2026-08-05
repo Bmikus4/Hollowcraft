@@ -17,8 +17,8 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     const page=await (await browser.newContext({viewport:{width:1000,height:700}})).newPage();
     page.on('pageerror',e=>console.log('  PAGEERROR:',String(e.message||e).slice(0,180)));
     await page.goto(base+'/index.html?perf=1&debug=1',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
-    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:120000});
+    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:240000});
     await page.evaluate(`window.__hcPERF.arm(); __hc.lock(true);`);
     const g = await page.evaluate(`(()=>{ const r=__hc.gun('minigun'); return { gun:r, held:__hc.viewDbg().id }; })()`);
     console.log('  equipped:', JSON.stringify(g).slice(0,140));

@@ -15,8 +15,8 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     browser=await chromium.launch({executablePath:findBrowser(),headless:true,args:['--enable-gpu','--use-angle=d3d11','--mute-audio','--disable-gpu-vsync','--disable-frame-rate-limit']});
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
     await page.goto(base+'/index.html?perf=1&debug=1',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
-    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:120000});
+    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:240000});
     await page.evaluate(`window.__hcPERF.arm()`); await page.evaluate(HELPERS);
     for(const where of ['hall','lab']){
       await page.evaluate(`goDungeon(${JSON.stringify(where)}); H.cam({yaw:0.7,pitch:0}); H.lock(true);`);

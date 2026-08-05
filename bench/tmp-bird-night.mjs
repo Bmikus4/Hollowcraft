@@ -43,11 +43,11 @@ function blob(file, drop=12){
     const page=await ctx.newPage();
     page.on('pageerror',e=>console.log('  PAGEERROR:',String(e.message||e).slice(0,180)));
     await page.goto(base+'/index.html?debug=1&rd=8',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
-    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:120000});
+    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:240000});
     await page.evaluate(`__hc.lock(true); __hc.cmdRun('/gamemode creative'); __hc.cmdRun('/fly on'); __hc.setTime(${T});`);
     await page.evaluate(`__hc.skyFlock({spawn:true})`);
-    await page.waitForFunction(`(()=>{try{const f=__hc.skyFlock(); return Array.isArray(f)&&f.length>0;}catch(e){return false;}})()`,{timeout:20000});
+    await page.waitForFunction(`(()=>{try{const f=__hc.skyFlock(); return Array.isArray(f)&&f.length>0;}catch(e){return false;}})()`,null,{timeout:20000});
     // FLY UP TO THE FLOCK'S HEIGHT AND LOOK AT ONE, so the sky is the only thing behind it. Distance is whatever the flock is
     // at — that IS the range Ben saw them at.
     for(let k=0;k<8;k++){

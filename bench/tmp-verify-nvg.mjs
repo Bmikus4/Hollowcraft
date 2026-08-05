@@ -24,8 +24,8 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
     const errors=[]; page.on('pageerror', e=>errors.push(String(e.message||e).slice(0,200)));
     await page.goto(base+'/index.html?debug=1&t=680',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null,{timeout:90000});
     await page.evaluate(`__hc.tp(520,180)`); await sleep(4500);
     await page.evaluate(`__hc.cam({yaw:0.7, pitch:-0.05})`); await sleep(700);
     await page.screenshot({ path: path.join(OUT,'nvg-off.png') });

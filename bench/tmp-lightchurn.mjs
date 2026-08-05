@@ -46,7 +46,7 @@ const key = L => L.point+'/'+L.pointShadow+' dir '+L.dir+'/'+L.dirShadow+' spot 
     }
     const t0=Date.now();
     await page.goto(base+'/index.html?debug=1&perf=1', { waitUntil:'load', timeout:120000 });
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:120000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:120000});
 
     let lastN=0, lastKey=null, readyAt=null, compilesWithLightMove=0, compilesFlat=0;
     console.log('    time  progs  (+n)  lights point/ptShadow dir/dirShadow spot/spotShadow   poolLit  where');

@@ -17,7 +17,7 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     const page=await (await browser.newContext({viewport:{width:800,height:600}})).newPage();
     page.on('pageerror',e=>console.log('PAGEERROR:',String(e.message||e).slice(0,180)));
     await page.goto(base+'/index.html?perf=1&debug=1',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:120000});
     await sleep(3000);
     const rows = await page.evaluate(`__hc.modelBounds()`);
     if(rows.err){ console.log('ERR', rows.err); return; }

@@ -28,13 +28,13 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     const page = await ctx.newPage();
     const errors=[]; page.on('pageerror', e=>errors.push(String(e.message||e).slice(0,200)));
     await page.goto('http://127.0.0.1:'+port+'/index.html?debug=1&t=630', { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true; } catch(e){ return false; } })()`, { timeout:90000 });
+    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true; } catch(e){ return false; } })()`,null, { timeout:90000 });
     await sleep(2000);
     const fails=[]; const ck=(name,cond,info)=>{ if(!cond) fails.push(name+' :: '+JSON.stringify(info)); };
 
     // A: summon armed (grace ended), park it dead in the blind spot (player looks -z; +z is behind)
     await page.evaluate(`(()=>{ __hc.arm(); __hc.summon(); __hc.put(0, 14); })()`);
-    await page.waitForFunction(`(() => { try { return __hc.st().wa===true; } catch(e){ return false; } })()`, { timeout:30000 });
+    await page.waitForFunction(`(() => { try { return __hc.st().wa===true; } catch(e){ return false; } })()`,null, { timeout:30000 });
     for(let i=0;i<8;i++){ await page.evaluate(`__hc.put(0, 14)`); await sleep(250); }   // hold it behind
     const a = await page.evaluate(`__hc.sneak()`);
     ck('STARTS confident (skill model, no fog/darkness terms)', a.conf>0.55, a);

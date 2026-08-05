@@ -28,7 +28,7 @@ const AUDIT = `({pokes:window.__hcBRX.wallPokes(), ov:window.__hcBRX.wallOverlap
     const page=await (await browser.newContext({viewport:{width:800,height:600}})).newPage();
     page.on('pageerror',e=>console.log('PAGEERROR:',String(e.message||e).slice(0,200)));
     await page.goto(base+'/index.html?debug=1&t=210',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
     await page.evaluate(`window.__hcBR.enter()`); await sleep(5500);
     // walk the region: each teleport streams new chunks in, so this sees several independent generations, not one
     for(const [dx,dz] of [[0,0],[240,0],[0,240],[-240,-240],[480,240]]){

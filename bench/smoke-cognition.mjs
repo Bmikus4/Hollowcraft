@@ -74,7 +74,7 @@ const check = (name, ok, detail) => { results.push({ name, ok, detail }); consol
     const page = await ctx.newPage();
     page.on('pageerror', e => errors.push(String(e.message || e).slice(0, 300)));
     await page.goto('http://127.0.0.1:' + port + '/index.html?debug=1&t=630', { waitUntil: 'load', timeout: 90000 });
-    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started === true; } catch (e) { return false; } })()`, { timeout: 90000 });
+    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started === true; } catch (e) { return false; } })()`,null, { timeout: 90000 });
     console.log('game started (night). summoning...');
     await page.evaluate(`(() => { __hc.summon(); __hc.put(12, 12); __hc.look(); })()`);
 

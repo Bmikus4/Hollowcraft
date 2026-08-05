@@ -62,7 +62,7 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     }
     const t0=Date.now();
     await page.goto(base+'/index.html?debug=1&perf=1', { waitUntil:'load', timeout:120000 });
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:120000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:120000});
 
     // ---- the cold boot: how much generation runs before meshing gets going? ----
     // The milestone is latched INSIDE the engine (__hc.fill().genAtMesh2) rather than sampled here. Reading it from a

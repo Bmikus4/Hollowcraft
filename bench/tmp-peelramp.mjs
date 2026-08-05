@@ -33,8 +33,8 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     const page=await (await browser.newContext({ viewport:{width:1000,height:620} })).newPage();
     page.on('pageerror', e=>console.log('PAGEERROR:', String(e.message||e).slice(0,240)));
     await page.goto(base+'/index.html?debug=1&rd=8', { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:90000});
-    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()', {timeout:90000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:90000});
+    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null, {timeout:90000});
     await sleep(6000);
     // NIGHT. At midday the seraph despawned four seconds into phase 2 and endPeel went with it, which read as the peel
     // switching itself off -- the daylight despawn rule, not the ramp. The fight happens at night anyway.

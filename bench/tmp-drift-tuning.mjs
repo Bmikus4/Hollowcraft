@@ -60,7 +60,7 @@ const BRACKET = [
     const page=await ctx.newPage();
     page.on('pageerror',e=>console.log('PAGEERROR: '+String(e.message||e).slice(0,300)));
     await page.goto(base+'/index.html?debug=1&rd=6',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
+    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:120000});
     await page.evaluate(`__hc.pinScene(); __hc.vitals(20,20,true)`);
     // Full daylight, found not assumed — setTime returns the PREVIOUS frame's uDay, so read it a frame later.
     let best={f:0.15,day:-1};

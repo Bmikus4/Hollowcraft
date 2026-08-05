@@ -26,8 +26,8 @@ const TAG = process.argv[2] || 'base';
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
     page.on('pageerror', e=>console.log('PAGEERROR:', String(e.message||e).slice(0,250)));
     await page.goto(base+'/index.html?debug=1&t=210&noshadow=1',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null,{timeout:90000});
     const st = await page.evaluate(`__hc.st()`); const SX=st.sx, SZ=st.sz;
     // a flat run of sand on the beach west of spawn
     await page.evaluate(`__hc.tp(${SX}-14,${SZ})`); await sleep(5000);

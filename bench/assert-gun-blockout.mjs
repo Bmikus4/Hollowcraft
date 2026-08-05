@@ -43,8 +43,8 @@ const OFF_WALL=2.20; // past the probe's reach (1.56), AND far enough that the l
     const page=await (await browser.newContext({viewport:{width:1000,height:700}})).newPage();
     page.on('pageerror',e=>{ errs.push(String(e.message||e)); console.log('  PAGEERROR:',String(e.message||e).slice(0,180)); });
     await page.goto(base+'/index.html?debug=1',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',{timeout:120000});
-    await page.waitForFunction("(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()",{timeout:240000});
+    await page.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',null,{timeout:120000});
+    await page.waitForFunction("(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()",null,{timeout:240000});
     await page.evaluate('(()=>{ __hc.lock(true); __hc.setTime(0.45); __hc.cmdRun("/gamemode creative"); })()').catch(()=>{});
     await sleep(2500);
     const ev=js=>page.evaluate(js);
@@ -58,6 +58,13 @@ const OFF_WALL=2.20; // past the probe's reach (1.56), AND far enough that the l
     await sleep(1200);
     const standX=Math.floor(P0.x)+0.5, standY=P0.y;
     const goTo=async(x,dz)=>{ await ev(`__hc.tpAt(${x},${standY},${wallZ+1+dz})`); await ev('__hc.cam({yaw:0,pitch:0})'); };
+    // A REST POSE MUST BE READ WHEN THE BEND HAS ACTUALLY GONE, not a fixed sleep after stepping back. The ease is dt*10, so
+    // 800 ms is nominally eight time constants — but MEASURED off the wall it reads 0.1735 at +200 ms and 0 at +900 ms, so a
+    // sleep of 800 sits on the edge of it. That cost a red on the offhand drift check: the gun is the FIRST item in that loop
+    // and therefore the only one entering it from the wall, so its "rest" was a mid-ease sample and its "returned" was not.
+    // Compared against each other, a settling pose reads exactly like a pose that drifted.
+    const relax=async(t=4000)=>{ const t0=Date.now();
+      for(;;){ const b=await ev('__hc.blockOut()'); if(!(b.bend>0.02) || Date.now()-t0>t) return b.bend; await sleep(100); } };
 
     // ---- 1. EVERY GUN, PRESSED AGAINST IT ----
     const guns=(await ev('__hc.itemClasses()')).gunsAll||[];
@@ -130,7 +137,7 @@ const OFF_WALL=2.20; // past the probe's reach (1.56), AND far enough that the l
     for(const g of ['hunting_rifle','shotgun','ar15','minigun']){
       await ev(`__hc.cmdRun("/clearinv"); __hc.cmdRun("/give ${g} 1")`); await sleep(200);
       await ev(`__hc.hold(${JSON.stringify(g)})`); await sleep(200);
-      await goTo(standX, OFF_WALL); await sleep(800);
+      await goTo(standX, OFF_WALL); await sleep(200); await relax();
       const c=await ev('__hc.adsClearance()'), bo=await ev('__hc.blockOut()');
       openRows.push({ g, bend:bo.bend, clear:c.clearance });
     }
@@ -139,7 +146,7 @@ const OFF_WALL=2.20; // past the probe's reach (1.56), AND far enough that the l
 
     // ---- 2. THE CLICK: ONCE PER BLOCK-OUT, AND NEVER ALONG A WALL ----
     await ev(`__hc.cmdRun("/give hunting_rifle 1")`); await ev(`__hc.hold("hunting_rifle")`); await sleep(200);
-    await goTo(standX, OFF_WALL); await sleep(700);
+    await goTo(standX, OFF_WALL); await sleep(200); await relax();
     await ev('__hc.blockOutReset()');
     const away=await ev('__hc.blockOut()');
     check('standing off the wall, the latch is clear', !away.out && away.bend<0.05, `bend ${away.bend}`);
@@ -156,7 +163,7 @@ const OFF_WALL=2.20; // past the probe's reach (1.56), AND far enough that the l
     check('a strafe ALONG the wall adds ZERO clicks', strafe.clicks===1, `clicks ${strafe.clicks} after 8 stops`);
     check('and the latch stayed out across it', strafe.out, `bend ${strafe.bend}`);
     // Out and back in: the second block-out is a second click, which is what proves the latch clears at all.
-    await goTo(standX, OFF_WALL); await sleep(700);
+    await goTo(standX, OFF_WALL); await sleep(200); await relax();
     await goTo(standX, AT_WALL); await sleep(700);
     const two=await ev('__hc.blockOut()');
     check('leaving and returning clicks a SECOND time', two.clicks===2, `clicks ${two.clicks}`);
@@ -168,7 +175,7 @@ const OFF_WALL=2.20; // past the probe's reach (1.56), AND far enough that the l
     for(const id of others){
       await ev(`__hc.cmdRun("/clearinv"); __hc.cmdRun("/give ${id} 1")`); await sleep(200);
       await ev(`__hc.hold(${JSON.stringify(id)})`); await sleep(200);
-      await goTo(standX, OFF_WALL); await sleep(700);
+      await goTo(standX, OFF_WALL); await sleep(200); await relax();
       const off=await ev('__hc.blockOut()');
       await goTo(standX, AT_WALL); await sleep(900);
       const at=await ev('__hc.blockOut()');
@@ -207,12 +214,12 @@ const OFF_WALL=2.20; // past the probe's reach (1.56), AND far enough that the l
     const frows=[];
     for(const id of offIds){
       await ev(`__hc.offhandSet(${JSON.stringify(id)},1)`); await sleep(400);
-      await goTo(standX, OFF_WALL); await sleep(800);
+      await goTo(standX, OFF_WALL); await sleep(300); await relax();
       const a=await ev('__hc.blockOut()');
       await goTo(standX, AT_WALL); await sleep(900);
       const b=await ev('__hc.blockOut()');
       // …and back off it, because the offhand group is the one that historically ACCUMULATED a += and span out.
-      await goTo(standX, OFF_WALL); await sleep(900);
+      await goTo(standX, OFF_WALL); await sleep(300); await relax();
       const c=await ev('__hc.blockOut()');
       frows.push({ id, restRx:a.off&&a.off.rx, wallRx:b.off&&b.off.rx, backRx:c.off&&c.off.rx,
                    restPos:a.off&&a.off.pos, backPos:c.off&&c.off.pos, inBlock:b.off&&b.off.inBlock,
@@ -232,7 +239,7 @@ const OFF_WALL=2.20; // past the probe's reach (1.56), AND far enough that the l
     // ---- 5. AN EMPTY FIST IS NOT A BLOCK-OUT ----
     await ev('__hc.offhandSet(null)'); await ev('__hc.cmdRun("/clearinv")');
     await ev('(()=>{ __hc.setViewItem ? __hc.setViewItem(null) : 0; })()').catch(()=>{});
-    await goTo(standX, OFF_WALL); await sleep(600);
+    await goTo(standX, OFF_WALL); await sleep(200); await relax();
     await ev('__hc.blockOutReset()');
     await goTo(standX, AT_WALL); await sleep(900);
     const fist=await ev('__hc.blockOut()');

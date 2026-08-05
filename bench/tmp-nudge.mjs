@@ -20,7 +20,7 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     const page = await (await browser.newContext({ viewport:{width:1280,height:720} })).newPage();
     const errors=[]; page.on('pageerror', e=>errors.push(String(e.message||e).slice(0,180)));
     await page.goto('http://127.0.0.1:'+port+'/index.html?debug=1&t=210', { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true; } catch(e){ return false; } })()`, { timeout:90000 });
+    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true; } catch(e){ return false; } })()`,null, { timeout:90000 });
     await sleep(3000);
     await page.evaluate(`__hc.qaLocked(true)`);   // headless has no real pointer lock — look code is gated on it
     const P = () => page.evaluate(`(()=>({pitch:+__hc.pitchNow(), yaw:+__hc.yawNow(), cine:__hc.cine().active, nudge:__hc.nudgeActive()}))()`);

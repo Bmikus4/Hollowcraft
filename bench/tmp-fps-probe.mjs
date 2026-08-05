@@ -23,7 +23,7 @@ async function fps(page,secs){ const s=[]; for(let i=0;i<secs*4;i++){ await slee
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
     page.on('pageerror',e=>errors.push(String(e.message||e).slice(0,180)));
     await page.goto(base+'/index.html?debug=1',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
     await sleep(1500);
     const overworld = await fps(page,2);                                    // baseline (no door)
     await ev(page,`window.__hcBR.door()`); await sleep(600);                 // spawn a Void Door → 60fps portal renders the whole scene AGAIN each frame

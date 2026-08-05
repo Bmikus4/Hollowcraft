@@ -73,8 +73,8 @@ function readSet(file, pts, ch){
       const page=await ctx.newPage();
       page.on('pageerror',e=>console.log('  PAGEERROR:',String(e.message||e).slice(0,160)));
       await page.goto(base+'/index.html?debug=1&rd=8'+qs,{waitUntil:'load',timeout:120000});
-      await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
-      await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
+      await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`, null, {timeout:120000});
+      await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`, null, {timeout:240000});
       await page.evaluate(`__hc.lock(true); __hc.pinScene(); __hc.cmdRun('/gamemode creative'); __hc.cmdRun('/fly on');`);
       const S=await page.evaluate(`__hc.st()`);
       const gy=await page.evaluate(`__hc.groundY(${S.sx},${S.sz})`);

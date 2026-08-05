@@ -43,8 +43,8 @@ const PACK = ['vault_door_x','concrete','warning_block','metal_bench','reinforce
     const page=await (await browser.newContext({ viewport:{width:1280,height:720} })).newPage();
     page.on('pageerror', e=>errs.push(String(e.message||e).slice(0,220)));
     await page.goto(base+'/index.html?debug=1&rd=8', { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:90000});
-    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()', {timeout:90000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:90000});
+    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null, {timeout:90000});
     await sleep(7000);
     ok('the game loads with the pack in it', errs.length===0, errs.slice(0,3));
     await page.evaluate('__hc.cmdRun("/gamemode creative")').catch(()=>{});

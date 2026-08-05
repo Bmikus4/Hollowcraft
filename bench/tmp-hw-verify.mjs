@@ -57,8 +57,8 @@ const check = (name, ok, detail)=>{ console.log((ok?'PASS  ':'FAIL  ')+name+(det
       page.on('pageerror', e=>{ errs.push(String(e.message||e)); console.log('PAGEERROR:', String(e.message||e).slice(0,400)); });
     }
     await page.goto(base+'/index.html?debug=1&perf=1&rd=6', { waitUntil:'load', timeout:120000 });
-    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`, { timeout:120000 });
-    await page.waitForFunction(`(()=>{try{return __hc.probe?__hc.probe().chunkHere===true:__hc.fill().meshed>0;}catch(e){return false;}})()`, { timeout:120000 });
+    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`,null, { timeout:120000 });
+    await page.waitForFunction(`(()=>{try{return __hc.probe?__hc.probe().chunkHere===true:__hc.fill().meshed>0;}catch(e){return false;}})()`,null, { timeout:120000 });
     console.log('pinScene', JSON.stringify(await page.evaluate(`__hc.pinScene()`)));
     await page.evaluate(`__hc.vitals(20,20,true)`);              // creative: it must not be able to kill the harness mid-run
     await page.evaluate(`__hc.setTime(0.72)`);                    // night — the Wretch AI's own hours

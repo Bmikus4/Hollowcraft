@@ -31,7 +31,7 @@ const T = (name, cond, info='') => { console.log((cond?'PASS':'FAIL')+' — '+na
 
     // ============ PAGE A — fresh world: mutate, save, unlock ============
     await page.goto(base+'?debug=1&t=252', { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true && __hc.probe().chunkHere===true; } catch(e){ return false; } })()`, { timeout:90000 });
+    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true && __hc.probe().chunkHere===true; } catch(e){ return false; } })()`,null, { timeout:90000 });
     await sleep(12000);   // let the chunk ring + spawn structures stream in
     await page.evaluate(`__hc.wipe() + '|' + __hc.achReset()`);
 
@@ -65,7 +65,7 @@ const T = (name, cond, info='') => { console.log((cond?'PASS':'FAIL')+' — '+na
 
     // ============ PAGE B — reload: restore and assert ============
     await page.goto(base+'?debug=1&t=252', { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true && __hc.probe().chunkHere===true; } catch(e){ return false; } })()`, { timeout:90000 });
+    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true && __hc.probe().chunkHere===true; } catch(e){ return false; } })()`,null, { timeout:90000 });
     await sleep(9000);
     const B = await page.evaluate(`(()=>{
       const preBlock = __hc.blockAt(${A.bx},${A.by},${A.bz});

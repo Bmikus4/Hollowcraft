@@ -45,7 +45,7 @@ async function setCam(page, pos, target) {
 
     // ---- boss harness: load + zero-error + idle/firing diag + screenshots ----
     await page.goto('http://127.0.0.1:' + PORT + '/' + DEMO + '/boss-harness.html', { waitUntil: 'load', timeout: 60000 });
-    await page.waitForFunction('window.__diag && window.__boss', { timeout: 60000 });
+    await page.waitForFunction('window.__diag && window.__boss',null, { timeout: 60000 });
     await sleep(2600);
 
     report.diagIdle = await page.evaluate('window.__boss.computeDiag()');
@@ -71,7 +71,7 @@ async function setCam(page, pos, target) {
     const ppErr = [];
     pp.on('pageerror', e => ppErr.push(String(e.message || e).slice(0, 200)));
     await pp.goto('http://127.0.0.1:' + PORT + '/bench/prewarm-profile.html', { waitUntil: 'load', timeout: 60000 });
-    await pp.waitForFunction('window.__profileReady', { timeout: 60000 });
+    await pp.waitForFunction('window.__profileReady',null, { timeout: 60000 });
     // COLD (no prewarm): summon frame pays build + first-render shader compile.
     // run twice; 2nd is the steady number (1st includes JS/JIT warmup).
     const cold1 = await pp.evaluate('window.profileCold()'); await sleep(400);

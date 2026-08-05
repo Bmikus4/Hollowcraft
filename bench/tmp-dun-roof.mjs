@@ -17,7 +17,7 @@ const CHROME=['C:','Program Files','Google','Chrome','Application','chrome.exe']
     const b=await chromium.launch({executablePath:CHROME,headless:true,args:['--enable-gpu','--use-angle=d3d11','--mute-audio']});
     const page=await (await b.newContext({viewport:{width:1280,height:720}})).newPage();
     await page.goto(base+'/index.html?debug=1&t=252',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
     await page.mouse.click(640,360); await sleep(1500);
     await page.evaluate(`__hc.summon&&__hc.summon()`).catch(()=>{});
     // go to the lair and let its chunks build

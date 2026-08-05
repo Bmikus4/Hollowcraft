@@ -50,8 +50,8 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
     page.on('pageerror',e=>{ errs.push(String(e.message||e)); console.log('  PAGEERROR:',String(e.message||e).slice(0,200)); });
     await page.goto(base+'/index.html?debug=1',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',{timeout:120000});
-    await page.waitForFunction("(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()",{timeout:240000});
+    await page.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',null,{timeout:120000});
+    await page.waitForFunction("(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()",null,{timeout:240000});
     const pr=await page.evaluate('__hc.probe()');
     await page.evaluate(`(()=>{ __hc.lock(true); __hc.setTime(0.5); __hc.tp(${pr.spawnX}, ${pr.spawnZ}); })()`);
     await sleep(3000);

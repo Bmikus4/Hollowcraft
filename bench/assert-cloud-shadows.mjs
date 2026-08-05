@@ -63,8 +63,8 @@ function ratioField(off, on, crop, blocks=14){
     const page=await ctx.newPage();
     const errs=[]; page.on('pageerror',e=>{ errs.push(String(e.message||e)); console.log('  PAGEERROR:',String(e.message||e).slice(0,180)); });
     await page.goto(base+'/index.html?debug=1&rd=8&perf=1',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
-    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:120000});
+    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:240000});
     // pinScene() SETS CLOUD COVER TO ZERO. It pins the weather for deterministic benching and _uCloud is part of that, so a
     // cloud-shadow harness that pins the scene is testing a clear sky: the first run of this file reported cover 0, uCloudShadow
     // 0, and a flag that changed nothing. Pin first, then put the clouds back — the pin is still worth having for the rain, fog,

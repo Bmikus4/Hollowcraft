@@ -33,7 +33,7 @@ const findBrowser=()=>['C:/Program Files/Google/Chrome/Application/chrome.exe','
     const page=await (await browser.newContext({viewport:{width:800,height:520}})).newPage();
     page.on('pageerror',e=>console.log('PAGEERROR:',String(e.message||e).slice(0,200)));
     await page.goto(base+'/index.html?debug=1&rd=4',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',{timeout:90000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null,{timeout:90000});
     await sleep(4000);
 
     for(const deep of [2,4,8]){

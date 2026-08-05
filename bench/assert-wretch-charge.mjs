@@ -47,8 +47,8 @@ const hold = async (pg) => { await pg.evaluate('__hc.setTime(0.0)'); await pg.ev
     const pg=await (await b.newContext({viewport:{width:900,height:600}})).newPage();
     pg.on('pageerror',e=>console.log('PAGEERROR:',String(e.message||e).slice(0,160)));
     await pg.goto(base+'/'+PAGE+'?debug=1&rd=10',{waitUntil:'load',timeout:90000});
-    await pg.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',{timeout:90000});
-    await pg.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',{timeout:90000});
+    await pg.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',null,{timeout:90000});
+    await pg.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null,{timeout:90000});
     await sleep(4000);
     await pg.evaluate('__hc.setTime(0.0)');
     await pg.evaluate('__hc.qaLocked(true)');

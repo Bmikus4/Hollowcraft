@@ -30,8 +30,8 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     const page = await ctx.newPage();
     const errors=[]; page.on('pageerror', e=>errors.push(String(e.message||e).slice(0,200)));
     await page.goto(base+'/index.html?debug=1&t=252', { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`, { timeout:90000 });
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`, { timeout:90000 });
+    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`,null, { timeout:90000 });
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null, { timeout:90000 });
 
     // stand SOUTH of the furnace spot and ignite it → the fx must claim the south face and stay there
     const spot = await page.evaluate(`(()=>{ const p=__hc.pines(); const px=Math.floor(p.px), pz=Math.floor(p.pz);

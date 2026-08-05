@@ -63,7 +63,7 @@ function check(name, got, want){
       ctx=await browser.newContext({ viewport:{width:900,height:600} }); page=await ctx.newPage(); page.on('pageerror', hookErrors);
     }
     await page.goto(base+'/index.html?debug=1&rd=6'+FLAGS, { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:90000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:90000});
     await sleep(3000);
     await page.evaluate('__hc.eqUI("inv")');
     await settleFor(page, '__hc.equip().cells', v => v > 0);

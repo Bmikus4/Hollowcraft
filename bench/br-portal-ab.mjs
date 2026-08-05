@@ -91,8 +91,8 @@ const STEADY=`(async()=>{ const f=()=>new Promise(r=>requestAnimationFrame(t=>r(
     const ev=async(js,tag)=>{ try{ return await page.evaluate(js); }catch(e){ return {err:String(e.message||e).slice(0,150), at:tag}; } };
 
     await page.goto(base+'/index.html?debug=1&rd=8',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',{timeout:90000});
-    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',{timeout:90000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null,{timeout:90000});
+    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null,{timeout:90000});
     await sleep(7000);
     await ev('__hc.cmdRun("/gamemode creative")'); await ev('__hc.setTime(0.42)');
 

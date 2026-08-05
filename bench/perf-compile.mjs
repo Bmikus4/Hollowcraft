@@ -30,8 +30,8 @@ async function session(browser, base, label, urlExtra){
   const page = await ctx.newPage();
   const errs=[]; page.on('pageerror',e=>errs.push(String(e.message||e).slice(0,160)));
   await page.goto(base+'/index.html?perf=1&debug=1&t=210&brseed='+BRSEED+urlExtra,{waitUntil:'load',timeout:120000});
-  await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
-  await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:180000});
+  await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:120000});
+  await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:180000});
   await page.evaluate(`window.__hcPERF.arm()`);
   await sleep(2500);
   const progAtLoad = await page.evaluate(`(()=>{try{return (renderer.info.programs||[]).length;}catch(e){return -1;}})()`)

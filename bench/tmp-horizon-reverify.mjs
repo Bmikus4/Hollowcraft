@@ -33,8 +33,8 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
 
 async function boot(page, base, file){
   await page.goto(base+'/'+file+'?debug=1&rd=6', { waitUntil:'load', timeout:90000 });
-  await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`, {timeout:90000});
-  await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`, {timeout:90000});
+  await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`,null, {timeout:90000});
+  await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null, {timeout:90000});
 }
 
 // Sea-line row: find the steepest vertical brightness drop in the middle strip — that IS the waterline — and report

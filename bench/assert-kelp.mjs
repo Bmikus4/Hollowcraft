@@ -52,10 +52,10 @@ const chk=(c,n,d)=>{ if(c){pass++;console.log('  PASS  '+n+(d?'   '+d:''));} els
       page.on('pageerror', e=>console.log('PAGEERROR:', String(e.message||e).slice(0,300)));
     }
     await page.goto(base+'/index.html?debug=1', { waitUntil:'load', timeout:120000 });
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:180000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:180000});
     const pr=await page.evaluate('__hc.probe()');
     await page.evaluate(`__hc.tp(${pr.spawnX},${pr.spawnZ})`);
-    await page.waitForFunction('(()=>{try{const f=__hc.fill(); return f.meshed>=f.want;}catch(e){return false;}})()',{timeout:90000}).catch(()=>{});
+    await page.waitForFunction('(()=>{try{const f=__hc.fill(); return f.meshed>=f.want;}catch(e){return false;}})()',null,{timeout:90000}).catch(()=>{});
     await sleep(4000);
 
     const cen=await page.evaluate('__hc.kelpCensus()');

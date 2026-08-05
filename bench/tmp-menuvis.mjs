@@ -50,7 +50,7 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     // ---- 2 & 3. into the world: the cabin (#3) and a shrub close-up (#6) ----
     await page.click('#set-panel [data-back]'); await sleep(400);   // both hidden panels carry a back button — scope it
     await page.click('#mb-solo');
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:120000});
     await sleep(3000); await page.evaluate(`__hc.cineKill&&__hc.cineKill()`);
     await page.evaluate(`__hc.hud(false)`); await sleep(500);
 

@@ -49,7 +49,7 @@ const span = a => Math.max(...a)-Math.min(...a);
       page.on('pageerror', e=>console.log('PAGEERROR:', String(e.message||e).slice(0,300)));
     }
     await page.goto(base+'/index.html?debug=1', { waitUntil:'load', timeout:120000 });
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:180000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:180000});
     await sleep(1500);
 
     // An item in EACH hand, which is the configuration (c) is about.
@@ -116,7 +116,7 @@ const span = a => Math.max(...a)-Math.min(...a);
     const burst=async()=>{ await page.evaluate('__hc.handKick(1.25)'); return span(series(await sample(1100,24),'arm',1)); };
     const hipGun=await burst();
     await page.evaluate('(()=>{try{__hc.aim(true);}catch(e){}})()');
-    const reached=await page.waitForFunction('(()=>{try{return __hc.handPose().ads>=0.999;}catch(e){return false;}})()',{timeout:8000}).then(()=>true).catch(()=>false);
+    const reached=await page.waitForFunction('(()=>{try{return __hc.handPose().ads>=0.999;}catch(e){return false;}})()',null,{timeout:8000}).then(()=>true).catch(()=>false);
     chk(reached, 'the rifle actually reached the eye', 'adsT '+(await page.evaluate('__hc.handPose()')).ads);
     const adsGun=await burst();
     chk(adsGun < hipGun*0.5 && adsGun > 0, 'aimed amplitude is a fraction of hip, and not zero',

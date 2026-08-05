@@ -81,9 +81,9 @@ function findBrowser(){
     const tNav = Date.now();
     await page.goto(base+'/'+FILE+'?perf=1&debug=1&t=210&brseed='+BRSEED+(PERFOFF?('&perfoff='+PERFOFF):''),{waitUntil:'load',timeout:120000});
     const tLoadEvent = Date.now()-tNav;
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:120000});
     const tStarted = Date.now()-tNav;
-    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:180000});
+    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:180000});
     const tInteractive = Date.now()-tNav;
     // time to steady state: 3 consecutive seconds with no frame over 16.6 ms
     await page.evaluate(`window.__hcPERF.arm()`);

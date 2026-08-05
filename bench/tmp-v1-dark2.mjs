@@ -26,8 +26,8 @@ const TAG = process.argv[2] || 'now';
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
     const errs=[]; page.on('pageerror', e=>{ errs.push(String(e.message||e).slice(0,200)); });
     await page.goto(base+'/index.html?debug=1&t=210',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null,{timeout:90000});
     const st = await page.evaluate(`__hc.st()`); const SX=st.sx, SZ=st.sz;
     // deep forest, eye level, looking level into the trees
     await page.evaluate(`__hc.tp(${SX}-58,${SZ}+46)`); await sleep(8000);

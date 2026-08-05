@@ -61,8 +61,8 @@ function bestContrastNear(file, px, py, rIn, rOut, span){
     const pg=await (await b.newContext({viewport:{width:1280,height:720}})).newPage();
     pg.on('pageerror',e=>console.log('PAGEERROR:',String(e.message||e).slice(0,160)));
     await pg.goto(base+'/index.html?debug=1&rd=12',{waitUntil:'load',timeout:90000});
-    await pg.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',{timeout:90000});
-    await pg.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',{timeout:90000});
+    await pg.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',null,{timeout:90000});
+    await pg.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null,{timeout:90000});
     await sleep(5000);
     await pg.evaluate('__hc.setTime(0.42)');
 

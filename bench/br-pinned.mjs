@@ -62,8 +62,8 @@ const WALK=(secs)=>`(async()=>{ const f=()=>new Promise(r=>requestAnimationFrame
     const ev=async(js,tag)=>{ try{ return await page.evaluate(js); }catch(e){ return {err:String(e.message||e).slice(0,160), at:tag}; } };
 
     await page.goto(base+'/index.html?debug=1&rd=8',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',{timeout:90000});
-    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',{timeout:90000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null,{timeout:90000});
+    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null,{timeout:90000});
     await sleep(6000);
     await page.mouse.click(640,360); await sleep(1200);          // real gesture → the AudioContext exists
     await ev('__hc.cmdRun("/gamemode creative")');

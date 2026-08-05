@@ -32,8 +32,8 @@ const findBrowser=()=>['C:/Program Files/Google/Chrome/Application/chrome.exe','
     // lives in assert-shore-shelf; this is here to be looked at.
     const shoot=async(k,tag)=>{
       await page.goto(base+'/index.html?debug=1&rd=10',{waitUntil:'load',timeout:90000});
-      await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',{timeout:90000});
-      await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',{timeout:90000});
+      await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null,{timeout:90000});
+      await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null,{timeout:90000});
       await sleep(9000);
       await page.evaluate('__hc.cmdRun("/gamemode creative")').catch(()=>{});
       await page.evaluate('__hc.setTime(0.5)');

@@ -24,8 +24,8 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
     page.on('pageerror', e=>console.log('PAGEERROR:', String(e.message||e).slice(0,200)));
     await page.goto(base+'/index.html?debug=1&t=252&rd=6', { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`, { timeout:90000 });
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`, { timeout:90000 });
+    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`,null, { timeout:90000 });
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null, { timeout:90000 });
     await page.evaluate(`__hc.tp(500,-380)`); await sleep(5000);
     for(const [name,yaw] of [['alongE',Math.PI*0.55],['alongE-sea',Math.PI*0.7],['alongW',-Math.PI*0.55],['seaward',Math.PI]]){
       await page.evaluate(`__hc.cam({yaw:${yaw}, pitch:0.03})`); await sleep(500);

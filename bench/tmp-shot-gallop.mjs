@@ -12,7 +12,7 @@ const waitHttp=u=>new Promise((res,rej)=>{const t0=Date.now();(function poll(){c
     const browser=await chromium.launch({executablePath:'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',headless:true,args:['--enable-gpu','--ignore-gpu-blocklist','--use-angle=d3d11','--mute-audio']});
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
     await page.goto('http://127.0.0.1:'+port+'/index.html?debug=1&t=630',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction("(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()",{timeout:90000});
+    await page.waitForFunction("(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()",null,{timeout:90000});
     await sleep(1500);
     await page.evaluate("(()=>{ __hc.freeze(true,true); __hc.studio(true); __hc.frame({dist:10, ang:0, state:'HUNT', crawl:1, adv:8, committed:true, aim:2.4}); __hc.spin(115); __hc.set({dist:5}); })()");
     await sleep(1200);

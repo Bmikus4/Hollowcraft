@@ -50,7 +50,7 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
 
     const t0=Date.now();
     await page.goto(base+'/index.html?debug=1'+FLAGS, { waitUntil:'load', timeout:120000 });
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:120000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:120000});
     const tStart=Date.now()-t0;
     console.log('started at '+tStart+'ms');
 

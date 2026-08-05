@@ -19,7 +19,7 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     const errors=[]; page.on('pageerror', e=>errors.push(String(e.message||e).slice(0,200)));
     const t = (process.argv[2]||'210');
     await page.goto('http://127.0.0.1:'+port+'/index.html?debug=1&t='+t, { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true; } catch(e){ return false; } })()`, { timeout:90000 });
+    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true; } catch(e){ return false; } })()`,null, { timeout:90000 });
     await sleep(9000);   // natural spawn, let chunks fully stream+mesh
     for(const [yaw,tag] of [[0,'0'],[1.9,'1'],[3.6,'2'],[5.2,'3']]){
       await page.evaluate(`__hc.cam && __hc.cam({yaw:${yaw}, pitch:-0.05})`); await sleep(500);

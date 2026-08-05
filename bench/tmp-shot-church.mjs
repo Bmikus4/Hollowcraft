@@ -24,10 +24,10 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
     page.on('pageerror', e=>console.log('PAGEERROR:', String(e.message||e).slice(0,250)));
     await page.goto(base+'/index.html?debug=1&t=252',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null,{timeout:90000});
     // wait for the spot scan (builder rotation touches it within ~20 frames even unbuilt)
-    await page.waitForFunction(`(()=>{try{const g=__hc.church(); return !!(g&&g.x!=null);}catch(e){return false;}})()`,{timeout:60000});
+    await page.waitForFunction(`(()=>{try{const g=__hc.church(); return !!(g&&g.x!=null);}catch(e){return false;}})()`,null,{timeout:60000});
     const g=await page.evaluate(`__hc.church()`);
     console.log('spot:', JSON.stringify(g));
     await page.evaluate(`__hc.tp(${g.x}, ${g.z})`);

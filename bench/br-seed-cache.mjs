@@ -103,8 +103,8 @@ function ensureProbe(root){
     // per-chunk door-population comparison needs: two runs that differ in nothing the game can see.
     const seedQ = process.env.BRSEED ? '&brseed='+process.env.BRSEED : '';
     await page.goto(base+'/index.html?perf=1&debug=1&rd=8'+seedQ,{waitUntil:'load',timeout:90000});
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',{timeout:90000});
-    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',{timeout:90000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null,{timeout:90000});
+    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null,{timeout:90000});
     await sleep(9000);                                      // let the load-time prewarm finish
     await ev('__hc.cmdRun("/gamemode creative")'); await ev('__hcPERF.arm()');
 

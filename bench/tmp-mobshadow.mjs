@@ -43,8 +43,8 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
       page.on('pageerror', e=>console.log('PAGEERROR:', String(e.message||e).slice(0,300)));
     }
     await page.goto(base+'/index.html?debug=1&rd=6', { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`, {timeout:90000});
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`, {timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`,null, {timeout:90000});
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null, {timeout:90000});
     await page.evaluate(`__hc.stillFrame(true)`);
     await page.evaluate(`__hc.setTime(0.72)`);              // full night: uDay 0, so the sun casts nothing and only a torch can
     await sleep(1800);

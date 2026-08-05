@@ -43,9 +43,9 @@ const REPORT = `__hc.genRead()`;
     const t0=Date.now();
     await page.goto(base+'/index.html?debug=1'+FLAGS, { waitUntil:'load', timeout:120000 });
     console.log('load event          '+(Date.now()-t0)+'ms');
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:180000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:180000});
     console.log('started             '+(Date.now()-t0)+'ms');
-    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()', {timeout:180000});
+    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null, {timeout:180000});
     console.log('first chunk under player '+(Date.now()-t0)+'ms');
     console.log('instrument: '+await page.evaluate(INSTRUMENT));
 

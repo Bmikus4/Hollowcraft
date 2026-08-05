@@ -31,7 +31,7 @@ const T=(name,ok,detail)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+' —
     const page=await (await browser.newContext({viewport:{width:800,height:600}})).newPage();
     const errs=[]; page.on('pageerror', e=>{ errs.push(String(e.message||e).slice(0,220)); console.log('PAGEERROR:',String(e.message||e).slice(0,220)); });
     await page.goto(base+'/index.html?debug=1&t=210',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
 
     const R = await page.evaluate(`(()=>{
       const out={ agree:0, disagree:[], anti:0, antiBad:[], det:0, detBad:[], empty:[], kinds:{0:0,1:0,2:0}, up:0, down:0, edges:0, span:__hcBRX.SPAN, cells:__hcBRX.CELLS };

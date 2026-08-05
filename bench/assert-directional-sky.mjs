@@ -64,8 +64,8 @@ const BAND=[0.35,0.65,0.40,0.60];   // the middle of the frame, whatever the pit
       const page=await ctx.newPage();
       page.on('pageerror',e=>{ errs.push(String(e.message||e)); console.log('  PAGEERROR:',String(e.message||e).slice(0,160)); });
       await page.goto(base+PAGE+'?debug=1&rd=8'+qs,{waitUntil:'load',timeout:120000});
-      await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:180000});
-      await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
+      await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`, null, {timeout:180000});
+      await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`, null, {timeout:240000});
       await page.evaluate(`__hc.lock(true); __hc.pinScene(); __hc.cmdRun('/gamemode creative'); __hc.cmdRun('/fly on');`);
       const S=await page.evaluate(`__hc.st()`);
       const BX=Math.round(S.sx)+6, BZ=Math.round(S.sz);

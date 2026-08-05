@@ -62,9 +62,9 @@ async function rowEdge(page){
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
     const errs=[]; page.on('pageerror',e=>{ errs.push(String(e.message||e).slice(0,200)); console.log('PAGEERROR:',String(e.message||e).slice(0,200)); });
     await page.goto(base+'/index.html?debug=1',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
     await page.evaluate(`__hc.aim(false)`);
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null,{timeout:90000});
     // stand looking out to sea, level with the horizon, so the seam runs across the middle of the frame
     await page.evaluate(`__hc.hud&&__hc.hud(false)`).catch(()=>{});
     // THE CONSTRUCTION THAT WAS BROKEN, tested as numbers. uHorizonBlend exists to be the shared anchor where the sky meets

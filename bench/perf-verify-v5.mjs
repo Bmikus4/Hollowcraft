@@ -75,8 +75,8 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
     const errs=[]; page.on('pageerror',e=>errs.push(String(e.message||e).slice(0,180)));
     await page.goto(base+'/index.html?perf=1&debug=1&t=210&brseed='+BRSEED,{waitUntil:'load',timeout:120000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
-    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:180000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:120000});
+    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:180000});
     await page.evaluate(`window.__hcPERF.arm()`);
     await page.evaluate(`window.__hcPERF.enterBR()`); await sleep(3000);
     // park, so the two reads are not separated by the player having moved

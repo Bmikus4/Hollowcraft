@@ -52,13 +52,13 @@ const POOLS=[8,16,32];
       const errs=[]; page.on('pageerror',e=>errs.push(String(e.message||e).slice(0,140)));
       const ev=async(js)=>{ try{ return await page.evaluate(js); }catch(e){ return {err:String(e.message||e).slice(0,140)}; } };
       await page.goto(base+'/index.html?debug=1&rd=8',{waitUntil:'load',timeout:90000});
-      try{ await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',{timeout:90000}); }
+      try{ await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null,{timeout:90000}); }
       catch(e){
         console.log('  DID NOT START. diagnostics:');
         console.log('   pageerrors: '+J(errs.slice(0,5)));
         console.log('   probe:      '+J(await ev('(()=>({ hasHc:typeof window.__hc!=="undefined", st:(window.__hc&&__hc.st)?__hc.st():null }))()')));
         throw e; }
-      await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',{timeout:90000});
+      await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null,{timeout:90000});
       await sleep(7000);
       await ev('__hc.cmdRun("/gamemode creative")'); await ev('__hc.setTime(0.42)');
       const set=await ev('__hcPERF.lightPool('+pool+')');

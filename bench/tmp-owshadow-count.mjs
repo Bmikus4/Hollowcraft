@@ -21,8 +21,8 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
     page.on('pageerror',e=>console.log('PAGEERROR:',String(e.message||e).slice(0,180)));
     await page.goto(base+'/index.html?perf=1&debug=1',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
-    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:120000});
+    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:240000});
     await page.evaluate(`window.__hcPERF.arm()`); await page.evaluate(HELPERS);
     await page.evaluate(`goDungeon('hall'); H.cam({yaw:0.7,pitch:0}); H.lock(true);`);
     for(let i=0;i<60;i++){ const ok=await page.evaluate(`(()=>{const f=__hc.fill(); return f.meshed>=f.want;})()`); if(ok) break; await sleep(500); }

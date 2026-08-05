@@ -59,8 +59,8 @@ function hue(file,c){
     page.on('pageerror',e=>{ errs.push(String(e.message||e)); console.log('  PAGEERROR:',String(e.message||e).slice(0,160)); });
     const PAGE='/'+String(process.env.HC_PAGE||'index.html').replace(/^\/+/,'');
     await page.goto(base+PAGE+'?debug=1&rd=8',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:180000});
-    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`, null, {timeout:180000});
+    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`, null, {timeout:240000});
     await page.evaluate(`__hc.lock(true); __hc.pinScene(); __hc.cmdRun('/gamemode creative'); __hc.cmdRun('/fly on');`);
     const S=await page.evaluate(`__hc.st()`);
     const FY=96, BZ=Math.round(S.sz), BX=Math.round(S.sx)+8;
@@ -103,8 +103,8 @@ function hue(file,c){
     // crimson light's own cells must still read a high level, or the falloff has been quietly scaled by the tint.
     const p2=await ctx.newPage();
     await p2.goto(base+PAGE+'?debug=1&rd=8&dbg=bl',{waitUntil:'load',timeout:120000});
-    await p2.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:180000});
-    await p2.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
+    await p2.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`, null, {timeout:180000});
+    await p2.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`, null, {timeout:240000});
     await p2.evaluate(`__hc.lock(true); __hc.pinScene(); __hc.cmdRun('/gamemode creative'); __hc.cmdRun('/fly on');`);
     const build2=async(x0)=>p2.evaluate(`(()=>{
       for(let dx=-1;dx<=9;dx++) for(let dz=-4;dz<=4;dz++) for(const y of [${FY}, ${FY}+6]) __hc.cmdRun('/setblock '+(${x0}+dx)+' '+y+' '+(${BZ}+dz)+' stone');

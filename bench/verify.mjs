@@ -33,7 +33,7 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
 
     // ---- day view of the streamed world (mesh integrity shot)
     await page.goto('http://127.0.0.1:'+port+'/index.html?debug=1&t=252', { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true && __hc.probe().chunkHere===true; } catch(e){ return false; } })()`, { timeout:90000 });
+    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true && __hc.probe().chunkHere===true; } catch(e){ return false; } })()`,null, { timeout:90000 });
     await sleep(20000);   // let the ring fill
     await page.evaluate(`__hc.cam({ yaw: 0.6, pitch: -0.15 })`);
     await sleep(400);
@@ -63,7 +63,7 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
 
     // ---- night shot with a torch placed (visual: warm pool + no shattered geometry)
     await page.goto('http://127.0.0.1:'+port+'/index.html?debug=1&t=630', { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true && __hc.probe().chunkHere===true; } catch(e){ return false; } })()`, { timeout:90000 });
+    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true && __hc.probe().chunkHere===true; } catch(e){ return false; } })()`,null, { timeout:90000 });
     await sleep(15000);
     await page.evaluate(`(async () => { __hc.setBlock(3, 1, 3, 'torch'); __hc.setBlock(-3, 1, 2, 'lantern'); __hc.cam({ yaw: 2.4, pitch: -0.2 }); })()`);
     await sleep(2500);   // queues drain + relight lands

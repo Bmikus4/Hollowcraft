@@ -37,7 +37,7 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
       page.on('pageerror', e=>console.log('PAGEERROR:', String(e.message||e).slice(0,300)));
     }
     await page.goto(base+'/index.html?debug=1', { waitUntil:'load', timeout:120000 });
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:180000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:180000});
     const pr=await page.evaluate('__hc.probe()');
     await page.evaluate(`__hc.tp(${pr.spawnX},${pr.spawnZ})`);
     await page.evaluate('__hc.setTime(0.70)');   // dusk-into-night: fire is only worth measuring when it is what you see
@@ -54,7 +54,7 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
         return k; })()`);
       // SETTLE FIRST. Every setBlock queues a remesh and a relight, and measuring through that churn reported 68 fps
       // for ONE torch and 148 for eighty-five — the number was the meshing, not the fire.
-      await page.waitForFunction('(()=>{try{const q=__hc.queues?__hc.queues():null; return !q || (q.remesh===0 && q.relight===0);}catch(e){return true;}})()',{timeout:20000}).catch(()=>{});
+      await page.waitForFunction('(()=>{try{const q=__hc.queues?__hc.queues():null; return !q || (q.remesh===0 && q.relight===0);}catch(e){return true;}})()',null,{timeout:20000}).catch(()=>{});
       await sleep(5000);
       const f=await fps(); const st=await page.evaluate('__hc.st()');
       fs.writeFileSync(path.join(ROOT,'bench','results','flame-'+label.split(' ')[0]+n+'.png'), await page.screenshot({clip:{x:640,y:120,width:520,height:480}}));
@@ -64,7 +64,7 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     console.log('FIRE COST at dusk, 1280x720');
     // The BASELINE needs the same settle the scenes get, or it is measured through the cold chunk fill and comes back
     // LOWER than the same world with eighty-five torches in it (49 against 150 — the first read of this probe).
-    await page.waitForFunction('(()=>{try{const f=__hc.fill(); return f.meshed>=f.want;}catch(e){return false;}})()',{timeout:60000}).catch(()=>{});
+    await page.waitForFunction('(()=>{try{const f=__hc.fill(); return f.meshed>=f.want;}catch(e){return false;}})()',null,{timeout:60000}).catch(()=>{});
     await sleep(5000);
     const clean=await fps(); console.log('  '+'no fire'.padEnd(22)+' fps med '+String(clean.med).padStart(4)+'  min '+String(clean.min).padStart(4));
     await scene(1,'one torch close');

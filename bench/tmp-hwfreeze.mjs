@@ -27,8 +27,8 @@ import fs from 'node:fs';
     page.on('pageerror',e=>console.log('PAGEERROR:',String(e.message||e).slice(0,300)));
     page.on('console',m=>{ const t=m.text(); if(m.type()==='error'||/horrific|drift|wretch|crash/i.test(t)) console.log('console['+m.type()+']:',t.slice(0,300)); });
     await page.goto(base+'/index.html?perf=1&debug=1',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
-    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:120000});
+    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:240000});
     await page.evaluate(`window.__hcPERF.arm()`);
     // an independent clock, so "the loop stopped" does not rest on the game's own counters
     await page.evaluate(`(()=>{ window.__raf=0; (function tick(){ window.__raf++; requestAnimationFrame(tick); })(); })()`);

@@ -29,7 +29,7 @@ function check(name, ok, detail){ checks.push({name, ok:!!ok, detail}); console.
     const page = await ctx.newPage();
     const errors=[]; page.on('pageerror', e=>errors.push(String(e.message||e).slice(0,200)));
     await page.goto('http://127.0.0.1:'+port+'/index.html?debug=1&t=252', { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true; } catch(e){ return false; } })()`, { timeout:90000 });
+    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true; } catch(e){ return false; } })()`,null, { timeout:90000 });
     await sleep(3000);
     const shot = n => page.screenshot({ path: path.join(ROOT,'bench','results',`verify-cine-${n}.png`) });
 
@@ -39,7 +39,7 @@ function check(name, ok, detail){ checks.push({name, ok:!!ok, detail}); console.
     if(!dw){ check('swim: found deep water', false, dw); }
     else {
       await page.evaluate(`__hc.tpExact(${dw.x}, ${dw.z}, ${dw.sea-4})`);
-      await page.waitForFunction(`(() => { try { return __hc.probe().chunkHere===true; } catch(e){ return false; } })()`, { timeout:30000 });   // physics idles in unloaded chunks — wait for the sea chunk to stream in
+      await page.waitForFunction(`(() => { try { return __hc.probe().chunkHere===true; } catch(e){ return false; } })()`,null, { timeout:30000 });   // physics idles in unloaded chunks — wait for the sea chunk to stream in
       await sleep(400);
       const y0 = (await page.evaluate(`__hc.tpExact(${dw.x}, ${dw.z}, ${dw.sea-4})`)).y;   // re-seat at depth (may have drifted while unloaded)
       await page.evaluate(`__hc.lock(true)`);   // physics() only runs while pointer-locked — force the flag (headless can't acquire real lock)

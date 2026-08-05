@@ -26,7 +26,7 @@ const fb=()=>['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Progra
     const pg=await (await b.newContext({viewport:{width:900,height:600}})).newPage();
     pg.on('pageerror',e=>console.log('PAGEERROR:',String(e.message||e).slice(0,160)));
     await pg.goto(base+'/'+PAGE+'?debug=1&rd=10',{waitUntil:'load',timeout:90000});
-    await pg.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',{timeout:90000});
+    await pg.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',null,{timeout:90000});
     await sleep(3000);
     say(await pg.evaluate('__hc.gunHandOn()')===true, 'the hand is enabled (GUN_HAND_ON)');
     const rows=await pg.evaluate('__hc.gunGrips()');
@@ -44,7 +44,7 @@ const fb=()=>['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Progra
     // The arithmetic above proves the palm sits where the MODEL says its grip is; it cannot prove the result is not filling the
     // screen, which is the actual thing that failed three times. buildFist's one material is 0xcbb89a, so counting cream pixels
     // in a real frame measures exactly that. Held-item fog tints it toward the fog colour with depth, hence the wide tolerance.
-    await pg.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',{timeout:90000});
+    await pg.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null,{timeout:90000});
     await pg.evaluate('__hc.cmdRun("/gamemode creative")').catch(()=>{});
     await pg.evaluate('__hc.setTime(0.42)');
     await sleep(1500);

@@ -38,7 +38,7 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
       page.on('pageerror', e=>console.log('PAGEERROR:', String(e.message||e).slice(0,300)));
     }
     await page.goto(base+'/index.html?debug=1', { waitUntil:'load', timeout:120000 });
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:180000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:180000});
     // PIN THE SCENE. Left to itself the player drifts — three runs of this photographed a pickaxe handle against
     // dusk water with the head out of frame. Spawn ground, level gaze, broad daylight (uDay is 1 at t=0; night
     // runs 0.63..0.94), and a moment for the light bake to settle after the teleport.

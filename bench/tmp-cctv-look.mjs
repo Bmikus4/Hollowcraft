@@ -16,8 +16,8 @@ const br=await chromium.launch({executablePath:fb(),headless:true,args:['--enabl
 const pg=await(await br.newContext({viewport:{width:1100,height:620}})).newPage();
 pg.on('pageerror',e=>console.log('PAGEERROR:',String(e.message||e).slice(0,160)));
 await pg.goto(b+'/index.html?debug=1&rd=6',{waitUntil:'load',timeout:90000});
-await pg.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',{timeout:90000});
-await pg.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',{timeout:90000});
+await pg.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',null,{timeout:90000});
+await pg.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null,{timeout:90000});
 await sl(6000); await pg.evaluate('__hc.cmdRun("/gamemode creative")').catch(()=>{}); await pg.evaluate('__hc.setTime(0.5)');
 // One of each facing, side by side, on a concrete wall so the props read against a flat backdrop.
 // __hc.setBlock takes offsets RELATIVE to the player, not world coordinates -- passing absolutes silently builds it somewhere else.

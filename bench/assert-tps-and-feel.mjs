@@ -31,8 +31,8 @@ const ok=(name,cond,got)=>{ if(!cond)fails++; console.log(`  ${cond?'ok  ':'FAIL
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
     const errors=[]; page.on('pageerror',e=>errors.push(String(e.message||e).slice(0,220)));
     await page.goto(base+'/index.html?debug=1&t=252',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null,{timeout:90000});
     await page.mouse.click(640,360); await sleep(600);
     await page.evaluate(`__hc.vitals(null,null,true)`);   // creative: no starving mid-run
 
@@ -115,7 +115,7 @@ const ok=(name,cond,got)=>{ if(!cond)fails++; console.log(`  ${cond?'ok  ':'FAIL
     // answers with the wrong height — which lands the player inside a hill, where nothing falls, no jump clears and the gun's
     // wall-bend is pinned at maximum. Three later checks failed on exactly that before this wait was added.
     await page.evaluate(`(()=>{ const P=__hc.pos(); __hc.tpExact(P.x+34, P.z+34); })()`);
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:60000});
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null,{timeout:60000});
     await sleep(900);
     // CARVE the spot rather than trusting the landing. Teleporting to an offset and snapping to groundYAt puts you inside a tree
     // or a hillside often enough to matter, and an embedded player does not fall, cannot jump clear, and pins the gun's wall-bend
@@ -128,7 +128,7 @@ const ok=(name,cond,got)=>{ if(!cond)fails++; console.log(`  ${cond?'ok  ':'FAIL
       for(let dx=-5;dx<=5;dx++)for(let dz=-5;dz<=5;dz++){ __hc.setBlockAt(x+dx,g,z+dz,'stone');
         for(let dy=1;dy<=22;dy++) __hc.setBlockAt(x+dx,g+dy,z+dz,'air'); }
       __hc.tpExact(x+0.5, z+0.5, g+1); return {x:x+0.5,z:z+0.5,y:g+1}; })()`);
-    await page.waitForFunction(`(()=>{try{return __hc.jumpProbe().onGround===true;}catch(e){return false;}})()`,{timeout:20000}).catch(()=>{});
+    await page.waitForFunction(`(()=>{try{return __hc.jumpProbe().onGround===true;}catch(e){return false;}})()`,null,{timeout:20000}).catch(()=>{});
     await sleep(400);
     const outside = await page.evaluate(`__hc.tpsCam()`);
     ok('stepping outside gives it back', outside.active===true && outside.indoors===false, {active:outside.active, indoors:outside.indoors});

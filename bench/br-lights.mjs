@@ -63,6 +63,46 @@ window.__LT={
     L.sort((a,b)=>a-b);
     return { w, h, mean:+(sum/L.length).toFixed(1), median:+L[L.length>>1].toFixed(1),
              p90:+L[Math.floor(L.length*0.9)].toFixed(1), blackPct:+(100*black/L.length).toFixed(1) }; },
+  // WHAT DOES THE POOL ACTUALLY CONTRIBUTE. Ben: "LIGHTS ARE NOT WORKING, I CANNOT SEE THEM ... I can see FAINT
+  // flickering, but thats it". My earlier claim rested on the frame no longer being BLACK (1.9 -> 43.8), which is not the
+  // same statement as the ceiling lights lighting the room. So turn the pool off and read the frame again: the difference
+  // IS the pool's contribution, and if it is small then 43.8 was ambient and emissive, not tube light.
+  contrib(){ const on=this.pixels();
+    const keep=(BR.lightPool||[]).map(L=>({L, i:L.intensity, v:L.visible}));
+    brPoolLightsOff(); const off=this.pixels();
+    for(const k of keep){ k.L.intensity=k.i; k.L.visible=k.v; }
+    const back=this.pixels();
+    return { withPool:on.mean, poolOff:off.mean, restored:back.mean, contribution:+(on.mean-off.mean).toFixed(1),
+             pctFromPool: on.mean>0? +(100*(on.mean-off.mean)/on.mean).toFixed(1):null }; },
+  // THE TWO GATES IN brxUpdateLights, counted. A fixture is skipped entirely if brLitRooms does not contain its room, and
+  // its intensity is multiplied by brFlick when it is a flicker — a mostly-off duty cycle reads exactly as faint flicker.
+  gate(){ let vis=null; try{ vis=brLitRooms(); }catch(e){}
+    const F=BR.fixtures||[]; let near=0, dead=0, gatedOut=0, flick=0, roomNull=0;
+    for(const f of F){ const d=Math.hypot(f.x-player.pos.x, f.z-player.pos.z); if(d>95) continue; near++;
+      if(f.dead){ dead++; continue; }
+      if(f.room==null) roomNull++;
+      if(vis && f.room!=null && !vis.has(f.room)) gatedOut++;
+      if(f.flick) flick++; }
+    return { fixturesWithin95m:near, dead, gatedOutByLitRooms:gatedOut, litRoomsSize:vis?vis.size:null,
+             flickering:flick, roomNull, poolSlots:(BR.lightPool||[]).length, brLightPool:PERF.brLightPool }; },
+  // THE DUTY CYCLE, over frames rather than at one instant. A single sample cannot tell a lit hall from a strobing one.
+  duty(n){ const N=n||60, rows=[];
+    for(let k=0;k<N;k++){ let lit=0, sum=0;
+      for(const L of (BR.lightPool||[])){ if(L.visible && L.intensity>0){ lit++; sum+=L.intensity; } }
+      rows.push({lit, sum:+sum.toFixed(1)}); brxUpdateLights(player.pos.x, player.pos.z); }
+    const litAvg=rows.reduce((a,r)=>a+r.lit,0)/rows.length, sumAvg=rows.reduce((a,r)=>a+r.sum,0)/rows.length;
+    return { frames:rows.length, avgLitSlots:+litAvg.toFixed(2), avgTotalIntensity:+sumAvg.toFixed(1),
+             minLit:Math.min(...rows.map(r=>r.lit)), maxLit:Math.max(...rows.map(r=>r.lit)) }; },
+  // IS EVERY FIXTURE'S LIGHT INSIDE THE ROOM IT LIGHTS. f.y is read in WORLD space by brxUpdateLights; the room carries
+  // its own world floor (fy) and ceiling. A fixture below its room's floor is a light under the floorboards.
+  heights(){ const F=BR.fixtures||[]; let n=0, below=0, above=0, noY=0; const bad=[];
+    const bases=[...new Set((BR.loaded||[]).map(r=>brxLevelDy(r.gx,r.gz)))].sort((a,b)=>a-b);
+    for(const f of F){ n++; if(f.y==null){ noY++; continue; }
+      const r=brxRoomAt(f.x,f.z); if(!r) continue;
+      const floor=(r.fy!=null?r.fy:BR_WY0), ceil=(r.ceil!=null?r.ceil:BR_WY1);
+      if(f.y<floor){ below++; if(bad.length<6) bad.push({at:[+f.x.toFixed(0),+f.z.toFixed(0)], y:+f.y.toFixed(1), floor:+floor.toFixed(1), ceil:+ceil.toFixed(1)}); }
+      else if(f.y>ceil+0.5) above++; }
+    return { fixtures:n, belowTheirRoomFloor:below, aboveTheirCeiling:above, noY, storeyOffsetsLoaded:bases, worst:bad }; },
   // Stand under the nearest live fixture and look up, so the pixel read is of a place that is SUPPOSED to be lit rather
   // than wherever the camera happened to be pointing.
   standUnderFixture(){ let best=null;
@@ -99,8 +139,8 @@ function ensureProbe(root){
     const ev=async(js)=>{ try{ return await page.evaluate(js); }catch(e){ return {err:String(e.message||e).slice(0,200)}; } };
 
     await page.goto(base+'/index.html?perf=1&debug=1&rd=8',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',{timeout:90000});
-    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',{timeout:90000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null,{timeout:90000});
+    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null,{timeout:90000});
     await sleep(7000);
     await ev('__hc.cmdRun("/gamemode creative")'); await ev('__hcPERF.arm()');
     // The overworld frame in daylight is the control the halls have to be compared against: it fixes what this
@@ -109,9 +149,18 @@ function ensureProbe(root){
 
     console.log('enter:    '+J(await ev('__hcPERF.enterBR()')));
     await sleep(3000);
+    for(const sd of [1234567,31337,4242]){
+      await ev('__hcBR.seed('+sd+')'); await sleep(1200);
+      const lv=await ev('(()=>{const s=[...new Set((BR.loaded||[]).map(r=>brxLevelDy(r.gx,r.gz)))];return s.sort((a,b)=>a-b);})()');
+      console.log('seed '+sd+' storey offsets: '+J(lv));
+      if(Array.isArray(lv) && lv.length>1) break; }
     console.log('lights:   '+J(await ev('__LT.lights()')));
     console.log('fixtures: '+J(await ev('__LT.fixtures(24)')));
     console.log('pixels:   '+J(await ev('__LT.pixels()')));
+    console.log('heights:  '+J(await ev('__LT.heights()')));
+    console.log('gate:     '+J(await ev('__LT.gate()')));
+    console.log('duty:     '+J(await ev('__LT.duty(60)')));
+    console.log('contrib:  '+J(await ev('__LT.contrib()')));
     console.log('under:    '+J(await ev('__LT.standUnderFixture()')));
     await sleep(500);
     console.log('pixels under fixture: '+J(await ev('__LT.pixels()')));

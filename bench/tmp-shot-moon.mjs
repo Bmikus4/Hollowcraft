@@ -20,7 +20,7 @@ function findBrowser(){ for(const p of ['C:\\Program Files\\Google\\Chrome\\Appl
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
     page.on('pageerror',e=>console.log('ERR',String(e.message).slice(0,200)));
     await page.goto('http://127.0.0.1:'+port+'/index.html?debug=1&t=720',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true&&__hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true&&__hc.probe().chunkHere===true;}catch(e){return false;}})()`,null,{timeout:90000});
     await sleep(9000);
     // sweep yaw AND pitch (look up) to catch the small high moon disc
     for(const y of [0,1.05,2.1,3.14,4.2,5.2]){

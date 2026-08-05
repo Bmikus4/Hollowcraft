@@ -25,11 +25,11 @@ function findBrowser(){ for(const p of ['C:\\Program Files\\Google\\Chrome\\Appl
     const page = await (await browser.newContext({ viewport:{width:1280,height:720} })).newPage();
     page.on('pageerror', e=>console.log('PAGEERROR:', String(e.message||e).slice(0,300)));
     await page.goto(base+'/index.html?debug=1&rd=6', { waitUntil:'load', timeout:120000 });
-    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`, { timeout:120000 });
+    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`,null, { timeout:120000 });
     await page.evaluate(`__hc.pinScene(); __hc.vitals(20,20,true); __hc.setTime(0.72)`);
     await sleep(1500);
     console.log('summon', JSON.stringify(await page.evaluate(`__hc.summonNow()`)));
-    await page.waitForFunction(`(()=>{try{return __hc.st().wa===true;}catch(e){return false;}})()`, { timeout:30000 });
+    await page.waitForFunction(`(()=>{try{return __hc.st().wa===true;}catch(e){return false;}})()`,null, { timeout:30000 });
 
     // Everything goes through __hc: page.evaluate runs in the page's global scope and the game's `wretch`, `spears` and
     // `player` are module-scoped inside <script type="module">, so touching them directly is a ReferenceError.

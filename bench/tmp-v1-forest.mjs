@@ -25,8 +25,8 @@ const TAG = process.argv[2] || 'f';
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
     const errs=[]; page.on('pageerror', e=>{ errs.push(String(e.message||e).slice(0,200)); });
     await page.goto(base+'/index.html?debug=1&t=210&noshadow=1',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null,{timeout:90000});
     const st = await page.evaluate(`__hc.st()`); const SX=st.sx, SZ=st.sz;
     // aerial over deep forest — look straight down at the canopy: seam bites read as straight-edged gaps
     const fps=[];

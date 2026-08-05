@@ -26,8 +26,8 @@ const ok=(name,cond,got)=>{ if(!cond)fails++; console.log(`  ${cond?'ok  ':'FAIL
     const page=await (await b.newContext({viewport:{width:1280,height:720}})).newPage();
     const errors=[]; page.on('pageerror',e=>errors.push(String(e.message||e).slice(0,200)));
     await page.goto(base+'/index.html?debug=1&t=252',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null,{timeout:90000});
     await page.mouse.click(640,360); await sleep(800);
     await page.evaluate(`__hc.summon()`);
     await sleep(1200);

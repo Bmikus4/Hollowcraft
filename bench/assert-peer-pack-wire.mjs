@@ -35,7 +35,7 @@ async function openGame(ctx, base, q, errs){
   const page=await ctx.newPage();
   page.on('pageerror', e=>errs.push(String(e.message||e).slice(0,200)));
   await page.goto(base+'/index.html?'+q, { waitUntil:'load', timeout:90000 });
-  await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true && __hc.probe().chunkHere===true;}catch(e){return false;}})()', {timeout:90000});
+  await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true && __hc.probe().chunkHere===true;}catch(e){return false;}})()',null, {timeout:90000});
   return page;
 }
 

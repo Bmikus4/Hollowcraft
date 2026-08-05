@@ -14,8 +14,8 @@ function waitHttp(u,t=20000){ return new Promise((res,rej)=>{ const t0=Date.now(
     browser=await chromium.launch({executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',headless:true,args:['--enable-gpu','--use-angle=d3d11','--mute-audio']});
     const page=await (await browser.newContext({viewport:{width:400,height:300}})).newPage();
     await page.goto(base+'/index.html?debug=1&rd=4',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
-    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:120000});
+    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:240000});
     const out=[];
     for(let i=0;i<=40;i++){ const t=i/40; await page.evaluate(`__hc.setTime(${t})`); await sleep(120);
       const s=await page.evaluate(`__hc.sunDir()`); out.push(`${t.toFixed(3)} elev ${String(s.elevDeg).padStart(7)} day ${s.day} moon ${s.moonElevDeg}`); }

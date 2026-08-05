@@ -56,7 +56,7 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     }
     const t0=Date.now();
     await page.goto(base+'/index.html?debug=1&perf=1'+FLAGS, { waitUntil:'load', timeout:120000 });
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:120000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:120000});
     console.log('prewarm flag: '+(/prewarm/.test(FLAGS)?'ON (?prewarm=1)':'off (shipped default)'));
 
     // Wait for the loading screen to hide, and record the program count at exactly that moment.

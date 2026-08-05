@@ -50,7 +50,7 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     }
     const t0=Date.now();
     await page.goto(base+'/index.html?debug=1&perf=1', { waitUntil:'load', timeout:120000 });
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:120000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:120000});
 
     // Track EVERY program id ever seen, and the live count, so churn (built then released) is distinguishable from growth.
     const everSeen=new Map();   // id -> {t, key, phase}

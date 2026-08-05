@@ -51,9 +51,9 @@ async function bandStat(page){
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
     page.on('pageerror',e=>console.log('PAGEERROR:',String(e.message||e).slice(0,200)));
     await page.goto(base+'/index.html?debug=1',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
     await page.evaluate(`__hc.aim(false)`);
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null,{timeout:90000});
     const now=await page.evaluate(`__hc.time()`); const DAY_LEN=now.frac>0.001? now.worldTime/now.frac : 600;
     await page.evaluate(`__hc.time(${0.3*DAY_LEN})`); await sleep(900);
     await page.evaluate(`(()=>{ const p=__hc.pos(); __hc.look(p.x-400,p.y,p.z); })()`); await sleep(900);

@@ -57,8 +57,8 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
     const errs=[]; page.on('pageerror',e=>{errs.push(String(e.message||e).slice(0,220)); console.log('PAGEERROR:',String(e.message||e).slice(0,220));});
     await page.goto(base+'/index.html?debug=1&t=210',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null,{timeout:90000});
     await page.evaluate(`window.__hcBR.enter()`); await sleep(7000);
     // render.calls resets every frame, so a single read catches whatever partial frame is in flight. Take the max.
     const peak=async()=>{ let c=0,t=0; for(let i=0;i<25;i++){ const r=await page.evaluate(`window.__hcBRX.rinfo()`);

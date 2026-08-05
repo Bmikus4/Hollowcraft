@@ -59,7 +59,7 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     page.on('response',r=>{ if(r.status()>=400) bad.push(r.status()+' '+r.url().replace(base,'')); });
     page.on('requestfailed',r=>bad.push('FAILED '+r.url().replace(base,'')));
     await page.goto(base+'/index.html?debug=1&t=210',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
     await page.evaluate(`window.__hcBR.enter()`); await sleep(7000);
     console.log('BAD REQUESTS:', JSON.stringify(bad,null,1));
     // what material does a room floor actually use?

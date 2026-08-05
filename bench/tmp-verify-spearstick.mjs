@@ -19,11 +19,11 @@ function waitHttp(url){ return new Promise((res,rej)=>{ const t0=Date.now(); (fu
     const page = await (await browser.newContext({ viewport:{width:1280,height:720} })).newPage();
     const errors=[]; page.on('pageerror', e=>errors.push(String(e.message||e).slice(0,200)));
     await page.goto('http://127.0.0.1:'+port+'/index.html?debug=1&t=630', { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true; } catch(e){ return false; } })()`, { timeout:90000 });
+    await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true; } catch(e){ return false; } })()`,null, { timeout:90000 });
     await sleep(1500);
     const fails=[]; const ck=(n,c,i)=>{ if(!c) fails.push(n+' :: '+JSON.stringify(i)); };
     await page.evaluate(`(()=>{ __hc.summon(); __hc.put(0, 8); })()`);
-    await page.waitForFunction(`(() => { try { return __hc.st().wa===true; } catch(e){ return false; } })()`, { timeout:30000 });
+    await page.waitForFunction(`(() => { try { return __hc.st().wa===true; } catch(e){ return false; } })()`,null, { timeout:30000 });
     // throw until one sticks in it (charge windup randomness: retry a few)
     let r=null;
     for(let t=0;t<6;t++){ await page.evaluate(`(()=>{ __hc.put(0, 8); __hc.spearTest(); })()`); await sleep(900);

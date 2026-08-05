@@ -24,8 +24,8 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     page.on('pageerror',e=>console.log('PAGEERROR:',String(e.message||e).slice(0,200)));
     page.on('console',m=>{ const t=m.text(); if(/horrific|wretch|drift/i.test(t)) console.log('console:',t.slice(0,180)); });
     await page.goto(base+'/index.html?perf=1&debug=1',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
-    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:120000});
+    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:240000});
     await page.evaluate(`window.__hcPERF.arm()`);
     const pr = await page.evaluate(`__hc.probe()`);
     await page.evaluate(`(()=>{ __hc.tp(${pr.spawnX}, ${pr.spawnZ}); __hc.setTime(0.85); __hc.look(0.7,0); __hc.lock(true); })()`);

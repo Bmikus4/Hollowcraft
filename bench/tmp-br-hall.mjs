@@ -42,7 +42,7 @@ const walkFwd = async(page,ticks)=>{ await page.keyboard.down('KeyW'); for(let i
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
     const errs=[]; page.on('pageerror',e=>{ errs.push(String(e.message||e).slice(0,200)); console.log('PAGEERROR:',String(e.message||e).slice(0,200)); });
     await page.goto(base+'/index.html?debug=1&t=210',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
     await page.evaluate(`window.__hcBR.enter()`); await sleep(5500);
     await page.evaluate(`__hc.aim(false)`);          // physics + input; without it nothing moves and every probe self-confirms
     console.log('in the halls:', JSON.stringify(await page.evaluate(`window.__hcBRX.stats()`)));

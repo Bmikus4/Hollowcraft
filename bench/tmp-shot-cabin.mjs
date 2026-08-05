@@ -24,8 +24,8 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
     page.on('pageerror', e=>console.log('PAGEERROR:', String(e.message||e).slice(0,250)));
     await page.goto(base+'/index.html?debug=1&t=252',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null,{timeout:90000});
     const c=await page.evaluate(`(()=>{ const p=__hc.pines(); return {cx:Math.floor(p.px)+22-Math.floor(p.px)%1, }; })()`).catch(()=>null);
     // cabin sits at spawn+(-?) — read spawn from the Home log: use island() px? Simplest: evaluate mmLandmarks-ish via __hc? Use fixed offsets from spawn via tp.
     const spot=await page.evaluate(`(()=>{ const L={x:0,z:0}; try{ const p=__hc.pines(); L.x=p.px; L.z=p.pz; }catch(e){} return L; })()`);

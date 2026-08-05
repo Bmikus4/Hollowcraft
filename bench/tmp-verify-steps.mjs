@@ -30,8 +30,8 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     const page = await ctx.newPage();
     page.on('pageerror', e=>errors.push(String(e.message||e).slice(0,300)));
     await page.goto(base+'/index.html?debug=1&t=630', { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`, { timeout:90000 });
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`, { timeout:90000 });
+    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`,null, { timeout:90000 });
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null, { timeout:90000 });
     // real input events → the game's own audioResume handler fires (AC created)
     await page.evaluate(`document.dispatchEvent(new Event('pointerlockchange'))`);
     await page.keyboard.press('KeyW'); await page.mouse.click(640,360); await sleep(800);

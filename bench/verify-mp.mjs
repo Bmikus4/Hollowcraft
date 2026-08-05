@@ -27,7 +27,7 @@ async function openGame(ctx, base, q, errors){
   const page = await ctx.newPage();
   page.on('pageerror', e => errors.push(String(e.message||e).slice(0,200)));
   await page.goto(base+'/index.html?'+q, { waitUntil:'load', timeout:90000 });
-  await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true && __hc.probe().chunkHere===true; } catch(e){ return false; } })()`, { timeout:90000 });
+  await page.waitForFunction(`(() => { try { return window.__hc && __hc.st().started===true && __hc.probe().chunkHere===true; } catch(e){ return false; } })()`,null, { timeout:90000 });
   return page;
 }
 
@@ -44,7 +44,7 @@ async function openGame(ctx, base, q, errors){
 
     // HOST joins first, then records 5,000 edits (spread across ~35 chunks so pages hit many chunks)
     const host = await openGame(ctxH, base, 'join&debug=1&t=252', errH);
-    await host.waitForFunction(`window.__hc && __hc.netInfo().on===true`, { timeout:30000 });
+    await host.waitForFunction(`window.__hc && __hc.netInfo().on===true`,null, { timeout:30000 });
     await sleep(8000);   // let some world stream in
     const placed = await host.evaluate(`(() => {
       let n=0;
@@ -56,7 +56,7 @@ async function openGame(ctx, base, q, errors){
     // GUEST late-joins -> host must paginate the sync and SURVIVE
     const t0 = Date.now();
     const guest = await openGame(ctxG, base, 'join&debug=1&t=252', errG);
-    await guest.waitForFunction(`window.__hc && __hc.netInfo().on===true`, { timeout:30000 });
+    await guest.waitForFunction(`window.__hc && __hc.netInfo().on===true`,null, { timeout:30000 });
     // wait until the guest's edit count matches the host's (sync complete), max 30s
     const hostCount = await host.evaluate(`__hc.editCount()`);
     let guestCount = 0, synced = false;

@@ -31,7 +31,7 @@ const check=(n,ok,d)=>{ console.log((ok?'PASS  ':'FAIL  ')+n+(d!=null?'   '+JSON
     const errs=[];
     page.on('pageerror',e=>{ errs.push(String(e.message||e)); console.log('PAGEERROR: '+String(e.message||e).slice(0,300)); });
     await page.goto(base+'/index.html?debug=1&rd=6',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
+    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:120000});
     await page.evaluate(`__hc.pinScene(); __hc.vitals(20,20,true); __hc.setTime(0.72)`);
     await sleep(1500);
 

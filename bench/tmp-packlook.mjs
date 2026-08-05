@@ -41,7 +41,7 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
       page.on('pageerror', e=>console.log('PAGEERROR:', String(e.message||e).slice(0,300)));
     }
     await page.goto(base+'/index.html?debug=1&rd=4', { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:90000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:90000});
     await sleep(3000);
     await page.evaluate('__hc.eqUI("inv")');
     await sleep(600);

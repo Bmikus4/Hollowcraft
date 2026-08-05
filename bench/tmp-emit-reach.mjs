@@ -38,8 +38,8 @@ function around(file,px,py,rad=26,th=60){
     page.on('pageerror',e=>console.log('  PAGEERROR:',String(e.message||e).slice(0,180)));
     const PAGE='/'+String(process.env.HC_PAGE||'index.html').replace(/^\/+/,'');
     await page.goto(base+PAGE+'?debug=1&rd=12',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
-    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,{timeout:240000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`, null, {timeout:120000});
+    await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`, null, {timeout:240000});
     await page.evaluate(`__hc.lock(true); __hc.pinScene(); __hc.cmdRun('/gamemode creative'); __hc.cmdRun('/fly on');`);
     const S=await page.evaluate(`__hc.st()`);
     const DIST=[8,24,48,96,160,224,288];

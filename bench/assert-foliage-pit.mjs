@@ -47,8 +47,8 @@ function ok(label, cond, got){ checks++; if(!cond)fails++; console.log('  '+(con
     const errs=[]; page.on('pageerror', e=>{ errs.push(String(e.message||e).slice(0,200)); console.log('PAGEERROR:', String(e.message||e).slice(0,300)); });
     console.log(OFF ? 'CONTROL RUN — ?nodecoseat=1, the invariant is OFF' : 'the invariant is ON');
     await page.goto(base+'/index.html?debug=1&rd=8'+(OFF?'&nodecoseat=1':''), { waitUntil:'load', timeout:90000 });
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:90000});
-    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()', {timeout:90000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:90000});
+    await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null, {timeout:90000});
     await sleep(7000);
 
     // Sweep the spawn area, then fly a lap and sweep again — the rate is per chunk, and one chunk is not a sample.

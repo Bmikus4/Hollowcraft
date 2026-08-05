@@ -29,7 +29,7 @@ function findBrowser(){ for(const p of ['C:\\Program Files\\Google\\Chrome\\Appl
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
     page.on('pageerror',e=>console.log('PAGEERROR: '+String(e.stack||e.message||e).slice(0,600)));
     await page.goto(base+'/index.html?debug=1&perf=1&rd=6',{waitUntil:'load',timeout:120000});
-    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`,{timeout:120000});
+    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:120000});
     await page.evaluate(`__hc.pinScene(); __hc.vitals(20,20,true)`);
     await sleep(1200);
 

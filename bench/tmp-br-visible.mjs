@@ -61,8 +61,8 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     page.on('response',r=>{ if(r.status()>=400) console.log('HTTP',r.status(),r.url().slice(-90)); });
     page.on('console',m=>{ if(m.type()==='error'){ const t=m.text().slice(0,300); cons.push(t); console.log('CONSOLE.ERROR:',t); } });
     await page.goto(base+'/index.html?debug=1&t=210',{waitUntil:'load',timeout:90000});
-    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null,{timeout:90000});
     await page.evaluate(`window.__hcBR.enter()`); await sleep(7000);
     const st = await page.evaluate(`window.__hcBRX.envStats()`);
     console.log('envStats', JSON.stringify(st,null,1));

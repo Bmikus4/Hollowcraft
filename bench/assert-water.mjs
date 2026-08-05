@@ -39,10 +39,16 @@ const chk=(c,n,d)=>{ if(c){pass++;console.log('  PASS  '+n+(d?'   '+d:''));} els
 
 // Sample the swim state at ~20 Hz from the node side. It has to be sampled, not read once: a pogo and a hold have the
 // SAME mean height and differ only in the variance, so one reading after the fact cannot tell them apart.
-async function track(page, ms){
+// SAMPLE COUNT, NOT ELAPSED TIME. A round trip through page.evaluate is normally a few milliseconds, but with four
+// sessions on one GPU it has taken over two seconds — and a time-bounded loop then returns ONE sample, from which a
+// peak-to-peak of 0.000 is not evidence of anything. n is what the checks below actually rest on, so it is what the loop
+// counts.
+async function track(page, ms, n=14){
   const ys=[], vys=[]; const t0=Date.now();
-  while(Date.now()-t0 < ms){ const w=await page.evaluate('__hc.water()'); ys.push(w.y); vys.push(w.vy); await sleep(50); }
-  return { ys, vys, n:ys.length, min:Math.min(...ys), max:Math.max(...ys), p2p:+(Math.max(...ys)-Math.min(...ys)).toFixed(3),
+  while(ys.length<n || Date.now()-t0 < ms){ const w=await page.evaluate('__hc.water()'); ys.push(w.y); vys.push(w.vy);
+    if(Date.now()-t0 > ms*6) break;   // …but never hang: a machine this slow has told us something too
+    await sleep(50); }
+  return { ys, vys, n:ys.length, ms:Date.now()-t0, min:Math.min(...ys), max:Math.max(...ys), p2p:+(Math.max(...ys)-Math.min(...ys)).toFixed(3),
            vyMax:+Math.max(...vys).toFixed(3), vyMin:+Math.min(...vys).toFixed(3),
            kicks:vys.filter(v=>v>0.6).length };   // an impulse-driven bounce spends most of its cycle with a large positive vy
 }
@@ -64,7 +70,7 @@ async function track(page, ms){
       page.on('pageerror', e=>console.log('PAGEERROR:', String(e.message||e).slice(0,300)));
     }
     await page.goto(base+'/index.html?debug=1', { waitUntil:'load', timeout:120000 });
-    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()', {timeout:180000});
+    await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:180000});
     await page.evaluate('__hc.setTime(0.30)');
     await sleep(2500);
 
@@ -76,7 +82,7 @@ async function track(page, ms){
       // ---- 1  THE RISE ----
       console.log('\n--- 1  hold Space at depth and rise ---');
       await page.evaluate(`__hc.tpExact(${dw.x}, ${dw.z}, ${SEA-4})`);
-      await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',{timeout:60000}).catch(()=>{});
+      await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null,{timeout:60000}).catch(()=>{});
       await sleep(600);
       const start = await page.evaluate(`__hc.tpExact(${dw.x}, ${dw.z}, ${SEA-4})`);
       await page.evaluate('__hc.lock(true)');           // physics() only runs pointer-locked; headless can never acquire the real lock
@@ -97,6 +103,11 @@ async function track(page, ms){
 
       // ---- 3+4  THE HOLD — the whole item ----
       console.log('\n--- 3  hold Space for 2.5 s at the surface and measure the bounce ---');
+      // Settle first. The approach to the float point is damped, not instant, so how much of its tail lands inside the
+      // window depends on how long the rise took — one run caught a single 0.341 sample of the tail and read as a push
+      // while the peak-to-peak was still 0.05 and the kick count still zero. The claim under test is that it HOLDS, so
+      // the window belongs after the arrival, not across it.
+      await sleep(900);
       const hold = await track(page, 2500);
       console.log('  hold ' + JSON.stringify({p2p:hold.p2p, vyMax:hold.vyMax, vyMin:hold.vyMin, kicks:hold.kicks, n:hold.n}));
       chk(hold.p2p < 0.06, 'the body holds still at the surface', 'peak-to-peak '+hold.p2p+' blocks over '+hold.n+' samples');
@@ -156,7 +167,7 @@ async function track(page, ms){
       if(!sh) chk(false,'found two blocks of water on the shelf');
       else{
         await page.evaluate(`__hc.tpExact(${sh.x}, ${sh.z}, ${sh.h+1})`);
-        await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',{timeout:60000}).catch(()=>{});
+        await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null,{timeout:60000}).catch(()=>{});
         await sleep(1200);
         await page.evaluate("__hc.key('Space',true)");
         await sleep(1500);

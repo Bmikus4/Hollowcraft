@@ -26,8 +26,8 @@ const VARIANTS=[['mblur','?debug=1'],['nomblur','?debug=1&nomblur=1']];
     for(const [tag,qs] of VARIANTS){
       const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
       await page.goto(base+'/index.html'+qs,{waitUntil:'load',timeout:120000});
-      await page.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',{timeout:120000});
-      await page.waitForFunction("(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()",{timeout:240000});
+      await page.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',null,{timeout:120000});
+      await page.waitForFunction("(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()",null,{timeout:240000});
       await page.evaluate('(()=>{ __hc.lock(true); __hc.cmdRun("/gamemode creative"); __hc.setTime(0.0); })()').catch(()=>{});
       await sleep(2500);
       // Sky filling the frame, away from the moon: the banding shows in the plain dark gradient, not next to a light source.

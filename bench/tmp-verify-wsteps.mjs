@@ -25,8 +25,8 @@ function findBrowser(){ const c=['C:\\Program Files\\Google\\Chrome\\Application
     const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
     const errors=[]; page.on('pageerror',e=>errors.push(String(e.message||e).slice(0,200)));
     await page.goto(base+'/index.html?debug=1&t=650',{waitUntil:'load',timeout:90000});   // night — the wretch moves freely
-    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`,{timeout:90000});
-    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
+    await page.waitForFunction(`(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()`,null,{timeout:90000});
     await page.mouse.click(640,360); await page.keyboard.press('KeyW'); await sleep(400);   // trusted gesture → initAudio() runs → audioReady=true (else every footfall gates out silently)
     await page.evaluate(`__hc.put(9,0)`);   // summon + drop it 9 blocks away → it stalks (moves) in audible range
     await sleep(3000);
