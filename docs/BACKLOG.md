@@ -1,8 +1,6 @@
 # Backlog — light, sky, water, horizon, atmosphere
 
 ## Open
-- Coloured block light
-- Water close up: shoreline foam
 - Entity contact shadows
 - Shadow distance / cascades
 - Planar or screen-space water reflection
@@ -15,6 +13,9 @@
 - `shore` at 7.70 ms, 805 draw calls, unattributed
 
 ## Awaiting Ben's eye (shipped)
+- Shoreline foam: patchy surf at the waterline, driven off the water's own depth
+- Coloured block light: shrine torches red, industrial lamps cold; warm lights unchanged
+- God rays: only empty sky seeds one, so lanterns cannot
 - Directional skylight: a floor, a wall and a soffit in shade are no longer the same brightness
 - Emitters visible from farther away: a lamp you have seen keeps burning after its chunk unloads
 - Voxel hash lighting: unlit ground washes out to grey at night instead of collapsing onto red/green
