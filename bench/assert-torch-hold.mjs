@@ -28,7 +28,9 @@ let fails=0; const ok=(n,c,g)=>{ if(!c)fails++; console.log(`  ${c?'ok  ':'FAIL'
     const fit=await page.evaluate(`__hc.torchFit()`);
     console.log('    torch geometry', JSON.stringify(fit));
     for(const k of ['held','placed']){
-      ok(k+' torch: the shaft reaches the top of the rag', fit[k] && fit[k].shaftCoversRag >= 0, fit[k]);
+      // BOUNDED AT BOTH ENDS NOW. Negative means the rag's top rings are wrapped around thin air; more than a couple of centimetres
+      // means bare twig standing over the cloth like a spike, which is what Ben saw on 08-05 after the first fix overshot to 0.049.
+      ok(k+' torch: the shaft reaches the top of the rag and stops there', fit[k] && fit[k].shaftCoversRag >= -0.004 && fit[k].shaftCoversRag <= 0.035, fit[k]);
     }
     for(const id of ['torch','torch_unlit','red_torch','candle']){
       const r=await page.evaluate(`__hc.heldInHand('${id}')`);
