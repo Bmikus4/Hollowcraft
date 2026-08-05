@@ -63,7 +63,10 @@ const med = a => { const s=a.slice().sort((x,y)=>x-y); return s.length%2 ? s[(s.
     await page.evaluate(`window.__hcPERF.arm(); window.__benchInfo=1;`);
     await page.evaluate(HELPERS);
     const ref = await page.evaluate(`__hcPERF.ref()`);
-    console.log(`gpu: ${ref.gpu}\nflag ${FLAG}: ${JSON.stringify(OFF)} (A) vs ${JSON.stringify(ON)} (B)   site ${SITE}   ${PAIRS} pairs of ${DUR}s`);
+    // SAY WHAT IS ACTUALLY BEING PRICED. With --onjs/--offjs no flag is touched at all, and this line still printed
+    // "flag portalOnScreen" — a run whose header names a flag it never set is a result nobody can trust six months on.
+    console.log(`gpu: ${ref.gpu}\n${ONJS ? `js A: ${OFFJS||'(nothing)'}\njs B: ${ONJS}\n(no flag is set in this mode — --flag ${FLAG} is ignored)`
+      : `flag ${FLAG}: ${JSON.stringify(OFF)} (A) vs ${JSON.stringify(ON)} (B)`}   site ${SITE}   ${PAIRS} pairs of ${DUR}s`);
 
     const run = body => page.evaluate(`(()=>{ try{ const r=(function(){${body}\nreturn null;})(); return r===null?'ok':r; }catch(e){ return {err:String(e&&e.message||e)}; } })()`);
 
@@ -79,7 +82,10 @@ const med = a => { const s=a.slice().sort((x,y)=>x-y); return s.length%2 ? s[(s.
       await sleep(2500);
       const cam = await page.evaluate(`(()=>{ const p=__hc.pos(); return Number.isFinite(p.yaw)&&Number.isFinite(p.pitch)&&Math.abs(p.pitch)<1.4; })()`);
       if(!cam) throw new Error('camera is not aimed — refusing to measure');
-      await page.evaluate(`__hc.pinScene(); __hc.lock(true); __hcPERF.reset();`);
+      // PIN THE FRAMERATE THE ADAPTIVE LADDER READS, for the same reason perf-census does (95c2436): without it a slow window
+      // sheds pixelScale mid-measurement and the "after" side is a cheaper game than the "before" side. In an A/B that is worse
+      // than noise — whichever side runs while the ladder is shedding wins.
+      await page.evaluate(`__hc.pinScene(); __hc.lock(true); try{__hc.fpsPin(240);}catch(e){} __hcPERF.reset();`);
       await sleep(DUR*1000);
       const r = await page.evaluate(`(()=>{ const f=__hcPERF.live(), p=__hc.frameProf(4000), i=__hc.perf(), L=__hc.lights(), g=__hcPERF.gpu();
         return { median:f.median, p99:f.p99, max:f.max, over12:f.over12, over16:f.over16_6, n:f.n,
