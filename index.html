@@ -1431,7 +1431,18 @@ paintTile('bedrock',   (x,y,r)=>{ const v=jit(r,0,40); return [30+v,30+v,34+v]; 
 paintTile('log_top',   (x,y,r)=>{ const dx=x-7.5,dy=y-7.5; const ring=Math.floor(Math.sqrt(dx*dx+dy*dy)); const v=jit(r,0,12); return ring%2?[64+v,44+v,28+v]:[86+v,60+v,38+v]; });
 paintTile('log_side',  (x,y,r)=>{ const bark=(x%5===0)?-16:0; const v=jit(r,0,16)+bark; return [72+v,50+v*0.8,32+v*0.6]; });
 paintTile('planks',    (x,y,r)=>{ if(y%5===4)return[54+jit(r,0,8),40,26]; const v=jit(r,0,16); return [122+v,92+v,58+v]; });
-paintTile('leaves',    (x,y,r)=>{ if(r()<0.2)return[22,44,20,255]; if(r()<0.15)return[20,40,18,255]; const v=jit(r,0,34); return [34+v*0.5,64+v,32+v*0.5,255]; });   // SOLID needles (was 20% transparent holes) → opaque, non-see-through canopy: no alpha-test overdraw
+// THE HOLES ARE BACK (Ben 08-05: "making all leaves transparent again, with holes in them"). They were removed for a
+// real reason — an alpha-tested canopy is discard overdraw and the solid tile bought early-Z — and the reason it is
+// affordable again is the SHELL: only the outer three blocks of a canopy are this block, the inside is leaves_core and
+// still solid, so what a hole shows is usually the dark core one block behind it. That is the depth the canopy lost.
+// GAPS, NOT SPECKLE. Punching random pixels gives a grey dither that reads as noise at any distance. This cuts a few
+// ROUND holes per tile with soft edges, which is what a gap between two leaves looks like, and keeps a hard alpha edge
+// for the alpha test to bite on.
+paintTile('leaves',(x,y,r)=>{
+  const H=[[3.5,4.0,2.1],[11.0,6.5,1.9],[6.0,12.0,2.0],[13.5,13.0,1.5]];   // four gaps, fixed so every leaf tile tiles with itself
+  for(const [hx,hy,hr] of H){ const d=Math.hypot(x-hx,y-hy); if(d<hr+(r()-0.5)*0.9) return [0,0,0,0]; }
+  if(r()<0.18) return [22,44,20,255]; if(r()<0.14) return [20,40,18,255];
+  const v=jit(r,0,34); return [34+v*0.5,64+v,32+v*0.5,255]; });
 paintTile('leaves_solid',(x,y,r)=>{ const v=jit(r,0,20); return [22+v*0.4,48+v*0.7,20+v*0.4]; });   // dense inner-canopy core: solid, darker, no gaps
 // ore = clustered nuggets (a few clumps with a dark outline + lit face) on stone — far clearer than the old per-pixel speckle
 const _oreBlobs=[[4,4,2.5],[11,6,2.2],[6,12,2.4],[13,12,1.7]];
@@ -3259,18 +3270,12 @@ const globalU = {
   uCloudShadow:{ value:1 },
   uCloudScroll:{ value:new THREE.Vector2(0,0) },
   uWhiteTile:{ value:(typeof TILEIDX!=='undefined'&&TILEIDX.vantawhite!=null)?TILEIDX.vantawhite:-1 },   // SHARED vantawhite-glow uniform (Ben 07-21): one reference every chunk material + clone points at, so the unlit-white override can never go stale across recompiles / composer rebuilds / VFX-setting toggles
-  // THE LIGHT IN YOUR HAND, for the scotopic gate only (see injectAtlas). The gate reads the BAKED block-light volume, and a torch
-  // you are carrying is a PointLight that was never baked into it — so walking a lantern through the world left everything it lit
-  // grey, which is the whole reason the washout read as "most of the world is grey at night" (Ben 08-05). Position and reach are
-  // pushed here every frame beside heldLight's own update.
-  uHandPos:{ value:new THREE.Vector3(0,-9999,0) },
-  uHandK:  { value:0 },
-  uHandR:  { value:26 },
-  // How much delivered direct light counts as "a light source touches this". 1.0 means a fragment reads fully coloured once
-  // three.js has put roughly 0.45 of luminance on it (uScotHi), which for a torch at intensity 46 and decay 1.3 is well inside
-  // the visible pool. Raise it to make colour reach further out into the dim edge of a lamp; 0 is the A/B off, and 0 restores
-  // the pre-fix behaviour of colour ONLY where the baked volume or the sky says so.
-  uScotLitK:{ value:1.0 },
+  // THE HAND-LIGHT SPHERE IS GONE, and this is the answer to the open question about it. uHandPos/uHandK/uHandR fed the scotopic
+  // gate a hand-rolled ball around the PLAYER — uHandR = heldLight.distance*0.72 = 23 blocks — which switched the washout fully
+  // off inside about 17 blocks of the camera through walls and on faces turned away from the lamp, and is the prime suspect for
+  // the saturated red texels Ben photographed. `31ecf4c` replaced the gate with reflectedLight.directDiffuse and left these three
+  // uniforms behind, declared and pushed every frame but read by nothing. They are removed rather than narrowed: the delivered
+  // light already carries the held lantern with its real decay and its real N·L, so a radius has nothing left to contribute.
   // DIRECTIONAL SKYLIGHT — see injectAtlas. amt 0 is the A/B off; up/dn are the hemisphere fraction reaching a face pointing
   // straight up and straight down, and a vertical face lands on their midpoint.
   uSkyDirAmt:{ value:1 },
@@ -3280,21 +3285,17 @@ const globalU = {
   // grade's own S-curve is why a 0.58 factor costs 61% of the value rather than 42%.
   uSkyDirUp: { value:1.06 },
   uSkyDirDn: { value:0.80 },
-  // SCOTOPIC WASHOUT — see injectAtlas. Shared refs so every per-chunk material clone moves at once; uScotAmt 0 is the A/B off.
-  // 0.85, NOT 1.0 (Ben 08-05: "most of the world is grey at night"). The washout is right about what the tone curve does to an
-  // unlit surface's hue, and wrong to take all of it: a trace of colour left in the deep dark reads as night rather than as
-  // greyscale, and the light you CARRY now restores the rest (uHandPos below).
-  uScotAmt:{ value:0.85 },
-  // 0.01 -> 0.45, WIDE (Ben 08-05: "places where the chromatic grey is not smoothly transitioned"). It was 0.02 -> 0.20, and that
-  // whole ramp is crossed inside one block at the edge of a torch's reach — so the colour did not fade back in, it stepped. The
-  // light level driving it is also part per-fragment (the block-light volume, trilinear over 1-block cells) and part PER FACE
-  // (aSky, a 4-bit scalar), so a narrow ramp turns the per-face part into visible edges wherever the sky term matters, which is
-  // dusk. A wide ramp cannot: the same face-to-face difference now moves the washout by a fraction of what it did.
-  uScotLo: { value:0.01 },
-  // 0.20, not 0.35: colour has to be fully back by the time a torch's own falloff reaches a face, or a torch-lit cellar goes
-  // grey where it should read amber. At 0.35 the measured night chroma is lower still (sat 0.155 vs 0.234) and the interior
-  // pays for it.
-  uScotHi: { value:0.45 },
+  // THE SCOTOPIC DIALS ARE NOT HERE. They live in _scotG / _scotH at the top of this file, as Float32Arrays, because a globalU
+  // entry can only be shared by materials this file injects by hand and Ben asked for the pass on every material in the game.
+  // Why each value is what it is:
+  //   amt 0.85, NOT 1.0 (Ben 08-05: "most of the world is grey at night") — a trace of colour left in the deep dark reads as
+  //     night rather than as greyscale.
+  //   lo 0.01 -> hi 0.45, WIDE (Ben 08-05: "places where the chromatic grey is not smoothly transitioned"). It was 0.02 -> 0.20,
+  //     and that whole ramp is crossed inside one block at the edge of a torch's reach, so the colour did not fade back in, it
+  //     stepped. The driving light level is part per-fragment (the block-light volume, trilinear over 1-block cells) and part PER
+  //     FACE (aSky, a 4-bit scalar), so a narrow ramp turns the per-face part into visible edges wherever the sky term matters,
+  //     which is dusk. hi must also stay high enough that colour is fully back by the time a torch's falloff reaches a face, or a
+  //     torch-lit cellar goes grey where it should read amber (at 0.35 the measured night chroma is 0.155 against 0.234).
   uTime:   { value:0 },
   uSunDir: { value:new THREE.Vector3(0.3,0.9,0.2) },
   uMoonDir:{ value:new THREE.Vector3(-0.3,-0.9,-0.2) },
@@ -3499,7 +3500,14 @@ const opaqueMat = injectAtlas(new THREE.MeshPhongMaterial({ shininess:1, specula
 const cutoutMat = injectAtlas(new THREE.MeshPhongMaterial({ side:THREE.DoubleSide, shininess:0, specular:0x000000 }), {cutout:true});   // glass etc — genuinely see-through both sides
 // leaves get their OWN FrontSide material: the mesher emits all 6 faces of every leaf block, each seen from its normal side,
 // so single-sided is visually identical to the old DoubleSide while halving canopy fragment work (the scene's biggest fill sink).
-const leafMat   = injectAtlas(new THREE.MeshPhongMaterial({ side:THREE.FrontSide, shininess:0, specular:0x000000 }), {nightFoliage:true});   // OPAQUE now (was cutout/alpha-test): with the solid needle texture, leaves render with early-Z and zero discard overdraw — the big forest fill win
+// ALPHA-TESTED AGAIN, because the tile has holes in it again (Ben 08-05). The note that used to be here is the case for
+// the opposite and it is still true as far as it goes: an opaque tile renders with early-Z and zero discard overdraw,
+// and that was the big forest fill win. What pays for it now is that only the outer three blocks of a canopy are this
+// material — the core is leaves_core and stays opaque — so the alpha-tested surface is a shell, not a volume.
+// alphaTest WITHOUT transparent:true on purpose: transparent would move the canopy into the sorted blend pass, where a
+// forest is thousands of quads to sort every frame and leaves flicker against each other. A cutout stays in the opaque
+// pass and just discards.
+const leafMat   = injectAtlas(new THREE.MeshPhongMaterial({ side:THREE.FrontSide, shininess:0, specular:0x000000, alphaTest:0.5 }), {nightFoliage:true});
 // DoubleSide. The note that used to be here said FrontSide was safe because "the mesher emits both crossed
 // quads, so one always faces you", and that is true as far as it goes: two quads at right angles each front
 // a half-space, and the two half-spaces do cover every direction, so a plant never disappears outright.
@@ -4336,6 +4344,13 @@ const _deepSea=new THREE.Color(0.010,0.075,0.205), _horizCamDir=new THREE.Vector
 const _PN=128, _pineMaskData=new Uint8Array(_PN*4);
 const _pineMask=new THREE.DataTexture(_pineMaskData,_PN,1,THREE.RGBAFormat); _pineMask.wrapS=THREE.RepeatWrapping; _pineMask.minFilter=THREE.LinearFilter; _pineMask.magFilter=THREE.LinearFilter; _pineMask.needsUpdate=true;
 const _uPine={value:new THREE.Color(0.078,0.157,0.071)};   // = the DARKEST textured pixel in the leaf tile, rgb(20,40,18)
+// THE HORIZON PINES' PALETTE, one place for both halves of it. The canopy green and the woody band beneath it are two separate
+// uniforms updated in two separate places (updateSky, ~250 lines apart) and Ben has now asked three times for the pair to be
+// darker — 07-20 vibrancy, 08-04 "slightly darker at source", 08-05 "MUCH too light". Every one of those was a scale on these
+// same six numbers, so they live here as the palette, and _pineTone is the scale that moves.
+const PINE_GREEN=[0.034,0.090,0.029];   // approved 07-20 rev3 / 08-04
+const PINE_BAND =[0.050,0.040,0.030];   // dark woody brown — trunks and the shadowed forest floor, not foliage
+const _pineTone={ g:0.60, b:0.60 };     // 08-05: a 40% cut on both, hue held. __hc.pineTone({green,band}) moves it live.
 // THE SILHOUETTE'S SHAPE, as four shared numbers (Ben 08-04: "the peaks of the pines are still too volatile", after the same
 // note on 07-20 and 07-27). The canopy height was 24 + treeline*18 + spike + crown — a 24-to-55-block envelope, so adjacent
 // columns could differ by more than the trees are tall, and the crown terms ride at 235 cycles per turn on top of that.
@@ -4660,7 +4675,12 @@ function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.p
   // 0.042/0.112/0.036 -> 0.034/0.090/0.029, the same colour at 81%: the green stays where he approved it and only the value
   // moves. Deliberately this constant and not a multiply further down the shader — a darkening pass over the top would also
   // take the fog wash, the tip gradient and the undertree seam with it, and those are all tuned against each other.
-  { const dim=0.10+0.90*day, base=[0.034,0.090,0.029]; _uPine.value.setRGB(base[0]*dim, base[1]*dim, base[2]*dim);   // DARK forest green matching the real edge trees (Ben 07-20 rev3); at NIGHT it goes near-BLACK silhouette
+  // AND DARKER AGAIN, 08-05 (Ben: "skybox pines... thier color pallets both the green and brown is MUCH too light, it needs to be
+  // made darker"). 0.034/0.090/0.029 at 60%, and the woody band with it — see PINE_BAND below, because he named both and the two
+  // have to move together or the trunks read as lit ground under a dark canopy. HUE HELD EXACTLY: all three channels take the same
+  // factor, so this is the value moving and nothing else, which is the form of the change he accepted twice before.
+  // __hc.pineTone({green,band}) is the live A/B — this is a palette, and a palette is settled by his eye, not by a statistic.
+  { const dim=0.10+0.90*day, base=PINE_GREEN; _uPine.value.setRGB(base[0]*_pineTone.g*dim, base[1]*_pineTone.g*dim, base[2]*_pineTone.g*dim);   // DARK forest green matching the real edge trees (Ben 07-20 rev3); at NIGHT it goes near-BLACK silhouette
     { const _ef=1-Math.exp(-Math.pow(CFG.RENDER_DIST*CK*scene.fog.density,2)); pineMat.uniforms.uFogAmt.value=clamp(_ef*0.93,0,0.97);   // MATCH the farthest rendered chunks' fog wash exactly (exp2 at the wall distance — includes weather + day/night via density), held a hair under so the tip-gradient still reads
       // FOG IN THE TREES: BLACK AT NIGHT, WHITE BY DAY (Ben 07-27 fix-list #7, finished 07-28). The first pass took only the
       // "fade to black" half of that and applied it at every hour — a flat 10% of the fog colour — so by day the horizon
@@ -4718,7 +4738,7 @@ function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.p
       pu.uCamY.value=pm.uCamY.value; pu.uVisD.value=pm.uVisD.value;
       pu.uPushD.value=pm.uPushD.value; pu.uHide.value=pm.uHide.value;   // the anchoring too, or the band projects at a different range than the canopy clipping it and the join tears
       pu.uEntAz.value=pm.uEntAz.value; pu.uEntW.value=pm.uEntW.value; pu.uEntOn.value=pm.uEntOn.value;
-      const dimB=0.10+0.90*day; _uPineBand.setRGB(0.050*dimB, 0.040*dimB, 0.030*dimB); }   // goes near-black at night with the canopy above it
+      const dimB=(0.10+0.90*day)*_pineTone.b; _uPineBand.setRGB(PINE_BAND[0]*dimB, PINE_BAND[1]*dimB, PINE_BAND[2]*dimB); }   // goes near-black at night with the canopy above it; the tone factor is Ben's 08-05 "MUCH too light" on the brown, and it moves with the green above
     // the pine-visibility mask depends only on player position + render distance, so recompute the 128 rays +
     // re-upload the DataTexture only when the player has actually moved (or RD changed). <2 blocks of parallax
     // is sub-pixel at the horizon → gating this is exact, not approximate. Cost: 128×8 surfaceH calls, occasional.
@@ -6885,9 +6905,8 @@ function assignPointLights(){
     else heldLight.position.set(camera.position.x + _m[0]*0.34*_side, camera.position.y-0.15 + _m[1]*0.34*_side, camera.position.z + _m[2]*0.34*_side);   // NO held light while grabbed — it blows out the throat jumpscare with glare
     const strong=hl>=15; heldLight.color.setHex(strong?0xff9838:0xff6a22);
     heldLight.intensity=(strong?58:46)*(1+Math.sin(t*11)*0.07+Math.sin(t*1.9)*0.05); heldLight.distance=strong?32:26; heldLight.decay=1.3;
-    heldLight.castShadow=false;
-    globalU.uHandPos.value.copy(heldLight.position); globalU.uHandK.value=1; globalU.uHandR.value=heldLight.distance*0.72; }   // 0.72 of the light's own reach: colour comes back inside the bright core of the pool, not out at its last glimmer
-  else { heldLight.intensity=0; heldLight.castShadow=false; globalU.uHandK.value=0; }
+    heldLight.castShadow=false; }
+  else { heldLight.intensity=0; heldLight.castShadow=false; }
 }
 function disposeChunkMeshes(c){
   if(!c.group) return;
@@ -14436,8 +14455,14 @@ function buildPlayerModel(){ const g=new THREE.Group();
   const strawM=new THREE.MeshLambertMaterial({map:_strawHatTex()});
   const straw=new THREE.Group();
   { const brim=new THREE.Mesh(new THREE.CylinderGeometry(0.44,0.46,0.035,22),strawM); brim.position.y=1.73; brim.scale.z=0.92; straw.add(brim);   // broad drooping brim
-    const crown=new THREE.Mesh(new THREE.CylinderGeometry(0.19,0.28,0.24,18),strawM); crown.position.y=1.86; straw.add(crown);                    // tapered crown
-    const cap=new THREE.Mesh(new THREE.CylinderGeometry(0.19,0.19,0.03,18),strawM); cap.position.y=1.985; straw.add(cap);                          // flat top
+    // THE CROWN HAS TO CONTAIN THE HEAD (Ben 08-05: "the players head shows through the top of the straw hat"). The head is a
+    // 0.30 x 0.30 x 0.32 BOX, so its top corners sit 0.219 out from the axis and its top face is at y 2.00 — while the crown
+    // tapered to r 0.19 and the flat top was a 0.19 disc centred at 1.985. Both numbers are smaller than the head they cover, so
+    // the four corners of the skull came through the straw and the top face was coplanar with the disc. A round hat over a square
+    // head has to clear the DIAGONAL, not the width: r stays above 0.248 for the whole height of the head, and the flat top is
+    // lifted clear of 2.00 instead of sharing a plane with it.
+    const crown=new THREE.Mesh(new THREE.CylinderGeometry(0.24,0.30,0.28,18),strawM); crown.position.y=1.90; straw.add(crown);                    // tapered crown
+    const cap=new THREE.Mesh(new THREE.CylinderGeometry(0.24,0.24,0.03,18),strawM); cap.position.y=2.055; straw.add(cap);                          // flat top
     const band=new THREE.Mesh(new THREE.CylinderGeometry(0.285,0.285,0.05,18),new THREE.MeshLambertMaterial({color:0x7a4a2a})); band.position.y=1.775; straw.add(band); }   // leather band
   straw.visible=false; straw.position.y=-1.62; headG.add(straw);   // same trick as the helm: absolute build heights, head-local parent
   // HAZMAT SUIT (Ben 07-24): a full-body plastic suit (colour chosen at wear-time) with big translucent windows
@@ -15917,19 +15942,31 @@ function buildHandcuffs(){ const g=new THREE.Group();
 // cross-bolt Picatinny clamp with the big slotted nut on the RIGHT (no QD lever — that's the EXPS), canted
 // purple-magenta notch-filter front window + near-clear rear glass. The RETICLE is NOT in here — it's a
 // camera-collimated 68-MOA-ring / 1-MOA-dot hologram (see view.holoRet in updateView): parallax-free, true to POI.
-function _holoReticleTex(){ const S=256, cv=document.createElement('canvas'); cv.width=cv.height=S; const x=cv.getContext('2d');
-  const c=S/2, R=100;                                                                    // ring radius 100px = 34 MOA → 1 MOA ≈ 2.94px
-  x.strokeStyle='rgba(255,40,30,0.30)'; x.lineWidth=7; x.shadowColor='rgba(255,50,40,0.9)'; x.shadowBlur=9;
+// DRAWN AT THE SIZE IT IS SEEN (Ben: "holosights still not centered"). A true 68 MOA ring on a 62° frame is 15 device pixels
+// across at 720p — and this was a 256 px drawing with minFilter=Linear and therefore NO mipmaps, so the GPU point-sampled a
+// 2.4 px speckled ring at one sample per 13 texels. Measured on a parked, full-ADS frame: 3 to 9 red pixels in the whole centre
+// crop, scattered, where a ring wants ~90. That is what "not centered" looks like — the few texels that survive the sampling
+// land wherever they land, and the smudge's centre of mass wanders frame to frame while the geometry is provably on the axis.
+// 64 px keeps the same ring/half-extent ratio (R/(S/2) = 100/128, which the plane's size formula depends on) with every stroke
+// scaled to match, and the minification filter now uses the mip chain, so what is drawn is what is averaged.
+function _holoReticleTex(){ const S=64, K=S/256, cv=document.createElement('canvas'); cv.width=cv.height=S; const x=cv.getContext('2d');
+  const c=S/2, R=100*K;                                                                  // ring radius = 34 MOA, still 100/128 of the half-extent
+  x.strokeStyle='rgba(255,40,30,0.30)'; x.lineWidth=7*K; x.shadowColor='rgba(255,50,40,0.9)'; x.shadowBlur=9*K;
   x.beginPath(); x.arc(c,c,R,0,6.2832); x.stroke();                                      // soft bloom halo under the ring
   x.shadowBlur=0;
-  for(let i=0;i<720;i++){ const a=i/720*6.2832;                                          // LASER SPECKLE — the ring core is grainy dashes, never LED-crisp
-    x.strokeStyle='rgba(255,46,36,'+(0.30+Math.random()*0.7).toFixed(2)+')'; x.lineWidth=2.4+Math.random()*1.3;
-    x.beginPath(); x.arc(c,c,R+(Math.random()-0.5)*1.5,a,a+0.012); x.stroke(); }
-  x.strokeStyle='rgba(255,46,36,0.85)'; x.lineWidth=3; x.shadowColor='rgba(255,50,40,0.8)'; x.shadowBlur=4;
-  for(const[dx,dy] of [[0,-1],[0,1],[-1,0],[1,0]]){ x.beginPath(); x.moveTo(c+dx*(R-8),c+dy*(R-8)); x.lineTo(c+dx*(R+11),c+dy*(R+11)); x.stroke(); }   // cardinal tick stadia crossing the ring
-  x.fillStyle='rgba(255,64,50,1)'; x.shadowColor='rgba(255,50,40,1)'; x.shadowBlur=7;
-  x.beginPath(); x.arc(c,c,2.9,0,6.2832); x.fill();                                      // the 1 MOA dot — tiny core, readable by its bloom
-  const t=new THREE.CanvasTexture(cv); t.minFilter=THREE.LinearFilter; t.magFilter=THREE.LinearFilter; return t; }
+  // 180 dashes, not 720: at this radius 720 arcs of 0.012 rad overlap into a solid line and the speckle — the whole point of
+  // drawing it by hand — is gone. The count follows the circumference so the gaps stay gaps.
+  for(let i=0;i<180;i++){ const a=i/180*6.2832;                                          // LASER SPECKLE — the ring core is grainy dashes, never LED-crisp
+    x.strokeStyle='rgba(255,46,36,'+(0.30+Math.random()*0.7).toFixed(2)+')'; x.lineWidth=(2.4+Math.random()*1.3)*K;
+    x.beginPath(); x.arc(c,c,R+(Math.random()-0.5)*1.5*K,a,a+0.048); x.stroke(); }
+  x.strokeStyle='rgba(255,46,36,0.85)'; x.lineWidth=3*K; x.shadowColor='rgba(255,50,40,0.8)'; x.shadowBlur=4*K;
+  for(const[dx,dy] of [[0,-1],[0,1],[-1,0],[1,0]]){ x.beginPath(); x.moveTo(c+dx*(R-8*K),c+dy*(R-8*K)); x.lineTo(c+dx*(R+11*K),c+dy*(R+11*K)); x.stroke(); }   // cardinal tick stadia crossing the ring
+  x.fillStyle='rgba(255,64,50,1)'; x.shadowColor='rgba(255,50,40,1)'; x.shadowBlur=7*K;
+  x.beginPath(); x.arc(c,c,Math.max(0.9,2.9*K),0,6.2832); x.fill();                      // the 1 MOA dot — tiny core, readable by its bloom
+  const t=new THREE.CanvasTexture(cv);
+  // Mipmapped minification: the plane is ~19 device px wide at 720p and three times that on a 4K screen, so it is minified on
+  // every display there is. LinearFilter alone meant no mip chain and one point sample per 13 texels.
+  t.generateMipmaps=true; t.minFilter=THREE.LinearMipmapLinearFilter; t.magFilter=THREE.LinearFilter; return t; }
 function buildHoloSight(){ const g=new THREE.Group();
   const body =new THREE.MeshPhongMaterial({color:0x141519,shininess:34,specular:0x2c3038});   // matte hard-anodised aluminum
   const metal=new THREE.MeshPhongMaterial({color:0x26282e,shininess:120,specular:0x5a6070});  // machined hardware
@@ -15993,7 +16030,13 @@ function buildMinigun(dot,suppressed){ const g=new THREE.Group();
   // MUZZLE FLASH — the minigun had none (only the voxel tracer showed); a real flash sprite out the barrel cluster (Ben 07-21)
   const flash=buildMuzzleFlash(); flash.renderOrder=8; flash.userData.base=suppressed?0.8:1.35;
   flash.position.set(0,0,suppressed?-0.66:-0.62); flash.visible=false; g.add(flash); g.userData.flash=flash;
-  g.userData.barrels=barrels; g.traverse(o=>{ if(o.isMesh)o.castShadow=true; }); g.rotation.set(0.06,0,0.04); return g; }
+  // THE CANT IS A CARRY, NOT AN AIM (Ben: "holosights still not centered"). This rotation used to be baked onto the model, and
+  // captureAim reads the bore off group.matrix * MESH.matrix — so the minigun's bore pointed 0.0595 rad (3.4°) above the eye at
+  // full ADS. Measured: the reticle, which hangs on the bore, landed 32 px above frame centre while its own sight window is
+  // 0.036 rad (27 px) in half-extent, so the ring was clipped away entirely and the holosight read as empty. The shots went 3.4°
+  // high with it. Declared instead, and blended out by the raise in updateView, so the hip look is untouched and the aimed bore
+  // is level.
+  g.userData.barrels=barrels; g.traverse(o=>{ if(o.isMesh)o.castShadow=true; }); g.userData.carryRot=[0.06,0,0.04]; return g; }
 // M4-pattern AR-15 — minimal but reads real: split upper/lower, free-float M-LOK handguard, full-length flat-top rail,
 // A2 birdcage, low-profile gas block, compact red-dot, curved STANAG mag, A2 grip, collapsible stock. Muzzle points -z.
 function buildAR15(dot,suppressed){ const g=new THREE.Group();
@@ -17004,6 +17047,13 @@ function updateView(dt){ updateRecoil(dt);                                      
       const pz=HG_HIP[2] + (HG_ADS[2]-HG_HIP[2])*e;
       view.group.position.set(px-_hgV.x, py-_hgV.y, pz-_hgV.z);
     }
+    // A MODEL'S CARRY CANT COMES OFF AS THE GUN COMES UP. It is a look for the hip — the minigun is held slightly muzzle-high and
+    // rolled — and the aim axis is read off the mesh matrix, so leaving it on while aimed points the bore (and therefore the
+    // reticle, and the round) above where the sight is looking. Blended by the same raise `e` as the pose, and written BEFORE
+    // captureAim and before the glass correction so both measure the pose that will be drawn.
+    if(view.mesh && view.mesh.userData && view.mesh.userData.carryRot){
+      const cr=view.mesh.userData.carryRot, k=1-e;
+      view.mesh.rotation.set(cr[0]*k, cr[1]*k, cr[2]*k); }
     // THE WINDOW GOES ON THE AXIS, MEASURED (Ben 08-04: "holosights have fully dissapeared"). The aimed pose lifts the gun by the
     // model's declared dotY, which is the emitter's height and not the rear window's: measured at full ADS the window's centre sat
     // 0.0376 rad below the aim axis while its own half-angle is 0.0390, so the axis grazed the bottom rim. The reticle is a 0.0099
@@ -26620,6 +26670,20 @@ window.__hc={
                minH:+b.toFixed(1), maxH:+(b+a+4*sp+9.2*cr).toFixed(1), swing:+(a+4*sp+9.2*cr).toFixed(1),
                shared:(pineMat.uniforms.uTreeAmp===pineUnderMat.uniforms.uTreeAmp) };
     }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/Ben's eye: the horizon pines' PALETTE, both halves at once — green is the canopy, band is the woody brown under it.
+  // Each is a scale on the approved constants (PINE_GREEN / PINE_BAND) with the hue held, which is the only form of this change
+  // Ben has ever accepted; 1.0 is the pre-08-05 palette he called "MUCH too light". Reads back the LIVE colour as well as the
+  // dial, because both are also multiplied by the hour (0.10 + 0.90*day) and a dial alone says nothing about what is on screen.
+  pineTone(o){ try{ if(o){ if(o.green!=null)_pineTone.g=+o.green; if(o.band!=null)_pineTone.b=+o.band;
+        if(o.amt!=null){ _pineTone.g=+o.amt; _pineTone.b=+o.amt; } }
+      const P=_uPine.value, B=_uPineBand;
+      return { green:+_pineTone.g.toFixed(3), band:+_pineTone.b.toFixed(3),
+               liveGreen:[+P.r.toFixed(4),+P.g.toFixed(4),+P.b.toFixed(4)],
+               liveBand:[+B.r.toFixed(4),+B.g.toFixed(4),+B.b.toFixed(4)],
+               greenLum:+(0.2126*P.r+0.7152*P.g+0.0722*P.b).toFixed(5),
+               bandLum:+(0.2126*B.r+0.7152*B.g+0.0722*B.b).toFixed(5),
+               shared:(pineUnderMat.uniforms.uPineCol.value===_uPine.value) };
+    }catch(e){ return {err:String(e.message||e)}; } },
   bandFog(mul,cap,skirt){ try{ const u=pineUnderMat.uniforms;
       if(mul!=null) u.uFogMul.value=+mul; if(cap!=null) u.uFogCap.value=+cap; if(skirt!=null) u.uBandSkirt.value=+skirt;
       return { mul:+u.uFogMul.value.toFixed(3), cap:+u.uFogCap.value.toFixed(3), skirt:+u.uBandSkirt.value.toFixed(3),
@@ -27771,6 +27835,13 @@ window.__hc={
   // radius is random, so waiting twelve seconds and measuring the furthest brother reports the dice: one run showed 39.7
   // blocks of stray and the next 7.1, from identical code. This asks _monkGoal directly, a few hundred times, and reports
   // how far the targets it hands out actually reach.
+  // #68: the canopy's alpha cutout, live. 0 turns the holes off as far as the rasteriser is concerned (the transparent
+  // texels draw as opaque black), which is the ONLY way to A/B the discard cost against itself — same camera, same
+  // chunks, same frame. Every chunk has its own material clone, so the base and all the clones have to be told.
+  leafCut(v){ try{ const a=(v==null?0.5:+v); leafMat.alphaTest=a; leafMat.needsUpdate=true;
+      let n=0; world.forEach(c=>{ const g=c.group; if(!g) return; const m=g.userData&&g.userData.leaf;
+        if(m&&m.material&&m.material!==leafMat){ m.material.alphaTest=a; m.material.needsUpdate=true; n++; } });
+      return { alphaTest:a, clones:n }; }catch(e){ return {err:String(e.message||e)}; } },
   // ---- #71 AMBIENCE ----
   // The cue distribution at a given hour, without playing anything: a scheduler built from random thresholds cannot be
   // tested one roll at a time. Also reports the mean distance the cue was placed at, which is the other half of the item
@@ -27892,11 +27963,48 @@ window.__hc={
                apHalf: ap?[+ap.x.toFixed(4),+ap.y.toFixed(4)]:null,
                apHalfAngle: ap?+(Math.atan2(Math.min(ap.x,ap.y), depth)).toFixed(5):null,
                ringHalfAngle:0.0099, offAxisAngle:+offAng.toFixed(5), adsT:+(view.adsT||0).toFixed(3),
+               // THE RETICLE DOES NOT HANG ON THE CAMERA AXIS — it hangs on view.aimCam, the true bore line, so "the glass is on
+               // the camera axis" (offAxisAngle) says nothing about whether the DOT is in the middle of the WINDOW. That gap is
+               // what the eye reads as an off-centre holosight, so it gets its own number.
+               // aimCam is CAMERA-LOCAL (captureAim stores it pre-rotation and applies the camera quaternion at use), so it must be
+               // compared against the camera-local glass position and camera-local -z. Comparing it against a world forward read
+               // 0.111 rad on a rifle whose reticle was measurably dead centre.
+               offAimAngle:(()=>{ try{ const A=view.aimCam; if(!A) return null;
+                   const gl=new THREE.Vector3().setFromMatrixPosition(hs.matrixWorld); camera.worldToLocal(gl);
+                   return +(gl.angleTo(A)).toFixed(5); }catch(e){ return null; } })(),
+               aimVsFwd:(()=>{ try{ const A=view.aimCam; return A?+(Math.acos(Math.max(-1,Math.min(1,-A.z/A.length())))).toFixed(5):null; }catch(e){ return null; } })(),
+               retNdc:(()=>{ try{ const R=view.holoRet; if(!R) return null; R.updateWorldMatrix(true,false);
+                   const v=new THREE.Vector3().setFromMatrixPosition(R.matrixWorld).project(camera); return [+v.x.toFixed(4),+v.y.toFixed(4)]; }catch(e){ return null; } })(),
                grp:[+view.group.position.x.toFixed(4),+view.group.position.y.toFixed(4),+view.group.position.z.toFixed(4)],
                grpRot:[+view.group.rotation.x.toFixed(4),+view.group.rotation.y.toFixed(4),+view.group.rotation.z.toFixed(4)],
                dotY:(view.mesh&&view.mesh.userData.dotY)||null, adsZ:(view.mesh&&view.mesh.userData.adsZ)||null,
                bend:+(view.gunBend||0).toFixed(3), boTilt:view._boTilt, nearPush:view._nearPush,
                glassLocal:(()=>{ const v=new THREE.Vector3().setFromMatrixPosition(hs.matrixWorld); return camera.worldToLocal(v).toArray().map(n=>+n.toFixed(4)); })() }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // QA: THE RETICLE AS IT IS ACTUALLY DRAWN — how big it lands on screen, and how strongly. holoDbg answers "is the window on
+  // the axis", which passed for every gun while the frame held almost no red at all: a ring that is one pixel across, or drawn
+  // at a tenth of its opacity, is off-axis by nothing and invisible anyway. ringPx is the radius in DEVICE pixels, worked from
+  // the plane's own half-width and the camera's vertical FOV, so it can be compared with what the screenshot measured.
+  holoRetInfo(){ try{ const R=view.holoRet; if(!R) return {no:'no reticle'};
+      const m=R.material, g=R.geometry&&R.geometry.parameters||{};
+      R.updateWorldMatrix(true,false);
+      const wp=new THREE.Vector3().setFromMatrixPosition(R.matrixWorld);
+      const C=new THREE.Vector3(); camera.getWorldPosition(C);
+      const dist=wp.distanceTo(C);
+      const halfW=(g.width||0)*0.5*R.scale.x;                                       // world half-width of the plane at its distance
+      const px=(canvas.height*0.5)/Math.tan(camera.fov*Math.PI/360);                 // pixels per unit at unit depth
+      return { visible:!!R.visible, opacity:+(m.opacity||0).toFixed(3), transparent:!!m.transparent,
+               blending:m.blending, depthTest:!!m.depthTest, depthWrite:!!m.depthWrite,
+               clipPlanes:(m.clippingPlanes&&m.clippingPlanes.length)||0, localClip:!!renderer.localClippingEnabled,
+               plane:[g.width||null,g.height||null], scale:+R.scale.x.toFixed(4), dist:+dist.toFixed(4),
+               ringPx:+(halfW/dist*px).toFixed(1), fov:+camera.fov.toFixed(2), cvH:canvas.height,
+               map:m.map?[m.map.image&&m.map.image.width, m.map.image&&m.map.image.height]:null,
+               // The bore line is the -z axis of group.matrix * mesh.matrix, so a MESH rotation tilts the aim without touching the
+               // group pose the sight was centred by. That is the only way the window can be on the axis and the dot off it.
+               meshRot:view.mesh?[+view.mesh.rotation.x.toFixed(4),+view.mesh.rotation.y.toFixed(4),+view.mesh.rotation.z.toFixed(4)]:null,
+               meshPos:view.mesh?[+view.mesh.position.x.toFixed(4),+view.mesh.position.y.toFixed(4),+view.mesh.position.z.toFixed(4)]:null,
+               aimCam:view.aimCam?[+view.aimCam.x.toFixed(4),+view.aimCam.y.toFixed(4),+view.aimCam.z.toFixed(4)]:null,
+               adsT:+(view.adsT||0).toFixed(3) }; }
     catch(e){ return {err:String(e.message||e)}; } },
   // QA: the third-person body's arm/hand pose. The rig is module scope and the model is 120 px tall in a bench frame, so
   // "is the rifle shouldered" is not a question a screenshot can answer at that size.
@@ -28282,15 +28390,25 @@ window.__hc={
       return { amt:+globalU.uSkyDirAmt.value.toFixed(3), up:+globalU.uSkyDirUp.value.toFixed(3), dn:+globalU.uSkyDirDn.value.toFixed(3),
                side:+((globalU.uSkyDirUp.value+globalU.uSkyDirDn.value)/2).toFixed(3) };
     }catch(e){ return {err:String(e.message||e)}; } },
-  // QA/bench: the scotopic chroma washout on the atlas materials. amt 0 is the A/B off; lo/hi are on the FACE'S LIGHT LEVEL,
-  // max(blockLight, bakedSky*day), 0..1 — not on the pixel, which is albedo-weighted and left bright sand coloured at midnight.
-  scot(o){ try{ if(o&&o.amt!=null) globalU.uScotAmt.value=+o.amt; if(o&&o.lo!=null) globalU.uScotLo.value=+o.lo; if(o&&o.hi!=null) globalU.uScotHi.value=+o.hi;
-      if(o&&o.on!=null) globalU.uScotAmt.value=o.on?1:0;
+  // QA/bench: the scotopic pass, now on EVERY lit material (three's own shader chunks — see the top of the file). amt 0 is the
+  // A/B off; lo/hi are on the FACE'S LIGHT LEVEL, max(blockLight, bakedSky*day, deliveredDirect, emissive), 0..1 — not on the
+  // pixel, which is albedo-weighted and left bright sand coloured at midnight.
+  // These write a shared Float32Array, so one call moves every material and every per-chunk clone at once with no recompile.
+  scot(o){ try{ if(o&&o.amt!=null) _scotG[0]=+o.amt; if(o&&o.lo!=null) _scotG[1]=+o.lo; if(o&&o.hi!=null) _scotG[2]=+o.hi;
+      if(o&&o.on!=null) _scotG[0]=o.on?1:0;
       // litK: how much DELIVERED direct light counts as a light source touching the surface. 0 is the pre-08-05-late gate,
       // which saw only the baked volume and the sky — placed lamps could not restore colour and the hand did it by radius.
-      if(o&&o.litK!=null) globalU.uScotLitK.value=+o.litK;
-      return { amt:+globalU.uScotAmt.value.toFixed(3), lo:+globalU.uScotLo.value.toFixed(5), hi:+globalU.uScotHi.value.toFixed(5),
-               litK:+globalU.uScotLitK.value.toFixed(3) };
+      if(o&&o.litK!=null) _scotH[0]=+o.litK;
+      // floor: THE CAVE DESCENT (Ben 08-05: "unlit caves at all hours are NOT DARK, and this is because of the mono pass as
+      // well"). What fraction of its own luminance a fully washed, fully sky-occluded surface keeps. 1 restores the old
+      // luminance-preserving wash, which is the A/B for the cave bug; 0 takes an unlit cave to pure black.
+      if(o&&o.floor!=null) _scotH[1]=+o.floor;
+      // `global` is read back off three's own chunk rather than from a flag of mine: it is the one thing a harness cannot infer
+      // from pixels, and it is how a reverted patch or a renamed chunk in a library upgrade gets caught instead of silently
+      // turning the pass off for the 219 materials that have no injection of their own.
+      return { amt:+_scotG[0].toFixed(3), lo:+_scotG[1].toFixed(5), hi:+_scotG[2].toFixed(5), day:+_scotG[3].toFixed(3),
+               litK:+_scotH[0].toFixed(3), floor:+_scotH[1].toFixed(3),
+               global:/HC_SCOT/.test(THREE.ShaderChunk.dithering_fragment) && /HC_SCOT/.test(THREE.ShaderChunk.lights_fragment_end) };
     }catch(e){ return {err:String(e.message||e)}; } },
   cloudShadow(o){ try{ if(o&&o.on!=null) _cloudShadowOn=!!o.on;
       return { on:_cloudShadowOn, amt:+globalU.uCloudShadow.value.toFixed(4), scroll:[+globalU.uCloudScroll.value.x.toFixed(3),+globalU.uCloudScroll.value.y.toFixed(3)],
