@@ -1926,6 +1926,22 @@ function craterDrop(wx,wz){ if(!craters.length) return 0;
 // `let`, not const, so __hc.shelf can turn it off on a live page: SHELF_K=1 is the identity map, and comparing the two is the only
 // way to show experimentally — rather than by reading the arithmetic — that the coast does not move when the shelf changes.
 let SHELF_K=0.35, SHELF_W=14;
+// #69 PLAINS. `let`, like SHELF_K and for the same reason: PLAINS_K=0 is the identity and comparing the two on a live page
+// is the only way to SHOW, rather than argue, that flattening a region did not move the coastline (__hc.plains).
+// PLAINS_DAMP is how much of the ridged/erosion relief a plain gives up — 0.85 leaves a seventh of it, because a biome
+// with none at all is a table, and the item is "flat", not "empty".
+let PLAINS_K=1, PLAINS_DAMP=0.85;
+// THE PLAINS MASK ON ITS OWN, for QA and for anything that wants to know what biome it is standing in. This is the
+// REGIONAL strength, before the height gate surfaceH applies — "is this a plains region", not "how much was this column
+// actually flattened", which is the number a census wants to correlate relief against. It duplicates surfaceH's domain
+// warp, and if the two ever drift apart this reports a region that was never flattened; that shows up as assert-plains
+// losing its correlation, which is the safe direction for a QA-only function to fail in.
+function plainsAt(wx,wz){
+  const wxo = wx + 34*fbm2(wx*0.0041, wz*0.0041, 701, 4);
+  const wzo = wz + 34*fbm2(wx*0.0041+11.3, wz*0.0041+7.7, 733, 4);
+  const mtn = smooth(0.5,0.84, fbm2(wxo*0.0012, wzo*0.0012, 55, 4));
+  return PLAINS_K * smooth(0.46, 0.74, fbm2(wxo*0.0009, wzo*0.0009, 77, 4)) * (1-mtn);
+}
 function surfaceH(wx, wz){
   const kk = wx+','+wz; let h=_hmCache.get(kk); if (h!==undefined) return h;
   // domain warp
@@ -1937,6 +1953,29 @@ function surfaceH(wx, wz){
   let elev = CFG.SEA + 2 + cont*24 + (rdg-0.4)*30*smooth(0.15,0.6,cont+0.3) - ero*7;
   // MOUNTAINS: a low-frequency region mask lifts whole areas into real peaks (rocky caps in genColumn)
   const mtn = smooth(0.5,0.84, fbm2(wxo*0.0012, wzo*0.0012, 55, 4));
+  // ---- #69 FLAT PLAINS, WHICH IS ALSO THE ITEM THAT GIVES RIVERS SOMEWHERE TO BE RIVERS ----
+  // Rivers already exist: the carve below lerps a channel to CFG.SEA-3 wherever a noise field crosses zero. In steep
+  // ground that reads as a gash and in flat ground it reads as a river, which is the strongest argument for this biome.
+  //
+  // It DAMPS the ridged and erosion terms rather than adding a constant, and the arithmetic is written as a blend toward
+  // what is left when you take those two terms away — CFG.SEA+2+cont*24, the continental shape alone, which varies at
+  // 0.0015 and is therefore already flat at the scale a person walks. Identical to damping the terms, easier to bound.
+  //
+  // *** THIS ITEM CAN MOVE LAND, and about twenty structures site off surfaceH — the cathedral wants the highest flattish
+  // dry ground, the village wants a real mountain, the silo wants flat ground. So the mask is gated on the column ALREADY
+  // BEING WELL ABOVE THE SEA, and the gate is a smoothstep rather than a threshold: at SEA+3 the strength is zero, it
+  // reaches full only by SEA+10, and the blend target can never be below SEA+4. No column above sea level can be pushed
+  // under it, no coast can move, and no dry land becomes water — the same by-construction argument the shallow shelf
+  // makes, and assert-plains measures the coastline on 24 bearings with the dial on and off to prove it rather than
+  // argue it. A radius gate was considered and rejected: the real coastline runs from about 220 to 280 blocks out, well
+  // inside ISLE_CORE, so no single radius separates inland from shore. Height does. ***
+  //
+  // Mutually exclusive with mtn, or you get a flat mountain: mtn is already 0..1 over its own region mask.
+  let pl = PLAINS_K * smooth(0.46, 0.74, fbm2(wxo*0.0009, wzo*0.0009, 77, 4)) * (1-mtn);
+  if(pl>0.001){
+    pl *= smooth(CFG.SEA+3, CFG.SEA+10, elev);
+    if(pl>0.001) elev = lerp(elev, Math.max(CFG.SEA+4, CFG.SEA+2+cont*24), pl*PLAINS_DAMP);
+  }
   elev += mtn*mtn*96;                                            // taller real peaks (snow/ice caps painted in genColumn)
   // ISLAND falloff + central highland → a self-contained landmass with a mountainous, snow-capped interior
   const idist=Math.hypot(wx-ISLE_X, wz-ISLE_Z);
@@ -3076,6 +3115,13 @@ function injectAtlas(mat, opts={}){
         // world dimmer, which is the one thing Ben has asked against four times.
         'float _sdir=mix(1.0, mix(uSkyDirDn, uSkyDirUp, 0.5+0.5*normalize(vObjN).y), uSkyDirAmt);\n'+
         'irradiance *= _sdir;\n'+
+        // TRIED AND REJECTED, 2026-08-05, for Ben's "black texels everywhere": relaxing this contrast at night —
+        // `mix(0.80,0.26,uDay)` as the floor, so faces differ by 1.25x instead of 4x once the only thing being multiplied is the
+        // ambient. The reasoning is sound and the effect is not there: pure-black share in the dark ground crop moved 1.063% ->
+        // 1.031% and the frames are indistinguishable. So the night mosaic is NOT this term, and it is not the film grain either
+        // (grain on 0.122% isolated black against 0.067% off, both negligible, bench/tmp-grain-black.mjs). Do not re-run either
+        // theory; what has not been done is locating the black pixels against `?dbg=sky` and `?albedo` at the same vantage, which
+        // is what separates the bake from the texture from the grade.
         'irradiance *= (0.26 + 0.74*pow(vSky,1.15));\n'+   // skylight CONTRAST curve — floor 0.035→0.16 (Ben 07-20) →0.26 with a softer exponent (Ben 07-27, "black pixels everywhere"): under a canopy vSky≈0, and 16% of a 0.6 hemi is indistinguishable from black, so the forest floor and any dappled shade read as solid black holes. Caves/interiors still go dark (they also lose the direct term below) and torches still dominate.
         'vec3 _lpc = vLP + normalize(vObjN)*0.5;\n'+   // FACE→AIR offset (Ben 07-21): a face sits on the solid/air boundary; sampling there blended the solid cell (light 0) with the air cell → half-lit AND a per-cell checkerboard on lit surfaces. Push half a cell along the normal so we sample the LIT air cell at its texel centre.
         // RADIANCE, three channels: the volume carries each light's own colour premultiplied by its level (see LIGHT_PAL and
@@ -14859,8 +14905,18 @@ function _viewLocalBox(root){ const box=new THREE.Box3(), v=new THREE.Vector3(),
 // duplicated sight-sway branches cost.
 // CALLERS MUST REWRITE THE POSE EVERY FRAME: this ADDS an offset, so a component nothing else assigns would accumulate.
 const _boV=new THREE.Vector3(), _boW=new THREE.Vector3(), _boQ=new THREE.Quaternion();
+// THE ARM COMES BACK WITH IT (Ben 08-05: "when items held in the hand are pushed back due to being pushed into a wall, the arm
+// should move with them"). The forearm groups hang off the CAMERA at a fixed rest, so every retraction and every drop this
+// function applies moved the item and left the hand it is supposed to be in exactly where it was — a torch sliding out of a fist
+// as you walk up to a wall. Recorded here rather than recomputed by the caller because this is the only place that knows the
+// total: the retraction, the pivot correction and the keep-in-frame drop are three separate writes to g.position and only their
+// sum is the thing the arm has to match. Zeroed on the early return, or the arm keeps the last wall's offset out in the open.
+const _boP0=new THREE.Vector3();
 function blockOutHand(v, bend, tilt, pull){
-  const g=v.group, m=v.mesh; if(!m || !(bend>0.002)) return 0;
+  const g=v.group, m=v.mesh;
+  if(!m || !(bend>0.002)){ if(v._boDX) v._boDX.set(0,0,0); return 0; }
+  if(!v._boDX) v._boDX=new THREE.Vector3();
+  _boP0.copy(g.position);
   let bb=m.userData._vbb; if(!bb){ bb=_viewLocalBox(m); m.userData._vbb=bb; }
   m.updateMatrix();
   // ONLY THINGS THAT STICK OUT FORWARD GET STOOD UP. A held tool is an extruded SPRITE — a flat card in the xy plane with
@@ -14895,7 +14951,7 @@ function blockOutHand(v, bend, tilt, pull){
   // Camera space is the group's own space, so the same eight corners answer it. Forward is -z, and it is the camera's forward
   // rather than the probe's horizontal one; looking steeply up or down at a wall therefore constrains slightly off-axis,
   // which errs toward retracting more, never less.
-  if(ex.z>1.5) return a;                        // …and a box that size cannot say where the front of the object is either
+  if(ex.z>1.5){ v._boDX.copy(g.position).sub(_boP0); return a; }   // …and a box that size cannot say where the front of the object is either
   const lim=Math.max(0.14,(1.5-bend)-0.12);
   g.updateMatrix();
   const MM=_vmM.multiplyMatrices(g.matrix, m.matrix);
@@ -14917,6 +14973,7 @@ function blockOutHand(v, bend, tilt, pull){
   _boV.set((bb.min.x+bb.max.x)*0.5,(bb.min.y+bb.max.y)*0.5,(bb.min.z+bb.max.z)*0.5).applyMatrix4(MC);
   const halfH=Math.abs(_boV.z)*Math.tan(camera.fov*Math.PI/360), high=_boV.y-0.55*halfH;
   if(high>0) g.position.y-=high;
+  v._boDX.copy(g.position).sub(_boP0);          // the whole journey, for the arm to follow — see the header
   return a; }
 // THE HELD ITEM MUST FIT IN FRONT OF THE EYE. Seeing the INSIDE of a mesh means the near plane has cut through it (Ben 08-04:
 // "i can still see inside the shotgun's stock when it is ads"). MEASURED across all 16 gun variants while aimed: the AR sat
@@ -15177,7 +15234,11 @@ function buildHeldLantern(){ const g=new THREE.Group();
   // AND SOMETHING BEHIND THE GLASS TO SEE. Transparent panes over an empty box read as a wire cage, not a lamp: the flame is
   // 0.12 wide inside a 0.22 box and does not fill it. This is the burner's body — small, unlit-material so it holds its glow in
   // a dark cellar, and inside the pane rather than through it.
-  const core=new THREE.Mesh(new THREE.BoxGeometry(0.1,0.13,0.1), new THREE.MeshBasicMaterial({color:0xffd9a0})); core.position.y=0.06; g.add(core);
+  // AND IT STAYS UNDER THE BLOOM THRESHOLD. At 0xffd9a0 — luma 0.87 — the burner passed the bright-pass gate and flared over its
+  // own cage: measured at night the glass was gone and the lantern read as one white blob, which is a different way of not having
+  // glass. 0xd98a3c is luma 0.50, warm enough to read as a lit wick against the dark and dim enough that what you see through the
+  // pane is the pane.
+  const core=new THREE.Mesh(new THREE.BoxGeometry(0.09,0.12,0.09), new THREE.MeshBasicMaterial({color:0xd98a3c})); core.position.y=0.06; g.add(core);
   for(const o of [[-0.11,-0.11],[0.11,-0.11],[-0.11,0.11],[0.11,0.11]]){ const p=new THREE.Mesh(new THREE.BoxGeometry(0.028,0.32,0.028),metal); p.position.set(o[0],0.1,o[1]); g.add(p); }   // corner posts
   const top=new THREE.Mesh(new THREE.BoxGeometry(0.3,0.05,0.3),metal); top.position.y=0.27; g.add(top);
   const base=new THREE.Mesh(new THREE.BoxGeometry(0.28,0.05,0.28),metal); base.position.y=-0.06; g.add(base);
@@ -15553,7 +15614,7 @@ camera.add(offView.group);
 // The offhand ITEM keeps its low rest (OFF_VIEW_Y): "the left hand down by default" was about the thing you carry, not about
 // the limb. Guns are exempt by construction, not by a test here — updateMainArm/updateOffArm hide these groups for a gun,
 // because a gun carries its own hand (attachGunHand) and that hand rides the weapon.
-const FIST_REST_Y=-0.22;
+const FIST_REST_Y=-0.22, ARM_REST_Z=0.12;   // ARM_REST_Z is also the base the block-out's arm-follow rebases off — see the end of updateView
 const OFF_VIEW_Y=-0.26, OFF_ARM_Y=FIST_REST_Y;
 offView.group.position.set(-0.22,OFF_VIEW_Y,-0.35);
 // Yaw is Ben's, OFFHAND ONLY (-0.45 -> -0.10): "spun counterclockwise a bit" seen from the top down, which about +Y is a
@@ -15671,7 +15732,7 @@ function setOffItem(id){ if(offView.id===id)return; offView.id=id;
 // rotation (0.06,0,0), which is that branch with the swing at zero. The box is symmetric, so no negative scale is needed.
 const offArm={ group:new THREE.Group(), mesh:null };
 camera.add(offArm.group);
-offArm.group.position.set(-0.32,OFF_ARM_Y,0.12);
+offArm.group.position.set(-0.32,OFF_ARM_Y,ARM_REST_Z);
 offArm.group.rotation.set(0.06,0,0);
 function updateOffArm(){
   // A GUN CARRIES ITS OWN HAND (see attachGunHand), so the camera-mounted forearm must stand down for it — decided HERE, in the
@@ -15698,7 +15759,7 @@ function updateOffArm(){
 // all guns" rather than each needing its own placement.
 const mainArm={ group:new THREE.Group(), mesh:null };
 camera.add(mainArm.group);
-mainArm.group.position.set(0.32,OFF_ARM_Y,0.12);      // offArm's pose with x negated
+mainArm.group.position.set(0.32,OFF_ARM_Y,ARM_REST_Z);      // offArm's pose with x negated
 mainArm.group.rotation.set(0.06,0,0);
 mainArm.group.visible=false;
 function updateMainArm(){
@@ -16397,6 +16458,19 @@ function updateView(dt){ updateRecoil(dt);                                      
     // THE LEFT HAND BENDS TOO (Ben 08-04: "for offhand items"). Same probed signal as the right, same pivot arithmetic, at full
     // strength: the offhand never aims, so there is no cheek-weld to relax the tilt toward.
     blockOutHand(offView, view.gunBend||0, BLOCKOUT_TILT, BLOCKOUT_PULL); }
+  // ---- AND NOW THE ARMS GO WHERE THE HANDS WENT ----
+  // Last, because both block-outs must have run: the main hand's is written in two different branches (the pose-blended gun one
+  // and the else for everything else) and the offhand's is above, so this is the only point where all of them are final.
+  // Z IS ASSIGNED, X AND Y ARE ADDED, and that asymmetry is the whole trap. The per-frame arm code writes x and y outright
+  // (x from -0.32-HM.x, y from OFF_ARM_Y+bob) so adding to those is spent each frame — but NOTHING writes the arm's z, which was
+  // set once at construction. A += there compounds every frame the item is bent, and the arm walks off behind the eye at 60 Hz.
+  // That is the same accumulation that once span the offhand gun out of frame; here it is avoided by rebasing off ARM_REST_Z.
+  { const dm=mainArm.group.visible?view._boDX:null;
+    mainArm.group.position.z=ARM_REST_Z+(dm?dm.z:0);
+    if(dm){ mainArm.group.position.x+=dm.x; mainArm.group.position.y+=dm.y; }
+    const dof=offArm.group.visible?offView._boDX:null;
+    offArm.group.position.z=ARM_REST_Z+(dof?dof.z:0);
+    if(dof){ offArm.group.position.x+=dof.x; offArm.group.position.y+=dof.y; } }
   if(view.flashT>0 || offView.flashT>0){ const f=Math.max(view.flashT,offView.flashT)/0.06;
     const _lit = (view.flashT>0 ? fl : null) || (offView.mesh?_findFlash(offView.mesh):null);
     if(_lit) _lit.getWorldPosition(muzzleLight.position);
@@ -26551,6 +26625,41 @@ window.__hc={
   // proven-failing control for the shallow-band numbers, and the way to show the coast is unmoved by measuring both.
   shelf(k,w){ try{ if(k!=null) SHELF_K=+k; if(w!=null) SHELF_W=+w; _hmCache.clear();
       return { k:SHELF_K, w:SHELF_W }; }catch(e){ return {err:String(e.message||e)}; } },
+  // #69: the plains dial, live. Clearing the heightmap cache is the whole point — without it surfaceH keeps answering
+  // from the setting you just changed away from, and an A/B of the coastline compares a number with itself.
+  wet(x,z){ const h=surfaceH(x,z); return {h, w:h<=CFG.SEA}; },   // #69: the one bit that must not flip when the plains dial moves
+  riverNear(x,z,r){ const R=r||120;                                // #69/#74: is there a channel in this region, and does it carry a current
+    for(let d=0;d<=R;d+=4)for(let a=0;a<16;a++){ const th=a*0.3927, px=Math.round(x+Math.sin(th)*d), pz=Math.round(z+Math.cos(th)*d);
+      const h=surfaceH(px,pz); if(h>CFG.SEA-1) continue;            // a carved channel bottoms out at SEA-3
+      const v=flowVec(px+0.5,pz+0.5);
+      return { found:true, x:px, z:pz, h, dist:d, flow:+Math.hypot(v.x,v.z).toFixed(3), river:Math.abs(_riverField(px,pz))<0.05,
+               plains:+plainsAt(px,pz).toFixed(3) }; }
+    return { found:false }; },
+  // The mask's own distribution, which is the first thing to look at when a biome does not appear: fbm2 returns -1..1, so a
+  // smoothstep window picked for a 0..1 field selects nothing at all.
+  plainsHist(n,step){ const N=n||24, ST=step||64; let mn=9, mx=-9, dry=0; const bins=[0,0,0,0,0]; let hMax=0, hMaxPl=0;
+    for(let i=0;i<N;i++)for(let j=0;j<N;j++){ const x=Math.round(ISLE_X-(N-1)/2*ST+i*ST), z=Math.round(ISLE_Z-(N-1)/2*ST+j*ST);
+      const h=surfaceH(x,z); if(h<=CFG.SEA) continue; dry++;
+      const p=plainsAt(x,z); mn=Math.min(mn,p); mx=Math.max(mx,p); bins[Math.min(4,Math.floor(p*5))]++;
+      if(h>hMax){ hMax=h; hMaxPl=p; } }
+    return { dry, min:+mn.toFixed(3), max:+mx.toFixed(3), bins, frac:+(bins.slice(2).reduce((a,b)=>a+b,0)/(dry||1)).toFixed(3),
+             highest:hMax, highestPl:+hMaxPl.toFixed(3) }; },
+  plains(k,d){ try{ if(k!=null) PLAINS_K=+k; if(d!=null) PLAINS_DAMP=+d; _hmCache.clear();
+      return { k:PLAINS_K, damp:PLAINS_DAMP }; }catch(e){ return {err:String(e.message||e)}; } },
+  // How flat is the ground, and is it flat because it is a plain? Mean absolute height difference between neighbours over
+  // a patch, with the mask's own strength at the centre, so "plains are flatter than the rest" becomes two numbers.
+  relief(x,z,r){ const R=r||24; let s=0,n=0,lo=1e9,hi=-1e9;
+    for(let ox=-R;ox<=R;ox+=2)for(let oz=-R;oz<=R;oz+=2){ const h=surfaceH(x+ox,z+oz);
+      if(h>CFG.SEA){ s+=Math.abs(h-surfaceH(x+ox+2,z+oz)); n++; lo=Math.min(lo,h); hi=Math.max(hi,h); } }
+    return { x,z, samples:n, meanStep:n?+(s/n).toFixed(3):null, span:n?hi-lo:null, plains:+plainsAt(x,z).toFixed(3) }; },
+  // Walk out from the player and report the flattest and roughest dry patches, with each one's mask strength — the
+  // correlation between the two IS the item, and one hand-picked spot proves nothing about a biome.
+  plainsCensus(n,step){ const N=n||10, ST=step||96, out=[];
+    for(let i=0;i<N;i++)for(let j=0;j<N;j++){ const x=Math.round(ISLE_X-(N-1)/2*ST+i*ST), z=Math.round(ISLE_Z-(N-1)/2*ST+j*ST);
+      const h=surfaceH(x,z); if(h<=CFG.SEA+3) continue;
+      out.push({x,z,h,pl:+plainsAt(x,z).toFixed(3), relief:+this.relief(x,z,16).meanStep }); }
+    out.sort((a,b)=>b.pl-a.pl);
+    return { n:out.length, plainest:out.slice(0,5), least:out.slice(-5).reverse() }; },
   shoreProfile(nBearings, deep){ const N=nBearings|0||16, D=(deep!=null?deep:4);
     try{ const out=[];
       for(let b=0;b<N;b++){ const th=b/N*Math.PI*2, cs=Math.cos(th), sn=Math.sin(th);
