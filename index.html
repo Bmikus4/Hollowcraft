@@ -19186,11 +19186,11 @@ function brEnter(){ if(BR.inside)return; const d=BR.door;
   player.pos.set(BR_ENTRY.x, brEntryFloorY()+1.2, BR_ENTRY.z); player.vel.set(0,0,0);
   brStartAudio(); BR.paleFlees=0; BR.pale={state:'dormant',cd:45+Math.random()*45,t:0}; }   // The Pale wakes 45-90s in; the flee counter (2 retreats, then it commits) resets per visit
 function brExit(){ if(!BR.inside)return; const r=BR.returnPos||{x:0,y:BR_FLOOR,z:0,yaw:0};
-  brStopAudio(); brResumeMusic(); brRestoreAtmo(); brEnvCacheClear(); brClearEnv(); BR.rooms=[]; brClearExit(); brHidePale(); brPoolLightsOff(); BR.inside=false;
+  brStopAudio(); brResumeMusic(); brRestoreAtmo(); brEnvCacheClear(); brClearEnv(); BR.rooms=[]; brClearExit(); brHidePale(); brPoolLightsOff(); applyOverworldShadowLights(); BR.inside=false;
   player.pos.set(r.x, (typeof groundYAt==='function')?groundYAt(r.x,r.z)+1.1:r.y+1.1, r.z); player.vel.set(0,0,0);
   if(typeof streamChunks==='function')for(let i=0;i<6;i++)streamChunks(160,160);
   if(typeof flashName==='function')flashName(BR.hasKey?'you step back into the world — the Key to Olympus is yours':'you step back into the world'); }
-function brForceLeaveOnDeath(){ brStopAudio(); brResumeMusic(); brRestoreAtmo(); brEnvCacheClear(); brClearEnv(); BR.rooms=[]; brClearExit(); brHidePale(); brPoolLightsOff(); BR.inside=false; BR.hasKey=false; BR.sealed=true; }
+function brForceLeaveOnDeath(){ brStopAudio(); brResumeMusic(); brRestoreAtmo(); brEnvCacheClear(); brClearEnv(); BR.rooms=[]; brClearExit(); brHidePale(); brPoolLightsOff(); applyOverworldShadowLights(); BR.inside=false; BR.hasKey=false; BR.sealed=true; }
 
 // ---- MINIMAP → dead static (one 64px noise texture, scrolled; no per-frame noise gen) ----
 let _brNoise=null;
@@ -20657,7 +20657,7 @@ function brPrecompileStep(){
       chunkRoot.visible=false; if(typeof skyDome!=='undefined') skyDome.visible=false;
       // the light pool exactly as brxUpdateLights would leave it standing in a lit room
       for(let i=0;i<BR.lightPool.length;i++){ const L=BR.lightPool[i];
-        L.visible = PERF.brStableLightCount ? true : (i<4);
+        L.visible = true;                                 // the count is fixed for the process now — see LIGHT_POOL
         L.intensity = i<4 ? 12.0 : 0;
         L.position.set(BR_ENTRY.x + (i%4)*3, BR_WY1-0.9, BR_ENTRY.z + ((i/4)|0)*3); }
       // every chunk group the prewarm built, attached where the renderer can see it
@@ -20709,15 +20709,26 @@ function brPrecompileStep(){
   S.done=true;
   return 1;
 }
+// castShadow IS A SHADER KEY and shadow.autoUpdate is the cost — three keys every lit program on numPointLightShadows
+// exactly as it keys on numPointLights, so switching a caster on when you walk into the halls relinks the whole set just
+// as surely as adding a light does. This used to promote 2 pool slots to casters on entry while the overworld tier had
+// promoted 1, which is a second program variant on top of the count mismatch LIGHT_POOL describes.
+// So: WHICH slots cast is decided once, by applyOverworldShadowLights at boot, and never moved again. This only retunes
+// the ones already casting for a room-sized space and drives the per-frame WORK through autoUpdate, which is free.
 function brApplyShadowLights(){
   if(!BR.lightPool) return 0;
-  const want = (CFG.quality==='Low') ? 0 : Math.min(BR_SHADOW_LIGHTS, PERF.brShadowLights|0);
+  const allow = (CFG.quality==='Low') ? 0 : Math.min(BR_SHADOW_LIGHTS, PERF.brShadowLights|0);
   const SS = CFG.quality==='Ultra'?1024:512;
+  let cast=0;
   for(let i=0;i<BR.lightPool.length;i++){ const L=BR.lightPool[i];
-    if(i<want){ L.castShadow=true; L.shadow.mapSize.set(SS,SS);
-      L.shadow.bias=-0.006; L.shadow.normalBias=0.06; L.shadow.camera.near=0.3; L.shadow.camera.far=26; }
-    else L.castShadow=false; }
-  return want;
+    if(!L.castShadow) continue;                          // never promote or demote — the count is fixed for the process
+    cast++;
+    if(cast<=allow){ L.shadow.mapSize.set(SS,SS);
+      L.shadow.bias=-0.006; L.shadow.normalBias=0.06; L.shadow.camera.near=0.3; L.shadow.camera.far=26;   // the halls are rooms, not a 36-block torch reach
+      L.shadow.autoUpdate=false; }                       // brxUpdateLights raises needsUpdate on the frames a tube is lit
+    else L.shadow.autoUpdate=false;
+  }
+  return Math.min(cast, allow);
 }
 // ---- THE INSTALLER (Ben 07-27) ----
 // One group PER CHUNK, each offset in Y by its storey. That offset is what makes stacked floors nearly free for
@@ -23120,7 +23131,22 @@ function _seaYaw(x,z){ let best=null; for(let k=0;k<24;k++){ const th=k*0.2618; 
 // later monk is inert. So the first two kills ARE the anger — the sky turns, a toll sounds, the beast is roused — and
 // the third is the sacrifice. The crypt ritual is untouched and still converts on ONE offering; this is the second,
 // slower road to the same creature, and it costs three.
-const MONK_WRATH_KILLS=3, MONK_CAP=3;                 // three alive at a holy site, three kills to the conversion
+const MONK_WRATH_KILLS=3;                             // three kills to the conversion. NOT changed by #55: with 4-6 monks in a room this is easier to trip by accident than it was under a global cap of 3, Ben has been told, and he has not asked for a different number.
+// #55 — A MONASTERY IS A COMMUNITY, AND IT WAS THREE MEN SHARED BETWEEN THREE BUILDINGS.
+// What was wrong: MONK_CAP was 3 GLOBAL, so the cathedral, the chapel and the ruin competed for the same three bodies —
+// walk from one to the other and the monks followed you by respawning. They also trickled in one per 22 seconds, so a
+// monastery you approached was never full, and _monkGoal's 7-block cloister was a soft suggestion they drifted out of.
+// Now each site owns a quota and fills it AS A GROUP on the first tick you are in range, and the leash is the building's
+// own footprint. Ben's numbers, cathedral revised down by him from 8-12: chapel 3-4, cathedral/monastery 4-6, ruin 1.
+const MONK_SITES={ cathedral:{lo:4,hi:6,r:11}, chapel:{lo:3,hi:4,r:8}, ruin:{lo:1,hi:1,r:5} };
+const MONK_MAX=14;                                    // a backstop against a fourth site appearing and nobody noticing; not a design number
+// Per-site state, keyed by the ids above: the quota rolled once so it does not flicker between ticks, and ROUSED — set
+// when any monk of that site is fired upon, which is the one thing that lets that community leave its ground.
+const _monkSite={};
+function _monkSiteOf(id,x,z,r){ let s=_monkSite[id];
+  if(!s){ const q=MONK_SITES[id]; s=_monkSite[id]={id, quota:q.lo+((Math.random()*(q.hi-q.lo+1))|0), roused:false}; }
+  s.x=x; s.z=z; s.r=r; return s; }
+function _monkAlive(id){ let n=0; for(const a of animals) if(a.type==='monk' && !a.dead && a.site===id) n++; return n; }
 const MONK_CHANTS=[   // KJV, chosen for a man who lives on a rock in the sea and can see what is coming
   'The Lord is my shepherd; I shall not want.',
   'Yea, though I walk through the valley of the shadow of death, I will fear no evil.',
@@ -23151,16 +23177,28 @@ function monkChant(a){
 // A monk's wandering is a cloister, not a pasture: he keeps to his own church. Half the time he returns null, which the
 // generic animal loop reads as "stand still" — a monk who is always walking somewhere does not read as a monk.
 function _monkGoal(a){ const h=a.home||{x:a.x,z:a.z};
-  if(Math.hypot(a.x-h.x,a.z-h.z)>7) return {x:h.x+(Math.random()-0.5)*3, z:h.z+(Math.random()-0.5)*3};   // drifted out of the cloister → walk back in
+  // #55: THE LEASH IS THE BUILDING, AND IT IS HARD. It was a flat 7 blocks for every site and only a nudge — a monk past
+  // it was sent back but every wander target was drawn from a ring that could sit outside it, so a cathedral's community
+  // slowly bled onto the hillside. The radius is now the site's own footprint (11 for the cathedral, 8 for the chapel, 5
+  // for the ruin) and no target is ever generated beyond it.
+  // ROUSED IS THE ONE EXIT. Ben: they do not leave unless one is fired upon. Once a shot lands on any monk of a site,
+  // that whole community is free of its ground — and it stays free, because a congregation that wandered back into
+  // formation after being shot at would read as nothing having happened.
+  const S=a.site?_monkSite[a.site]:null;
+  if(S && S.roused){ if(Math.random()<0.25) return null;
+    const ang=Math.random()*6.283, r=6+Math.random()*18; return {x:a.x+Math.cos(ang)*r, z:a.z+Math.sin(ang)*r}; }
+  const L=a.leashR||7;
+  if(Math.hypot(a.x-h.x,a.z-h.z)>L) return {x:h.x+(Math.random()-0.5)*3, z:h.z+(Math.random()-0.5)*3};   // drifted out of the cloister → walk back in
   if(Math.random()<0.45) return null;
-  const ang=Math.random()*6.283, r=1.5+Math.random()*4.5;
+  const ang=Math.random()*6.283, r=1.5+Math.random()*Math.max(1,L-1.5);
   return {x:h.x+Math.cos(ang)*r, z:h.z+Math.sin(ang)*r}; }
 function spawnMonkAt(x,z,home){
   const gy=groundYAt(x,z); if(gy<=CFG.SEA+1) return null;
   if(solidAt(Math.floor(x),Math.floor(gy),Math.floor(z)) || solidAt(Math.floor(x),Math.floor(gy)+1,Math.floor(z))) return null;   // never inside masonry — the churches are walls and pillars, and a monk in a pillar is a monk nobody ever meets
   const mesh=buildAnimalMesh('monk',false); mesh.position.set(x,gy,z);
   const a={type:'monk',mesh,x,y:gy,z,yaw:Math.random()*6.283,hp:ANIMALS.monk.hp,timer:0,flee:0,dead:false,
-    home:home||{x,z}, chantT:4+Math.random()*16, _chant:0};
+    home:home||{x,z}, chantT:4+Math.random()*16, _chant:0,
+    site:(home&&home.site)||null, leashR:(home&&home.r)||7};   // #55: which community he belongs to, and how far his own church lets him walk
   animals.push(a); return a; }
 // Try a ring of spots around a holy site; the first one on the site's OWN storey wins.
 //
@@ -26375,6 +26413,12 @@ window.__hc={
         easedDist:+_xhDist.toFixed(2),
         offGun:!!(armor[EQ_OFF] && ITEMS[armor[EQ_OFF].id] && ITEMS[armor[EQ_OFF].id].gun),
         mainGun:!!(ITEMS[view.id]&&ITEMS[view.id].gun),
+        // WHICH BARREL the ring is riding. Needed because "it follows the gun" cannot be read off the offset alone: the offhand's
+        // hip pose has no yaw or pitch of its own, so its axis points straight down the screen and its honest offset is ~0 — which
+        // is indistinguishable from the ring not following anything at all.
+        axis: _tpsAct ? 'tps' : ((ITEMS[view.id]&&ITEMS[view.id].gun) ? 'main'
+              : ((armor[EQ_OFF] && ITEMS[armor[EQ_OFF].id] && ITEMS[armor[EQ_OFF].id].gun) ? 'off' : null)),
+        airborne:!player.onGround,
         aimCam:view.aimCam?[+view.aimCam.x.toFixed(4),+view.aimCam.y.toFixed(4),+view.aimCam.z.toFixed(4)]:null,
         offAxisDeg:view.aimCam?+(Math.acos(Math.max(-1,Math.min(1,-view.aimCam.z)))*57.29578).toFixed(3):null,
         // holoPos, NOT holo: this object already ends with `holo` as a VISIBILITY boolean and with its own `adsT`, and later keys

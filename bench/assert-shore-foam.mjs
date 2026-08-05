@@ -56,7 +56,10 @@ function foamShare(file,c,th=120){
     await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`, null, {timeout:240000});
     await page.evaluate(`__hc.lock(true); __hc.pinScene(); __hc.cmdRun('/gamemode creative'); __hc.cmdRun('/fly on');`);
     const F0=await page.evaluate(`__hc.foam()`);
-    check('foam is on by default', F0.amt>0.99, JSON.stringify(F0));
+    // OFF BY DEFAULT since Ben said "I want to get rid of the white foam" (08-05). The term stays measured, because he may want it
+    // back quietly at a lower strength, and a feature nobody can price is a feature nobody can bring back.
+    check('foam is OFF by default', F0.amt<0.01, JSON.stringify(F0));
+    await page.evaluate(`__hc.foam({amt:1})`); await sleep(300);
     const S=await page.evaluate(`__hc.st()`);
     // THE SPAWN SHORE, from low and close: the waterline has to fill a band of the frame, and from a height it is a thin line that
     // no crop can separate from the sand behind it. The bearing is found by walking out from spawn until the ground is at sea
@@ -105,7 +108,13 @@ function foamShare(file,c,th=120){
     // 0.105% while the band's mean moved 32.9 -> 42.9: foam mixed at 0.75 into water that is itself dark does not clear a
     // luminance threshold of 120, so the test was measuring nothing while the feature worked. The share is still printed, because
     // it is what would catch a foam that had become pure white.
-    check('the waterline brightens', sn.mean > so.mean + 2.0, `mean ${so.mean} -> ${sn.mean}`);
+    // NO LONGER A CLAIM, and the reason is worth keeping. The foam is off in shipping, and the same change that made the water
+    // transparent (uFresCap 0.80 -> 0.42) means this crop is now dominated by the SAND under the water: its mean went 50 -> 84
+    // between runs, so an additive foam term of 0.55 moves it by a fraction of what it moved before and a fixed threshold here
+    // measures the seabed's brightness rather than the foam. What survives as a check is the shape — the waterline has to move more
+    // than the open water does — which is what distinguishes surf from a wash whatever the water is doing.
+    console.log(`  waterline delta ${(sn.mean-so.mean).toFixed(2)} against open water ${(dN.mean-dO.mean).toFixed(2)}`);
+    check('turning it on moves the waterline more than the open sea', (sn.mean-so.mean) > (dN.mean-dO.mean), `${(sn.mean-so.mean).toFixed(2)} vs ${(dN.mean-dO.mean).toFixed(2)}`);
     check('the open water does not', Math.abs(dN.mean-dO.mean) < 1.5, `mean ${dO.mean} -> ${dN.mean}`);
     // AND IT IS NOT A WHITEWASH. Foam that covers the whole shore band is surf everywhere, which is the failure mode of a
     // depth-driven term with too wide a curve.
