@@ -39,7 +39,7 @@ const ARGS=['--no-sandbox','--enable-unsafe-swiftshader','--use-gl=angle','--dis
     await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
     await page.evaluate(`window.__hcBR.enter()`); await sleep(5000);
 
-    const rows=[]; const seen=new Set();
+    const rows=[]; const seen=new Set(); const fits=[];
     for(const seed of [99991,1234567,31337,4242,777]){
       await page.evaluate(`window.__hcBR.seed(${seed})`); await sleep(2200);
       for(const [dx,dz] of [[0,0],[240,0],[-240,-240]]){
@@ -48,6 +48,8 @@ const ARGS=['--no-sandbox','--enable-unsafe-swiftshader','--use-gl=angle','--dis
         // maze; identical counts across three teleports is the tell, so the chunk is printed with each sample.
         const st=await page.evaluate(`(()=>{const s=window.__hcBRX.stats();return {chunk:s.chunk,walls:s.walls};})()`);
         const L=await page.evaluate(`window.__hcBR.lintels()`);
+        const F=await page.evaluate(`window.__hcBR.doorFit()`);
+        for(const f of F) fits.push(f);
         const doors=L.filter(l=>l.kind==='door');
         for(const d of doors){ const k=(d.arch?'arch':'flat')+' span'+d.span.toFixed(1)+' head'+d.y0.toFixed(2);
           rows.push(k); seen.add(k); }
@@ -57,6 +59,21 @@ const ARGS=['--no-sandbox','--enable-unsafe-swiftshader','--use-gl=angle','--dis
                     '  crawl='+L.filter(l=>l.kind==='crawl').length+'  tunnel='+L.filter(l=>l.kind==='tunnel').length);
       }
     }
+    // DOES THE LEAFWORK FILL THE OPENING. A varied width is only correct if the leaves still reach both jambs, and the
+    // single-leaf branch is newly reachable (dbl flips at dw 1.953, and the old fixed width 2.2 was always double).
+    const built=fits.filter(f=>f.leafW!==null);
+    const gaps=built.filter(f=>Math.abs(f.gap)>0.001);
+    const singles=built.filter(f=>!f.dbl), doubles=built.filter(f=>f.dbl);
+    const wrongPivots=built.filter(f=>f.pivots!==f.leaves);
+    console.log('\nhung doors '+fits.length+', of which built '+built.length+
+                '   single-leaf '+singles.length+' ('+(100*singles.length/Math.max(1,built.length)).toFixed(1)+'%)'+
+                '   double '+doubles.length);
+    console.log('leaf span vs opening: '+gaps.length+' with a gap over 1mm'+(gaps.length?'  worst '+gaps.map(g=>g.gap).sort((a,b)=>Math.abs(b)-Math.abs(a))[0]:'')+
+                '   pivot count wrong on '+wrongPivots.length);
+    if(singles.length) console.log('  narrowest single: '+JSON.stringify(singles.sort((a,b)=>a.dw-b.dw)[0]));
+    if(doubles.length) console.log('  widest double:    '+JSON.stringify(doubles.sort((a,b)=>b.dw-a.dw)[0]));
+    if(gaps.length) console.log('  sample gap: '+JSON.stringify(gaps[0]));
+
     const tally=new Map(); for(const k of rows) tally.set(k,(tally.get(k)||0)+1);
     const sorted=[...tally.entries()].sort((p,q)=>q[1]-p[1]);
     console.log('\n'+rows.length+' doorway headers, '+sorted.length+' distinct (arch, span, head)');
