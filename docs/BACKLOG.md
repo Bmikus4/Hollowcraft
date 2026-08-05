@@ -12,6 +12,9 @@
 - `shore` at 7.70 ms, 805 draw calls, unattributed
 
 ## Awaiting Ben's eye (shipped)
+- Scotopic pass is global: patched into three's own lit shader chunks, so every material takes it, not the six atlas ones
+- Unlit caves descend to black instead of parking on their own luma — at every hour, gated on the face's sky openness
+- Horizon pines darker again, both halves: PINE_GREEN and PINE_BAND at 60%, hue held (`__hc.pineTone`)
 - Entity contact shadows: one instanced quad per creature, at its own feet, one draw call
 - Night chroma: the light you CARRY brings the colour back, and the washout is 0.85 not 1.0
 - Shoreline foam: patchy surf at the waterline, driven off the water's own depth

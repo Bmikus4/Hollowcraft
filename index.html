@@ -2345,16 +2345,28 @@ function noTreeZones(){ if(_NOTREE) return _NOTREE;
 // of that is a bigger and far riskier change than the shapes, and it is the wrong one to make first: shape is what you
 // see from fifty blocks away. Birch bark is a follow-up with its own risk, not a detail of this one.
 const TREE_PINE=0, TREE_BROAD=1, TREE_SLENDER=2;
+// A WOOD IS ONE KIND OF TREE (Ben 08-05: "making regions of the forest with them in it ... it should not be a mix").
+// The first version rolled the species per TRUNK off the tree's own rng, which gives a salt-and-pepper forest: every
+// stand is a third pine, a third oak, a third birch, and no part of the island looks like anywhere in particular. This
+// is a REGION field instead — one low-frequency noise, 0.0009, so a patch runs about a hundred and fifty blocks — and
+// every tree in a region reads the same number. Nothing random is left in the choice at all: two neighbouring trunks
+// cannot disagree, which is the whole point.
+// The band edges are the only softness: within a couple of hundredths of a boundary the field decides, so a wood does
+// not end on a ruler-straight line, but it still ends.
 function _treeKind(wx,wz,h,rng){
   // The treeline is not negotiable: high ground stays conifer, and so does anywhere the mountain mask is doing work.
   if(h >= CFG.SEA+34) return TREE_PINE;
-  const pl = (typeof plainsAt==='function') ? plainsAt(wx,wz) : 0;
-  const f = fbm2(wx*0.0016, wz*0.0016, 613, 3);          // the grove field: which broadleaf a region favours
-  if(pl > 0.35) return (f > 0.02) ? TREE_BROAD : TREE_SLENDER;   // a plain is a meadow with round trees in it
-  const low = 1 - clamp((h - (CFG.SEA+6)) / 26, 0, 1);   // 1 at the shore, 0 by SEA+32
-  if(rng() < low*0.72) return (f > -0.06) ? TREE_BROAD : TREE_SLENDER;
-  return TREE_PINE;
+  const f = fbm2(wx*0.0009, wz*0.0009, 613, 3);   // THE REGION FIELD. Measured over the island: about -0.35..+0.30.
+  if(f < -0.15) return TREE_PINE;                 // the pine belt, and it still owns the high ground above it
+  if(f <  0.02) return TREE_BROAD;                // oak country: the widest band, and it is the one the plains sit in
+  return TREE_SLENDER;                            // birch groves, the smallest share
 }
+// Which BLOCKS a kind is built from. The pine keeps the original ids, so every pine already standing in a save is made
+// of the same block it was made of yesterday; the two new species get the new pairs. [shell, core, log].
+function _treeBlocks(kind){
+  return kind===TREE_BROAD   ? [BID.oak_leaves,   BID.oak_leaves_core,   BID.oak_log]
+       : kind===TREE_SLENDER ? [BID.birch_leaves, BID.birch_leaves_core, BID.birch_log]
+       : [BID.leaves, BID.leaves_core, BID.log]; }
 function _pineShape(wx,wz){ const rng=tileRng((wx*92821^wz*68917)>>>0);
   const th = Math.max(10, Math.round((18 + (rng()*14|0)) * (0.9 + rng()*0.25)));      // 18..31 base, then ±~12% random size fluctuation
   const thick = rng()<0.15?1:0;                        // mostly single-trunk pines (was 35% chunky) → thinner on average
@@ -2452,8 +2464,9 @@ function pineEmit(wx,wz,emit){
   // 22-block circles around every structure. What must never happen is a TRUNK inside a building's footprint.
   if (noTreeHit(wx,wz,thick?1:0)) return false;
   // trunk: each footprint column grows from its OWN floor up to the canopy (fills up to 2 blocks over an overhang)
+  const [LEAF_SHELL, LEAF_CORE, LOG_ID] = _treeBlocks(sh.kind);   // #68: this tree's own species blocks
   for(const fp of foot){ const gy=Math.min(h, surfaceH(wx+fp[0],wz+fp[1]));
-    for(let y=gy+1; y<=h+th; y++) emit(wx+fp[0], y, wz+fp[1], BID.log, true); }
+    for(let y=gy+1; y<=h+th; y++) emit(wx+fp[0], y, wz+fp[1], LOG_ID, true); }
   // ---- BROADLEAF AND SLENDER: a round canopy, branches under it, and an irregular rim ----
   if(sh.kind!==TREE_PINE){
     const cr=sh.crad, top=th+cr-1, cy=th;                 // canopy centre sits at the top of the trunk
@@ -2462,7 +2475,7 @@ function pineEmit(wx,wz,emit){
     if(sh.kind===TREE_BROAD){ const nb=3+(rng()*3|0);
       for(let b=0;b<nb;b++){ const a=(b/nb)*6.283+rng()*0.9, len=1+(rng()*2|0), by=th-1-(rng()*2|0);
         for(let s=1;s<=len;s++){ const bx=Math.round(Math.cos(a)*s), bz=Math.round(Math.sin(a)*s);
-          emit(wx+bx, h+by+(s===len?1:0), wz+bz, BID.log, true); } } }
+          emit(wx+bx, h+by+(s===len?1:0), wz+bz, LOG_ID, true); } } }
     // A ROUND CANOPY WITH A LUMPY EDGE. The radius is modulated by a world-space field rather than by the per-tree rng,
     // so the lumps are consistent between the generator and the structure sweeps that re-run it, and neighbouring trees
     // in a grove do not share the same silhouette.
@@ -2477,13 +2490,13 @@ function pineEmit(wx,wz,emit){
         if(ox===0&&oz===0&&yy<top-1) continue;                      // the trunk keeps its column
         const core=(rr<=rad-2.0) && y>-cr+1 && y<cr;                // interior → the opaque core block, same as the pine
         if(!core && rng()<0.06) continue;                           // a few natural gaps in the shell
-        emit(wx+ox, h+yy, wz+oz, core?BID.leaves_core:BID.leaves, false);
+        emit(wx+ox, h+yy, wz+oz, core?LEAF_CORE:LEAF_SHELL, false);
       }
     }
     // A FEW HANGING LEAVES under the rim: the underside of a broadleaf is not a flat disc, and this is what you see
     // standing under one.
     if(sh.kind===TREE_BROAD) for(let k=0;k<4;k++){ const a=rng()*6.283, r=Math.max(1,cr-1);
-      emit(wx+Math.round(Math.cos(a)*r), h+cy-cr-1, wz+Math.round(Math.sin(a)*r), BID.leaves, false); }
+      emit(wx+Math.round(Math.cos(a)*r), h+cy-cr-1, wz+Math.round(Math.sin(a)*r), LEAF_SHELL, false); }
     return true;
   }
   // conical layered canopy
@@ -2497,10 +2510,10 @@ function pineEmit(wx,wz,emit){
       const rr=Math.sqrt(ox*ox+oz*oz);
       const core=(rr<=rad-3) && (y>base+2) && (y<th-1);   // interior (>3 blocks inward, not top/bottom) → solid core
       if (!core && rng()<0.05) continue;               // outer shell: a few natural gaps; core stays solid
-      emit(wx+ox, h+y, wz+oz, core?BID.leaves_core:BID.leaves, false);
+      emit(wx+ox, h+y, wz+oz, core?LEAF_CORE:LEAF_SHELL, false);
     }
   }
-  emit(wx, h+th+3, wz, BID.leaves, false);
+  emit(wx, h+th+3, wz, LEAF_SHELL, false);
   return true;
 }
 function decorate(c){
@@ -20425,8 +20438,7 @@ function brxGenerate(o){ BR.rooms=[]; BR.walls=[]; BR.doors=[]; BR.lintels=[]; B
       if(_nearSpawn(px,pz,2))continue; if(!_clearAt(px,pz))continue;
       const rad = kind===5 ? (1.1+rng()*1.0) : 0.62;
       BR.props.push({x:px, z:pz, kind, rot, r:rad});
-      BR.boxes.push({x:px, z:pz, hx:rad, hz:rad}); } }
-  BR._buried=(BR._buried||0)+brxDropBuriedWalls(); }
+      BR.boxes.push({x:px, z:pz, hx:rad, hz:rad}); } } }
 // A WALL STANDING ENTIRELY INSIDE ANOTHER WALL. A stairwell's side lining is emitted at c0/c1 = floor/ceil(cross +/-
 // BRX_STAIR_HW), and room walls sit on the BR_CS grid — so when a well sits centred in a cell those two coordinates are
 // the SAME line, and the lining lays a second 8 m x 8 m face exactly over the room wall already there. One material, one
@@ -20438,6 +20450,10 @@ function brxGenerate(o){ BR.rooms=[]; BR.walls=[]; BR.doors=[]; BR.lintels=[]; B
 // thickness — a pair overlapping by ~BR_WT is the deliberate corner growth in brxEmitWall and must be left alone.
 // Bucketed by wall LINE (axis + fixed coordinate + storey floor), because the naive pass is O(walls^2) per chunk.
 function brxDropBuriedWalls(){ const W=BR.walls; if(!W||W.length<2) return 0;
+  // IDEMPOTENT, because brxUnion re-pushes the SAME record objects on every stream. Splicing only touches BR.walls, so the
+  // next union starts from the chunk records again — but `by` is written ON the record and would otherwise be re-raised
+  // relative to an already-raised base. `_by0` holds the original (usually undefined) and every run resets to it first.
+  for(let i=0;i<W.length;i++){ const w=W[i]; if(w._by0===undefined) w._by0=(w.by!==undefined?w.by:null); w.by=(w._by0===null?undefined:w._by0); }
   // BUCKET BY THE LINE ONLY — axis plus fixed coordinate, never the heights. At generation time `ty` is still LOCAL and a
   // room wall carries its own varied `_roomCeil` while a lining carries BR_WY1 or roofFar, so keying on ty put the two
   // records of every real pair in DIFFERENT buckets and the pass dropped 3 of 14 instead of all of them.
@@ -20704,6 +20720,11 @@ function brxUnion(){ const keep=BR.loaded||[];
     for(const f of rec.fixtures){ if(f._room0===undefined) f._room0=f.room; if(f._room0!=null) f.room=f._room0+base; }
     for(const b of rec.bulbs){ if(b._room0===undefined) b._room0=b.room; if(b._room0!=null) b.room=b._room0+base; }
     for(const f of BRX_FIELDS){ if(f==='rooms')continue; const a=rec[f]; for(let i=0;i<a.length;i++) BR[f].push(a[i]); } }
+  // AFTER THE UNION, NOT PER CHUNK. A stairwell only exists on a chunk PERIMETER (the cut lives in brxEmitWall's
+  // `run.a<0||run.b<0` branch, off the shared-edge oracle), so the room wall its lining lands on top of belongs to the
+  // NEIGHBOURING chunk. Run per generation the pass saw one chunk at a time and caught 4 of 14; here it sees every loaded
+  // chunk at once. Cheap enough to repeat on each stream: it buckets by wall line, so it is linear plus a few compares.
+  BR._buried=brxDropBuriedWalls();
   BR._nav=null; BR._navSeed=null; _brLitSet=null; _brLitRoom=-2; }       // both caches key off the room set, which just changed
 function brxStream(force){ if(!BR.infinite || !BR.inside) return false;
   const c=brxChunkOf(player.pos.x, player.pos.z);
@@ -28414,6 +28435,35 @@ window.__hc={
   postfx(){ try{ return { mbOn:_mbOn, mbMode:_mbMode, motionPass:!!motionPass, softShadows:_softShadows, shadowType:renderer.shadowMap.type, grain:gradePass?+gradePass.uniforms.uGrain.value.toFixed(3):null,
       sceneRT:_sceneRT?_sceneRT.texture.type:null, sceneRTHalf:!!(_sceneRT&&_sceneRT.texture.type===THREE.HalfFloatType) }; }catch(e){ return {err:e.message}; } },
   setMB(on){ try{ return { mbMode:setMotionBlur(on) }; }catch(e){ return {err:e.message}; } },
+  // QA: DOES THE HAT CONTAIN THE HEAD (Ben 08-05: "the players head shows through the top of the straw hat"). A round hat over a
+  // square head has to clear the head's DIAGONAL, not its width, and its top has to be clear of the head's top face rather than
+  // coplanar with it — two numbers no screenshot of a 120 px model can settle, and the meshes are module scope. Reads the real
+  // geometry: the head box off the head pivot, the crown cone and the flat top off the hat group, so it cannot agree with a
+  // stale idea of either. Cylinders are POLYGONS — 18 segments — so the radius that matters is the inradius, r*cos(pi/n).
+  hatFit(){ try{ const P=_tpsBody||(_pv&&_pv.P); if(!P||!P.strawHat) return {no:'no rig'};
+      const head=P.head&&P.head.children.find(c=>c.isMesh&&c.geometry&&c.geometry.parameters&&c.geometry.parameters.width===0.30);
+      if(!head) return {no:'no head box'};
+      const hp=head.geometry.parameters, hy=head.position.y+(P.head.position.y||0);
+      const halfDiag=Math.hypot(hp.width/2, hp.depth/2), headTop=hy+hp.height/2;
+      let crown=null, cap=null;
+      P.strawHat.traverse(o=>{ const g=o.geometry&&o.geometry.parameters; if(!g||g.radiusTop==null) return;
+        const y0=o.position.y+P.strawHat.position.y+(P.head.position.y||0);
+        const seg={y:y0, h:g.height, rT:g.radiusTop, rB:g.radiusBottom, n:g.radialSegments};
+        if(g.radiusTop!==g.radiusBottom && g.height>0.1) crown=seg;                       // the tapered crown is the only cone
+        else if(g.height<0.05 && g.radiusTop<0.35 && (!cap || y0>cap.y)) cap=seg; });     // the flat top is the highest thin disc
+      if(!crown||!cap) return {no:'crown/cap not found', crown, cap};
+      const inr=(r,n)=>r*Math.cos(Math.PI/(n||18));
+      // The tightest the crown gets over the height the head occupies: sample the overlap of the two y-spans.
+      const y0=Math.max(crown.y-crown.h/2, hy-hp.height/2), y1=Math.min(crown.y+crown.h/2, headTop);
+      let minR=1e9; for(let i=0;i<=20;i++){ const y=y0+(y1-y0)*i/20;
+        const t=(y-(crown.y-crown.h/2))/crown.h; minR=Math.min(minR, inr(crown.rB+(crown.rT-crown.rB)*t, crown.n)); }
+      return { headTop:+headTop.toFixed(4), halfDiag:+halfDiag.toFixed(4),
+               capBottom:+(cap.y-cap.h/2).toFixed(4), capInradius:+inr(cap.rT,cap.n).toFixed(4),
+               crownMinInradius:+minR.toFixed(4),
+               capClearsHead:+((cap.y-cap.h/2)-headTop).toFixed(4),      // >0 = the flat top is above the skull, not in its plane
+               crownClearsCorners:+(minR-halfDiag).toFixed(4),           // >0 = no corner of the head reaches the straw
+               capCoversCorners:+(inr(cap.rT,cap.n)-halfDiag).toFixed(4) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   equipHat(id){ try{ id=id||'straw_hat'; armor[0]={id,n:1}; if(typeof openInventory==='function')openInventory(2); if(typeof updateArmorView==='function')updateArmorView(); return { helm:armor[0].id, hatVisible:!!(_pv&&_pv.P&&_pv.P.strawHat&&_pv.P.strawHat.visible) }; }catch(e){ return {err:e.message}; } },   // QA: equip a helmet + open the paperdoll
   placeTrophy(which){ try{ const id=(which==='wretch')?BID.wretch_trophy:BID.ceraphim_trophy; const px=Math.floor(player.pos.x)+3, pz=Math.floor(player.pos.z), py=groundYAt(px,pz,player.pos.y);
     setBlockWorld(px,py,pz,id,true); const c=getChunk(px>>4,pz>>4); if(c){ c.dirty=true; buildChunkMeshes(c); }
