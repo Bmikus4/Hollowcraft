@@ -5843,6 +5843,19 @@ scene.add(nvLight); scene.add(nvLight.target);
 // overworld therefore renders at 25 point lights instead of 19 — six more iterations of the point-light loop per
 // fragment, paid always, in exchange for the program set never growing again. That trade is the whole change:
 // DO NOT "optimize" this back down to 10, and do not let anything create a PointLight per world object.
+// ---- ONE TABLE FOR EVERY EMITTER, IN HAND OR IN THE WORLD (Ben 08-05, "they should all emit the same, ALL OF THEM") ----
+// They did not. The two paths were written apart and drifted: the pool (updateLights, placed) ran 60/34 for a level-15 lamp, 46/27
+// for the middle and 18/12 for a dim one; the hand ran 58/32 for level 15 and 46/26 for EVERYTHING ELSE, with no dim tier at all —
+// so a candle (level 10) in your hand threw a lantern-sized pool 26 blocks, while the same candle on the floor threw 18 at 12.
+// KEYED BY THE EMITTER'S LIGHT LEVEL, because that is the one property every kind already carries (blockLight): torch 14, lantern 15,
+// candle 10, candelabra 13, campfire 14, hanging_light 14, red_torch 11-12, font 9, br_fluor 15. Nothing here knows what an emitter IS.
+// The multipliers stay on the two paths and are NOT part of the table: the hand keeps its 12% two-note flicker (61fe516, deliberate)
+// and the pool keeps `fl` (the flame's own curve, per-emitter seed) and `edge` (the fade that stops a lamp popping in at the pool's
+// range limit). Those describe how a light behaves, not how much light it is.
+const EL_DECAY = 1.3;
+const _EL_STRONG = { i:60, d:34, c:0xff9838 }, _EL_MID = { i:46, d:27, c:0xff6a22 }, _EL_DIM = { i:18, d:12, c:0xff6a22 };
+// Returns one of three shared objects, never a new one: this is called for every pool slot every frame.
+function emitterLight(lvl){ return (lvl>=15) ? _EL_STRONG : (lvl<=10) ? _EL_DIM : _EL_MID; }
 const LIGHT_POOL = 16;   // dynamic warm-light pool: the nearest placed torches/lanterns/candles are lit (the "baked" volume wasn't lighting spawned lights — dungeon/structures went dark)
 let _hwLightSlot = -1;            // index into pointPool reserved for the Horrific Wretch's eye glow, or -1
 const _lampV = new THREE.Vector3();   // scratch for a swinging lamp's bulb position — this is read inside the per-frame light loop
@@ -7703,8 +7716,8 @@ function assignPointLights(){
         const _fdepth = (e[4]>1) ? 1.15 : (e[4]===1) ? 1.0 : 0.35;
         const fl = 1 + (fireFlicker(t,_fseed)/0.87 - 1)*_fdepth;
         const dist=Math.sqrt(_plCand[i][0]), edge=clamp((34-dist)/12,0,1);
-        const lvl=e[3], strong=lvl>=15, dim=lvl<=10;
-        pl.color.setHex(strong?0xff9838:0xff6a22); pl.intensity=(strong?60:dim?18:46)*fl*edge; pl.distance=strong?34:dim?12:27; pl.decay=1.3;
+        const _E=emitterLight(e[3]);
+        pl.color.setHex(_E.c); pl.intensity=_E.i*fl*edge; pl.distance=_E.d; pl.decay=EL_DECAY;
         // A caster that HAS a light re-renders its cube on the sun's cadence — creatures move, so a one-shot map would
         // freeze their shadow in place. Gated on intensity because a torch faded out at the edge of the pool has nothing
         // to cast, and on _streamMeshed for the same reason the sun's cadence is: don't stack a shadow pass on a meshing frame.
@@ -7740,8 +7753,9 @@ function assignPointLights(){
     // half blocks back, so the torch you were holding lit the air behind your head and left you in your own shadow.
     if(_tpsAct && _tpsBody && _tpsBody.group.visible) heldLight.position.copy(_tpsHandW);
     else heldLight.position.set(camera.position.x + _m[0]*0.34*_side, camera.position.y-0.15 + _m[1]*0.34*_side, camera.position.z + _m[2]*0.34*_side);   // NO held light while grabbed — it blows out the throat jumpscare with glare
-    const strong=hl>=15; heldLight.color.setHex(strong?0xff9838:0xff6a22);
-    heldLight.intensity=(strong?58:46)*(1+Math.sin(t*11)*0.07+Math.sin(t*1.9)*0.05); heldLight.distance=strong?32:26; heldLight.decay=1.3;
+    // THE SAME TABLE THE POOL READS (emitterLight) — see it for why the hand's own numbers are gone. The flicker stays here.
+    const _H=emitterLight(hl); heldLight.color.setHex(_H.c);
+    heldLight.intensity=_H.i*(1+Math.sin(t*11)*0.07+Math.sin(t*1.9)*0.05); heldLight.distance=_H.d; heldLight.decay=EL_DECAY;
     heldLight.castShadow=false; }
   else { heldLight.intensity=0; heldLight.castShadow=false; }
 }
@@ -16330,6 +16344,17 @@ function updateSpears(dt){ for(let i=spears.length-1;i>=0;i--){ const s=spears[i
       })){ stuck=true; break; }
       let hitA=null; for(const a of animals){ if(a.dead)continue; if(Math.hypot(s.x-a.x,s.y-(a.y+0.4),s.z-a.z)<0.95){ hitA=a; break; } }
       if(hitA){ hurtAnimal(hitA,thrown); spawnParticles(s.x,s.y,s.z,0xcc2018,8,1.6,0.5); stickSpear(s,hitA); stuck=true; break; }   // sticks INTO the animal and rides it
+      // YOUR OWN SPEAR CAN KILL YOU (Ben's backlog item 23, first half: "own ricochets and thrown spears kill you"). The flight tested the
+      // Wretch, the animals and the terrain and never the thrower — so a spear hurled straight up fell back through the player's head and
+      // did nothing. It is the same capsule the block-collision code uses (HW half-width, PH tall), and the same damage the creature would
+      // have taken, because a spear does not know whose ribs it is in.
+      //   THE GRACE PERIOD IS THE WHOLE TRICK. A spear leaves the hand INSIDE the player's own capsule — throwSpear spawns it 0.6 forward
+      // of the eye — so without a delay every throw would kill you instantly. 0.35 s is long enough for any throw to clear the body and
+      // far shorter than the arc of a spear lobbed upward, which is the case this is for.
+      if(s.age>0.35 && !player.dead && Math.abs(s.x-player.pos.x)<HW+0.25 && Math.abs(s.z-player.pos.z)<HW+0.25
+         && s.y>player.pos.y-0.15 && s.y<player.pos.y+PH+0.15){
+        if(typeof damage==='function') damage(thrown, 'your own spear found you', 'spear');
+        spawnParticles(s.x,s.y,s.z,0xcc2018,10,1.8,0.5); stickSpear(s,null); stuck=true; break; }
       const b=getBlock(Math.floor(s.x),Math.floor(s.y),Math.floor(s.z));
       if((b!==AIR && b!==WATER && isSolid[b]) || s.y<0.05){ stickSpear(s,null); stuck=true; break; } }          // sticks into terrain/blocks
     if(stuck) continue;
@@ -29933,6 +29958,8 @@ window.__hc={
   // Any non-zero nan count is a bug, at any time, whatever the frame looks like.
   skyCensus(){ try{ let meshes=0, verts=0, nan=0, zero=0, one=0; const bad=[];
       const B={ '+x':[0,0], '-x':[0,0], '+y':[0,0], '-y':[0,0], '+z':[0,0], '-z':[0,0] };
+      const W={ '+x':0, '-x':0, '+y':0, '-y':0, '+z':0, '-z':0 }; const wrong=[];
+      let degen=0; const degenAt=[];
       chunkRoot.traverse(o=>{ const g=o.geometry; if(!g||!g.attributes||!g.attributes.aSky||!g.attributes.normal) return;
         meshes++; const a=g.attributes.aSky.array, p=g.attributes.position.array, nm=g.attributes.normal.array;
         for(let i=0;i<a.length;i++){ const v=a[i]; verts++;
@@ -29941,12 +29968,32 @@ window.__hc={
           // hundred out of two million and invisible at four decimals. His report is literally per orientation.
           const nx=nm[i*3], ny=nm[i*3+1], nz=nm[i*3+2];
           const k = Math.abs(nx)>0.5 ? (nx>0?'+x':'-x') : Math.abs(ny)>0.5 ? (ny>0?'+y':'-y') : Math.abs(nz)>0.5 ? (nz>0?'+z':'-z') : null;
-          if(k){ B[k][1]++; if(!Number.isFinite(v)||v<=0) B[k][0]++; }
+          // A DEGENERATE NORMAL RENDERS BLACK and falls into no bucket above, so the by-orientation shares could not see
+          // it however wrong it was. ?dbg=nrm exists for exactly this failure (a black pixel there is normalize(0) = NaN),
+          // and "completely blacked out" faces with a sky bake that agrees with the heightfield is what it looks like.
+          { const nl=Math.hypot(nx,ny,nz); if(!(nl>0.9&&nl<1.1)){ degen++; if(degenAt.length<10) degenAt.push({at:[+p[i*3].toFixed(0),+p[i*3+1].toFixed(0),+p[i*3+2].toFixed(0)], n:[+nx.toFixed(2),+ny.toFixed(2),+nz.toFixed(2)], len:+nl.toFixed(3)}); } }
+          if(k){ B[k][1]++;
+            if(!Number.isFinite(v)||v<=0){ B[k][0]++;
+              // A DARK FACE IS ONLY A BUG IF ITS NEIGHBOURHOOD IS OPEN. A face at the bottom of a notch SHOULD be dark,
+              // so the by-normal share above cannot tell a fault from a shadow. This asks the heightfield the same
+              // question the bake asks — the best of the nine columns around the face's own cell — and counts the face as
+              // WRONGLY dark only when that says open. World coords, straight off each chunk's htop, so it is independent
+              // of the snapshot pad the bake reads through and cannot inherit a bug from it.
+              const wx=Math.round(p[i*3]+(o.parent?o.parent.position.x:0)), wy=Math.round(p[i*3+1]), wz=Math.round(p[i*3+2]+(o.parent?o.parent.position.z:0));
+              let open=0;
+              for(let dz=-1;dz<=1&&open<1;dz++) for(let dx=-1;dx<=1;dx++){
+                const cc=getChunk((wx+dx)>>4,(wz+dz)>>4); if(!cc) continue;
+                const th=cc.htop[((wx+dx)&15)+(((wz+dz)&15)*CK)];
+                const ov = wy>=th ? 1 : Math.max(0, 1-(th-wy)/6);
+                if(ov>open){ open=ov; if(open>=1) break; } }
+              if(open>=0.5){ W[k]++; if(wrong.length<10) wrong.push({at:[wx,wy,wz], face:k, open:+open.toFixed(2)}); } } }
           if(!Number.isFinite(v)){ nan++; if(bad.length<8) bad.push([+(p[i*3]+(o.parent?o.parent.position.x:0)).toFixed(0), +p[i*3+1].toFixed(0), +(p[i*3+2]+(o.parent?o.parent.position.z:0)).toFixed(0)]); }
           else if(v<=0) zero++; else if(v>=1) one++; } });
       const byFace={}; for(const kk in B) byFace[kk] = B[kk][1] ? +(B[kk][0]/B[kk][1]).toFixed(4) : null;
+      const wrongByFace={}; for(const kk in W) wrongByFace[kk] = B[kk][1] ? +(W[kk]/B[kk][1]).toFixed(4) : null;
       return { meshes, verts, nan, zeroShare:verts?+(zero/verts).toFixed(4):null, fullSkyShare:verts?+(one/verts).toFixed(4):null,
-               darkShareByFace:byFace, firstNaNAt:bad };
+               darkShareByFace:byFace, wronglyDarkByFace:wrongByFace, wrongExamples:wrong,
+               degenerateNormals:degen, degenerateAt:degenAt, firstNaNAt:bad };
     }catch(e){ return {err:String(e.message||e)}; } },
   canopyProbe(){ try{
       // Read the atlas back. The tiles are painted into one canvas at boot, so this is what the GPU is sampling, not
@@ -30926,6 +30973,22 @@ window.__hc={
   // QA: THE MESSAGE CHANNEL (Ben's backlog item 39). Types a line through the real flashName and samples the element over time, because
   // "it is a typewriter" is a statement about the text growing one character at a time — a final read would look identical to the old
   // instant write. Also reports the day label the sunrise wrap emits, without waiting for a sunrise.
+  // QA: THROW A SPEAR STRAIGHT UP AND SEE WHO IT LANDS ON (Ben's backlog item 23). Aims the player up, throws through the real
+  // throwSpear, then reports the flight and the player's health so a bench can watch it come back down. Health is the assertion; the
+  // spear list is how a run that never threw anything is told apart from one where the spear missed.
+  spearSelf(pitch){ try{ if(typeof throwSpear!=='function') return {no:'no throwSpear'};
+      player.creative=false; player.health=20; player.dead=false;
+      const id=Object.keys(ITEMS).find(k=>ITEMS[k]&&ITEMS[k].spear); if(!id) return {no:'no spear item'};
+      inv[selSlot]={id,n:1}; refreshHotbar(); setViewItem(id);
+      player.pitch=(pitch==null?1.15:+pitch);
+      throwSpear(id,1);
+      return { id, spears:spears.length, health:+player.health.toFixed(2), pitch:+player.pitch.toFixed(2) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  spearFlight(){ try{ return { spears:spears.length, stuck:stuckSpears.length,
+      health:+player.health.toFixed(2), dead:!!player.dead,
+      rows:spears.map(s=>({age:+s.age.toFixed(2), x:+s.x.toFixed(2), z:+s.z.toFixed(2), y:+s.y.toFixed(2), dy:+(s.y-player.pos.y).toFixed(2),
+                           dxz:+Math.hypot(s.x-player.pos.x,s.z-player.pos.z).toFixed(2)})) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   msgProbe(text){ try{ const e=document.getElementById('name'); if(!e) return {no:'no #name'};
       flashName(text==null?'the wood remembers you':text);
       return { text:e.textContent, opacity:e.style.opacity, typing:!!flashName._iv }; }
@@ -31681,6 +31744,19 @@ window.__hc={
     hitsBelow:(typeof aabbHits==='function')?aabbHits(p.pos.x,p.pos.y-0.6,p.pos.z):null,
     blkFeet:getBlock(Math.floor(p.pos.x),Math.floor(p.pos.y-0.1),Math.floor(p.pos.z)),
     ramp:(typeof rampSurfAt==='function')?rampSurfAt(p.pos.x,p.pos.z):null }; },   // QA: why is the player not falling?
+  // QA/bench: the two emission paths side by side. Parity is a claim about numbers, not about pixels — a held light sits at the eye
+  // and a placed one in a block, so no crop can compare them at matched geometry — and these are the numbers themselves: the shared
+  // table, the live hand light, and every live pool slot with the level it is serving. Colour and distance carry no multiplier and
+  // must match the table exactly; intensity carries the hand's flicker or the pool's fl*edge, so only its ratio to the base is
+  // meaningful. That is exactly what bench/assert-emitter-parity.mjs asserts.
+  lightParams(){ const T={ strong:_EL_STRONG, mid:_EL_MID, dim:_EL_DIM, decay:EL_DECAY };
+    const one=pl=>({ i:+pl.intensity.toFixed(3), d:+pl.distance.toFixed(3), c:pl.color.getHex(), decay:+pl.decay.toFixed(3) });
+    const heldLvl=Math.max((()=>{ const s=inv[selSlot], it=s&&ITEMS[s.id], b=it?it.block:null; return (b!=null)?(blockLight[b]||0):0; })(),
+                           (()=>{ const s=armor[EQ_OFF], it=s&&ITEMS[s.id], b=it?it.block:null; return (b!=null)?(blockLight[b]||0):0; })());
+    return { table:T, held:{ lvl:heldLvl, base:emitterLight(heldLvl), ...one(heldLight) },
+      pool:pointPool.filter(pl=>pl.intensity>0).map((pl,i)=>one(pl)),
+      // The level each live slot is serving, in the same order the pool was filled this frame.
+      poolLvl:_plCand.slice(0,pointPool.length).map(s=>s[1]?s[1][3]:null) }; },
   editQ(){ return {remesh:remeshSet.size, relight:relightSet.size}; },   // QA/bench: watch the edit queues drain
   // QA/bench: which loaded chunks HOLD an emitter but have NO light volume. That pair is a bug by definition — every fragment in
   // such a chunk samples `_bl` 0, so the night wash gate reads it unlit and the whole chunk washes. Pixel crops cannot tell that
