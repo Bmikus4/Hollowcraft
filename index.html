@@ -420,7 +420,17 @@ const _propFill = new Float32Array([0.237, 0.267, 0.30, 0]);
     '#if defined( HC_SCOT ) && !defined( HC_SCOT_SKIP )\n'+
     // GATED ON THE LIGHT DELIVERED, NEVER ON THE PIXEL. A pixel-luminance gate is albedo-weighted: it washed the dirt out and
     // left beach sand salmon-pink under the same moonlight, because sand is a brighter texture (c7c813d).
-    '{ float _dlit=dot(reflectedLight.directDiffuse,'+L+')*uScotH.x;\n'+
+    // ALBEDO DIVIDED BACK OUT, and this is Ben 08-05 "chests completely black in lit rooms". directDiffuse has ALREADY been
+    // multiplied by the material's own diffuse colour (RE_Direct does irradiance * BRDF_Lambert(material.diffuseColor)), so a
+    // dark-brown chest reported a tiny value with a lamp blazing on it, failed the uScotG.z knee, and got 85% washed toward its own
+    // luma — which on a dark object in a dim room is black, and it also stripped the warm lamp light that made it legible. Bright
+    // surfaces in the same room passed the gate and kept their colour; dark ones did not. That is the SAME albedo bias the
+    // pixel-luminance gate was rejected for on c7c813d ("sand and dirt receive the same moonlight"), arriving by a different route.
+    // diffuseColor is still in scope here — declared at the top of main() in all four lit shaders.
+    // THE 0.2 IS THE CALIBRATION, not a fudge: BRDF_Lambert is albedo/PI, so dividing by albedo leaves irradiance/PI, and 0.2 is the
+    // mid albedo the ramp's lo/hi were tuned against. A mid-grey surface gates exactly as it did before this change; only the dark
+    // and the bright ones move, and they move onto the same footing as each other.
+    '{ float _dlit=dot(reflectedLight.directDiffuse/max(diffuseColor.rgb,vec3(0.05)),'+L+')*0.2*uScotH.x;\n'+
     // A SURFACE THAT IS ITS OWN LIGHT COUNTS AS LIT. Without this every emissive prop in the game — lamp glass, a troffer, a
     // furnace mouth — greys out at night, which is the exact opposite of Ben's rule that anything a light touches goes warm.
     '  float _emi=dot(totalEmissiveRadiance,'+L+');\n'+
@@ -429,7 +439,15 @@ const _propFill = new Float32Array([0.237, 0.267, 0.30, 0]);
     // can see. vSky is the CAVE GATE — leaves and glass are excluded from it (occludesSky, Ben 07-23), so vSky 0 means walled
     // in by opaque blocks, not merely shaded. A forest floor reads vSky~1 and is left alone; only genuine enclosure descends.
     '  float _slit=max(max(_bl, vSky*uScotG.w), max(_dlit,_emi));\n'+
-    '  float _open=clamp(vSky,0.0,1.0);\n'+
+    // A KNEE, NOT A LINEAR TERM — Ben 08-05: "a ton of dark blocks / really dark random blocks in the woods that have no light,
+    // DURING THE DAY". The descent is not day-gated and does not need to be for a cave, but in a wood in daylight a face beside a
+    // trunk has PARTIAL sky (logs DO occlude sky, and _ssky is a 6-block ramp so cells under one read a fraction), the sun does not
+    // reach it, so _slit is small, _w goes to 1, and with a linear (1.0-vSky) the descent still fired and crushed that face to 15%
+    // in broad daylight. aSky is a 4-bit PER-FACE scalar on greedy quads, which is exactly why it read as whole random BLOCKS rather
+    // than as a gradient. With the knee a walled-in face (vSky 0) still descends fully and a shaded forest face at 0.25 or more does
+    // not descend at all. I weighed this knee when the descent shipped and rejected it for consistency with the ambient curve above;
+    // his report is the evidence that the linear term is too eager.
+    '  float _open=smoothstep(0.0,0.25,clamp(vSky,0.0,1.0));\n'+
     '#else\n'+
     // Non-atlas materials have no sky bake, so they take the day factor straight: immune by day, washed at night unless a
     // light reaches them. _open 1.0 used to mean "never descend", on the reasoning that blackening a prop on open night ground
@@ -13484,7 +13502,13 @@ function updateWretch(dt){
         const wInTun = wInDun && !(Math.abs(wretch.pos.x-L.cx)<=dR && Math.abs(wretch.pos.z-L.cz)<=dR);   // in the tunnels, not the open hall
         wretch._dropDescend=false;
         if(wInDun){ const dP=Math.hypot(gp.x-ex,gp.z-ez); const _los=!!(wretch.sense&&wretch.sense.seen);
-          if(wretch._dunRetreat){ wretch._cryptAscend=false; aim(L.cx,L.cz); speed=Math.max(speed,reckless?16:12); if(Math.hypot(L.cx-ex,L.cz-ez)<4){ wretch._dunRetreat=false; wretch.committed=true; wretch.thought='Now — again, out of the dark.'; } }   // shot in its lair → withdraw to the MAIN ROOM, then resume the hunt (never flees to the woods)
+          // THE NAMED HOLE (Ben 08-05: "figure out EXACTLY why"). Swept every branch that writes `speed` in the brain: SCOUT 2.8, PEEK
+          // 2.2, the dance 2.0-2.8, the treeline slink 3.6, TRACK 4.0, the sea dash 4.5 and the decoy 3.4 are all at or under a walk,
+          // and TRAVERSE, CHASE, HUNT, FLEE, the lair commit and the sighted maze sprint each write crawl next to their speed. THIS one
+          // commanded 12-16 blocks a second and wrote no posture at all — shot in its lair, it withdrew to the main room at a sprint in
+          // whatever pose it happened to be in, which after a vigil or a window press is standing. Stated here as well as in the global
+          // invariant because a branch should say what posture its own movement is in.
+          if(wretch._dunRetreat){ wretch._cryptAscend=false; aim(L.cx,L.cz); speed=Math.max(speed,reckless?16:12); wretch.crawl=Math.min(1,(wretch.crawl||0)+dt*4); if(Math.hypot(L.cx-ex,L.cz-ez)<4){ wretch._dunRetreat=false; wretch.committed=true; wretch.thought='Now — again, out of the dark.'; } }   // shot in its lair → withdraw to the MAIN ROOM, then resume the hunt (never flees to the woods)
           else if((L.b2y!=null) && wretch.pos.y < L.fy-1){ aim(L.shX,L.shZ); wretch._cryptAscend=(Math.hypot(L.shX-ex,L.shZ-ez)<2.8); }   // in the CRYPT → climb the stair-shaft back UP to the hall, then chase (F was an undefined build-scope local → ReferenceError on crypt/labyrinth entry; L.fy is the hall floor) (Ben 07-21)
           else { wretch._cryptAscend=false;
             // THE PLAYER IS BELOW, IN THE CRYPT. dP is a HORIZONTAL distance, so standing over the crypt it
@@ -13607,6 +13631,22 @@ function updateWretch(dt){
   // REAL ground covered this frame — the rig reads this so it NEVER gallops/flails in place while wedged
   const _disp=Math.hypot(wretch.pos.x-ex, wretch.pos.z-ez)/Math.max(dt,1e-3);
   wretch._advRate=(wretch._advRate||0)+(_disp-(wretch._advRate||0))*Math.min(1,dt*10);
+  // RUNNING IS ALWAYS ON ALL FOURS (Ben 08-05: "WRETCH STILL IS ABLE TO RUN AT ME WHILE STANDING UP"). This has been fixed twice by
+  // patching whichever branch was guilty at the time — the commit branch drops it to 0.75 "so the gallop plays from frame one", the
+  // sighted maze sprint to 0.85 — and it keeps coming back, because there is no shortage of code that writes `speed`: the sea-discipline
+  // dash to cover, the scarecrow detour, the vigil walk, the unwedge, the will's shoreline errands, a routed nav leg around a tree, the
+  // intimidate run. Every one of them is a branch that can command a sprint and forget the posture, and the gait is keyed off crawl, so
+  // forgetting it means a creature translating at 16 blocks a second in a standing pose. Patching them one at a time is why this bug has
+  // outlived two fixes.
+  //   So the rule is stated ONCE, here, at the only point that knows what actually happened: _advRate is the REAL ground covered this
+  // frame, so a creature commanding a sprint into a wall is not forced onto all fours for motion it is not achieving, and no future
+  // branch can introduce this fault again without also being covered by it. Over 5 blocks/s — faster than a man walks — it goes onto all
+  // fours; the ramp (dt*6) gets it there inside two tenths of a second, which reads as diving forward rather than snapping.
+  //   Below 5 nothing is touched, so every deliberate standing pose keeps its own crawl: the vigil, the window press, the treeline peek,
+  // the drag, the scoop, the maze creep. Those are excluded by name as well, because a scripted pose that happens to be moved FAST by its
+  // own script (the scoop's lunge, a drag) owns its rig outright.
+  if((wretch._advRate||0)>5 && !wretch.dragging && !player.grabbed && !wretch._scooping && !wretch._vigAct && !wretch._park)
+    wretch.crawl=Math.min(1,(wretch.crawl||0)+dt*6);
   // HARD ANTI-WEDGE RULE: it may never stay boxed in or embedded — un-stick to the nearest open floor, else melt into the woods
   if((wretch._boxT||0)>1.3){
     const fx=Math.floor(wretch.pos.x), fz=Math.floor(wretch.pos.z), fy=Math.floor(wretch.pos.y);
@@ -29851,6 +29891,9 @@ window.__hc={
       return { state:w.state, committed:!!w.committed, commitT:+(w.commitT||0).toFixed(2), dist:+(w.dist||0).toFixed(2),
                crawl:+(w.crawl||0).toFixed(3), claw:+clamp(((w.crawl||0)-0.45)/0.55,0,1).toFixed(3),
                riseB:+(w._riseB||0).toFixed(3), riseD0:+(w._riseD0||0).toFixed(2), reachT:+(w._reachT||0).toFixed(3),
+               // THE GROUND IT IS ACTUALLY COVERING, which is the only honest input to "is it running". A commanded speed is not
+               // motion — a creature wedged against a wall commands 16 and travels nothing — and `state` is not motion either.
+               advRate:+(w._advRate||0).toFixed(2),
                summoned:!!w._summoned, huntArmed:!!HORROR.huntArmed, canGrab:!!(w._summoned||HORROR.huntArmed),
                posture:w.posture, active:!!w.active, hp:w.hp,
                creativeHits:(HORROR.creativeHits||0), recommitT:+(w._recommitT||0).toFixed(2),
