@@ -6189,7 +6189,13 @@ function buildModelBlocks(c,g){
       c.emitters.push([cx0+lx+0.5, ly+fy, cz0+lz+0.5, blockLight[id]]);
       const seed=((lx*7+lz*13+ly*3)%97)/97;
       if(m==='torch') flames.push({x:lx+0.5,y:ly+0.55,z:lz+0.5,w:0.32,h:0.66,type:(id===BID.red_torch?4:0),seed});   // torch flame — type 4 = red (shrine torch)
-      else if(m==='lantern' && !B[id].unlit) flames.push({x:lx+0.5,y:ly+0.28,z:lz+0.5,w:0.2,h:0.34,type:1,seed});   // a shot-out lantern keeps the model and loses the flame
+      // A FLAME INSIDE A LANTERN HAS TO FIT INSIDE THE LANTERN (Ben 08-05: "I CAN SEE A FLAme outside the top of lanterns").
+      // buildFlameGeo anchors a flame at its BASE and builds the quad FLAME_QUAD_EXT (1.35) taller than h, so a flame declared
+      // y 0.28 / h 0.34 reaches 0.28 + 0.34*1.35 = 0.739 — and the lantern's roof plate is at 0.475. It stood a quarter of a block
+      // out of the top of the cage, and has since it was written; putting real glass in the frame is only what made it visible.
+      // Interior is 0.055 (base plate top) to 0.475 (roof underside), so a base of 0.10 with h 0.26 tops out at 0.451 and the
+      // embers stay under the roof. Narrowed to 0.18 as well, inside the 0.30 panes.
+      else if(m==='lantern' && !B[id].unlit) flames.push({x:lx+0.5,y:ly+0.10,z:lz+0.5,w:0.18,h:0.26,type:1,seed});   // a shot-out lantern keeps the model and loses the flame
       else if(m==='candle') flames.push({x:lx+0.5,y:ly+0.42,z:lz+0.5,w:0.13,h:0.24,type:2,seed});
       else if(m==='candelabra'){ for(const dxp of [-0.09,0,0.09]) flames.push({x:lx+0.5+dxp,y:ly+0.56,z:lz+0.5,w:0.09,h:0.17,type:2,seed:seed+dxp*3.0}); }   // three little candle flames
       else if(m==='campfire') flames.push({x:lx+0.5,y:ly+0.18,z:lz+0.5,w:0.78,h:0.95,type:3,seed});
@@ -10967,6 +10973,10 @@ function loop(){ try{
   // ---- PRELOAD GATE (Ben 07-27): the overlay is not decoration, it is the work window. It stays up until the spawn
   //      chunk is meshed AND every item icon has been baked AND the shadows-off shader variants are compiled — all
   //      amortized a slice per frame so the sigil keeps animating instead of freezing on one giant stall.
+  // PAIRED WITH THE T.end BELOW, and it must stay outside the if: with only the end reached, T.end computes
+  // now-openAt against an openAt set once at boot, so `gate` reads as the whole session and every frame's cpuMs
+  // reads as tens of seconds. That is what a lost begin looks like in this profiler, not a slow loading screen.
+  T.begin(TID.gate);
   if(!initialReady){ const c=getChunk(Math.floor(player.pos.x)>>4,Math.floor(player.pos.z)>>4);
     if(c&&c.meshed){
       if(!_preIcons){ try{ _preIcons=Object.keys(ITEMS); }catch(e){ _preIcons=[]; } _preI=0; }
@@ -15349,7 +15359,9 @@ function buildHeldLantern(){ const g=new THREE.Group();
   const top=new THREE.Mesh(new THREE.BoxGeometry(0.3,0.05,0.3),metal); top.position.y=0.27; g.add(top);
   const base=new THREE.Mesh(new THREE.BoxGeometry(0.28,0.05,0.28),metal); base.position.y=-0.06; g.add(base);
   const h=new THREE.Mesh(new THREE.TorusGeometry(0.08,0.014,6,12),metal); h.position.y=0.33; h.rotation.x=Math.PI/2; g.add(h);
-  const fg=buildFlameGeo([{x:0,y:0.08,z:0,w:0.12,h:0.16,type:1,seed:0.4}]); if(fg){ const fl=new THREE.Mesh(fg,flameMat); fl.frustumCulled=false; fl.renderOrder=5; g.add(fl); }
+  // Same arithmetic as the placed one: base-anchored, x1.35. At h 0.16 this topped out at 0.296 against a roof plate whose
+  // underside is 0.245 — the held lantern's flame came through its own lid too. 0.12 tops out at 0.242.
+  const fg=buildFlameGeo([{x:0,y:0.08,z:0,w:0.12,h:0.12,type:1,seed:0.4}]); if(fg){ const fl=new THREE.Mesh(fg,flameMat); fl.frustumCulled=false; fl.renderOrder=5; g.add(fl); }
   g.rotation.set(0.08,0,0.04); return g; }
 // held CANDLE — a short wax stub with a small flame
 function buildHeldCandle(){ const g=new THREE.Group();
@@ -27010,8 +27022,13 @@ window.__hc={
       return { fired, lockAhead:+Math.max(0,_monkChantLock-clock.elapsedTime).toFixed(1) }; }catch(e){ return {err:e.message}; } },
   monkHurt(dmg){ try{ const m=animals.find(a=>a.type==='monk'&&!a.dead); if(!m)return {err:'no monk'}; hurtAnimal(m,+dmg||1); return {hp:m.hp, dead:!!m.dead, wrath:HORROR.monkWrath|0}; }catch(e){ return {err:e.message}; } },
   monkKill(){ try{ const m=animals.find(a=>a.type==='monk'&&!a.dead); if(!m)return {err:'no monk'};
-      const hw0=wretchExtra.filter(w=>w.active).length; killAnimal(m);
-      return { wrath:HORROR.monkWrath|0, hwBefore:hw0, hwAfter:wretchExtra.filter(w=>w.active).length, menace:+HORROR.menace.toFixed(2), armed:!!HORROR.huntArmed }; }catch(e){ return {err:e.message}; } },
+      // COUNT HORRIFIC WRETCHES, NOT EXTRA WRETCHES. This read wretchExtra.filter(active).length, and hwOnSacrifice does
+      // not add a wretch — it DRESSES the prime one (hwDress(wretchPrime,true)). So the third monk kill converted the
+      // beast exactly as designed while this hook reported hwAfter 0 and assert-monks called the gate broken. A metric
+      // that cannot see the thing it is measuring is worse than no metric: it accuses working code.
+      const hwN=()=>((wretchPrime&&wretchPrime.horrific)?1:0)+wretchExtra.filter(w=>w.active&&w.horrific).length;
+      const hw0=hwN(); killAnimal(m);
+      return { wrath:HORROR.monkWrath|0, hwBefore:hw0, hwAfter:hwN(), menace:+HORROR.menace.toFixed(2), armed:!!HORROR.huntArmed }; }catch(e){ return {err:e.message}; } },
   monkWrathSet(n){ try{ HORROR.monkWrath=+n||0; return HORROR.monkWrath; }catch(e){ return {err:e.message}; } },
   // QA: the gate has to survive a reload or it is not a gate. Same shape as packSaveRoundTrip — applySave restores the WHOLE
   // session, so the snapshot must carry the live player and inventory or it reads s.player.x off undefined.
