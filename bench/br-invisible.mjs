@@ -88,6 +88,50 @@ window.__IV={
     for(const c of (BR.crawls||[])) add('crawl', (c.x0+c.x1)/2, (c.z0+c.z1)/2, Math.abs(c.x1-c.x0)<0.01, Math.max(Math.abs(c.x1-c.x0),Math.abs(c.z1-c.z0)));
     const byKind={}; for(const r of rows){ const k=byKind[r.kind]=byKind[r.kind]||{n:0,blocked:0,fully:0}; k.n++; if(r.blocked)k.blocked++; if(r.blocked===5)k.fully++; }
     return { total:rows.length, byKind, worst:rows.filter(r=>r.blocked).slice(0,12) }; },
+  // BEN'S ACTUAL EXPERIENCE, ASKED DIRECTLY: walk the body until something stops it, then ask what the player would SEE
+  // at that moment — a mesh within reach of the crosshair, and the luminance of the middle of the frame. Blocked with a
+  // surface in front of you is a wall. Blocked with nothing drawn in front of you is an invisible block, and it is the
+  // same event whether the cause is a missing mesh, a culled one, a failed material or a stale chunk. This asks the
+  // question in pixels AND in collision at once, which the solid-versus-record census could not.
+  bumps(nWalks, steps){
+    const N=nWalks||24, S=steps||60, out={walks:0, blocked:0, blockedWithSurface:0, blockedWithNothing:0, cases:[]};
+    const rc=new THREE.Raycaster(); rc.far=1.6;
+    const y=player.pos.y, ox=player.pos.x, oz=player.pos.z;
+    for(let w=0; w<N; w++){
+      // deterministic spread of directions and start offsets — no Math.random, so two runs compare
+      const ang=(w/N)*Math.PI*2, sx=ox+Math.cos(ang)*6, sz=oz+Math.sin(ang)*6;
+      player.pos.set(sx,y,sz); try{ brxCollide(player); }catch(e){}
+      out.walks++;
+      let stuck=0;
+      for(let k=0;k<S;k++){
+        const bx=player.pos.x, bz=player.pos.z;
+        player.pos.x+=Math.cos(ang)*0.12; player.pos.z+=Math.sin(ang)*0.12;
+        try{ brxCollide(player); }catch(e){}
+        const moved=Math.hypot(player.pos.x-bx, player.pos.z-bz);
+        if(moved>0.06){ stuck=0; continue; }
+        if(++stuck<3) continue;                                  // one contact frame is a graze; three is a stop
+        out.blocked++;
+        player.yaw=Math.atan2(-Math.cos(ang), -Math.sin(ang)); player.pitch=0;
+        camera.position.set(player.pos.x, player.pos.y+1.4, player.pos.z);
+        camera.rotation.set(0, player.yaw, 0); camera.updateMatrixWorld(true);
+        rc.setFromCamera({x:0,y:0}, camera);
+        const h=rc.intersectObject(scene,true).filter(o=>o.object&&o.object.isMesh&&o.object.visible);
+        // WHAT IS ON SCREEN, not what is in the graph: render and read the middle of the frame back out of GL.
+        renderer.render(scene,camera);
+        const gl=renderer.getContext(), W=64, H=64;
+        const px=Math.max(0,((gl.drawingBufferWidth-W)>>1)), py=Math.max(0,((gl.drawingBufferHeight-H)>>1));
+        const buf=new Uint8Array(W*H*4); gl.readPixels(px,py,W,H,gl.RGBA,gl.UNSIGNED_BYTE,buf);
+        let sum=0; for(let i=0;i<W*H;i++) sum+=0.2126*buf[i*4]+0.7152*buf[i*4+1]+0.0722*buf[i*4+2];
+        const lum=+(sum/(W*H)).toFixed(1);
+        if(h.length){ out.blockedWithSurface++; }
+        else { out.blockedWithNothing++;
+          if(out.cases.length<10) out.cases.push({x:+player.pos.x.toFixed(1), z:+player.pos.z.toFixed(1),
+            y:+player.pos.y.toFixed(1), lum, nearestMeshM:null, dir:+(ang*57.3).toFixed(0)}); }
+        break;
+      }
+    }
+    player.pos.set(ox,y,oz);
+    return out; },
   // OVERWORLD CONTROL, and it has to be a different question out there: nothing carves the overworld, so "solid where a
   // record says open" has no meaning. Instead: a solid cell with open air beside it and NO MESH drawn on that face —
   // cast a short ray from the open neighbour into the cell and see whether anything is there to be seen.
@@ -165,7 +209,17 @@ function ensureProbe(root){
     await sleep(3000);
     console.log('census:   '+J(await ev('__IV.census(40,1)')));
     console.log('openings: '+J(await ev('__IV.openings()')));
-    console.log('census60: '+J(await ev('__IV.census(60,2)')));
+    console.log('bumps(entry):   '+J(await ev('__IV.bumps(24,60)')));
+    // THE PATHS A PLAYER EXERCISES, not the one a bench exercises. Invisible geometry classically comes from remesh and
+    // unload-reload, not from first generation, and Ben's word was "still" — he had been playing, not just arriving.
+    await ev('(()=>{const y=player.pos.y; player.pos.x+=260; brxStream(true); player.pos.x-=260; brxStream(true); player.pos.y=y;})()');
+    await sleep(1500);
+    console.log('bumps(reload):  '+J(await ev('__IV.bumps(24,60)')));
+    console.log('census(reload): '+J(await ev('__IV.census(20,1)')));
+    await ev('(()=>{try{brLeave&&brLeave();}catch(e){}})()'); await sleep(1500);
+    console.log('re-enter: '+J(await ev('__hcPERF.enterBR()'))); await sleep(2500);
+    console.log('bumps(re-enter):  '+J(await ev('__IV.bumps(24,60)')));
+    console.log('census(re-enter): '+J(await ev('__IV.census(20,1)')));
     console.log('page errors: '+(errs.length?errs.slice(0,6).join(' | '):'none'));
     await browser.close();
   }catch(e){ console.log('HARNESS ERROR: '+(e&&e.stack||e)); }
