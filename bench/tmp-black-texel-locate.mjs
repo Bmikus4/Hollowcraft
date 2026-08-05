@@ -29,11 +29,27 @@
 // descent knee, because _open is ~1 on a face at vSky 0.8.
 // WHAT IS LEFT is the third branch: the lighting and the grade. Note the distribution is BIMODAL — 10.87% of the crop under luminance
 // 8 while the crop median is 32.84 — which is the signature of a THRESHOLD somewhere, not of a smooth curve.
-// NEXT STEP, cheap, and it reuses the pixel set this run already identified: difference the graded frame against itself with
-// __hc.scot({amt:0}) and again with __hc.scot({floor:1}) at this same vantage. That separates the wash from the descent from the grade
-// in one pair each. Do that before proposing any fourth theory.
+// RESULT 2, 2026-08-05 LATER, AND IT ANSWERS IT: THE THIRD BRANCH IS THE SCOTOPIC PASS, AND ONLY AT NIGHT.
+// Same vantage, same pixel set (9,719 px of flat dark patch, 6.8% of the crop), four more passes:
+//        the SET        whole crop
+//   graded      med 4.63       33.97    100% of the set under luminance 8
+//   dbg=lit     med 11.57      25.37    <- the set receives LESS THAN HALF the crop's delivered light, 23% of it under 8
+//   wash-off    med 27.76      45.68    <- scot({amt:0}): the black is GONE, 0.1% under 8
+//   descent-off med 29.06      48.26    <- scot({floor:1}): also gone
+//   both-off    med 27.36      47.10
+// So: these faces are ones the MOON reaches less than their neighbours (dbg=lit), which lowers `_slit`, which raises `_w`, and the
+// descent then multiplies them down to 2% of their own luma while the neighbour that caught the moon sits at 34. A modest difference
+// in delivered light comes out as a 7x step across a block edge — that is the bimodality, and it is not a threshold in the bake, it is
+// the descent amplifying a smooth one. Either dial alone removes it.
+// AND THE DAYTIME CASE, which Ben's report is actually about, DOES NOT REPRODUCE HERE AT ALL: `HC_T=0.42` gives 0% black and 0 px of
+// flat dark patch in the same crop. By construction it cannot — at day 1 the descent's `1-_open*uScotG.w` is 0 on open ground and
+// `_slit >= vSky` is over the knee, so the pass is inert. Whatever makes blocks dark in daylight is NOT this pass; it is in the sky
+// bake, where 0c79c8d / f5aad84 / 554d122 are measuring a per-face-normal asymmetry with `__hc.skyCensus()`.
+// WHAT IS LEFT IS A JUDGEMENT, NOT A BUG HUNT: the night patches ARE the black night Ben signed off ("NIGHTTIME IS NOW ACTUALLY DARK,
+// and looks good"), seen from the side where it lands unevenly. Softening them means softening that. His call.
 //
-//   node bench/tmp-black-texel-locate.mjs
+//   node bench/tmp-black-texel-locate.mjs            the near-night vantage (t=0.94, uDay 0.042)
+//   HC_T=0.42 node bench/tmp-black-texel-locate.mjs  full daylight, where the set does not exist
 import { spawn } from 'node:child_process'; import { createServer } from 'node:net';
 import http from 'node:http'; import fs from 'node:fs'; import path from 'node:path';
 import { chromium } from 'playwright-core';
@@ -87,7 +103,18 @@ function readCrop(file,c){
     const base='http://127.0.0.1:'+port; await waitHttp(base+'/index.html');
     browser=await chromium.launch({executablePath:findBrowser(),headless:true,args:['--enable-gpu','--use-angle=d3d11','--mute-audio']});
     const shots={};
-    for(const [tag,qs] of [['graded',''],['sky','&dbg=sky'],['albedo','&albedo=1']]){
+    // THE FOURTH, FIFTH AND SIXTH PASSES ARE DIALS, NOT PAGES. `wash-off` and `descent-off` are the same page as `graded` with one
+    // uniform moved, so they follow the same pixel set exactly and separate the three remaining suspects:
+    //   wash-off      __hc.scot({amt:0})   the whole scotopic mix gone. If the set lights up, the WASH made them black.
+    //   descent-off   __hc.scot({floor:1}) the mix stays, its target returns to luma. If the set lights up, the DESCENT did.
+    //   both-off      neither. If the set is STILL black here, nothing in this pass is responsible and it is the grade or the light.
+    const DIALS={ 'wash-off':'__hc.scot({amt:0})', 'descent-off':'__hc.scot({floor:1})', 'both-off':'__hc.scot({amt:0, floor:1})' };
+    // HC_T pins the clock. The default 0.94 is the vantage the first run used and it is NEARLY NIGHT (uDay 0.042) — Ben's report of
+    // dark blocks is a DAYTIME one, so `HC_T=0.42 node bench/tmp-black-texel-locate.mjs` is the other half of the question and the
+    // two runs answer different things.
+    const T=+(process.env.HC_T||0.94);
+    for(const [tag,qs] of [['graded',''],['sky','&dbg=sky'],['albedo','&albedo=1'],['lit','&dbg=lit'],
+                           ['wash-off',''],['descent-off',''],['both-off','']]){
       const ctx=await browser.newContext({viewport:{width:1000,height:560},deviceScaleFactor:1});
       await ctx.addInitScript(`try{ localStorage.setItem('hollowcraft_grain','0'); }catch(e){}`);
       const page=await ctx.newPage();
@@ -103,7 +130,11 @@ function readCrop(file,c){
       for(let i=0;i<24;i++){ const f=await page.evaluate(`__hc.fill()`); if(f&&f.meshed>=f.want) break; await sleep(400); }
       await sleep(1800);
       await page.evaluate(`__hc.cam({yaw:${Math.PI}, pitch:-0.42})`);
-      await page.evaluate(`__hc.setTime(0.94)`); await sleep(620); await page.evaluate(`__hc.setTime(0.94)`); await sleep(320);
+      await page.evaluate(`__hc.setTime(${T})`); await sleep(620); await page.evaluate(`__hc.setTime(${T})`); await sleep(320);
+      // RE-PIN AFTER THE DIAL, not before: the dial takes a frame to reach the uniform and setTime drifts while it does.
+      if(DIALS[tag]){ await page.evaluate(DIALS[tag]); await sleep(450);
+        await page.evaluate(`__hc.setTime(0.94)`); await sleep(520); await page.evaluate(`__hc.setTime(0.94)`); await sleep(260);
+        console.log(`  ${tag.padEnd(11)} dials ${JSON.stringify(await page.evaluate(`__hc.scot({})`))}`); }
       const f=path.join(OUT,`blacktex-${tag}.png`); await page.screenshot({path:f}); shots[tag]=f;
       console.log(`  ${tag.padEnd(7)} shot taken`);
       await ctx.close();
@@ -113,7 +144,7 @@ function readCrop(file,c){
     const iso=isolated(shots.graded,CROP);   // now: flat dark patches
     console.log(`\n  graded frame: black ${iso.blackPct}%, FLAT-DARK-PATCH ${iso.isoPct}%  (${iso.idx.length} px)`);
     if(!iso.idx.length){ console.log('  no isolated black pixels in this crop — nothing to locate'); return; }
-    for(const tag of ['graded','sky','albedo']){
+    for(const tag of ['graded','sky','albedo','lit','wash-off','descent-off','both-off']){
       const set=readSet(shots[tag],iso.idx), all=readCrop(shots[tag],CROP);
       console.log(`  ${tag.padEnd(7)}  the SET ${JSON.stringify(set)}`);
       console.log(`  ${tag.padEnd(7)}  whole crop ${JSON.stringify(all)}`);

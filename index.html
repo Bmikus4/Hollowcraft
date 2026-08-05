@@ -18836,11 +18836,31 @@ function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id
 // cone, so nine pellets land in a body at 8 m and three or four at 30, and assert-shotgun measures it (324 hits at 4
 // blocks against 128 at 30). Scaling each pellet by distance as WELL would contradict the flat 25 Ben asked for, and it
 // would put back the per-range special case this function was deliberately built without.
+let _ricoLog=0, _ricoNear=99;   // QA only: how many times the last shot skipped off a wall — see __hc.ricoTest
 const PELLET_DMG=25, PELLET_HEAD=1.33, PELLET_SUP=6;   // a suppressed 12 gauge keeps the proportional cost it always had (3 of 12 -> 6 of 25)
 function _traceBullet(o,d,bolt,rev,sup,sg,vo){
   const animDmg=Math.max(3,(sg?PELLET_DMG:bolt?40:rev?14:10) - (sup?(sg?2:bolt?20:4):0));   // one pellet is worth 6 on an animal, so a whole shell is 54 — a deer dies to one                               // the hunting rifle hits far harder; suppressor costs the rifle -20 but light guns only -4 (the flat -20 drove AR/Python animal damage NEGATIVE — bullets healed animals)
   const _maxR=sg?36:bolt?210:rev?120:70;   // shot sheds velocity fast: past ~36 blocks a 12 gauge is not a weapon                                                                    // the hunting rifle reaches ~3x as far as the AR; the revolver ~mid
-  for(let t=0.6;t<_maxR;t+=0.35){ const px=o.x+d.x*t, py=o.y+d.y*t, pz=o.z+d.z*t;                      // finer step so tight hitboxes aren't skipped
+  // RICOCHETS, AND THEY CAN KILL YOU (Ben's backlog item 23: "own ricochets and thrown spears kill you"). The trace was one ray that ended
+  // at the first solid block. It is up to three SEGMENTS now: a glancing hit on hard stone reflects and keeps going, and from the second
+  // segment onward the shooter's own capsule is in the line of fire.
+  //   NOTHING NEW HAD TO BE COMPUTED. The block branch below already solves the exact face the ray pierced and its normal — for the bullet
+  // hole — so the reflection is d - 2(d.n)n off numbers that were already there.
+  //   WHEN IT BOUNCES: incidence under 0.35 of the normal (about 70 degrees off it — a graze, not a square hit) and a block of hardness 1
+  // or more. A bullet does not skip off dirt or thatch, and a square hit into stone does not come back at you.
+  //   RANGE IS SHARED, NOT RESET. `travelled` carries across segments, so two bounces cannot give a round three times its reach — a
+  // ricochet is the same bullet, further along its life.
+  //   THE PLAYER IS ONLY IN DANGER AFTER THE FIRST BOUNCE, for the same reason the thrown spear needed a grace period: the ray starts
+  // inside the shooter's own body, so testing the capsule on segment 0 would make every shot suicide.
+  let travelled=0, bounced=0, rico=null;   // _ricoLog (QA only, see __hc.ricoTest) counts the bounces this shot took
+  for(let seg=0; seg<3; seg++){
+  rico=null;
+  for(let t=(seg?0.05:0.6); travelled+t<_maxR; t+=0.35){ const px=o.x+d.x*t, py=o.y+d.y*t, pz=o.z+d.z*t;                      // finer step so tight hitboxes aren't skipped
+    if(seg>0){ const _nd=Math.hypot(px-player.pos.x, pz-player.pos.z); if(_nd<_ricoNear) _ricoNear=_nd; }   // QA only: how close the return came
+    if(seg>0 && !player.dead && !player.creative && Math.abs(px-player.pos.x)<HW+0.2 && Math.abs(pz-player.pos.z)<HW+0.2
+       && py>player.pos.y-0.1 && py<player.pos.y+PH+0.1){                                              // your own ricochet, coming back
+      if(typeof damage==='function') damage(animDmg, 'your own ricochet found you', 'bullet');
+      spawnParticles(px,py,pz,0xcc2018,10,1.8,0.5); return true; }
     // THE TRACER LEAVES THE MUZZLE AND CONVERGES ONTO THE LINE. vo is the barrel's own position; the hit trace still runs from the
     // eye down d, so the two are parallel and a few centimetres apart. Blending the tracer's origin from the muzzle onto the true
     // ray over the first 4 blocks means the streak starts AT the barrel and is on the bullet's line by the time it is far enough
@@ -18858,6 +18878,24 @@ function _traceBullet(o,d,bolt,rev,sup,sg,vo){
       let nx=0,ny=0,nz=0,tEnter;
       if(tx>=ty && tx>=tz){ nx=-Math.sign(d.x); tEnter=tx; } else if(ty>=tz){ ny=-Math.sign(d.y); tEnter=ty; } else { nz=-Math.sign(d.z); tEnter=tz; }
       const fx=qx+d.x*tEnter, fy=qy+d.y*tEnter, fz=qz+d.z*tEnter;                  // exact point the ray pierced that face → seat the decal HERE (proud of the surface), never inside/under the block
+      // GLANCING HIT ON HARD STONE → it skips off. Decided here, before the terminal effects, because a ricochet still marks the wall it
+      // came off but must not spend the shot on it.
+      const _inc=Math.abs(d.x*nx+d.y*ny+d.z*nz), _hard=(B[b]&&B[b].hard)||0;
+      // 0.75 OF THE NORMAL, NOT 0.35, AND THE REASON IS GEOMETRY RATHER THAN TASTE. A shallow-only gate (0.35 = more than 69 degrees off
+      // the normal) is the realistic rule and it makes Ben's own ask unreachable: a graze reflects almost along the wall, so it always
+      // travels AWAY from the shooter and can never come back. Measured — forty shots at ten angles inside a stone chamber wounded nobody.
+      // 0.75 admits the 45-degree case, which is the one that returns: two walls meeting at a right angle send a round back antiparallel to
+      // the way it came, which is exactly how you shoot yourself. A square-on hit (incidence above 0.75) still buries the round in the wall.
+      if(bounced<2 && _hard>=1 && _inc<0.75){
+        addBulletHole(fx,fy,fz,nx,ny,nz); spawnParticles(fx,fy,fz,0xffe08a,7,2.6,0.35);                 // sparks, not a dust burst: this is steel on stone
+        // MIRROR PLUS A LITTLE SCATTER. A perfect reflection off a voxel face is a billiard ball, and a round that skips off stone comes
+        // off deformed — the jitter is small enough that the corner-return case survives it and large enough that two identical shots do
+        // not land in the same place.
+        const _dot=d.x*nx+d.y*ny+d.z*nz, _J=0.05;
+        let _rx=d.x-2*_dot*nx+(Math.random()-0.5)*_J, _ry=d.y-2*_dot*ny+(Math.random()-0.5)*_J, _rz=d.z-2*_dot*nz+(Math.random()-0.5)*_J;
+        const _rl=Math.hypot(_rx,_ry,_rz)||1; _rx/=_rl; _ry/=_rl; _rz/=_rl;
+        rico={ t:t, x:fx+nx*0.02, y:fy+ny*0.02, z:fz+nz*0.02, dx:_rx, dy:_ry, dz:_rz };
+        break; }
       spawnParticles(px,py,pz,blockColor(b),9,1.7,0.5); addBulletHole(fx,fy,fz,nx,ny,nz);
       shotFixture(qx,qy,qz,b,d);   // a lantern goes out, a hanging lamp or a chime is knocked swinging (see below)
       return true; }
@@ -18869,6 +18907,12 @@ function _traceBullet(o,d,bolt,rev,sup,sg,vo){
     if(an){ hurtAnimal(an,animDmg); spawnParticles(px,py,pz,0xcc2018,8,1.6,0.5); return true; }   // blood burst only — no lingering wound decal (Ben 07-21)
     if(NET.on && !NET.host){ for(const _k in _netAnimals){ const _e=_netAnimals[_k]; const _dx=px-_e.x,_dz=pz-_e.z,_dy=py-_e.y;   // GUEST: the real animals[] is empty here → hit the host's mirrored animals and request the damage
       if(_dx*_dx+_dz*_dz<0.9 && _dy>-0.25 && _dy<2.2){ const _n=+String(_k).replace(/^n/,''); if(_n===_n)netSend({t:'han',n:_n,v:animDmg}); spawnParticles(px,py,pz,0xcc2018,8,1.6,0.5); return true; } } } }
+  // Out of range, or a clean miss, or the ray left the world: either way this bullet is finished.
+  if(!rico) return true;
+  travelled+=rico.t; bounced++; _ricoLog++;
+  o={x:rico.x,y:rico.y,z:rico.z}; d={x:rico.dx,y:rico.dy,z:rico.dz};
+  vo=null;                                                                                             // the muzzle-convergence blend belongs to the FIRST segment only
+  }
   return true; }
 // THE RAY DECIDES WHICH CREATURE IT HIT — not the camera. Called once per step of the bullet's walk, so stepping t outward
 // finds the FIRST creature along the line by construction, which is what a bullet does. withNearestWretch (the MELEE binder)
@@ -30991,6 +31035,31 @@ window.__hc={
   // QA: THROW A SPEAR STRAIGHT UP AND SEE WHO IT LANDS ON (Ben's backlog item 23). Aims the player up, throws through the real
   // throwSpear, then reports the flight and the player's health so a bench can watch it come back down. Health is the assertion; the
   // spear list is how a run that never threw anything is told apart from one where the spear missed.
+  // QA: FIRE A BULLET AT A KNOWN WALL AT A KNOWN ANGLE AND SEE WHERE IT ENDS UP (Ben's backlog item 23). Builds the wall itself, so the
+  // test does not depend on what happens to be standing near spawn: a stone slab two blocks in front of the player, the aim swung to a
+  // grazing angle across it, and the shot put through the REAL fireGun path. Health is the assertion for a self-hit; ricochetLog counts
+  // the bounces the trace actually took.
+  ricoTest(o){ o=o||{}; try{
+      const yaw=(o.yaw==null?0.30:+o.yaw);
+      player.creative=false; player.dead=false; player.health=20; player.pitch=0;
+      const px=Math.floor(player.pos.x), py=Math.floor(player.pos.y), pz=Math.floor(player.pos.z);
+      // A STONE BOX AROUND THE SHOT. One wall is not enough to bring a round back to the shooter — a single graze sends it away down the
+      // wall. Three faces of a small chamber give it somewhere to come back FROM, which is the case Ben is describing.
+      // A TIGHT CHAMBER. At a radius of 3 the closest a returning round came to the shooter was 2.96 blocks — a ricochet off a wall three
+      // blocks away simply does not cross the middle of the room again. At radius 1 the walls are a metre off and the return has nowhere
+      // else to go, which is the "you shot yourself in a stone cell" case the ask is about.
+      const R=(o.r==null?1:o.r|0);
+      if(o.build!==false){ for(let dx=-R;dx<=R;dx++)for(let dz=-R;dz<=R;dz++)for(let dy=0;dy<=3;dy++){
+          const edge=(Math.abs(dx)===R||Math.abs(dz)===R);
+          if(edge) setBlockWorld(px+dx,py+dy,pz+dz,BID.stone,true);
+          else if(dy>0) setBlockWorld(px+dx,py+dy,pz+dz,AIR,true); } }
+      _ricoLog=0; _ricoNear=99;
+      player.yaw=yaw;
+      const id=o.gun||'ar15'; inv[selSlot]={id,n:60}; refreshHotbar(); setViewItem(id);
+      if(typeof fireGun==='function') fireGun(inv[selSlot]);
+      return { yaw:+player.yaw.toFixed(2), gun:id, bounces:_ricoLog, near:+_ricoNear.toFixed(2), health:+player.health.toFixed(2) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  ricoRead(){ try{ return { bounces:_ricoLog, health:+player.health.toFixed(2), dead:!!player.dead }; }catch(e){ return {err:String(e.message||e)}; } },
   spearSelf(pitch, straight){ try{ if(typeof throwSpear!=='function') return {no:'no throwSpear'};
       player.creative=false; player.health=20; player.dead=false;
       const id=Object.keys(ITEMS).find(k=>ITEMS[k]&&ITEMS[k].spear); if(!id) return {no:'no spear item'};
