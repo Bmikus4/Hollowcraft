@@ -120,6 +120,15 @@ const W=900,H=600;
     // tuning flips it off the no-signal slate. The feed's own pixels on the face are NOT verified here.
     // The feed is not the slate: brighter, and with real contrast across it rather than two scanline values.
     console.log('    face pixels (diagnostic only)', JSON.stringify({slate:offFace.m, feed:onFace.m}));
+    // IT STAYS ON WHEN THE CAMERA STOPS BEING RENDERED (Ben 08-05: "they should display their cameras on them all the time"). A slot
+    // was handed out fresh every frame and a monitor without one went to the no-signal slate, so walking more than SCR_RANGE (64) from
+    // the camera blanked a screen that was working a second earlier. A code now keeps its tile and the tile keeps its last frame.
+    const far=await page.evaluate(`(()=>{ const p=__hc.pos(); __hc.tpExact(p.x+120, p.z+120);
+        for(let i=0;i<8;i++) __hc.cctvStep();
+        return { live:__hc.cctv().live, q:__hc.cctvScreenAt(${MON[0]},${MON[1]},${MON[2]}) }; })()`);
+    console.log('    120 blocks away', JSON.stringify(far).slice(0,240));
+    ok('the monitor is out of the live set once the player leaves', (far.live||[]).length===0, {live:far.live});
+    ok('...and its face is still showing the camera', far.q && far.q.on===1, {on:far.q&&far.q.on});
     ok('no page errors', errors.length===0, errors);
     await b.close();
   } finally { server.kill(); }
