@@ -2658,17 +2658,99 @@ function greedyMesh(c, pass){
 // CFG.SEA+0.88: a 0.91-block step wherever chunk water ended (Ben 08-04, who guessed it from the frame: "it is at a block
 // height, when it should really be in between").
 const WATER_SURF_DROP=0.12;
+// =====================================================================
+//  THE FLOW FIELD (#74) — one vector per water column, baked at mesh time
+// =====================================================================
+// The roster is right that the DIRECTION is the hard part and the scroll is not. Three items want this vector (#74's
+// texture, #70's bubbles, #67's kelp lean), so it is one pure function of world x,z: no state, no time, no randomness,
+// which is also what makes it identical on every client without a byte crossing the wire.
+//
+// IT IS SAMPLED ON A LATTICE, NOT PER BLOCK. A single sample costs 16 rays of surfaceH, and a chunk holds up to 256
+// water columns — per column that is a quarter of a million heightmap lookups a chunk, which is a mesh hitch you can
+// feel. One sample per 8 blocks, cached forever, bilinearly interpolated between the four surrounding samples: about a
+// dozen new samples for a fresh sea chunk. Interpolating the VECTOR rather than the angle is deliberate — two opposed
+// currents cancel to zero and read as slack water, which is what they are, where two angles would average to a heading
+// pointing across both of them.
+const FLOW_CELL=8;
+const _flowCache=new Map();
+// THE SIGNED RIVER FIELD, and it must stay in step with surfaceH's. surfaceH carves a channel wherever |this| < 0.035,
+// so if the domain warp here ever drifts from the warp there, this function finds channels that were never cut and the
+// water flows across dry rock. The three lines are duplicated rather than shared because surfaceH is terrain — the one
+// function in this file that ~20 structures site off — and threading a second return value out of it to save three
+// lines is not a trade worth making.
+function _riverField(wx,wz){
+  const wxo = wx + 34*fbm2(wx*0.0041, wz*0.0041, 701, 4);
+  const wzo = wz + 34*fbm2(wx*0.0041+11.3, wz*0.0041+7.7, 733, 4);
+  return fbm2(wxo*0.0020, wzo*0.0020, 91, 3);
+}
+const FLOW_RIVER=1.0;        // blocks a second the surface pattern travels downstream in a river
+const FLOW_IN=0.62;          // the ocean's inflow gain at the waterline (see the sign flip below)
+const FLOW_SLACK=18;         // distance from land where inflow has died to nothing and the drift turns seaward
+const FLOW_REACH=72;         // how far the land/sea rays look; past this the open ocean is dead flat and #59's business
+function _flowSample(cx,cz){
+  const key=cx+','+cz; const hit=_flowCache.get(key); if(hit!==undefined) return hit;
+  const x=cx*FLOW_CELL, z=cz*FLOW_CELL;
+  // ONE ray fan answers both questions: where is the nearest land, and how enclosed is this water. 16 bearings, 4-block
+  // steps. `enclosed` is what separates a river or a pond from a bay — a coastal cell sees land on one side, a channel
+  // sees it on both, a pond sees it everywhere.
+  let landTh=null, landR=1e9, enclosed=0;
+  for(let k=0;k<16;k++){ const th=k*0.3927, sn=Math.sin(th), cs=Math.cos(th);
+    for(let r=4;r<=FLOW_REACH;r+=4){ if(surfaceH(Math.round(x+sn*r), Math.round(z+cs*r))>CFG.SEA){ enclosed++; if(r<landR){landR=r; landTh=th;} break; } } }
+  let fx=0, fz=0;
+  const rv=_riverField(x,z);
+  if(Math.abs(rv)<0.05 && enclosed>=11){
+    // A RIVER FLOWS ALONG ITS CHANNEL, WHICH IS THE LEVEL SET OF THE FIELD — so the tangent is perpendicular to the
+    // field's gradient, not down the terrain. The terrain gradient is the obvious thing to reach for and it is wrong
+    // here: the carve lerps the channel floor to a FLAT CFG.SEA-3, so along a river the ground does not descend at all
+    // and across it the banks rise on both sides — steepest descent points at the water's own centreline.
+    const d=6, gx=_riverField(x+d,z)-_riverField(x-d,z), gz=_riverField(x,z+d)-_riverField(x,z-d);
+    let tx=-gz, tz=gx; const L=Math.hypot(tx,tz);
+    if(L>1e-9){ tx/=L; tz/=L;
+      // WHICH WAY IS DOWNSTREAM cannot be read off the channel floor either, for the same reason. Rivers end in the sea,
+      // so downstream is whichever end of the tangent takes you toward it: the nearest-land bearing is inverted to get a
+      // seaward one. A channel with no coast in reach keeps the arbitrary sign — an inland run of river that has to look
+      // like it is going somewhere, and either answer does.
+      if(landTh!=null){ const sx=-Math.sin(landTh), sz=-Math.cos(landTh); if(tx*sx+tz*sz < 0){ tx=-tx; tz=-tz; } }
+      fx=tx*FLOW_RIVER; fz=tz*FLOW_RIVER; }
+  } else if(landTh!=null && enclosed<11){
+    // THE OCEAN'S INFLOW IS THE ROSTER'S INVERTED MASK, WRITTEN AS A SIGN FLIP RATHER THAN A SECOND FIELD (Q4 ruling:
+    // static, no tide). One signed magnitude along the landward axis: positive at the waterline, through zero at
+    // FLOW_SLACK, negative — i.e. seaward — beyond it, faded out entirely by the edge of the rays' reach. That gives
+    // water rolling in at the shore, a slack band, a gentle seaward drift offshore, and dead-flat open ocean, with no
+    // discontinuity anywhere between them and one number to tune.
+    const s=FLOW_IN*(1-landR/FLOW_SLACK), fade=1-clamp((landR-FLOW_SLACK*2.2)/(FLOW_REACH-FLOW_SLACK*2.2),0,1);
+    const m=clamp(s,-0.26,FLOW_IN)*fade;
+    fx=Math.sin(landTh)*m; fz=Math.cos(landTh)*m;
+  }
+  // Anything left is still: open ocean out of reach of any coast, and enclosed ponds. A pond does NOT flow — inland
+  // water was deliberately made flat and only a river has anywhere to be going.
+  const v={x:fx,z:fz};
+  if(_flowCache.size>60000) _flowCache.clear();
+  _flowCache.set(key,v); return v;
+}
+const _fvOut={x:0,z:0};
+function flowVec(wx,wz,out){
+  const fx=wx/FLOW_CELL, fz=wz/FLOW_CELL, cx=Math.floor(fx), cz=Math.floor(fz), tx=fx-cx, tz=fz-cz;
+  const a=_flowSample(cx,cz), b=_flowSample(cx+1,cz), c=_flowSample(cx,cz+1), d=_flowSample(cx+1,cz+1);
+  const x0=a.x+(b.x-a.x)*tx, x1=c.x+(d.x-c.x)*tx, z0=a.z+(b.z-a.z)*tx, z1=c.z+(d.z-c.z)*tx;
+  const o=out||_fvOut; o.x=x0+(x1-x0)*tz; o.z=z0+(z1-z0)*tz; return o;
+}
 function waterMesh(c){
-  const P=[], NM=[], TOPF=[], DEP=[], COLD=[];
+  const P=[], NM=[], TOPF=[], DEP=[], COLD=[], FLOW=[];
   const g=_sg;   // padded-snapshot reads (see snapshotChunk)
   // COLD is the WHOLE water column's depth, the same number on every vertex of that column — tops and the side strips under
   // them. aDepth cannot serve: for a top face it is the column depth, but for a side face it is that cell's own depth below
   // the surface, so clamping the world curve by aDepth would drop a 5-deep column's surface by 4.4 and the side strip beside
   // it by 0.4 and tear the water open along every shoreline. See the clamp in waterMat's vertex stage.
+  // THE FLOW IS PER COLUMN, not per vertex and not per cell: the top face and every side strip under it belong to one
+  // piece of moving water, and giving a column's side a different current from its own surface would shear the texture
+  // at the waterline. It is read once per (lx,lz) and held here for whatever push calls follow.
+  const cx0=c.cx*CK, cz0=c.cz*CK; let _cfx=0, _cfz=0;
   const push=(a,b,cc,d,nx,ny,nz,top,depth,colD)=>{ const quad=[a,b,cc,d]; const o=[0,1,2,0,2,3];
-    for(let t=0;t<6;t++){const vv=quad[o[t]];P.push(vv[0],vv[1],vv[2]);NM.push(nx,ny,nz);TOPF.push(top);DEP.push(depth);COLD.push(colD);} };
+    for(let t=0;t<6;t++){const vv=quad[o[t]];P.push(vv[0],vv[1],vv[2]);NM.push(nx,ny,nz);TOPF.push(top);DEP.push(depth);COLD.push(colD);FLOW.push(_cfx,_cfz);} };
   for (let ly=0;ly<WH;ly++) for (let lz=0;lz<CK;lz++) for (let lx=0;lx<CK;lx++){
     if (g(lx,ly,lz)!==WATER) continue;
+    { const fv=flowVec(cx0+lx+0.5, cz0+lz+0.5); _cfx=fv.x; _cfz=fv.z; }
     if (g(lx,ly+1,lz)!==WATER){ const y=ly+1-WATER_SURF_DROP;         // water-column depth below this surface cell
       let depth=1; for(let dy=ly-1; dy>=0 && g(lx,dy,lz)===WATER; dy--) depth++;
       push([lx,y,lz],[lx+1,y,lz],[lx+1,y,lz+1],[lx,y,lz+1],0,1,0,1,depth,depth); }
@@ -2690,6 +2772,7 @@ function waterMesh(c){
   geo.setAttribute('aTop',new THREE.Float32BufferAttribute(TOPF,1));
   geo.setAttribute('aDepth',new THREE.Float32BufferAttribute(DEP,1));
   geo.setAttribute('aColD',new THREE.Float32BufferAttribute(COLD,1));
+  geo.setAttribute('aFlow',new THREE.Float32BufferAttribute(FLOW,2));   // #74: blocks a second, in world XZ
   return geo;
 }
 
@@ -3824,6 +3907,10 @@ const _farSeaGeo=(()=>{ const g=new THREE.RingGeometry(0.0005, 16.0, 128, 44);  
   // difference between their curves IS a ledge there. It cannot be shared with aDepth, which is 12 for absorption; absorption
   // saturates by about five blocks, so that number is a colour and this one is geometry.
   g.setAttribute('aColD', new THREE.BufferAttribute(new Float32Array(n).fill(64), 1));
+  // aFlow is declared and left at zero. It has to exist: an attribute the shader declares but the geometry omits reads
+  // whatever was last bound to that slot, so the disc would inherit some sea chunk's current and the open ocean would
+  // scroll. Zero is also the honest value — this disc is water past the render wall, where the flow field stops.
+  g.setAttribute('aFlow', new THREE.BufferAttribute(new Float32Array(n*2), 2));
   return g; })();
 // Built on FIRST USE, not here: waterMat is declared a few hundred lines further down, and naming it at this point is a
 // use-before-initialisation that stops the file dead. The geometry above has no such dependency, so only the mesh waits.
@@ -4278,17 +4365,25 @@ const waterMat = new THREE.ShaderMaterial({
     // k=2.6e-6 put the entire bend outside the clip: measured, drop at camera.far was 0.00 and the visible sea was dead flat.
     // R=170 still clears the render wall (128) so no chunk water curves and the shore stays safe by construction, and
     // k=1.03e-4 reaches 2.5 blocks at the clip — 0.44 degrees of dip across the last 150 blocks of visible sea.
+    uFlow:{value:1.0},   // #74 master gain on the baked flow field — 0 is the A/B off and restores the pre-flow surface exactly (__hc.flow({gain}))
     uWx:{value:0}, uCurveR:{value:170.0}, uCurveK:{value:0.000103}, uCurveClamp:{value:1}, uCurveCap:{value:8.0}   // THE WORLD CURVE — flat to 20 blocks, then k*(d-20)^2. k is small on purpose: at 40 blocks that is 0.9 down, at 96 it is 12.6, so the tip-over is gentle where you can see detail and only steepens where it reads as the sea falling away. "Subtle."
   }),
   vertexShader:`
-    attribute float aTop; attribute float aDepth; attribute float aColD; varying float vTop; varying float vDepth; varying vec3 vW; varying vec3 vN; varying float vFog; varying float vCrest;
-    uniform float uTime; uniform vec3 uCamPos; uniform float uCurveR, uCurveK, uCurveClamp, uCurveCap;   // uCamPos is the SAME uniform the fragment stage already uses; declaring it in both stages costs nothing and avoids a second copy that could drift
+    attribute float aTop; attribute float aDepth; attribute float aColD; attribute vec2 aFlow; varying float vTop; varying float vDepth; varying vec3 vW; varying vec3 vN; varying float vFog; varying float vCrest; varying vec2 vFlow;
+    uniform float uTime; uniform vec3 uCamPos; uniform float uCurveR, uCurveK, uCurveClamp, uCurveCap, uFlow;   // uCamPos is the SAME uniform the fragment stage already uses; declaring it in both stages costs nothing and avoids a second copy that could drift
     void main(){
-      vTop=aTop; vDepth=aDepth; vec3 p=position; vec3 wp=(modelMatrix*vec4(p,1.0)).xyz;
+      vTop=aTop; vDepth=aDepth; vFlow=aFlow*uFlow; vec3 p=position; vec3 wp=(modelMatrix*vec4(p,1.0)).xyz;
+      // WATER THAT MOVES SOMEWHERE (#74). aFlow is a velocity in blocks a second, baked per column by flowVec, and the
+      // only thing either stage does with it is ADVECT THE SAMPLE POINT: every pattern on this surface is a function of
+      // xz, so evaluating it at xz - v*t makes the whole thing travel at v without a single new octave of noise. Where
+      // the field is zero — open ocean, ponds — the subtraction is of zero and the water is bit-identical to before,
+      // which is what lets a river flow through a sea that Ben has already signed off on.
+      vec2 fo = vFlow*uTime;
       if(aTop>0.5){
         float y=0.0; vec2 n=vec2(0.0);
         vec2 D0=normalize(vec2(1.0,0.3)),D1=normalize(vec2(-0.7,1.0)),D2=normalize(vec2(0.5,-0.9)),D3=normalize(vec2(-1.0,-0.4));
-        float p0=dot(D0,wp.xz)*0.35+uTime*0.9, p1=dot(D1,wp.xz)*0.6+uTime*1.15, p2=dot(D2,wp.xz)*1.3+uTime*1.6, p3=dot(D3,wp.xz)*2.4+uTime*2.1;
+        vec2 ap=wp.xz-fo;
+        float p0=dot(D0,ap)*0.35+uTime*0.9, p1=dot(D1,ap)*0.6+uTime*1.15, p2=dot(D2,ap)*1.3+uTime*1.6, p3=dot(D3,ap)*2.4+uTime*2.1;
         y+=sin(p0)*0.14+sin(p1)*0.09+sin(p2)*0.045+sin(p3)*0.02;
         y=min(y,0.10);   // CLAMP crests below the block top (rest surface sits 0.12 under it) → waves never rise over adjacent land
         n+=D0*cos(p0)*0.14*0.35+D1*cos(p1)*0.09*0.6+D2*cos(p2)*0.045*1.3+D3*cos(p3)*0.02*2.4;
@@ -4348,13 +4443,17 @@ const waterMat = new THREE.ShaderMaterial({
     }`,
   fragmentShader:`
     precision highp float;
-    varying float vTop; varying float vDepth; varying vec3 vW; varying vec3 vN; varying float vFog; varying float vCrest;
+    varying float vTop; varying float vDepth; varying vec3 vW; varying vec3 vN; varying float vFog; varying float vCrest; varying vec2 vFlow;
     uniform vec3 uSunDir,uMoonDir,uCamPos; uniform float uDay,uTime; uniform vec3 uFogColor; uniform float uFogDensity, uDeep, uWx; uniform vec3 uRing; uniform float uRingFade;
     uniform float uGladeAfter, uGladeAmt, uFresCap, uFoam;
     float h2(vec2 p){ return fract(sin(dot(p,vec2(12.9,78.2)))*43758.5); }
     float vn2(vec2 x){ vec2 i=floor(x),f=fract(x); f=f*f*(3.0-2.0*f); return mix(mix(h2(i),h2(i+vec2(1,0)),f.x),mix(h2(i+vec2(0,1)),h2(i+vec2(1,1)),f.x),f.y); }
     void main(){
-      vec2 uv=vW.xz;
+      // The surface texture is the item, and it is one subtraction: uv carries the column's current, so all six noise
+      // octaves below travel downstream together instead of each drifting on its own fixed heading. Their little
+      // hand-tuned uTime offsets stay — they are what keeps still water alive, and they are all that is left where the
+      // flow is zero.
+      vec2 uv=vW.xz - vFlow*uTime;
       float n1=vn2(uv*0.6+uTime*vec2(0.05,0.04)), n2=vn2(uv*1.7-uTime*vec2(0.07,0.03)), n3=vn2(uv*4.0+uTime*vec2(0.02,-0.09));
       vec3 rip=normalize(vec3((n1-0.5)*1.2+(n2-0.5)*0.8+(n3-0.5)*0.5, 1.0, (n2-0.5)+(n3-0.5)*0.6));
       vec3 N=normalize(vN*0.55+rip*0.6);
@@ -10520,7 +10619,7 @@ function loop(){ try{
   T.end(TID.input);
   applyWaterFog();
   T.begin(TID.entities); T.begin(TID.props);
-  updateDrops(dt); updateSpears(dt); updateStuckSpears(dt); updateParticles(dt); updateBubbles(dt); updateShells(dt); updateView(dt); if(typeof updateWings==='function')updateWings(dt); updateWatchers(dt); checkNotes(dt); updateSkyBirds(dt); updateFireflies(dt); updateLampHalos(dt); updateLeaves(dt); if(typeof updateDungeonBugs==='function')updateDungeonBugs(dt);  // floating items, thrown/stuck spears, particles, ejected shell casings, held viewmodel, angel wings, watching-eyes, notes, sky birds, dungeon arachnids
+  updateDrops(dt); updateSpears(dt); updateStuckSpears(dt); updateParticles(dt); updateBubbles(dt); updateShells(dt); updateView(dt); if(typeof updateWings==='function')updateWings(dt); updateWatchers(dt); checkNotes(dt); updateSkyBirds(dt); updateFireflies(dt); updateLampHalos(dt); updateContactShadows(dt); updateLeaves(dt); if(typeof updateDungeonBugs==='function')updateDungeonBugs(dt);  // floating items, thrown/stuck spears, particles, ejected shell casings, held viewmodel, angel wings, watching-eyes, notes, sky birds, dungeon arachnids
   netUpdate(dt);                                                             // co-op: send my transform, interpolate peers, host broadcasts the Wretch/time
   T.end(TID.props); T.end(TID.entities);
   T.begin(TID.audio); updateAudio(dt); T.end(TID.audio);
@@ -14490,6 +14589,12 @@ function updateBubbles(dt){
       if(_bWrap>=_bN) _bWrap=0;
       continue; }
     if(_bVel[i3+1]<2.4) _bVel[i3+1]+=1.1*dt;                                        // a bubble accelerates upward: less water above it to push through, and it is growing
+    // AND IT GOES WHERE THE WATER GOES (#74's second consumer). A bubble is the one thing in the game that makes a
+    // current visible from inside it, and the field is a pure function of xz, so this is a lookup and a lerp: the
+    // bubble's own drift eases toward the flow rather than being replaced by it, or a strand of them would snap sideways
+    // the moment they crossed a cell boundary.
+    if(typeof flowVec==='function'){ const fv=flowVec(_bPos[i3], _bPos[i3+2]);
+      _bVel[i3]+=(fv.x*0.8-_bVel[i3])*Math.min(1,dt*1.5); _bVel[i3+2]+=(fv.z*0.8-_bVel[i3+2])*Math.min(1,dt*1.5); }
     _bR[i]+=_bR[i]*0.28*dt;                                                         // and expands as the pressure drops
     const w=Math.sin(_bPh[i]+_bAge[i]*6.5)*0.20;                                    // the wobble is what stops 120 spheres reading as one rigid column
     _bPos[i3]+=(_bVel[i3]+w)*dt; _bPos[i3+1]+=_bVel[i3+1]*dt; _bPos[i3+2]+=(_bVel[i3+2]+Math.cos(_bPh[i]+_bAge[i]*5.9)*0.20)*dt;
@@ -15044,7 +15149,7 @@ function buildMinigun(dot,suppressed){ const g=new THREE.Group();
   const can=new THREE.Mesh(new THREE.BoxGeometry(0.15,0.16,0.16),dark); can.position.set(-0.14,-0.02,0.14); g.add(can);   // side ammo can
   const feed=new THREE.Mesh(new THREE.BoxGeometry(0.08,0.04,0.05),gm); feed.position.set(-0.07,0.0,0.06); g.add(feed);   // delrin feed chute
   { const belt=new THREE.Mesh(new THREE.BoxGeometry(0.05,0.03,0.09),brass); belt.position.set(-0.1,-0.06,0.1); belt.rotation.z=0.3; g.add(belt); }   // a hint of ammo belt
-  const grip=new THREE.Mesh(new THREE.BoxGeometry(0.045,0.16,0.055),dark); grip.position.set(0,-0.15,0.19); grip.rotation.x=0.24; g.add(grip);   // spade/pistol grip
+  const grip=new THREE.Mesh(new THREE.BoxGeometry(0.045,0.16,0.055),dark); grip.position.set(0,-0.15,0.19); grip.rotation.x=0.24; g.add(grip); g.userData.gripAt=[0,-0.15,0.19];   // spade/pistol grip
   if(dot){ const hs=buildHoloSight(); hs.position.set(0,0.115,0.06); g.add(hs); g.userData.dotY=0.115+hs.userData.axisY; }   // crafted XPS on top of the gearbox — dotY = the true optical axis
   if(suppressed){ const shroud=new THREE.Mesh(new THREE.CylinderGeometry(0.075,0.075,0.17,16),dark); shroud.rotation.x=Math.PI/2; shroud.position.set(0,0,-0.50); shroud.castShadow=true; g.add(shroud); }   // one absurd fat can swallowing all six muzzles (Ben 07-20)
   // muzzle-tip collar that glows RED-HOT under sustained fire (own material so only the tip heats — see updateView)
@@ -15079,7 +15184,7 @@ function buildAR15(dot,suppressed){ const g=new THREE.Group();
     for(const sx of [-1,1]){ const ear=new THREE.Mesh(new THREE.BoxGeometry(0.007,0.03,0.02),blk); ear.position.set(sx*0.011,0.103,0.075); g.add(ear); }          // ears span 0.088..0.118 — rooted in the base; aperture gap (inner edges ±0.0075) frames the 0.005 post dead-centre at the shared sight line
     g.userData.dotY=0.112; }   // the ADS pose centers THIS height on the eye: post tip sits exactly in the rear aperture, same discipline as the Python
   { const mag=box(0.03,0.12,0.044,poly, 0,-0.092,0.03, -0.16); g.userData.mag=mag; g.userData.magY=mag.position.y; g.userData.magRx=mag.rotation.x; }   // curved STANAG magazine — animated on reload
-  box(0.032,0.088,0.04,poly,0,-0.07,0.115, -0.42);     // A2 pistol grip — NEGATIVE rx rakes the butt of the grip rearward (+z, toward the eye). Positive points it at the muzzle, which is what read as a backwards grip.
+  { const _gp=box(0.032,0.088,0.04,poly,0,-0.07,0.115, -0.42); g.userData.gripAt=[_gp.position.x,_gp.position.y,_gp.position.z]; }   // A2 pistol grip   // …and it TELLS the hand where it is (userData.gripAt): see attachGunHand, which used one hardcoded point for five guns — NEGATIVE rx rakes the butt of the grip rearward (+z, toward the eye). Positive points it at the muzzle, which is what read as a backwards grip.
   tube(0.018,0.14,gm,       0,0.02,0.185);             // buffer tube
   box(0.046,0.07,0.10,poly, 0,0.01,0.235);             // collapsible stock
   { const tg=new THREE.Mesh(new THREE.TorusGeometry(0.026,0.005,6,14,Math.PI*1.3),gm); tg.rotation.y=Math.PI/2; tg.position.set(0,-0.05,0.075); g.add(tg); }   // trigger guard
@@ -15100,7 +15205,7 @@ function buildBoltRifle(suppressed,dot){ const g=new THREE.Group();
   box(0.06,0.075,0.36,steel, 0,0.0,0.03);              // receiver
   box(0.055,0.05,0.5,wood, 0,-0.035,0.02);             // fore-stock (wood under the barrel)
   box(0.062,0.128,0.30,wood, 0,-0.045,0.31);           // butt-stock (fuller)
-  box(0.05,0.11,0.05,wood, 0,-0.09,0.15, -0.5);        // wrist/grip — rakes rearward like the pistol grips (see assert-grip-rake); its top stays buried in the fore-stock
+  { const _gp=box(0.05,0.11,0.05,wood, 0,-0.09,0.15, -0.5); g.userData.gripAt=[_gp.position.x,_gp.position.y,_gp.position.z]; }   // wrist/grip — rakes rearward like the pistol grips (see assert-grip-rake); its top stays buried in the fore-stock
   box(0.05,0.02,0.11,wood, 0,0.02,0.30);               // low cheek riser flush with the stock top (was a weird floating block behind the scope)
   box(0.05,0.055,0.10,steel,0,-0.075,-0.03);           // detachable-mag floorplate under the receiver
   { const bp=new THREE.Mesh(new THREE.BoxGeometry(0.045,0.012,0.03),dark); bp.position.set(0,-0.108,-0.03); g.add(bp); }   // recoil pad line on the buttplate
@@ -15156,7 +15261,7 @@ function buildRevolver(suppressed){ const g=new THREE.Group();
   box(0.018,0.026,0.02,blk, 0,0.058,0.10, -0.5);       // spur hammer (cocked-back at the rear)
   box(0.01,0.03,0.014,blu,  0,-0.028,0.055);           // trigger
   { const tg=new THREE.Mesh(new THREE.TorusGeometry(0.026,0.006,6,16,Math.PI*1.25),blu); tg.rotation.y=Math.PI/2; tg.rotation.z=0.3; tg.position.set(0,-0.05,0.055); g.add(tg); }   // trigger guard
-  box(0.03,0.11,0.06,wood,  0,-0.088,0.11, -0.42);     // full walnut target grip — raked back means NEGATIVE rx: the muzzle is -z, so +rx swung the grip's butt toward it
+  { const _gp=box(0.03,0.11,0.06,wood,  0,-0.088,0.11, -0.42); g.userData.gripAt=[_gp.position.x,_gp.position.y,_gp.position.z]; }   // full walnut target grip — raked back means NEGATIVE rx: the muzzle is -z, so +rx swung the grip's butt toward it
   box(0.026,0.07,0.03,blu,  0,-0.05,0.10, -0.42);      // backstrap/grip frame tying grip to receiver — same rake, or it shears off the grip
   const flash=buildMuzzleFlash(); flash.renderOrder=8; flash.userData.base=0.75;
   flash.position.set(0,0.028,-0.32); flash.scale.setScalar(0.75); flash.visible=false; g.add(flash); g.userData.flash=flash;   // muzzle flash at the bore
@@ -15197,7 +15302,7 @@ function buildShotgun(suppressed){ const g=new THREE.Group();
   box(0.012,0.032,0.016,blk,  0,-0.020,0.055);                  // trigger
   { const tg=new THREE.Mesh(new THREE.TorusGeometry(0.024,0.005,6,14,Math.PI*1.3),blk); tg.rotation.y=Math.PI/2; tg.rotation.z=0.35; tg.position.set(0,-0.040,0.055); g.add(tg); }
   box(0.040,0.020,0.055,blk,  0,-0.026,0.085);                  // trigger group / loading port underside
-  box(0.042,0.058,0.075,wood, 0,-0.040,0.145, -0.28);           // wrist of the stock, raked REARWARD into the grip; the buttstock and pad above keep +0.10, which is comb drop, not rake
+  { const _gp=box(0.042,0.058,0.075,wood, 0,-0.040,0.145, -0.28); g.userData.gripAt=[_gp.position.x,_gp.position.y,_gp.position.z]; }   // wrist of the stock, raked REARWARD into the grip; the buttstock and pad above keep +0.10, which is comb drop, not rake
   box(0.044,0.090,0.13,wood,  0,-0.020,0.245, 0.10);            // BUTTSTOCK, dropping to the comb
   box(0.046,0.100,0.020,blk,  0,-0.028,0.312, 0.10);            // rubber recoil pad on the butt
   const flash=buildMuzzleFlash(); flash.renderOrder=8; flash.userData.base=suppressed?0.9:1.6;   // the widest flash of any gun in the game: a cylinder-bore 12 gauge throws a fireball
@@ -15471,7 +15576,10 @@ function updateMainArm(){
 // forearm above the receiver, then across it, then over the muzzle, and a hand half-on a gun reads worse than a gun held by
 // nothing. What it needs is the grip's position MEASURED per model (each builder knows where it put the grip) rather than one
 // offset guessed for all of them. Left in, switched off, so the next pass starts from the mechanism rather than from scratch.
-const GUN_HAND_ON=false;
+// THE HAND ON THE GUN IS ON (Ben 08-04: "I would rather land this in one try"). It is on because it is now MEASURED rather than
+// eyeballed: every gun declares its own grip (userData.gripAt) and attachGunHand solves for the arm's far tip landing on it, so
+// bench/assert-gun-hand.mjs can state the palm-to-grip error per gun instead of a person squinting at a 120-pixel hand.
+const GUN_HAND_ON=true;
 function attachGunHand(mesh, side){
   if(!GUN_HAND_ON) return null;
   if(!mesh) return null;
@@ -15480,14 +15588,24 @@ function attachGunHand(mesh, side){
   // receiver and therefore right up against the eye — two cream slabs filling the screen with the guns between them. The grip on
   // every one of these models sits under the receiver around z=+0.09, and the forearm has to run BACKWARD out of frame (past
   // vertical, hence x>PI/2) rather than forward toward the camera.
-  // AIMED, NOT GUESSED. buildFist is a forearm extending along -z from its own origin, so the pose is fully determined by two
-  // facts: the wrist sits AT the grip, and the arm runs from there back and down toward the shoulder. Solving that with a
-  // quaternion means no Euler triple to get wrong (the first two attempts put the forearm above the receiver, reading as a slab
-  // lying on the gun rather than a hand under it).
-  const f=buildFist(); f.scale.setScalar(0.42);
-  f.position.set(0.012*side, -0.075, 0.09);                                  // the grip: under the receiver on every one of these models
-  const _to=new THREE.Vector3(0.10*side, -0.54, 0.84).normalize();           // back, down, and slightly outboard toward the shoulder
-  f.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,-1), _to);
+  // WHICH END OF THE ARM IS THE HAND. buildFist is a 0.55-long forearm whose ORIGIN is the body end: the box is centred at
+  // z=-0.24, so it spans z -0.515..+0.035 and the far -z tip is the hand. Three visual passes failed because this was placed the
+  // other way round — origin (the elbow) pinned to the grip with -z aimed backward, which puts the HAND about 0.2 behind the
+  // grip, i.e. nearest the eye. That is the "two cream slabs filling the screen" Ben saw: the palm was in the camera and the
+  // elbow was on the gun.
+  //   So the arm is placed by solving for the tip. shoulder = grip + back*L and -z aims from there at the grip, which lands the
+  // tip exactly ON the grip for any L and any direction. L is the arm's own length times its own scale, read off the geometry
+  // rather than typed, so rescaling the fist cannot silently move the palm off the gun.
+  //   AND THE GRIP IS PER GUN, not one constant for five models. Each builder records userData.gripAt where it makes its grip
+  // box (the revolver's is at y-0.088 z+0.11, the AR's at y-0.07 z+0.115, the bolt rifle's wrist at y-0.09 z+0.15, the shotgun's
+  // at y-0.04 z+0.145, the minigun's spade at y-0.15 z+0.19). A single hardcoded point could not be right for more than one.
+  const f=buildFist(); const SC=0.42; f.scale.setScalar(SC);
+  const _grip=(mesh.userData.gripAt||[0.012*side,-0.075,0.09]);
+  const _armL=0.515*SC;                                                       // the tip of buildFist's own box, scaled
+  const _back=new THREE.Vector3(0.10*side, -0.54, 0.84).normalize();          // back, down, and slightly outboard toward the shoulder
+  f.position.set(_grip[0]+0.012*side + _back.x*_armL, _grip[1]+_back.y*_armL, _grip[2]+_back.z*_armL);
+  f.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,-1), _back.clone().negate());   // -z runs from the shoulder to the grip
+  f.userData.palmLocal=[_grip[0]+0.012*side,_grip[1],_grip[2]];               // where the palm is meant to land, for the probe to check against
   mesh.add(f); mesh.userData._gunHand=f; applyViewFog(f);
   return f; }
 function setViewItem(id){ if(view.id===id)return; view.id=id;
@@ -18521,6 +18639,28 @@ function brReslab(radius,staleOnly){ if(!BR.inside) return 0; let n=0;
 // The repair already existed (brReslab, clear=true) and was reachable only from QA hooks. Rather than call it blindly, each
 // chunk now carries the seed its slab was laid under, so a sweep can re-lay only the chunks that actually disagree.
 function brReslabStale(radius){ return brReslab(radius, true); }
+// DISTANCE MUST NOT DECIDE WHETHER THE REPAIR HAPPENS. brReslab only ever visits chunks within `radius` CHUNKS of the
+// player: brEnter asks for 10 (±160 blocks) and the stream tick for 6 (±96). Anything you explored FURTHER out than that
+// in a previous maze keeps the previous storey grid's slab, and Ben's report is exactly that shape — the invisible blocks
+// were inside the halls and "appeared after playing a while", not on entry. Measured with the storey oracle split across
+// two levels: 6 of 149 openings solid at chest height, every blocked column reporting base 40 against a carpet at 49 and
+// a lid at 58 (so the old concrete from 41-48 stands in the new storey's living space), and one brReslabStale(10) call
+// re-laid 165 chunks and took it to 0 of 149.
+// So sweep by STALENESS instead of by distance, a couple of chunks per frame, until nothing anywhere disagrees. Bounded
+// on purpose: 256 columns per chunk, and entry already does 165 chunks in one go, so this is far below that.
+// THE GUARD IS `_brSeed !== undefined`, NOT a coordinate test: only brGenColumn/brReslab stamp it, so it marks exactly
+// the chunks that were ever slabbed as Backrooms. Dropping that check would run brSlabColumn over overworld chunks and
+// write carpet and concrete into the world.
+function brReslabStaleAny(budget){ if(!BR.inside) return 0;
+  const seed=(BR.seed||0)>>>0, lim=budget||2; let n=0;
+  for(const c of world.values()){
+    if(n>=lim) break;
+    if(!c || !c.generated || c._brSeed===undefined) continue;
+    if(((c._brSeed||0)>>>0)===seed) continue;
+    for(let lx=0;lx<CK;lx++) for(let lz=0;lz<CK;lz++)
+      c.htop[lx+lz*CK]=brSlabColumn(c.blocks,lx,lz,c.cx*CK+lx,c.cz*CK+lz,true);
+    c._brSeed=seed; markRemesh(c.cx,c.cz); n++; }
+  return n; }
 
 // ---- ATMOSPHERE: reuse the engine's own fog/light, just swap the presets per zone (crisp, cheap) ----
 const _BR_FOG={0:[0.69,0.62,0.36],1:[0.10,0.10,0.12],2:[0.93,0.93,0.89],3:[0.03,0.03,0.04],4:[0.55,0.40,0.22]};
@@ -20966,7 +21106,7 @@ function updateBackrooms(dt){
   T.begin(TID.collision); brxCollide(player); T.end(TID.collision);                                                      // segment collision — keep the player inside the rooms (runs AFTER physics(dt))
   brxUpdateLights(player.pos.x, player.pos.z);                                                                           // fluorescent pool follows the player
   brUpdateHum(dt);                                                                                                       // the buzz tracks the LIT tubes near you — blacked-out wings go silent
-  if(BR.infinite){ try{ T.begin(TID.brStream); brxStream(false); brxPrefetch(); brReslabStale(6); T.end(TID.brStream); }catch(e){ T.end(TID.brStream); BR.infinite=false; if(typeof flashName==='function')flashName('the halls refuse to extend'); } }   // one chunk-crossing check per frame; a failure falls back to the fixed region rather than wedging the loop
+  if(BR.infinite){ try{ T.begin(TID.brStream); brxStream(false); brxPrefetch(); brReslabStale(6); brReslabStaleAny(2); T.end(TID.brStream); }catch(e){ T.end(TID.brStream); BR.infinite=false; if(typeof flashName==='function')flashName('the halls refuse to extend'); } }   // one chunk-crossing check per frame; a failure falls back to the fixed region rather than wedging the loop
   // …and one stale-slab sweep per frame. Entry alone is not enough: walking far enough re-reaches chunks that generated
   // during an EARLIER visit and were never in the entry radius, and those carry the old maze's lids. The seed stamp makes
   // the clean case a bounded integer compare over ~169 chunks with no column work, so the steady state costs nothing.
@@ -22113,6 +22253,55 @@ function updateLampHalos(dt){
   _lampPts.geometry.setDrawRange(0,n);
   _lampPts.geometry.attributes.position.needsUpdate=true;
   _lampPts.geometry.attributes.color.needsUpdate=true;
+}
+// ---- CONTACT SHADOWS: everything alive is joined to the ground it stands on ----------------------------------------------
+// Plan §4 item 11. Creatures cast shadow-map shadows only, and only inside the 46-block frustum; beyond that a deer stands on a
+// hillside with nothing under it and reads as a sticker. What sells contact is small and local — the dark patch right at the feet —
+// and that does not need the shadow map at all.
+// ONE InstancedMesh, so one draw call for every creature on screen, the same reason the fireflies and the lamp halos are single
+// objects. NO RAYCAST AND NO GROUND LOOKUP: an animal's own `y` IS the ground it is standing on (spawnAnimal and the walk code both
+// set it from groundYAt), so the shadow goes at its feet by definition. That is also why this cannot be used for the sky birds —
+// their y is altitude, and a bird would stamp a shadow into the air.
+// The radius comes from ANIMALS[type].h, which already carries each creature's height, rather than a second table to keep in sync.
+const CS_MAX=32, CS_R=44;
+let _csMesh=null, _csTex=null, _csOn=true, _csLive=0;
+const _csM=new THREE.Matrix4(), _csQ=new THREE.Quaternion(), _csP=new THREE.Vector3(), _csS=new THREE.Vector3();
+function _csTexture(){
+  if(_csTex) return _csTex;
+  const S=64, cv=document.createElement('canvas'); cv.width=cv.height=S; const c=cv.getContext('2d');
+  const g=c.createRadialGradient(S/2,S/2,0,S/2,S/2,S/2);
+  // A SOFT EDGE AND A SOFT CENTRE. A hard disc reads as a painted spot; the alpha peaks at 0.85 rather than 1 because a contact
+  // shadow is occlusion of the sky, not a hole, and the ground under a creature still sees light from the side.
+  g.addColorStop(0,'rgba(0,0,0,0.85)'); g.addColorStop(0.55,'rgba(0,0,0,0.45)'); g.addColorStop(1,'rgba(0,0,0,0)');
+  c.fillStyle=g; c.fillRect(0,0,S,S);
+  _csTex=new THREE.CanvasTexture(cv); _csTex.needsUpdate=true; return _csTex;
+}
+function updateContactShadows(dt){
+  if(typeof BR!=='undefined' && BR.inside){ if(_csMesh) _csMesh.visible=false; return; }   // same seal as the fireflies and the birds
+  if(!_csOn){ if(_csMesh) _csMesh.visible=false; return; }
+  if(!_csMesh){
+    const g=new THREE.PlaneGeometry(1,1); g.rotateX(-Math.PI/2);   // rotated ONCE, in the geometry, so no instance carries a rotation
+    const m=new THREE.MeshBasicMaterial({map:_csTexture(), transparent:true, depthWrite:false, opacity:0.62, color:0x000000, fog:true});
+    _csMesh=new THREE.InstancedMesh(g,m,CS_MAX); _csMesh.frustumCulled=false; _csMesh.renderOrder=1; _csMesh.count=0; scene.add(_csMesh);
+  }
+  _csMesh.visible=true;
+  const px=player.pos.x, pz=player.pos.z;
+  let n=0;
+  const put=(x,y,z,rad)=>{
+    if(n>=CS_MAX) return;
+    const d=Math.hypot(x-px, z-pz); if(d>CS_R) return;
+    const fade=clamp((CS_R-d)/10, 0, 1);                       // fades out over the last 10 blocks of range so one never pops in
+    _csP.set(x, y+0.04, z); _csQ.identity(); _csS.set(rad*2.0*fade, 1, rad*2.0*fade);
+    if(_csS.x<0.02) return;
+    _csM.compose(_csP,_csQ,_csS); _csMesh.setMatrixAt(n++, _csM);
+  };
+  for(let i=0;i<animals.length && n<CS_MAX;i++){ const a=animals[i]; if(!a||a.y==null) continue;
+    const A=ANIMALS[a.type]; put(a.x, a.y, a.z, A? Math.max(0.22, A.h*0.30) : 0.32); }
+  if(typeof wretch!=='undefined' && wretch && wretch.active && wretch.y!=null) put(wretch.x, wretch.y, wretch.z, 0.62);
+  if(typeof wretchExtra!=='undefined') for(const w of wretchExtra){ if(w&&w.active&&w.y!=null) put(w.x,w.y,w.z,0.62); }
+  if(typeof herobrine!=='undefined' && herobrine && herobrine.active && herobrine.y!=null) put(herobrine.x, herobrine.y, herobrine.z, 0.55);
+  _csLive=n; _csMesh.count=n;
+  if(n) _csMesh.instanceMatrix.needsUpdate=true;
 }
 function updateSkyBirds(dt){
   // Same isolation rule as the leaves (Ben 07-28): outdoor ambience must not appear inside the Backrooms — birds were
@@ -24968,6 +25157,11 @@ window.__hc={
       return { built:true, visible:!!_ffPts.visible, live:_ffLive, lit, maxBright:+mx.toFixed(3),
         day:+globalU.uDay.value.toFixed(4), hush:(typeof worldHush==='function')?+worldHush().toFixed(3):null,
         rain:(typeof weather!=='undefined')?+(weather.rain||0).toFixed(3):null }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: creature contact shadows. live is how many instances the one draw call is carrying this frame.
+  contactShadows(o){ try{ if(o&&o.on!=null){ _csOn=!!o.on; if(!_csOn&&_csMesh) _csMesh.visible=false; }
+      return { on:_csOn, built:!!_csMesh, visible:!!(_csMesh&&_csMesh.visible), live:_csLive, max:CS_MAX, range:CS_R,
+               animals:(typeof animals!=='undefined')?animals.length:null };
+    }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: the remembered-lamp halos. `reg` is how many chunks are in the registry and `emitters` how many lights it holds in
   // total — the two that say whether a lamp survived its chunk unloading, which is the whole feature. on:false is the A/B off.
   lampHalos(o){ try{ if(o&&o.on!=null){ _lampOn=!!o.on; _lampT=0; }
@@ -26300,6 +26494,30 @@ window.__hc={
   // main loop's per-frame setViewItem(inv[selSlot]) emptied the hand again a frame later. Three separate
   // measurements read the ninth tool, or nothing at all, before that was the answer.
   hold(id){ try{ id=id||'field_guide'; inv[selSlot]={id,n:1}; refreshHotbar(); setViewItem(id); return { held:view.id, slot:selSlot }; }catch(e){ return {err:e.message}; } },
+  // QA: DOES THE PALM LAND ON THE GRIP. Ben: "I would rather land this in one try" — three visual passes failed because a
+  // 120-pixel hand at the bottom of a frame cannot answer it. This builds each gun, attaches the hand, and reports the distance
+  // from the forearm's own far tip (the hand end of buildFist's box) to the grip the model declared. It should be ~0.
+  gunGrips(){ try{
+      const guns={revolver:buildRevolver(false), ar15:buildAR15(false,false), bolt:buildBoltRifle(false,false),
+                  shotgun:buildShotgun(false), minigun:buildMinigun(false,false)};
+      const out=[]; const tip=new THREE.Vector3(), palm=new THREE.Vector3();
+      for(const name in guns){ const g=guns[name];
+        const f=attachGunHand(g,1);
+        if(!f){ out.push({gun:name, hand:false, gripAt:g.userData.gripAt||null}); continue; }
+        g.updateMatrixWorld(true);
+        // the far -z tip of the forearm box, in the GUN's space: that is the hand end
+        tip.set(0,0,-0.515).applyMatrix4(f.matrix);
+        palm.fromArray(f.userData.palmLocal||[0,0,0]);
+        out.push({ gun:name, hand:true, gripAt:(g.userData.gripAt||null),
+                   tip:[+tip.x.toFixed(4),+tip.y.toFixed(4),+tip.z.toFixed(4)],
+                   palmWanted:[+palm.x.toFixed(4),+palm.y.toFixed(4),+palm.z.toFixed(4)],
+                   off:+tip.distanceTo(palm).toFixed(4),
+                   // how far the arm reaches BACK past the grip: a hand whose elbow is forward of its palm is inside-out, and a
+                   // positive number here is what says the forearm runs away from the eye rather than into it.
+                   elbowBehindPalm:+(f.position.z-palm.z).toFixed(4) }); }
+      return out; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  gunHandOn(){ try{ return !!GUN_HAND_ON; }catch(e){ return {err:String(e.message||e)}; } },
   // QA: the WorldEdit pencil and its selection. ITEMS, RECIPES and WE are all module scope, so a bench has no other way to ask
   // whether the item exists, whether it carries the flag the click paths test for, or what is currently selected. weSet exists
   // for one case a bench cannot reach by clicking: an oversized selection, to prove the cap refuses it.
@@ -27393,6 +27611,36 @@ window.__hc={
   lock(on){ locked=!!on; return locked; },   // QA: force the pointer-lock flag — headless Chrome can never acquire real pointer lock, and physics() only runs while locked
   deepWater(){ for(let r=30;r<260;r+=6)for(let a=0;a<12;a++){ const th=a*0.5236, x=player.pos.x+Math.cos(th)*r, z=player.pos.z+Math.sin(th)*r;   // QA: nearest genuinely deep sea spot
     if(surfaceH(Math.round(x),Math.round(z))<=CFG.SEA-5) return {x:+x.toFixed(1),z:+z.toFixed(1),sea:CFG.SEA}; } return null; },
+  // #74 QA. flow(): the field at a point, or anywhere — plus the gain, which is the A/B (0 = pre-flow surface exactly).
+  flow(o){ if(o&&o.gain!=null) waterMat.uniforms.uFlow.value=+o.gain;
+    const x=(o&&o.x!=null)?o.x:player.pos.x, z=(o&&o.z!=null)?o.z:player.pos.z, v=flowVec(x,z);
+    return { x:+x.toFixed(1), z:+z.toFixed(1), fx:+v.x.toFixed(4), fz:+v.z.toFixed(4), mag:+Math.hypot(v.x,v.z).toFixed(4),
+             river:Math.abs(_riverField(x,z))<0.05, h:surfaceH(Math.round(x),Math.round(z)), sea:CFG.SEA,
+             gain:waterMat.uniforms.uFlow.value, cells:_flowCache.size }; },
+  // Does the field the GPU is running actually carry a current? Reads the baked attribute off the meshes in the scene,
+  // not the CPU function — a flowVec that works while waterMesh forgets the attribute is the failure this catches.
+  flowMesh(){ let verts=0, moving=0, mx=0, sumx=0, sumz=0, meshes=0, chunks=0, withWater=0;
+    // Walk `world`, not chunkRoot.children: a chunk being re-meshed is removed from the scene graph and re-added, so the
+    // graph is momentarily short of the map and a probe that reads it can report zero water in a sea.
+    world.forEach(c=>{ chunks++; const g=c.group; if(!g) return; const m=g.userData&&g.userData.water; if(!m||!m.geometry) return; withWater++; const a=m.geometry.attributes.aFlow; if(!a) return; meshes++;
+      for(let i=0;i<a.count;i++){ const fx=a.getX(i), fz=a.getY(i), mg=Math.hypot(fx,fz); verts++; sumx+=fx; sumz+=fz; if(mg>0.01)moving++; if(mg>mx)mx=mg; } });
+    return { chunks, withWater, meshes, verts, moving, maxMag:+mx.toFixed(3), meanX:verts?+(sumx/verts).toFixed(4):0, meanZ:verts?+(sumz/verts).toFixed(4):0,
+             hasAttr:meshes>0 && meshes===withWater }; },
+  // A river's flow must point at the sea, an ocean shallow's must point at the land, and open ocean must be still. This
+  // walks out from the player and reports one sample of each kind it can find, with the heading to compare against.
+  flowCensus(){ const out={river:null, shore:null, open:null, pond:null};
+    const px=player.pos.x, pz=player.pos.z;
+    for(let r=6;r<420 && !(out.river&&out.shore&&out.open);r+=6) for(let a=0;a<24;a++){ const th=a*0.2618, x=Math.round(px+Math.sin(th)*r), z=Math.round(pz+Math.cos(th)*r);
+      const h=surfaceH(x,z); if(h>CFG.SEA) continue; const v=flowVec(x+0.5,z+0.5), mg=Math.hypot(v.x,v.z);
+      const riv=Math.abs(_riverField(x,z))<0.05;
+      // the bearing of the nearest land, which is what the shore case must be pointing ALONG and the river case ACROSS
+      let landTh=null, landR=1e9; for(let k=0;k<16;k++){ const t2=k*0.3927; for(let rr=4;rr<=72;rr+=4){ if(surfaceH(Math.round(x+Math.sin(t2)*rr), Math.round(z+Math.cos(t2)*rr))>CFG.SEA){ if(rr<landR){landR=rr; landTh=t2;} break; } } }
+      const rec={x,z,h,mag:+mg.toFixed(3),fx:+v.x.toFixed(3),fz:+v.z.toFixed(3),landR:landR>1e8?null:landR,
+                 dotLand:landTh==null?null:+((v.x*Math.sin(landTh)+v.z*Math.cos(landTh))/(mg||1)).toFixed(3)};
+      if(riv && !out.river && mg>0.05) out.river=rec;
+      else if(!riv && !out.shore && landR<=10 && mg>0.05) out.shore=rec;
+      else if(!riv && !out.open && landR>1e8) out.open=rec; }
+    return out; },
   shallowWater(depth){ const d=depth||2; for(let r=8;r<220;r+=4)for(let a=0;a<16;a++){ const th=a*0.3927, x=Math.round(player.pos.x+Math.cos(th)*r), z=Math.round(player.pos.z+Math.sin(th)*r);   // QA: nearest water exactly `depth` blocks deep — the shelf makes chest-deep the common case and a deep-water rule can behave differently in it
     if(surfaceH(x,z)===CFG.SEA-d){ let lx=null,lz=null;                                   // …WITH dry land in reach, or the spot is useless for testing a climb-out: the shelf is a long ramp and chest-deep can sit a dozen blocks off any bank, which is why this rejects the candidate rather than returning a null shore
       for(let rr=1;rr<=16&&lx==null;rr++)for(let aa=0;aa<24;aa++){ const t2=aa*0.2618, ux=Math.round(x+Math.cos(t2)*rr), uz=Math.round(z+Math.sin(t2)*rr);
