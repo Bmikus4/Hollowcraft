@@ -1500,11 +1500,19 @@ paintTile('oak_top',   (x,y,r)=>{ const dx=x-7.5,dy=y-7.5, ring=Math.floor(Math.
 // ends of it have been wrong within one day.
 const _LEAFHOLES=[[2.5,3.0,2.0],[8.0,1.5,1.7],[13.0,4.0,1.9],[5.0,8.0,2.2],[11.5,9.0,2.0],
                   [1.5,12.5,1.7],[7.0,14.0,1.9],[14.0,13.0,1.6],[9.5,5.5,1.6]];
+// A HOLE IS TRANSPARENT, NOT BLACK (Ben 08-05: "leaves are still black holes, and I cant see through them"). A texel
+// with alpha 0 still HAS a colour, and everything downstream averages it: the array texture is mipmapped with
+// NearestMipmapLinear, so at any distance a mip is the mean of four texels — and a black-with-alpha-0 hole drags the
+// three leaf texels beside it toward black. Alpha-testing then keeps the darkened texel and throws away the clear one,
+// so the canopy grows black speckles exactly where the holes are. Painting the hole in the LEAF's own colour at alpha 0
+// leaves the mip chain green and the cutout clean. This is the standard alpha-bleed problem and it is invisible in the
+// tile itself — the hole is transparent either way; it only shows once something filters it.
 function leafTile(name, base, spread, holes){
   paintTile(name,(x,y,r)=>{
     if(holes){
-      for(const [hx,hy,hr] of _LEAFHOLES){ if(Math.hypot(x-hx,y-hy) < hr+(r()-0.5)*1.2) return [0,0,0,0]; }
-      if(r()<0.07) return [0,0,0,0];                       // pinholes: the ragged edge between two leaves, not a drawn circle
+      const clear=[base[0],base[1],base[2],0];
+      for(const [hx,hy,hr] of _LEAFHOLES){ if(Math.hypot(x-hx,y-hy) < hr+(r()-0.5)*1.2) return clear; }
+      if(r()<0.07) return clear;                           // pinholes: the ragged edge between two leaves, not a drawn circle
     }
     if(r()<0.18) return [base[0]*0.66|0, base[1]*0.66|0, base[2]*0.66|0, 255];
     const v=jit(r,0,spread);
@@ -1516,7 +1524,7 @@ function sprigTile(name, base){
   paintTile(name,(x,y,r)=>{
     const B=[[5.0,5.5,3.4],[10.5,7.0,3.0],[7.5,11.0,2.8]];
     let d2=99; for(const [bx,by,br] of B){ const d=Math.hypot(x-bx,y-by)/br; if(d<d2)d2=d; }
-    if(d2>1.0+(r()-0.5)*0.22) return [0,0,0,0];
+    if(d2>1.0+(r()-0.5)*0.22) return [base[0],base[1],base[2],0];   // clear, in the sprig's own colour: see leafTile
     const v=jit(r,0,30), edge=smooth(1.0,0.55,d2);
     return [base[0]+v*0.5+edge*10, base[1]+v+edge*16, base[2]+v*0.5+edge*8, 255]; });
 }
@@ -1529,12 +1537,13 @@ leafTile('oak_leaf_solid',  [34,58,26], 20, false);
 paintTile('leaf_sprig',(x,y,r)=>{
   const B=[[5.0,5.5,3.4],[10.5,7.0,3.0],[7.5,11.0,2.8]];
   let d2=99; for(const [bx,by,br] of B){ const d=Math.hypot(x-bx,y-by)/br; if(d<d2)d2=d; }
-  if(d2>1.0+(r()-0.5)*0.22) return [0,0,0,0];
+  if(d2>1.0+(r()-0.5)*0.22) return [30,58,28,0];            // clear, in the pine sprig's own colour
   const v=jit(r,0,30), edge=smooth(1.0,0.55,d2);            // darker at the rim: a leaf cluster is not flat
   return [30+v*0.5+edge*10, 58+v+edge*16, 28+v*0.5+edge*8, 255]; });
 paintTile('leaves',(x,y,r)=>{
-  for(const [hx,hy,hr] of _LEAFHOLES){ if(Math.hypot(x-hx,y-hy) < hr+(r()-0.5)*1.2) return [0,0,0,0]; }
-  if(r()<0.07) return [0,0,0,0];
+  const clear=[34,64,32,0];                                // the pine's own green at alpha 0 — see the note on leafTile
+  for(const [hx,hy,hr] of _LEAFHOLES){ if(Math.hypot(x-hx,y-hy) < hr+(r()-0.5)*1.2) return clear; }
+  if(r()<0.07) return clear;
   if(r()<0.18) return [22,44,20,255]; if(r()<0.14) return [20,40,18,255];
   const v=jit(r,0,34); return [34+v*0.5,64+v,32+v*0.5,255]; });
 paintTile('leaves_solid',(x,y,r)=>{ const v=jit(r,0,20); return [22+v*0.4,48+v*0.7,20+v*0.4]; });   // dense inner-canopy core: solid, darker, no gaps
@@ -23685,6 +23694,17 @@ if(typeof window!=='undefined'){ window.__hcBR={
   // doorways vary" answers 100% arched by construction — it cannot see a flat header at all. `kind` separates the three
   // things brxEmitWall pushes into BR.lintels: a DOORWAY head at BR_DOORH, a CRAWL head at BR_CRAWL, and a TUNNEL bore head
   // (BR_WY0+2.0), which are not the same asset and must not be pooled when counting repetition.
+  // QA: DOES THE LEAFWORK STILL FILL THE OPENING now that width and offset vary per doorway. brBuildDoors derives
+  // clear = dw - BR_JW*2 and splits it into one leaf or two, so `covered` must come back equal to dw at every width — a
+  // shortfall is a gap at a jamb you can see through. `dbl` flips at clear > BR_LEAFW*1.25, i.e. dw > 1.953: at the old
+  // fixed 2.2 every door was DOUBLE, so varying the width is what made the single-leaf branch reachable at all, and this
+  // is where that branch gets counted rather than assumed. leafW/dbl are stamped by brBuildDoors, so a door reporting
+  // leafW null was never built.
+  doorFit:()=>(BR.doors||[]).map(d=>{ const clear=d.dw-BR_JW*2, n=d.dbl?2:1,
+      covered=(d.leafW!=null? n*d.leafW : 0)+BR_JW*2;
+    return { dw:+d.dw.toFixed(3), clear:+clear.toFixed(3), dbl:!!d.dbl, leaves:n,
+             leafW:(d.leafW!=null?+d.leafW.toFixed(3):null), covered:+covered.toFixed(3),
+             gap:+(d.dw-covered).toFixed(4), pivots:(d.pivots?d.pivots.length:0) }; }),
   lintels:()=>(BR.lintels||[]).map(l=>{ const y0=(l.y0!=null?l.y0:BR_DOORH);
     return { arch:!!l.arch, span:+(l.s1-l.s0).toFixed(2), y0:+y0.toFixed(2), vert:!!l.vert,
              kind:(y0<=BR_CRAWL+0.01?'crawl':(y0<BR_DOORH-0.01?'tunnel':'door')) }; }),
@@ -27877,6 +27897,10 @@ window.__hc={
       const V=off?offView:view;
       for(let i=0;i<40;i++) updateView(0.033);            // settle first, so `before` already holds the wall bend for wherever we stand
       V.gunKick=0; V.boltT=0;
+      // THE AIM IS RESET FIRST. Recoil climbs and STAYS, and pitch is clamped just short of straight up — so a second burst measured
+      // in the same session reports a climb of zero because there is nowhere left to climb. Two hands measured back to back is
+      // exactly that case, and it read as "the offhand does not kick".
+      player.pitch=0; player.yaw=0; RECOIL.tp=0; RECOIL.ty=0;
       const before={ z:+V.group.position.z.toFixed(3), rx:+V.group.rotation.x.toFixed(3) };
       const p0=player.pitch, y0=player.yaw;
       let fired=0, peakKick=0, peakRx=before.rx;

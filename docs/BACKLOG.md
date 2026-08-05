@@ -5,13 +5,13 @@
 - Planar or screen-space water reflection
 - TAA instead of FXAA
 - Bloom quality
-- Fog parity: far-sea disc vs chunk water, step at the render wall
 
 ## Blocked on Ben
 - Shadow penumbra: filter change, priced A/B
 - `shore` at 7.70 ms, 805 draw calls, unattributed
 
 ## Awaiting Ben's eye (shipped)
+- Fog parity at the render wall: measured, no step at either hour (ratio 3.9 day / 4.7 night) — bench/tmp-sea-handover.mjs
 - Night wash on the ocean: both water surfaces desaturate with the land, by the same amount, no descent
 - Fog in-scatter: a night bank no longer deletes what a lamp lights; night only (__hc.scot({glow}))
 - Thin-leaf transmission: a lamp on one side lights the whole plant; the daylight wood reads as volume (__hc.folTrans)
