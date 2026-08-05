@@ -12,6 +12,7 @@
 - `shore` at 7.70 ms, 805 draw calls, unattributed
 
 ## Awaiting Ben's eye (shipped)
+- Night wash on the ocean: both water surfaces desaturate with the land, by the same amount, no descent
 - Fog in-scatter: a night bank no longer deletes what a lamp lights; night only (__hc.scot({glow}))
 - Thin-leaf transmission: a lamp on one side lights the whole plant; the daylight wood reads as volume (__hc.folTrans)
 - Fog survives a doorway and a canopy, and eases instead of switching (__hc.fogEncl)
