@@ -7134,6 +7134,20 @@ function buildModelBlocks(c,g){
         const shellG=box(0.92,0.72,0.16); shellG.translate(0,0.5,0.42); put(shellG, case_);
         const well=box(0.74,0.56,0.04);   well.translate(0,0.52,0.5);  put(well, dark);          // recessed well the quad sits in front of
         const foot=box(0.5,0.06,0.3);     foot.translate(0,0.05,0.34); put(foot, case_);
+        // EVERY MONITOR GETS ITS FACE, not just the ones a player placed (Ben 08-05: "monitors should actually display their not
+        // connected screen, and their cameras view if connected, directly on the monitor"). The quad that IS the screen was only
+        // ever built by scrOnPlace or restored from a save, so a monitor that came from worldgen — or one whose registry entry was
+        // lost — rendered this bezel around a dark recessed well and nothing else: no slate, no scanlines, no feed. The mesher is
+        // the one pass that sees every monitor in the world, so it registers them: the registry entry is what scrUpdate walks when
+        // it hands out atlas slots, and the quad is what samples them. Untuned stays untuned — `tune:null` is the no-signal state,
+        // which is the screen he is asking for.
+        // …AND IT IS `arr`, NOT lx/ly/lz. This pass is grouped BY BLOCK ID — arr holds every monitor in the chunk — and the scan
+        // loop's lx/ly/lz are out of scope here entirely. Reaching for them threw a ReferenceError out of the whole model pass,
+        // which takes every model block in the chunk with it.
+        if(typeof scrBuildScreen==='function') for(const a of arr){
+          const wx=cx0+a[0], wy=a[1], wz=cz0+a[2], sk=scrKey(wx,wy,wz);
+          if(!screens[sk]) screens[sk]={tune:null};
+          scrBuildScreen(wx,wy,wz,id); }
         continue; }
       if(m==='bell_button'){ const stone=new THREE.MeshLambertMaterial({map:tileTex('cobble')}), brass=new THREE.MeshLambertMaterial({color:0xc8a850}), red=new THREE.MeshBasicMaterial({color:0xb02018});   // BELL SWITCH — a small altar plunger
         const post=box(0.16,0.5,0.16); post.translate(0,0.25,0); addIM(post, stone, 0);
@@ -20996,7 +21010,7 @@ function brxGenerate(o){ BR.rooms=[]; BR.walls=[]; BR.doors=[]; BR.lintels=[]; B
 // thickness — a pair overlapping by ~BR_WT is the deliberate corner growth in brxEmitWall and must be left alone.
 // Bucketed by wall LINE (axis + fixed coordinate + storey floor), because the naive pass is O(walls^2) per chunk.
 function brxDropBuriedWalls(){ const W=BR.walls; if(!W||W.length<2) return 0;
-  BR._buriedLow=0;                                                                // per pass, like the return value — a running total could not be compared with it
+  BR._buriedLow=0; BR._buriedBoth=0; BR._buriedTall=0;                                                                // per pass, like the return value — a running total could not be compared with it
   // IDEMPOTENT, because brxUnion re-pushes the SAME record objects on every stream. Splicing only touches BR.walls, so the
   // next union starts from the chunk records again — but `by` is written ON the record and would otherwise be re-raised
   // relative to an already-raised base. `_by0` holds the original (usually undefined) and every run resets to it first.
@@ -21035,9 +21049,13 @@ function brxDropBuriedWalls(){ const W=BR.walls; if(!W||W.length<2) return 0;
           // one is TRIMMED back to the edge of the overlap. Only when a covers b's full height, or trimming would expose
           // the part of b that was doing the work above a's top; and only when b overhangs on ONE side, since a wall
           // sticking out both ends would need splitting in two and no measured case does.
-          if(bot(b) < bot(a)-1e-6 || top(b) > top(a)+1e-6) continue;
+          if(bot(b) < bot(a)-1e-6 || top(b) > top(a)+1e-6){ BR._buriedTall=(BR._buriedTall||0)+1; continue; }
           const overLo = b0 < a0-1e-6, overHi = b1 > a1+1e-6;
-          if(overLo && overHi) continue;
+          // A wall sticking out at BOTH ends would have to be split in two, and this pass only ever shortens one end. The
+          // comment used to say "no measured case does" on the strength of the sheet audit reading 0 — a skipped pair stays
+          // in BR.walls, so it would have shown up there. Counted directly now, because inference from an absence somewhere
+          // else stops being true the moment the generator changes.
+          if(overLo && overHi){ BR._buriedBoth=(BR._buriedBoth||0)+1; continue; }
           const nLo = overLo ? b0 : a1, nHi = overLo ? a0 : b1;
           if(nHi-nLo <= 0.01){ kill.add(j); n++; continue; }                       // nothing left of b outside a
           const wasDesc = ax ? (b.z1<b.z0) : (b.x1<b.x0);
@@ -23387,7 +23405,7 @@ if(typeof window!=='undefined'){ window.__hcBRX={          // the chunk substrat
   clearInjected:()=>{ const W=BR.walls||[]; let n=0; for(let i=W.length-1;i>=0;i--) if(W[i].__injected){ W.splice(i,1); n++; } return n; },
   // buriedLow counts pairs the burial pass DECLINED because the buried wall started below its container's base — the case
   // that would have opened a hole. It is reported so the guard is a number and not just an argument.
-  wallOverlaps:()=>{ const W=BR.walls||[], out={walls:W.length, overlaps:0, worst:0, buried:BR._buried||0, buriedLow:BR._buriedLow||0, sample:[]};
+  wallOverlaps:()=>{ const W=BR.walls||[], out={walls:W.length, overlaps:0, worst:0, buried:BR._buried||0, buriedLow:BR._buriedLow||0, buriedBoth:BR._buriedBoth||0, buriedTall:BR._buriedTall||0, sample:[]};
     for(let i=0;i<W.length;i++){ const a=W[i], ax=a.x1-a.x0, az=a.z1-a.z0, aL=Math.hypot(ax,az)||1, aux=ax/aL, auz=az/aL;
       for(let j=i+1;j<W.length;j++){ const b=W[j], bx=b.x1-b.x0, bz=b.z1-b.z0, bL=Math.hypot(bx,bz)||1, bux=bx/bL, buz=bz/bL;
         if(Math.abs(aux*bux+auz*buz) < 0.999) continue;                                   // collinear-parallel only
@@ -23400,11 +23418,19 @@ if(typeof window!=='undefined'){ window.__hcBRX={          // the chunk substrat
         if(ov<=0.01) continue;
         // …AND THEY MUST SHARE HEIGHT TO FIGHT. Two chunks on different storeys legitimately put a wall on the same XZ line
         // at different heights (see brxEmitWall's sameStorey rule), and that is not an artefact. Only a Y overlap is.
-        // A wall's floor, when it does not carry an explicit `by`, is its own storey's floor — NOT BR_WY0. brxUnion rewrites
-        // ty to WORLD, so a chunk one storey up has ty 58 where the ground floor has 49, and assuming 41 for both invented a
-        // fat Y overlap between two walls that are really a storey apart. Derive the floor from the top: ty - one storey.
-        const _floor=w=>(w.by!=null? w.by : (w.ty!=null? w.ty-(BR_WY1-BR_WY0) : BR_WY0));
-        const ab=_floor(a), at2=(a.ty!=null?a.ty:BR_WY1), bb=_floor(b), bt=(b.ty!=null?b.ty:BR_WY1);
+        // A wall's floor, when it does not carry an explicit `by`, is its own storey's floor — NOT BR_WY0, because brxUnion
+        // rewrites ty to WORLD and a chunk one storey up has ty 58 where the ground floor has 49; assuming 41 for both
+        // invents a fat Y overlap between two walls that are really a storey apart.
+        // DERIVE IT THE WAY THE RENDERER DOES, from the storey offset — NOT as `ty - one storey`. wallBox is called with
+        // `by!=null?by:y0` and `lTy(w)`, so a wall's drawn extent is (by ?? BR_WY0) + dy up to _ty0 + dy. Rooms have varied
+        // ceilings (`_roomCeil`), so for a wall whose _ty0 is a 1.45-high room's ceiling, `ty - 8` lands metres BELOW the
+        // real floor and the Y test then answers about a wall that was never drawn there. That mismatch let this audit
+        // report 0 sheet overlaps while the burial pass was declining 15-51 pairs per generation for sharing a plane —
+        // the two disagreed about which pairs even touch in Y. `by` is LOCAL, so it takes the same +dy.
+        const _dyw=w=>(w._dy||0);
+        const _floor=w=>((w.by!=null? w.by : BR_WY0)+_dyw(w));
+        const _topw=w=>((w._ty0!==undefined? w._ty0 : (w.ty!=null? w.ty : BR_WY1))+_dyw(w));
+        const ab=_floor(a), at2=_topw(a), bb=_floor(b), bt=_topw(b);
         const yov=Math.min(at2,bt)-Math.max(ab,bb);
         if(yov<=0.01) continue;
         out.overlaps++;

@@ -70,7 +70,7 @@ const AUDIT=`window.__hcBRX.wallOverlaps()`;
         console.log('seed '+String(got).padEnd(8)+' tp '+String(dx+','+dz).padEnd(10)+
                     ' walls='+String(r.walls).padStart(4)+
                     '  SHEET='+String(sh).padStart(2)+' (desc '+sd+', in-well '+sw+')'+
-                    '  growth='+String(gr).padStart(3)+'  worst='+r.worst+'  buried='+(r.buried||0)+'  lowSkip='+(r.buriedLow||0));
+                    '  growth='+String(gr).padStart(3)+'  worst='+r.worst+'  buried='+(r.buried||0)+'  lowSkip='+(r.buriedLow||0)+'  bothEnds='+(r.buriedBoth||0)+'  tallSkip='+(r.buriedTall||0));
         const shs=(r.sample||[]).filter(s=>s.kind==='sheet');
         if(shs.length) console.log('        '+JSON.stringify(shs[0]));
       }
