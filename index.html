@@ -386,7 +386,13 @@ const _scotG = new Float32Array([0.85, 0.01, 0.45, 1]);
 // setting (lum 116.9 -> 117.0, saturation 0.66), because a lit surface never enters the descent — which is why the black can
 // go this deep without taking the lights with it. 0.0 is not the floor to use: a trace of value is what keeps a surface's
 // form readable, and total black would lose the shape of the room. __hc.scot({floor}) is the dial.
-const _scotH = new Float32Array([1.0, 0.02, 0.5, 0]);
+// [3] IS THE DESCENT'S OWN KNEE ON DELIVERED LIGHT, as a fraction of the wash's `hi` (0.45), so 0.35 puts it at 0.1575.
+// Ben 08-05: "in dark caves a held light shows nothing". A held lantern bakes nothing into the chunk volume, so its pool is carried
+// only by delivered light, which sits under the wash knee — and the descent then took the pool to 2% of its own luma. Above this
+// knee the descent is fully released, below the wash's `lo` nothing changes at all. 0 restores the pre-fix behaviour and is the A/B
+// (`__hc.scot({litKnee:0})`). Chosen as the lowest value that returns the corridor's min channel to within a few levels of
+// descent-off while leaving both unlit cases bit-identical — see bench/tmp-cave-held.mjs.
+const _scotH = new Float32Array([1.0, 0.02, 0.5, 0.35]);
 // ---- A PROP IN SHADE IS NOT A PROP AT NIGHT (Ben 08-05: the scarecrow near spawn "is completely black") ----
 // (r, g, b, -). The daylight SKY FILL that every non-atlas lit material was missing.
 //
@@ -483,7 +489,22 @@ const _propFill = new Float32Array([0.237, 0.267, 0.30, 0]);
     // coloured are the ones a lamp, a fire or the moon's own direct light actually reaches — which is the other half of what he
     // asked for in the same breath, that lights BURST colour out of a black night.
     // Props take the same line through the #else branch above, where _open is 1.0: they descend at night and never by day.
-    '  float _des=mix(1.0, uScotH.y, _w*(1.0-_open*uScotG.w));\n'+
+    // ---- A LIGHT IN YOUR HAND IS A LIGHT (Ben 08-05: "in dark caves a held light shows nothing") ----
+    // The descent's own gate, on DELIVERED light alone, and separate from the wash's `_w` on purpose. A PLACED lantern writes the
+    // chunk's baked volume, so `_bl` carries its whole pool over the wash knee and the pool never descends. A HELD lantern bakes
+    // NOTHING — it is one PointLight and lives entirely on `_dlit` — and `_dlit` across its pool sits UNDER the wash knee, so in a
+    // carved cave (`_open` 0) the descent took the pool to 2% of its own luminance. Measured, bench/tmp-cave-held.mjs, midnight in a
+    // 28-block carved corridor with a lantern in hand, descent on against off: median luma 42.1 vs 58.3 near, 57.6 vs 74.5 far, and
+    // the MIN CHANNEL 14 vs 37 — the channel the descent crushes is the one that made the pool read as light at all. That is why
+    // assert-cave-black is green through this: its lit case is a PLACED lantern.
+    // A SECOND KNEE RATHER THAN A WIDER `_w`, and this is what keeps the signed-off frames still: the wash (the desaturation) is
+    // unchanged everywhere, and the descent is released only where delivered light is between the wash's `lo` and this knee. A
+    // fragment with NO delivered light — an unlit cave, open night ground under nothing but the moon — has `_dw` exactly 1 and takes
+    // the identical path it took before, so Ben's black night and assert-cave-black's unlit interior cannot move.
+    // uScotH.w was the unused fourth slot; 0 disables the release entirely, which is the A/B (`__hc.scot({litKnee:0})`).
+    '  float _dk=uScotG.z*uScotH.w;\n'+
+    '  float _dw=(_dk>0.0)? 1.0-smoothstep(uScotG.y,_dk,max(_dlit,_emi)) : 1.0;\n'+
+    '  float _des=mix(1.0, uScotH.y, min(_w,_dw)*(1.0-_open*uScotG.w));\n'+
     '  gl_FragColor.rgb=mix(gl_FragColor.rgb, vec3(_sl*_des), uScotG.x*_w);\n'+
     // ---- THE FOG BETWEEN YOU AND A LAMP IS LIT BY IT (Ben 08-05: "light should be visible through nighttime black fog") ----
     // `fogFactor` is declared by three's fog_fragment inside main() with no braces around it, so it is still in scope here — and
@@ -3232,33 +3253,40 @@ function snapshotChunk(c){
 }
 const _snapN=new Array(9);
 function _sg(lx,ly,lz){ return (ly<0||ly>=WH) ? 0 : _snapB[(lx+1) + (lz+1)*_SW + ly*_SW*_SW]; }   // 0 === BID.air
-function _ssky(lx,ly,lz){ const th=_snapT[(lx+1)+(lz+1)*_SW]; if(ly>=th)return 1; const v=1-(th-ly)/6; return v<0?0:v; }
-// SIDE-FACE sky access (Ben 07-23): _ssky is a purely TOP-DOWN column-occlusion heightfield, so a vertical
-// face (cliff/slope-riser/cave-lip/eave/trunk-side) that is horizontally WIDE OPEN to the sky was stamped
-// vSky≈0 just because its own air column has something high above it → the shader then strips its sun and
-// floored it to 16% ambient → "dark faces that reject light", identical every reload (htop is seed-deterministic).
-// Fix: a side face sees sky if ANY lateral air-neighbour column is open. Genuine interiors (all 4 laterals
-// also capped by a roof) still read 0 → caves stay dark. Only x/z faces use this; y faces keep plain _ssky
-// (the column directly above a top/bottom face genuinely IS its sky).
-// A SHAFT ONE BLOCK WIDE IS NOT OPEN GROUND (Ben 08-05: "1x1 deep holes do not get dark for some reason?"). _ssky is a
-// column heightfield and its first line is `if(ly>=th) return 1`, so a dug shaft — whose own column has nothing left
-// above it — reads FULL SKY at every depth, and so does every wall face beside it, because the old max folded the cell's
-// own column in. Neither term knew how NARROW the opening was, which is why a 1-block hole was indistinguishable from a
-// field. The night descent cannot cover for it either: _open IS vSky, so the hole darkened at night and stayed lit by
-// day, which is exactly what he is looking at.
-// The cell's own column is now only trusted when it is PARTIAL. Where it reads fully open, the four lateral neighbours
-// decide, each by its OWN top: a cliff face keeps its light because the open side's neighbour top is below the face
-// (this is Ben's 07-23 fix and it must not regress), and a 1x1 shaft goes dark because all four neighbour tops are up at
-// the surface. Same four heightfield reads, still deterministic, still mesher-only.
-// The same narrowness test for a TOP or BOTTOM face, whose sky genuinely IS the column directly above it — a 1x1 shaft's
-// FLOOR is a y-face, so without this the walls of the hole go dark and its floor stays lit like a lawn. It only ever
-// takes light AWAY: where the column reads partial (a cave, a soffit, anything roofed) the old value stands unchanged,
-// so cave black cannot regress through here. Where it reads fully open, the four laterals decide, as above.
-function _sskyTop(lx,ly,lz){ const s=_ssky(lx,ly,lz); if(s<1) return s;
-  return Math.max(_ssky(lx+1,ly,lz), _ssky(lx-1,ly,lz), _ssky(lx,ly,lz+1), _ssky(lx,ly,lz-1)); }
-function _sskyOpen(lx,ly,lz){ const s=_ssky(lx,ly,lz);
-  const lat=Math.max(_ssky(lx+1,ly,lz), _ssky(lx-1,ly,lz), _ssky(lx,ly,lz+1), _ssky(lx,ly,lz-1));
-  return s>=1 ? lat : Math.max(s, lat); }
+// A BLOCK IS NOT DARK BECAUSE SOMETHING IS ABOVE IT. Ben found this himself, 08-05: "certain blocks are dark at night
+// and day ... IT IS ONLY blocks with a block somewhere above them directly, that become unaffected by lighting". That is
+// this heightfield, exactly: _skyCol is per-COLUMN, `if(ly>=th) return 1` and otherwise a 6-block ramp to zero, where th
+// is the topmost occluding block in that ONE column. So a floor under an eave, the ground beside a trunk, a step under a
+// canopy — anything with a block above it at ANY height — was stamped sky 0 six blocks down and had its sun stripped and
+// its ambient floored, in broad daylight, however wide open its sides were. Every fix layered on this so far has patched
+// one face orientation at a time (side faces 07-23, then the 1x1 shaft this afternoon) and the cause was always the
+// premise: a column is not a sky.
+//
+// WHAT REPLACES IT IS ONE RULE FOR EVERY FACE: how open is this cell's NEIGHBOURHOOD, not its column. The nine columns of
+// a 3x3 around the cell each score themselves by their own top, and the cell takes the best of them:
+//   - a block under an eave, a trunk or a canopy edge keeps its light, because a neighbouring column is open. This is
+//     Ben's report.
+//   - a 1x1 shaft still goes dark: where the cell's OWN column reads fully open, the centre is dropped and only the eight
+//     neighbours vote, and a shaft's eight neighbours are all capped up at the surface. (This is the rule that shipped in
+//     29f8795; it survives because it never depended on the centre.)
+//   - a cliff face still keeps its light, the 07-23 fix, because the open side's neighbour top is below the face.
+//   - a genuine interior still reads 0: all nine columns capped, nothing to rescue it. Cave black is that case.
+// Nine heightfield reads per face instead of one to five, at mesh time only, and _snapT is padded by one column in every
+// direction so the 3x3 is always in range — that padding is why the neighbourhood is 3x3 and not 5x5.
+function _skyCol(lx,ly,lz){ const th=_snapT[(lx+1)+(lz+1)*_SW]; if(ly>=th)return 1; const v=1-(th-ly)/6; return v<0?0:v; }
+function _skyNbr(lx,ly,lz){   // the eight columns around this one, each scored by its own top
+  let m=0;
+  for(let dz=-1;dz<=1;dz++) for(let dx=-1;dx<=1;dx++){ if(!dx&&!dz) continue;
+    const v=_skyCol(lx+dx,ly,lz+dz); if(v>m){ m=v; if(m>=1) return 1; } }
+  return m; }
+// THE ONE FACE RULE. Every orientation uses it: the y faces too, which is the other half of Ben's report — a floor with
+// anything above it was the darkest thing in the game and _ssky was all a y face ever got.
+function _sskyFace(lx,ly,lz){ const s=_skyCol(lx,ly,lz), n=_skyNbr(lx,ly,lz);
+  return s>=1 ? n : (s>n?s:n); }
+// The derived passes (grass, kelp, sprigs) ask about a CELL rather than a face, and they take the same rule: a tuft of
+// grass one step inside the drip line of a tree was black for the same reason a floor was, and it is the same fix.
+function _ssky(lx,ly,lz){ return _sskyFace(lx,ly,lz); }
+const _sskyTop=_sskyFace, _sskyOpen=_sskyFace;
 
 let _SPRIGS_ON = true;      // __hc.sprigs(false) + a remesh drops the canopy fringe entirely: the pixels that change ARE the sprigs, which is the only way to measure them against the canopy they cover
 let _SPRIG_FACE_N = true;   // __hc.sprigNormals(false) + a remesh is the A/B for the canopy sprig's own face normal
@@ -10049,7 +10077,10 @@ document.addEventListener('mouseup',e=>{ if(spearCharge.active){ const hs=heldSl
 document.addEventListener('contextmenu',e=>e.preventDefault());
 addEventListener('wheel',e=>{ if(!locked)return;
   if(cineMode){ cineSpeed=clamp(cineSpeed*(e.deltaY>0?0.82:1.22), 2, 140); try{localStorage.setItem('hollowcraft_cinespd',cineSpeed);}catch(_){} flashName('flight speed '+cineSpeed.toFixed(0)); return; }   // CINEMATIC: scroll sets free-flight speed (geometric so both ends are reachable fast)
-  if(view&&view.ads&&ITEMS[view.id]&&ITEMS[view.id].gun==='bolt'&&!ITEMS[view.id].dot){ view.scopeFov=clamp((view.scopeFov||7)+(e.deltaY>0?1:-1),4,16); try{localStorage.setItem('hollowcraft_zoom',view.scopeFov);}catch(_){} flashName((Math.round(700/view.scopeFov)/10)+'x zoom'); return; }   // scroll while aimed = adjust + save scope magnification (magnified SCOPE only — the holosight is fixed 1x)
+  // ZOOM GOES FURTHER, AND IN CONSTANT RATIOS (Ben 08-05: "allow the scope to be zoomed in further"). The floor was 4 degrees of FOV —
+  // 17.5x — and the step was one whole degree, so the last notch before the limit was a 25% jump in magnification while the first was 6%.
+  // 1.4 degrees is about 50x, and a multiplicative step means every notch is the same ratio wherever you are in the range.
+  if(view&&view.ads&&ITEMS[view.id]&&ITEMS[view.id].gun==='bolt'&&!ITEMS[view.id].dot){ view.scopeFov=clamp((view.scopeFov||7)*(e.deltaY>0?1.14:1/1.14),1.4,16); try{localStorage.setItem('hollowcraft_zoom',view.scopeFov);}catch(_){} flashName((Math.round(700/view.scopeFov)/10)+'x zoom'); return; }   // scroll while aimed = adjust + save scope magnification (magnified SCOPE only — the holosight is fixed 1x)
   selSlot=((selSlot+(e.deltaY>0?1:-1))%9+9)%9; refreshHotbar(); const s=inv[selSlot]; flashName(s?ITEMS[s.id].name:''); });
 addEventListener('keydown',e=>{ if(e.code==='Space')e.preventDefault();
   // THE COMMAND CONSOLE owns the keyboard while it is open. Its input handler deals with Enter, Escape and history; every
@@ -12103,9 +12134,19 @@ const scopeLensMat=new THREE.ShaderMaterial({ depthTest:true, depthWrite:true,
   '  gl_FragColor=vec4(col,1.0);',
   '}'].join('\n') });
 scopeLensMat.customProgramCacheKey=()=>'scopeLens';
+let _scopeSkip=0;   // frame counter for the hip-hold throttle — see updateScopeRT
 function updateScopeRT(){ const heldBolt=!!(ITEMS[view.id]&&ITEMS[view.id].gun==='bolt'&&!ITEMS[view.id].dot);   // only the SCOPED bolt rifle has a PiP — a crafted XPS replaces the scope entirely (1x, no magnified pass)
-  const aT=heldBolt?((view&&view.adsT)||0):0; scopeLensMat.uniforms.uActive.value=aT;   // uActive follows the animated raise, not the raw boolean → the glass fades in with the cheek-weld
-  if(aT<=0.22) return;                                                                              // don't pay for the extra scene pass until the sight is coming up (fade still hides the stale texture below this)
+  // THE GLASS IS LIVE WHENEVER THE RIFLE IS HELD (Ben 08-05: "make the scope on the hunting rifle always visible when the item is held,
+  // not just on ADS"). uActive used to follow adsT, so at the hip the lens was a flat dark disc — the shader's own unlit optic colour —
+  // and the magnified pass was skipped entirely below 0.22 to save it.
+  //   THE PASS IS THROTTLED INSTEAD OF SKIPPED. That extra full scene render is the real cost here, and paying it every frame just to
+  //   fill a 2 cm circle at the hip is what the old gate was avoiding. Aimed: every frame. Merely held: every third, which is 20 Hz of
+  //   parallax-free magnified image in a lens that small — indistinguishable from live, at a third of the cost.
+  const aT=heldBolt?((view&&view.adsT)||0):0;
+  scopeLensMat.uniforms.uActive.value=heldBolt?Math.max(aT,1):0;
+  if(!heldBolt) return;
+  _scopeSkip=(_scopeSkip+1)%3;
+  if(aT<=0.22 && _scopeSkip!==0) return;
   scopeCam.position.copy(camera.position); scopeCam.quaternion.copy(camera.quaternion);
   scopeCam.fov=view.scopeFov||7; scopeCam.updateProjectionMatrix();
   const gv=view.group.visible; view.group.visible=false;                                   // keep the rifle OUT of its own scope image
@@ -16514,7 +16555,7 @@ function treeFall(x,y,z,noDrops){ let logs=1; setBlockWorld(x,y,z,AIR,true);   /
 scene.add(camera);                                                                              // camera must be in the scene graph so its child viewmodel renders
 const view={ group:new THREE.Group(), mesh:null, id:'__none__', swing:0, bob:0, flashT:0,
   adsT:0, adsVel:0, settleT:0, lookSwayX:0, lookSwayY:0, prevYaw:null, prevPitch:null,   // scope raise-to-eye ease (adsT) + mouse-lag inertia + transition settle
-  scopeFov:(()=>{ try{ const z=localStorage.getItem('hollowcraft_zoom'); return z?clamp(+z,4,16):7; }catch(e){ return 7; } })() };
+  scopeFov:(()=>{ try{ const z=localStorage.getItem('hollowcraft_zoom'); return z?clamp(+z,1.4,16):7; }catch(e){ return 7; } })() };   // 1.4 = ~50x, the floor the scroll handler enforces; a saved value from before that change is still in range
 camera.add(view.group);
 const muzzleLight=new THREE.PointLight(0xffcc88,0,9,2); scene.add(muzzleLight);   // AR-15 muzzle flash lights the world briefly
 // A FILL LIGHT FOR WHAT IS IN YOUR HANDS (Ben 08-04: "i can still see inside the shotgun's stock when it is ads").
@@ -29290,6 +29331,23 @@ window.__hc={
                eyeFill:/uVEye/.test(sh.fragmentShader),
                frag:sh.fragmentShader.slice(0,240) }; }
     catch(e){ return {err:String(e.message||e)}; } },
+  // QA: THE HUNTING RIFLE'S SCOPE (Ben 08-05: always visible when held, and it must zoom further). uActive is what the lens shader mixes
+  // the dark-optic colour away with, so it IS "is the glass showing the world"; scopeFov is the magnification (lower FOV = more zoom, and
+  // the HUD's own label is 700/fov tenths of an x). Both are read after stepping updateView so the ADS ease has settled wherever it is.
+  scopeState(id, ads){ try{ if(id){ inv[selSlot]={id,n:1}; refreshHotbar(); setViewItem(id); }
+      locked=true; rmbHeld=(ads===true);
+      for(let i=0;i<90;i++) updateView(0.033);
+      if(typeof updateScopeRT==='function') for(let i=0;i<4;i++) updateScopeRT();
+      return { id:view.id, adsT:+(view.adsT||0).toFixed(3), uActive:+scopeLensMat.uniforms.uActive.value.toFixed(3),
+               scopeFov:+(view.scopeFov||0).toFixed(2), zoomX:+(700/(view.scopeFov||7)/10).toFixed(1) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // QA: turn the scroll wheel on the scope the way a player does, n notches (negative = zoom in), and report where it lands. The clamp is
+  // the thing under test — a floor that is never reached is not a floor.
+  scopeZoom(n){ try{ const step=1.14; let f=view.scopeFov||7;
+      for(let i=0;i<Math.abs(n|0);i++) f=clamp(f*((n|0)>0?step:1/step),1.4,16);
+      view.scopeFov=f; try{localStorage.setItem('hollowcraft_zoom',f);}catch(_){}
+      return { scopeFov:+f.toFixed(3), zoomX:+(700/f/10).toFixed(1) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   vfog(amt, eye, hold){ try{ if(amt!=null) _vfogAmt.value=+amt; if(eye!=null) _veyeAmt.value=+eye;
       if(hold!=null) _vfogHold=(hold===false?null:+hold);
       // `amt` IS NO LONGER WIRED TO THE VIEWMODEL (Ben 08-05 removed held-item fog), and it says so out loud — a probe that keeps
@@ -30996,11 +31054,15 @@ window.__hc={
       // glow: the fog's in-scatter. 0 is the A/B off — the pre-08-05 behaviour where a night fog bank deleted everything a lamp
       // lit (median 46.9 -> 7.9 at 20 blocks) and left the emitter as a bare dot. Night only, by construction.
       if(o&&o.glow!=null) _scotH[2]=+o.glow;
+      // litKnee: how much DELIVERED light releases a fragment from the CAVE DESCENT, as a fraction of the wash's own `hi`. This is
+      // what lets a HELD lantern light a cave: it bakes nothing, so its pool lives under the wash knee and used to descend with the
+      // rock around it. 0 is the A/B off — the pre-fix build.
+      if(o&&o.litKnee!=null) _scotH[3]=+o.litKnee;
       // `global` is read back off three's own chunk rather than from a flag of mine: it is the one thing a harness cannot infer
       // from pixels, and it is how a reverted patch or a renamed chunk in a library upgrade gets caught instead of silently
       // turning the pass off for the 219 materials that have no injection of their own.
       return { amt:+_scotG[0].toFixed(3), lo:+_scotG[1].toFixed(5), hi:+_scotG[2].toFixed(5), day:+_scotG[3].toFixed(3),
-               litK:+_scotH[0].toFixed(3), floor:+_scotH[1].toFixed(3), glow:+_scotH[2].toFixed(3),
+               litK:+_scotH[0].toFixed(3), floor:+_scotH[1].toFixed(3), glow:+_scotH[2].toFixed(3), litKnee:+_scotH[3].toFixed(3),
                global:/HC_SCOT/.test(THREE.ShaderChunk.dithering_fragment) && /HC_SCOT/.test(THREE.ShaderChunk.lights_fragment_end) };
     }catch(e){ return {err:String(e.message||e)}; } },
   cloudShadow(o){ try{ if(o&&o.on!=null) _cloudShadowOn=!!o.on;
