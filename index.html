@@ -5704,6 +5704,12 @@ const flameMat=new THREE.ShaderMaterial({
         float body=smoothstep(w, w*0.30, abs(x))*smoothstep(0.0,0.08,y);
         float tear=smoothstep(0.30,1.0,y)*0.86;
         body*=smoothstep(tear, tear+0.28, rise*1.15+0.16);
+        // SEPARATE TONGUES. One field gives one blob that wobbles; a real flame is two or three tongues that rise, lean
+        // past each other and pinch off. This is a second, FASTER field with a different lateral scale, cutting narrow
+        // vertical channels into the body — it does nothing at the base (where a flame is one mass) and everything from
+        // the middle up, which is where the eye looks.
+        float split=fbm(vec2(x*7.5, y*3.1 - t*3.10) + vSeed*23.0);
+        body*=1.0 - smoothstep(0.18,0.62,y)*smoothstep(0.62,0.30,split)*0.85;
         body*=smoothstep(1.0,0.78,y);
         body*=0.74+0.16*sin(t*13.0+ph)+0.10*sin(t*8.3+ph*1.7)+0.14*nz(vec2(t*3.4,vSeed));
         // THE INNER TONGUE: the same field, harder threshold, narrower envelope, and it stops lower — the hot part of
@@ -5713,9 +5719,13 @@ const flameMat=new THREE.ShaderMaterial({
         float wI=w*0.40;
         float core=smoothstep(wI, wI*0.15, abs(x))*smoothstep(0.0,0.06,y)*smoothstep(0.62,0.22,y);
         core*=smoothstep(tear*0.75, tear*0.75+0.26, rise*1.2+0.20);
-        // THE HALO, outside everything: no noise, no tear, just distance. It must stay well under the body's own
-        // alpha or the flame turns into a lantern-shaped smudge.
-        float halo=exp(-abs(x)*(3.6/max(wide,0.2)))*smoothstep(1.12,0.0,y)*0.10;
+        // THE HALO HAS TO HUG THE FLAME (Ben 08-05: "above the blocks of fire items, there is this weird part").
+        // First version faded it over smoothstep(1.12, 0.0, y) at a constant width — but the body ends at y=1.0, so
+        // between the tip and 1.12 there was halo with no fire in it, at full width, on both crossed quads, adding: a
+        // pale cone standing a block above every torch and campfire in the game. It is tied to the body's OWN envelope
+        // now — w already tapers with height — and it is gone by 0.86, under the tip, so there is nothing above the
+        // flame but the sparks that belong there.
+        float halo=exp(-abs(x)/max(w*1.9,0.04))*smoothstep(0.86,0.0,y)*0.11;
         if(body<0.03 && halo<0.012) discard;
         float blue=smoothstep(0.20,0.0,y)*(0.55+0.45*rise)*step(vType,3.5);   // not on the shrine torch: that one is red by design
         vec3 col=mix(vec3(0.36,0.03,0.0), vec3(1.0,0.34,0.03), smoothstep(0.0,0.42,body));   // soot edge → orange
@@ -5728,8 +5738,11 @@ const flameMat=new THREE.ShaderMaterial({
         // it is a white cone with no fire in it — the ramp, the tongue and the blue root were all there and all
         // invisible. Held just under that gate, the same shader reads as fire. Anything that raises these numbers has
         // to be checked at NIGHT, four blocks away, which is where it blows out.
+        // AND THE OUTPUT COMES DOWN AGAIN, because four planes add where two did. Additive blending means the gain is a
+        // function of how many quads a ray crosses, so doubling the planes without dropping this doubles the middle of
+        // every flame and puts it straight back through the bloom gate.
         float a=clamp(body+halo*0.7,0.0,1.0);
-        gl_FragColor=vec4(col*(body*0.98+core*0.30)+vec3(1.0,0.46,0.12)*halo*0.55, a);
+        gl_FragColor=vec4(col*(body*0.66+core*0.22)+vec3(1.0,0.46,0.12)*halo*0.40, a);
         return;
       }
       if(y<=1.0){
@@ -5779,8 +5792,17 @@ function buildFlameGeo(flames){ if(!flames.length) return null;
     const c=[[x0-ux*hw,y0,z0-uz*hw],[x0+ux*hw,y0,z0+uz*hw],[x0+ux*hw,y0+h,z0+uz*hw],[x0-ux*hw,y0+h,z0-uz*hw]];
     const uv=[[0,0],[1,0],[1,1],[0,1]], o=[0,1,2,0,2,3];
     for(const k of o){ P.push(c[k][0],c[k][1],c[k][2]); UV.push(uv[k][0],uv[k][1]); SE.push(seed); TY.push(type); } };
+  // FOUR PLANES, NOT TWO (Ben 08-05: "I wanted hyperrealistic fire"). Two crossed billboards read as a cardboard X from
+  // 45 degrees off either axis — the flame visibly thins and then fattens as you walk around it, which is the single
+  // most obvious tell that it is not a volume. Two more at the diagonals halve that variation for two more quads a
+  // flame, and this pass measured free at eighty-five flames (assert-flame: 147 fps clean, 151 with them).
+  // THE DIAGONALS CARRY A DIFFERENT SEED. Given the same one they draw the same silhouette rotated, and four copies of
+  // one tongue crossing at the axis is a star, not a fire. Offsetting the seed decorrelates the noise fields, and
+  // because the shader's flicker is keyed to the seed too, the four planes also breathe slightly out of step.
+  const D=0.70710678;
   for(const f of flames){ const hh=f.h*FLAME_QUAD_EXT;   // taller than the flame: the top of the quad is where the embers are
-    quad(f.x,f.y,f.z,1,0,f.w,hh,f.seed,f.type); quad(f.x,f.y,f.z,0,1,f.w,hh,f.seed,f.type); }
+    quad(f.x,f.y,f.z,1,0,f.w,hh,f.seed,f.type); quad(f.x,f.y,f.z,0,1,f.w,hh,f.seed,f.type);
+    quad(f.x,f.y,f.z,D,D,f.w*0.92,hh*0.97,f.seed+0.37,f.type); quad(f.x,f.y,f.z,D,-D,f.w*0.92,hh*0.97,f.seed+0.71,f.type); }
   const geo=new THREE.BufferGeometry();
   geo.setAttribute('position',new THREE.Float32BufferAttribute(P,3));
   geo.setAttribute('aUV',new THREE.Float32BufferAttribute(UV,2));
@@ -6415,7 +6437,11 @@ function buildModelBlocks(c,g){
       // a lantern and a candle are enclosed and do not; 2 is a fire you could cook on.
       const emberKind = m==='torch' ? 1 : m==='campfire' ? 2 : 0;
       c.emitters.push([cx0+lx+0.5, ly+fy, cz0+lz+0.5, blockLight[id], emberKind, seed]);
-      if(m==='torch') flames.push({x:lx+0.5,y:ly+0.55,z:lz+0.5,w:0.32,h:0.66,type:(id===BID.red_torch?4:0),seed});   // torch flame — type 4 = red (shrine torch)
+      // BIGGER, AND IT WRAPS THE RAG (Ben 08-05: "torches fire needs to be bigger, and it needs to oncompass the actual wrap on
+      // the torch"). The rag rings sit at 0.52 +- 0.066, i.e. 0.465 to 0.586 with a 0.122 tube radius, and the flame was BASED at
+      // 0.55 — above most of the cloth it is supposed to be burning. Based at 0.44 it starts under the lowest ring and rises
+      // through all four; 0.42 wide covers the rings' full 0.24 girth. Height is drawn as h*1.35 (see buildFlameGeo).
+      if(m==='torch') flames.push({x:lx+0.5,y:ly+0.44,z:lz+0.5,w:0.42,h:0.78,type:(id===BID.red_torch?4:0),seed});   // torch flame — type 4 = red (shrine torch)
       // A FLAME INSIDE A LANTERN HAS TO FIT INSIDE THE LANTERN (Ben 08-05: "I CAN SEE A FLAme outside the top of lanterns").
       // buildFlameGeo anchors a flame at its BASE and builds the quad FLAME_QUAD_EXT (1.35) taller than h, so a flame declared
       // y 0.28 / h 0.34 reaches 0.28 + 0.34*1.35 = 0.739 — and the lantern's roof plate is at 0.475. It stood a quarter of a block
@@ -6438,10 +6464,14 @@ function buildModelBlocks(c,g){
     let arr;
     for(const idk in byId){ const id=+idk, bd=B[id], m=bd.model; arr=byId[idk];
       if(m==='torch'){ const wd=torchWoodMat();                                                                                              // faceted 2-segment box shaft (not a cylinder), longer
-        addIM(box(0.09,0.34,0.09), wd, 0.17); addIM(box(0.07,0.26,0.07), wd, 0.43);
+        // A TORCH CASTS NO SHADOW (Ben 08-05: "there is this weird square shadow around the torchs base"). These parts were
+        // shadow casters — a 9 cm stick is far thinner than a shadow-map texel at any sane resolution, and a caster smaller than
+        // the map's own footprint resolves as one blocky patch on the ground rather than as a stick. That square WAS the torch.
+        // Physically it is also the right answer: the torch is the light in the scene, and a lamp does not shadow its own base.
+        addIM(box(0.09,0.34,0.09), wd, 0.17, false); addIM(box(0.07,0.26,0.07), wd, 0.43, false);
         _WRAP_YS.forEach((yo,i)=>{ const az=i*1.95; const tg=new THREE.TorusGeometry(0.08,0.042,6,12);                                        // fat rag tube-rings wrapped around the stick like bacon (rotation baked in for instancing)
           tg.rotateX(Math.PI/2 + _WRAP_TILT*Math.cos(az)); tg.rotateZ(_WRAP_TILT*Math.sin(az));
-          addIM(tg, ragRingMat(_WRAP_COLS[i%4]), 0.52+yo, true); }); continue; }                                                              // UNLIT wrapped-rag head; flame emerges from it
+          addIM(tg, ragRingMat(_WRAP_COLS[i%4]), 0.52+yo, false); }); continue; }                                                              // UNLIT wrapped-rag head; flame emerges from it
       // A CAGE WITH GLASS PANES IN IT. The frame parts share ONE material (one dispose, one program) while the glass gets its own,
       // which is also the only part of a lantern you are supposed to see through — see lanternPaneMat for why it writes no depth.
       if(m==='lantern'){ const metal=lanternMetalMat();
@@ -6450,8 +6480,11 @@ function buildModelBlocks(c,g){
         addIM(cyl(0.018,0.018,0.1,4),metal,0.58); continue; }
       if(m==='candle'){ addIM(cyl(0.06,0.07,0.3,6), new THREE.MeshPhongMaterial({color:0xe8dcc0,shininess:10}), 0.15); continue; }
       if(m==='campfire'){ const wood=new THREE.MeshLambertMaterial({color:0x3a2a1a}); const logGeo=cyl(0.07,0.07,0.92,5);
+        // SEATED ON THE GROUND (Ben 08-05: "make sure campfires are actually seated on the ground"). The logs are cylinders of
+        // radius 0.07 laid nearly flat, so a centre at 0.12 puts their undersides at 0.05 — the whole fire hovered five
+        // centimetres over the cell floor. At 0.07 the log rests ON it, which is what the radius means.
         for(const rot of [0.0,Math.PI/2]){ const im=new THREE.InstancedMesh(logGeo,wood,arr.length); im.castShadow=true; im.receiveShadow=true;
-          for(let i=0;i<arr.length;i++){ const a=arr[i]; _e.set(0,rot,Math.PI*0.46); _q.setFromEuler(_e); _v.set(a[0]+0.5,a[1]+0.12,a[2]+0.5); m4.compose(_v,_q,_one); im.setMatrixAt(i,m4); }
+          for(let i=0;i<arr.length;i++){ const a=arr[i]; _e.set(0,rot,Math.PI*0.46); _q.setFromEuler(_e); _v.set(a[0]+0.5,a[1]+0.07,a[2]+0.5); m4.compose(_v,_q,_one); im.setMatrixAt(i,m4); }
           im.instanceMatrix.needsUpdate=true; im.userData.modelMat=wood; g.add(im); }
         addIM(sphereG(0.3), new THREE.MeshBasicMaterial({color:0xff5a1e}), 0.06, false, im=>im.scale.set(1,0.32,1)); continue; }
       if(m==='tent'){ const canvas=new THREE.MeshPhongMaterial({color:0x7a6a48,side:THREE.DoubleSide,shininess:4}), pole=new THREE.MeshLambertMaterial({color:0x3a2a1a});
@@ -15767,7 +15800,9 @@ function buildHeldTorch(lit, red){ if(lit===undefined)lit=true; const g=new THRE
   const seg=(y,w,h,rz,rx)=>{ const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,w),wood); m.position.y=y; if(rz)m.rotation.z=rz; if(rx)m.rotation.x=rx; g.add(m); };
   seg(-0.12,0.056,0.18,0.05,0); seg(0.02,0.05,0.18,-0.06,0.02); seg(0.15,0.044,0.16,0.04,-0.02); seg(0.26,0.038,0.10,-0.03,0.02);
   const cloth=buildClothWrap(); cloth.position.y=0.30; g.add(cloth);                                                     // wrapped-rag head at the TOP of the stick
-  const fg=lit?buildFlameGeo([{x:0,y:0.33,z:0,w:0.34,h:0.7,type:red?4:0,seed:0.5}]):null;                              // flame rises FROM the cloth top; type 4 = bright-red shrine flame
+  // Same correction as the placed torch: buildClothWrap puts its rings at 0.30 +- 0.066, so a flame based at 0.33 sat above the
+  // cloth instead of around it. 0.24 starts below the lowest ring; wider and taller to match what the world torch now shows.
+  const fg=lit?buildFlameGeo([{x:0,y:0.24,z:0,w:0.44,h:0.80,type:red?4:0,seed:0.5}]):null;                              // flame rises THROUGH the cloth; type 4 = bright-red shrine flame
   if(fg){ const flame=new THREE.Mesh(fg,flameMat); flame.frustumCulled=false; flame.renderOrder=5; g.add(flame); g.userData.flame=flame; }
   g.rotation.set(0.15,0,0.12); return g; }
 // held LANTERN — a metal-framed glass box with an inner glow, corner posts, top/base plates and a ring handle (NOT a torch)
