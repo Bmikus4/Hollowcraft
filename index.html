@@ -17209,7 +17209,10 @@ function tpsAimDir(){
   const k=hr/rl;
   return _tpsAimV.set(x*k, hy, z*k).normalize(); }
 const RECOIL={tp:0,ty:0};   // pending impulse (rad). NO auto-recovery (Ben 07-20): the muzzle climbs and STAYS — pulling it back down is the shooter's job
-function kickRecoil(up,side){ const adsm=1-0.25*((typeof view!=='undefined'&&view.adsT)||0);   // cheek weld soaks ~25% — hip-fire bucks hardest
+// A CHEEK WELD ONLY SOAKS RECOIL FOR THE GUN THAT IS IN IT (Ben 08-05). adsm read the MAIN hand's adsT whichever hand fired, so
+// aiming a rifle in the right hand quietly took 25% off the kick of the pistol in your left — and the left hand never aims at all,
+// so its shots should always kick like the hip-fire they are. `soak` is passed by the caller, which knows which hand fired.
+function kickRecoil(up,side,soak){ const adsm=1-0.25*(soak!=null?soak:((typeof view!=='undefined'&&view.adsT)||0));   // cheek weld soaks ~25% — hip-fire bucks hardest
   RECOIL.tp+=up*adsm*(0.85+Math.random()*0.3); RECOIL.ty+=side*adsm*(Math.random()<0.5?-1:1)*(0.5+Math.random()); }
 function updateRecoil(dt){ if(!(RECOIL.tp||RECOIL.ty))return;
   const kk=1-Math.exp(-dt*34);                                                // kick ramp ~50ms — smooth, never a one-frame snap; then it simply STAYS
@@ -17797,7 +17800,11 @@ function updateView(dt){ updateRecoil(dt);                                      
   // whole transform from the pose every frame and then adds the kick, so a += there is spent and gone. This group only ever had
   // its .y rewritten, so a += on z and rotation.x compounded frame after frame: one shot walked the gun forward and span it. Both
   // components are now written from the stored rest pose, which is captured whenever setOffItem lays one down.
-  offView.gunKick=Math.max(0,(offView.gunKick||0)-dt*5.5);                        // the left hand bucks and settles on its own clock
+  // THE SAME CLOCK AS THE RIGHT HAND (Ben 08-05: "guns in the off hand need proper recoil"). 5.5 against the main hand's 7 made the
+  // left hand's buck linger a quarter longer and peak differently under sustained fire — the same gun, recoiling to a different
+  // rhythm depending on which hand it is in. There is no reason for the two to differ, and a shared number cannot drift apart.
+  offView.boltT=Math.max(0,(offView.boltT||0)-dt);                               // …and its own bolt cycle, per hand (see fireGun)
+  offView.gunKick=Math.max(0,(offView.gunKick||0)-dt*7);
   offView.swing=Math.max(0,(offView.swing||0)-dt*9);                             // …and swings on the same curve the right one does
   { const oswArc=offView.swing?offView.swing*Math.sin(offView.swing*Math.PI):0;
     const _oIsGun = !!(armor[EQ_OFF] && ITEMS[armor[EQ_OFF].id] && ITEMS[armor[EQ_OFF].id].gun);
@@ -17938,11 +17945,17 @@ function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id
   // rather than at the two mouse buttons, because that is one place and there are several ways to reach a trigger: left click,
   // right click with a full offhand, held full-auto, and the QA hooks.
   if(player.grabbed || player.tied) return false;
-  if(bolt && (view.boltT||0)>0) return false;                                                     // still cycling the bolt → can't fire
+  // THE BOLT CYCLE BELONGS TO THE HAND THAT FIRED (Ben 08-05: "guns in the off hand need proper recoil"). This timer, and the gate
+  // reading it, were both on `view` — the main hand — whichever hand pulled the trigger. So a bolt rifle in the LEFT hand fired
+  // once, set the right hand's cycle timer, and every shot after that was refused: measured, six trigger pulls produced one round
+  // and no buck at all, which is not weak recoil, it is no shot. It also locked out the main hand's own bolt gun for a second.
+  const _offFire = !!(slotArg && armor[EQ_OFF] && slotArg===armor[EQ_OFF]);
+  const _fv0 = _offFire ? offView : view;
+  if(bolt && (_fv0.boltT||0)>0) return false;                                                     // still cycling THIS hand's bolt → can't fire
   const _cap=magCap(it);
   if(isFinite(_cap)){ const _mk=gunKey(held); if(magGet(_mk,it,held)<=0){ if(AC)burst(master,0.4,0.04,340,0.4,80);   // DRY CLICK on an empty mag → auto-reload
       startReload(held); return false; }
-    magSet(_mk, GUNMAG[_mk]-1, held); if(bolt)view.boltT=0.95; }                                                     // fire from THIS gun's MAG (per-instance); inventory ammo is consumed at reload
+    magSet(_mk, GUNMAG[_mk]-1, held); if(bolt)_fv0.boltT=0.95; }                                                     // fire from THIS gun's MAG (per-instance); inventory ammo is consumed at reload
   const KP=(bolt?0.056 : rev?0.049 : (it.gun==='auto'?0.006 : it.gun==='shotgun'?0.062 : 0.019))*5;   // the 12 gauge kicks hardest of all — a cylinder-bore pump against the shoulder                            // camera recoil per shot ×5 (Ben 07-20): rifle 16° / Python 14° / AR 5.4° / minigun 1.7° — the gun OWNS your aim
   // THE MINIGUN FIGHTS BACK WHEN YOU AIM IT (Ben 08-05: "the minigun needs more recoil when ADS"). Its per-shot kick is the
   // smallest in the game — 0.006, a thirtieth of the shotgun's — because it fires 38 rounds a second and anything else would put
@@ -17950,13 +17963,13 @@ function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id
   // let you do, so the kick scales to triple over the raise. Only the minigun, and only by adsT: the rest of the guns' recoil is a
   // set of numbers Ben tuned by feel and none of them asked for this.
   const _mgAds = (it.auto && it.rof>=30) ? (1 + 2.0*Math.min(1, view.adsT||0)) : 1;
-  kickRecoil(KP*_mgAds, KP*_mgAds*0.32);                                                          // every shot climbs the aim for keeps — manage your muzzle
+  kickRecoil(KP*_mgAds, KP*_mgAds*0.32, _offFire?0:((view&&view.adsT)||0));                                                          // every shot climbs the aim for keeps — manage your muzzle
   // THE HAND THAT FIRED IS THE HAND THAT SHOWS IT (Ben 08-04: "when two guns are equipped, and the off hand slotted one is fired,
   // it looks like the main hand gun is shooting, muzzle flash, recoil, all of it"). fireGun takes the SLOT it is firing, so it
   // already knows which gun went off — but every visual it triggered was written to `view`, the main-hand model, because that was
   // the only viewmodel when this code was written. The offhand now keeps its own flash timer and buck, spent by updateView on its
   // own model. The CAMERA recoil stays shared: your aim is kicked by whichever gun fires, which is the point of recoil.
-  const _off = !!(slotArg && armor[EQ_OFF] && slotArg===armor[EQ_OFF]);
+  const _off = _offFire;   // decided once, up where the bolt cycle needed it — two copies of the same test could disagree
   const _kick = (bolt?1.0 : rev?1.0 : it.gun==='auto'?0.18 : it.gun==='shotgun'?1.25 : 0.45);
   if(_off) offView.gunKick=Math.min(1.3,(offView.gunKick||0)+_kick);
   else view.gunKick=Math.min(1.3,(view.gunKick||0)+_kick);                       // viewmodel buck against the shoulder
@@ -20936,6 +20949,7 @@ function brxGenerate(o){ BR.rooms=[]; BR.walls=[]; BR.doors=[]; BR.lintels=[]; B
 // thickness — a pair overlapping by ~BR_WT is the deliberate corner growth in brxEmitWall and must be left alone.
 // Bucketed by wall LINE (axis + fixed coordinate + storey floor), because the naive pass is O(walls^2) per chunk.
 function brxDropBuriedWalls(){ const W=BR.walls; if(!W||W.length<2) return 0;
+  BR._buriedLow=0;                                                                // per pass, like the return value — a running total could not be compared with it
   // IDEMPOTENT, because brxUnion re-pushes the SAME record objects on every stream. Splicing only touches BR.walls, so the
   // next union starts from the chunk records again — but `by` is written ON the record and would otherwise be re-raised
   // relative to an already-raised base. `_by0` holds the original (usually undefined) and every run resets to it first.
@@ -20986,11 +21000,18 @@ function brxDropBuriedWalls(){ const W=BR.walls; if(!W||W.length<2) return 0;
         const aLen=a1-a0, bLen=b1-b0;
         if(!(aLen > bLen+1e-6 || j>i)) continue;                                   // strictly shorter loses; equal length breaks by index so the pass is order-independent
         if(bot(b) >= top(a)-1e-6) continue;                                        // already stacked clear of a — no shared plane
+        // AND b MUST NOT START BELOW a. Both actions below assume a covers b from a's base upward: dropping b removes
+        // everything b was holding, and lifting b's base to a's TOP abandons whatever b covered between its own base and
+        // a's. If b begins lower — a record from a chunk one storey down, or one carrying an explicit lower `by` — either
+        // action opens masonry BELOW a that nothing replaces, which is a hole a player walks through. The pair then keeps
+        // its shared band, and a seam is the right thing to prefer over a hole. This guard was missing when the pass first
+        // shipped and the comment above it claimed the drop could not open a hole; it could.
+        if(bot(b) < bot(a)-1e-6){ BR._buriedLow=(BR._buriedLow||0)+1; continue; }
         n++;
         // b's face is inside a's over the shared band. If a covers b's whole height, b is pure duplicate masonry and goes:
-        // the container still collides and still renders, so this cannot open a hole. If b rises ABOVE a — the well lining's
-        // far half runs up to the head of the shaft — dropping it would open the shaft, so instead its BASE is lifted to a's
-        // top and the two STACK. Either way no two faces end up sharing a plane.
+        // the container still collides and still renders. If b rises ABOVE a — the well lining's far half runs up to the
+        // head of the shaft — dropping it would open the shaft, so instead its BASE is lifted to a's top and the two STACK.
+        // Either way no two faces end up sharing a plane, and nothing b was covering is left uncovered.
         if(top(b) <= top(a)+1e-6) kill.add(j);
         else b.by=top(a)-dyOf(b); } } }                                            // world height back into b's own LOCAL space
   if(kill.size){
@@ -23317,7 +23338,9 @@ if(typeof window!=='undefined'){ window.__hcBRX={          // the chunk substrat
     c.x0=a.x0+dx; c.z0=a.z0+dz; c.x1=a.x1+dx; c.z1=a.z1+dz; c.__injected=true;
     W.push(c); return {walls:W.length, from:{x0:a.x0,z0:a.z0,x1:a.x1,z1:a.z1}, to:{x0:c.x0,z0:c.z0,x1:c.x1,z1:c.z1}}; },
   clearInjected:()=>{ const W=BR.walls||[]; let n=0; for(let i=W.length-1;i>=0;i--) if(W[i].__injected){ W.splice(i,1); n++; } return n; },
-  wallOverlaps:()=>{ const W=BR.walls||[], out={walls:W.length, overlaps:0, worst:0, buried:BR._buried||0, sample:[]};
+  // buriedLow counts pairs the burial pass DECLINED because the buried wall started below its container's base — the case
+  // that would have opened a hole. It is reported so the guard is a number and not just an argument.
+  wallOverlaps:()=>{ const W=BR.walls||[], out={walls:W.length, overlaps:0, worst:0, buried:BR._buried||0, buriedLow:BR._buriedLow||0, sample:[]};
     for(let i=0;i<W.length;i++){ const a=W[i], ax=a.x1-a.x0, az=a.z1-a.z0, aL=Math.hypot(ax,az)||1, aux=ax/aL, auz=az/aL;
       for(let j=i+1;j<W.length;j++){ const b=W[j], bx=b.x1-b.x0, bz=b.z1-b.z0, bL=Math.hypot(bx,bz)||1, bux=bx/bL, buz=bz/bL;
         if(Math.abs(aux*bux+auz*buz) < 0.999) continue;                                   // collinear-parallel only
@@ -27842,6 +27865,34 @@ window.__hc={
                gunLat:latFelt }; }
     catch(e){ return {err:String(e.message||e)}; } },
   // The offhand viewmodel's transform after firing it: a buck that is rebased every frame stays bounded, one that accumulates walks off.
+  // ONE BURST HARNESS FOR BOTH HANDS (Ben 08-05: "guns in the off hand need proper recoil"). Two separate hooks would measure the
+  // two hands with two different stepping loops, and then a difference in the NUMBERS could be a difference in the HARNESS —
+  // which is exactly the trap that made a main-hand burst report a camera climb of 0 while the offhand reported 0.6: updateRecoil
+  // runs on the frame loop, and only the offhand's hook was stepping it. Same loop, same reads, one hand argument.
+  handFire(which,n,id){ try{ id=id||'ar15'; n=(n|0||6); const off=(which==='off');
+      if(off){ armor[EQ_OFF]={id,n:1}; setOffItem(id); }
+      else { armor[EQ_OFF]=null; setOffItem(null); inv[selSlot]={id,n:1}; refreshHotbar(); setViewItem(id); }
+      if(typeof updateArmorView==='function')updateArmorView();
+      invAdd('rifle_ammo',400); invAdd('buckshot',200);
+      const V=off?offView:view;
+      for(let i=0;i<40;i++) updateView(0.033);            // settle first, so `before` already holds the wall bend for wherever we stand
+      V.gunKick=0; V.boltT=0;
+      const before={ z:+V.group.position.z.toFixed(3), rx:+V.group.rotation.x.toFixed(3) };
+      const p0=player.pitch, y0=player.yaw;
+      let fired=0, peakKick=0, peakRx=before.rx;
+      for(let i=0;i<n;i++){
+        try{ if(fireGun(off?armor[EQ_OFF]:inv[selSlot])) fired++; }catch(e){}
+        updateView(0.033); updateRecoil(0.033);
+        if(Math.abs(V.gunKick||0)>Math.abs(peakKick)) peakKick=+(V.gunKick||0);
+        if(Math.abs(V.group.rotation.x-before.rx)>Math.abs(peakRx-before.rx)) peakRx=V.group.rotation.x; }
+      for(let i=0;i<20;i++) updateRecoil(0.033);          // the aim kick ramps over ~50 ms and then STAYS
+      const camClimb=+(player.pitch-p0).toFixed(4), camYaw=+(player.yaw-y0).toFixed(4);
+      for(let i=0;i<80;i++) updateView(0.033);            // …and let the buck settle, which is where an accumulating one shows
+      return { id, hand:off?'off':'main', fired, peakKick:+peakKick.toFixed(3), peakRx:+peakRx.toFixed(3),
+               camClimb, camYaw, before, after:{ z:+V.group.position.z.toFixed(3), rx:+V.group.rotation.x.toFixed(3) },
+               boltT:+((V.boltT||0)).toFixed(2) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  mainFire(n,id){ return this.handFire('main',n,id); },
   offFire(n,id){ try{ id=id||'ar15'; armor[EQ_OFF]={id,n:1}; setOffItem(id); if(typeof updateArmorView==='function')updateArmorView();
       // Settle FIRST, so `before` already contains the wall-bend block-out for wherever the player is standing. Comparing a
       // post-shot pose against the raw rest pose measured that bend, not the recoil, and failed in any room with a wall in front.
