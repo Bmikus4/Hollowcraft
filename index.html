@@ -3165,7 +3165,7 @@ function greedyMesh(c, pass){
   const hides = pass==='opaque'
       ? (nid)=> isOpaque[nid]                          // opaque hidden only by opaque
       : pass==='leaf'
-      ? (nid, sid)=> isOpaque[nid] || nid===sid        // leaves: cull interior leaf-leaf faces too → mesh only the canopy SHELL, not its solid volume (kills the dominant alpha-tested forest overdraw)
+      ? (nid)=> isOpaque[nid]                          // LEAVES ARE SEEN THROUGH EACH OTHER (Ben 08-05: "make sure that oak leaves can be seen behind eachother"). Culling leaf-leaf faces meshed only the canopy SHELL, which was right while leaves were opaque; now that the tile is a real cutout the layers behind a hole had no faces at all and a tree was one leaf deep. Every leaf-leaf boundary is a face again — this is the game's biggest alpha-tested fill sink, so it is measured, not assumed (bench/tmp-leaf-holes.mjs, __hc.treeCensus)
       : (nid, sid)=> isOpaque[nid] || nid===sid;       // glass: hidden by opaque or adjacent same
   const x=[0,0,0], q=[0,0,0];
   for (let d=0; d<3; d++){
@@ -3465,16 +3465,48 @@ function foliageMesh(c){
       const id=g(lx,ly,lz); if(!LEAF_CUT.has(id)) continue;
       const SPRIG_TILE = (id===BID.birch_leaves) ? SPRIG.birch : (id===BID.oak_leaves) ? SPRIG.oak : SPRIG.pine;
       const sky=clamp(_ssky(lx,ly,lz),0,1);
-      for(const [ox,oy,oz] of NB){
-        const nx=lx+ox, ny=ly+oy, nz=lz+oz;
+      const wx=cx0+lx, wz=cz0+lz;
+      // FACES OF THIS CELL THAT FACE OUTSIDE AIR ------------------------------------------------------------------
+      // Collected before any quad is emitted, because both of the rules below are properties of the CELL and cannot be
+      // decided one face at a time.
+      const _open=[];
+      for(const nb of NB){
+        const nx=lx+nb[0], ny=ly+nb[1], nz=lz+nb[2];
         // Edge cells: a neighbour outside this chunk is not readable here, and guessing "air" would hang sprigs on the
         // seam between two chunks where the canopy actually continues. Skipped — the face one block in still gets one.
         if(nx<0||nx>=CK||nz<0||nz>=CK||ny<0||ny>=WH) continue;
         if(g(nx,ny,nz)!==AIR) continue;
-        const wx=cx0+lx, wz=cz0+lz;
-        // EVERY EXPOSED FACE (Ben 08-05: "the tree coverage is off, they dont appear on every block face, they should").
-        // It was one face in two on the theory that a sprig everywhere reads as fur. It does not — at this size it reads
-        // as a gappy canopy with bald patches, which is worse, because the eye finds the missing ones.
+        // NO SPRIGS ON INTERIOR LEAVES (Ben 08-05: "just make inside oak leaves NOT have foliage"). Now that the leaf
+        // pass meshes every layer, the air GAPS inside a canopy are exposed leaf faces too, and they were growing
+        // foliage into the middle of the tree — visible through the holes as a solid green plug. "Outside" cannot be
+        // read off _ssky (the air under a canopy is shaded but outside), so it is asked the way the eye asks it: walk
+        // the face normal outward and require clear air. A face looking into the canopy hits leaves within a block or
+        // two; the shell's own faces look out at open air.
+        let out=true;
+        for(let s=2;s<=3;s++){ const px=lx+nb[0]*s, py=ly+nb[1]*s, pz=lz+nb[2]*s;
+          if(px<0||px>=CK||pz<0||pz>=CK||py<0||py>=WH) break;        // out of the padded snapshot: treat as open, same as the seam rule above
+          const q2=g(px,py,pz); if(q2!==AIR && q2!==WATER){ out=false; break; } }
+        if(out) _open.push(nb);
+      }
+      if(!_open.length) continue;
+      // NO TWO PERPENDICULAR SPRIGS ON ONE CELL (Ben 08-05: "some overlaps corner to corner leaves foliage, making two
+      // planes intersect and giving a weird look"). A cell on a corner of the canopy has two exposed faces at right
+      // angles; each grew its own crossed pair, and the two pairs cut through each other and read as an X standing off
+      // the tree. One AXIS per cell fixes it where thinning per FACE cannot — a per-face hash cannot see that the two
+      // survivors are perpendicular. Opposite faces of the same axis are kept together: they are 1.1 blocks apart and
+      // never meet. The axis is chosen by the same world-coordinate hash the jitter uses, so it is identical on every
+      // client and across a rebuild. NOT fixed by shrinking the quads: a sprig that no longer reaches its face's edge
+      // stops being the tree's outline, which is the whole point of the pass.
+      let _ax=_open[0][0]!==0?0:_open[0][1]!==0?1:2;
+      if(_open.some(f=>(f[0]!==0?0:f[1]!==0?1:2)!==_ax)){
+        const axes=[0,1,2].filter(a=>_open.some(f=>f[a]!==0));
+        _ax=axes[Math.min(axes.length-1, (xhash(wx,ly+3,wz,181)*axes.length)|0)];
+      }
+      for(const [ox,oy,oz] of _open){
+        if((ox!==0?0:oy!==0?1:2)!==_ax) continue;
+        // EVERY OUTWARD FACE ON THE KEPT AXIS (Ben 08-05: "the tree coverage is off, they dont appear on every block
+        // face, they should"). The thinning that is gone for good is the one-face-in-two HASH: at this size it read as a
+        // gappy canopy with bald patches, because the eye finds the missing ones. Every exposed CELL still gets a sprig.
         const jx=(xhash(wx,ly+7,wz,157)-0.5)*0.22, jz=(xhash(wx,ly+11,wz,163)-0.5)*0.22;
         // CENTRED ON THE FACE, and this is the bug Ben saw as "hanging too low or floating around the block". The cell
         // spans ly..ly+1, so its centre is ly+0.5 — the old anchor was ly, and quad() builds UPWARD from its anchor, so
@@ -3918,7 +3950,7 @@ const cutoutMat = injectAtlas(new THREE.MeshPhongMaterial({ side:THREE.DoubleSid
 // property I had set was decorative. The hole count in the tile, the alphaTest value and the atlas's alpha channel were
 // all correct and all measurable — and every one of them measured green while the thing on screen was opaque. This flag
 // is what makes any of them mean anything. (leafTrans is the other session's and is left exactly as found.)
-const leafMat   = injectAtlas(new THREE.MeshPhongMaterial({ side:THREE.FrontSide, shininess:0, specular:0x000000, alphaTest:0.5 }), {nightFoliage:true, leafTrans:true, cutout:true});
+const leafMat   = injectAtlas(new THREE.MeshPhongMaterial({ side:THREE.DoubleSide, shininess:0, specular:0x000000, alphaTest:0.5 }), {nightFoliage:true, leafTrans:true, cutout:true});   // DoubleSide, not FrontSide (Ben 08-05: "we can also see both sides of them"). FrontSide was deliberate while every leaf face was seen from its normal side and it halved canopy fragment work; a canopy you can now see into is a canopy whose far layers are seen from behind.
 // DoubleSide. The note that used to be here said FrontSide was safe because "the mesher emits both crossed
 // quads, so one always faces you", and that is true as far as it goes: two quads at right angles each front
 // a half-space, and the two half-spaces do cover every direction, so a plant never disappears outright.
@@ -18069,21 +18101,29 @@ function updateView(dt){ updateRecoil(dt);                                      
   { const dm=mainArm.group.visible?view._boDX:null;
     mainArm.group.position.z=ARM_REST_Z+(dm?dm.z:0);
     if(dm){ mainArm.group.position.x+=dm.x; mainArm.group.position.y+=dm.y; }
-    // THE HAND GOES TO THE ITEM (Ben 08-05: "make sure torches are actually held in the hand"). Measured, the palm — the far -z tip
-    // of buildFist's forearm — sat at camera z -0.394 while the held torch's shaft was at -0.62: the fist was 0.23 BEHIND the torch,
-    // holding nothing, on every frame. The arm is what moves, not the item: the flame's size and place are Ben's and a torch pulled
-    // back toward the eye would read bigger. Only items that declare a grip point are touched, so nothing else in the game moves,
-    // and the reach is clamped — an arm is not elastic. Rebased off the z assigned just above, never added to it, for the reason in
-    // the paragraph above this one.
-    // EVERY ITEM, NOT JUST THE ONES WITH A DECLARED GRIP (Ben's backlog item 19: "every item must be held in a hand"). Swept over the
-    // whole item table: 223 of 304 held items sat more than 6 cm off the palm and the worst — a foxglove, a bloodroot — sat 23 cm out,
-    // floating in front of a fist that was holding air. Two hundred and twenty-three hand-tuned offsets is not a fix; a rule is.
+    // THE ITEM GOES TO THE HAND — NOT THE HAND TO THE ITEM (Ben 08-05, reversing my own backlog item 19: "rifle cartridges are held
+    // out farther than a monitor… to do that you had to create a new arm, I JUST want every item moved into the default hand, not
+    // hands extending OUT to reach an item"). It used to add the palm-to-grip gap to mainArm.group.position, which made the arm
+    // telescope: a long item grew the forearm, a near one shortened it, and no two items had the same arm. THE ARM NEVER MOVES now —
+    // it stays at the rest pose assigned above — and the whole gap goes onto the ITEM instead.
+    //   SOLVED FROM THE ITEM'S AUTHORED PLACE, ASSIGNED, NEVER ADDED. _basePos is where the builder in setViewItem put the mesh; the
+    // fit is recomputed from that base every frame rather than from last frame's answer. Adding to a live position compounds at 60 Hz
+    // (it is the same fault that span the offhand gun out of frame), and feeding the corrected position back into the correction
+    // oscillates. Copying the base first makes this a one-shot solve with no state.
+    // EVERY ITEM, NOT JUST THE ONES WITH A DECLARED GRIP. Swept over the whole item table: 223 of 304 held items sat more than 6 cm
+    // off the palm and the worst — a foxglove, a bloodroot — sat 23 cm out, floating in front of a fist that was holding air. Two
+    // hundred and twenty-three hand-tuned offsets is not a fix; a rule is.
     //   A model that declares userData.gripAt (the torch, the candle, every gun) says exactly where a hand closes on it and keeps that
     // precision. Everything else uses its own BOUNDING BOX: the palm goes to the nearest point of it, which is the honest general
     // answer to "hold this" for a flower, a block cube, a trophy or a door. The box is cached in the model's local space and only its
     // eight corners are transformed per frame — setFromObject every frame would walk the whole model on the render path.
+    // GUNS ARE NOT IN THIS SET AT ALL: updateMainArm hides mainArm for anything with .gun, because a gun carries its own hand
+    // (attachGunHand). Nothing here can move a weapon, its sights or its bore.
     if(mainArm.group.visible && view.mesh){
       const UD=view.mesh.userData||{};
+      const _bp=UD._basePos||(UD._basePos=view.mesh.position.clone());
+      view.mesh.position.copy(_bp);
+      view.mesh.updateMatrix();
       view.mesh.updateWorldMatrix(true,false);
       mainArm.group.updateMatrixWorld(true);
       const pv=view._palmV||(view._palmV=new THREE.Vector3());
@@ -18091,7 +18131,14 @@ function updateView(dt){ updateRecoil(dt);                                      
       const g0=view._gripV||(view._gripV=new THREE.Vector3());
       let have=false;
       if(UD.gripAt){ g0.fromArray(UD.gripAt).applyMatrix4(view.mesh.matrixWorld); camera.worldToLocal(g0); have=true; }
-      else { let bb=UD._hbb; if(!bb && typeof _viewLocalBox==='function'){ bb=_viewLocalBox(view.mesh); UD._hbb=bb; }
+      // THE BOX IS BUILT FROM CHILD WORLD MATRICES, so the whole subtree has to be current before it is measured ONCE and cached
+      // forever. _viewLocalBox reads o.matrixWorld, and a model created this frame by setViewItem has never been rendered: its
+      // children's world matrices are identity, so the box came out as the model collapsed onto its own origin. Cached, that wrong
+      // box then decided where the item was held for as long as it was held — and whether it was wrong at all depended on whether a
+      // render had happened in between, which is why the same sweep measured a sapling 0.00, 0.046 and 0.119 off the palm on three
+      // runs of the same seed. updateWorldMatrix's second argument is the subtree; the fit's own call passes false because it only
+      // needs the item's own matrix.
+      else { let bb=UD._hbb; if(!bb && typeof _viewLocalBox==='function'){ view.mesh.updateWorldMatrix(true,true); bb=_viewLocalBox(view.mesh); UD._hbb=bb; }
         if(bb && isFinite(bb.min.x)){
           const c=view._hbbC||(view._hbbC=new THREE.Vector3());
           let lox=1e9,loy=1e9,loz=1e9,hix=-1e9,hiy=-1e9,hiz=-1e9;
@@ -18106,10 +18153,17 @@ function updateView(dt){ updateRecoil(dt);                                      
           const dx2=cxm-g0.x, dy2=cym-g0.y, dz2=czm-g0.z, L=Math.hypot(dx2,dy2,dz2)||1;
           g0.x+=dx2/L*0.01; g0.y+=dy2/L*0.01; g0.z+=dz2/L*0.01;
           have=true; } }
+      // NOT CLAMPED, and that is the point of the reversal. A clamp made sense when an arm was doing the reaching (an arm is not
+      // elastic); an item has no such limit, and the clamp is exactly what left the worst offenders 9 cm short of the palm.
+      //   pv/g0 are CAMERA space; view.mesh.position is view.group space. view.group is a direct child of the camera, so
+      // view.group.matrix is the group→camera map and its inverse carries both points back. Inverting the matrix and differencing
+      // the two POINTS (rather than rotating the difference) keeps the group's scale correct without decomposing it.
       if(have){
-        mainArm.group.position.x += clamp(g0.x-pv.x, -0.14, 0.14);
-        mainArm.group.position.y += clamp(g0.y-pv.y, -0.14, 0.14);
-        mainArm.group.position.z += clamp(g0.z-pv.z, -0.30, 0.30); } }
+        const _im=view._fitM||(view._fitM=new THREE.Matrix4());
+        view.group.updateMatrix(); _im.copy(view.group.matrix).invert();
+        pv.applyMatrix4(_im); g0.applyMatrix4(_im);
+        view.mesh.position.set(_bp.x+(pv.x-g0.x), _bp.y+(pv.y-g0.y), _bp.z+(pv.z-g0.z));
+        view.mesh.updateMatrix(); } }
     const dof=offArm.group.visible?offView._boDX:null;
     offArm.group.position.z=ARM_REST_Z+(dof?dof.z:0);
     if(dof){ offArm.group.position.x+=dof.x; offArm.group.position.y+=dof.y; } }
@@ -29313,6 +29367,9 @@ window.__hc={
   // #68: the canopy's alpha cutout, live. 0 turns the holes off as far as the rasteriser is concerned (the transparent
   // texels draw as opaque black), which is the ONLY way to A/B the discard cost against itself — same camera, same
   // chunks, same frame. Every chunk has its own material clone, so the base and all the clones have to be told.
+  // The leaf meshes as the GPU has them, so a probe can intersect the canopy's own triangles and answer "how many leaf
+  // surfaces does a ray through this tree cross" as a number instead of a screenshot (bench/tmp-leaf-depth.mjs).
+  leafMeshes(){ const out=[]; try{ chunkRoot.traverse(o=>{ if(o.userData&&o.userData.leaf&&o.userData.leaf.geometry) out.push(o.userData.leaf); }); }catch(e){} return out; },
   leafCut(v){ try{ const a=(v==null?0.5:+v); leafMat.alphaTest=a; leafMat.needsUpdate=true;
       let n=0; world.forEach(c=>{ const g=c.group; if(!g) return; const m=g.userData&&g.userData.leaf;
         if(m&&m.material&&m.material!==leafMat){ m.material.alphaTest=a; m.material.needsUpdate=true; n++; } });
@@ -29526,13 +29583,29 @@ window.__hc={
   heldSweep(){ try{ const out=[]; const keep=inv[selSlot];
       for(const id in ITEMS){ let r; try{ r=this.heldInHand(id); }catch(e){ r={err:String(e.message||e)}; }
         out.push({ id, arm:!!r.armVisible, gunHand:!!r.gunHand, grip:r.gripGap==null?null:r.gripGap,
-                   gap:r.gap==null?null:r.gap, no:r.no||r.err||null }); }
+                   gap:r.gap==null?null:r.gap, reach:r.armReach==null?null:r.armReach,
+                   armZ:r.armOff?Math.abs(r.armOff[2]):null, no:r.no||r.err||null }); }
       inv[selSlot]=keep; refreshHotbar(); setViewItem(keep?keep.id:null);
       const bad=out.filter(r=>!r.gunHand && (!r.arm || (r.grip==null && (r.gap==null || r.gap>0.06))));
       return { total:out.length, held:out.filter(r=>!r.no).length,
                noArm:out.filter(r=>!r.arm&&!r.gunHand).map(r=>r.id),
                offPalm:out.filter(r=>!r.gunHand&&r.grip==null&&r.gap!=null&&r.gap>0.06).length,
-               worst:out.filter(r=>r.gap!=null).sort((a,b)=>b.gap-a.gap).slice(0,12), bad:bad.length, rows:out }; }
+               worst:out.filter(r=>r.gap!=null).sort((a,b)=>b.gap-a.gap).slice(0,12), bad:bad.length,
+               // The reversal's own number: how far the ARM was displaced to hold each item. The floor is not zero and cannot be — the
+               // per-frame pose writes the arm's y from OFF_ARM_Y plus the walk bob, so every row carries the same few millimetres of
+               // it. What the reversal claims is that the displacement no longer DEPENDS ON THE ITEM, which is armSpread: the old code
+               // ran from 0 to the clamp's 0.30 across the table.
+               armMoved:out.filter(r=>!r.gunHand && r.reach!=null && r.reach>0.02).length,
+               armSpread:(()=>{ const v=out.filter(r=>!r.gunHand&&r.reach!=null).map(r=>r.reach);
+                 return v.length?+(Math.max(...v)-Math.min(...v)).toFixed(4):null; })(),
+               // THE Z IS THE CLEAN TEST, and the reason is which components are written by what. x and y are rewritten every frame
+               // by the pose (x from the strafe lean, y from the walk bob), so both carry a few millimetres that have nothing to do
+               // with reaching and that differ between two measurements of the same item taken 20 frames apart. NOTHING writes the
+               // arm's z except the rest assignment, the wall block-out and — before this reversal — the reach, which put up to 0.30
+               // there. Zero z is the reversal, stated in the one number no other system touches.
+               armZ:(()=>{ const v=out.filter(r=>!r.gunHand&&r.armZ!=null).map(r=>r.armZ);
+                 return v.length?+Math.max(...v).toFixed(5):null; })(),
+               armWorst:out.filter(r=>r.reach!=null).sort((a,b)=>b.reach-a.reach).slice(0,6), rows:out }; }
     catch(e){ return {err:String(e.message||e)}; } },
   heldInHand(id){ try{ if(id){ inv[selSlot]={id,n:1}; refreshHotbar(); setViewItem(id); }
       for(let i=0;i<20;i++) updateView(0.033);
@@ -29553,7 +29626,11 @@ window.__hc={
       let gripGap=null;
       if(m.userData&&m.userData.gripAt){ const gv=new THREE.Vector3().fromArray(m.userData.gripAt).applyMatrix4(m.matrixWorld);
         camera.worldToLocal(gv); gripGap=+palm.distanceTo(gv).toFixed(4); }
-      return { id:view.id, armVisible, gunHand:!!(m.userData&&m.userData._gunHand), gripGap,
+      // THE ARM'S OWN PLACE, so a bench can say the item moved and the ARM DID NOT (Ben 08-05: "not hands extending OUT to reach an
+      // item"). Reported as the offset from the rest pose the group is constructed at, because zero is the assertion.
+      const _armOff=[+(M.group.position.x-0.32).toFixed(4), +(M.group.position.y-OFF_ARM_Y).toFixed(4), +(M.group.position.z-ARM_REST_Z).toFixed(4)];
+      return { id:view.id, armVisible, gunHand:!!(m.userData&&m.userData._gunHand), gripGap, armOff:_armOff,
+               armReach:+Math.hypot(_armOff[0],_armOff[1],_armOff[2]).toFixed(4),
                palm:palm.toArray().map(n=>+n.toFixed(3)),
                itemBox:[bmin.toArray().map(n=>+n.toFixed(3)), bmax.toArray().map(n=>+n.toFixed(3))],
                gap:+palm.distanceTo(near).toFixed(4) }; }

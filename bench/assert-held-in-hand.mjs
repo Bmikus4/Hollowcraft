@@ -35,6 +35,14 @@ let fails=0; const ok=(n,c,g)=>{ if(!c)fails++; console.log(`  ${c?'ok  ':'FAIL'
     // 6 cm: the palm is a point and the fist is a 0.09 box, so under half its width is a hand closed on the thing.
     ok('and no item is left floating off the palm', r.offPalm===0, {offPalm:r.offPalm, worst:(r.worst||[])[0]});
     ok('…which is the same statement as nothing being wrong', r.bad===0, {bad:r.bad});
+    // THE ITEM MOVED, NOT THE ARM (Ben 08-05, reversing item 19: "I JUST want every item moved into the default hand, not hands
+    // extending OUT to reach an item"). The gap closing is only half the ask; the other half is that the forearm never left its rest
+    // pose to close it. Two assertions, because the arm's rest is not exactly its constructed pose: the frame loop writes its y from
+    // OFF_ARM_Y plus the walk bob, so ~5 mm is on every row no matter what is held. The claim that matters is armSpread — the arm's
+    // displacement must not vary WITH THE ITEM, and under the old reach it varied from 0 to the clamp's full 0.30.
+    console.log('    armWorst', JSON.stringify((r.armWorst||[]).slice(0,3)), 'spread', r.armSpread, 'z', r.armZ);
+    ok('and NO arm was extended to reach one', r.armMoved===0, {armMoved:r.armMoved, worst:(r.armWorst||[])[0]});
+    ok('the arm never leaves its rest DEPTH for any item', r.armZ!=null && r.armZ<1e-4, {armZ:r.armZ});
     ok('no page errors', errors.length===0, errors);
     await b.close();
   } finally { server.kill(); }
