@@ -27,6 +27,24 @@
 // are day 9.2 at row 312 and night 11.7 at row 296, against a median step of 0.78 and 0.36, and the rows at and below 320 read a
 // median of 50.8 by day where the report says the frame reads 0. Nothing at row 320, nothing of the size reported, at either hour.
 //
+// BUT THERE IS A DAYLIGHT BLACK-WATER ARTEFACT, AND THIS FILE'S VANTAGE IS BLIND TO IT. It is not a steep-view crush and it is not
+// near water: it is FAR water seen from an offshore eye, and it is enormous. Counting pure black (luminance < 3) in the sea band of
+// bench/tmp-sea-handover's frames — same spot, same pitch, differing only in render distance:
+//   rd        4       5       6       7       8
+//   day    17.50%  33.79%  41.93%  46.26%  49.28%      <- half the visible sea at the DEFAULT render distance
+//   night   0.00%   0.00%   0.00%   0.00%   0.00%
+// The frames (handover-rd8-day-1.png) show dense hard-black streaks in bands parallel to the horizon, from just under it down into
+// the near field, over both chunk water and the painted disc. It gets WORSE as the render distance rises, which is the opposite of
+// what a handover fault would do and is what more far water in frame would do.
+// THE LIKELY MECHANISM, unproven and written down so the next session starts from it rather than from scratch: this is the NIGHT
+// water bug's mechanism in daylight (61fe516). At a grazing angle the ripple normal swings per pixel, F swings with it, and
+// min(F,uFresCap) caps the sky reflection at 0.42 — so on a facet turned the wrong way the colour is mostly `base` sunk 97% toward
+// uBody by the Beer term, i.e. near-zero linear, and AgX's toe takes it to nothing while its neighbour catches the sky and reads
+// blue. At distance the wave normal is ALIASED (there is no mip on it), which is why it is salt-and-pepper and why it is worse the
+// further out you can see. The night cure was `col += uSeaNight * (1.0 - uDay)`, which is night-only by construction.
+// This is the strongest lead yet for Ben's oldest recurring report, "black texels everywhere", and it is NOT fixed here: the fix is a
+// floor or a normal-damping on a sea he has tuned repeatedly, and it needs his eye and a full session.
+//
 // THE FIRST RUN OF THIS FILE WAS OF A BEACH. Copying the night file's "shore plus 24 blocks along the same bearing" put the camera
 // over wet SAND — the frame is a beach with a corner of sea in it — and it read median 110-130 with zero black, which would have
 // closed the lead for entirely the wrong reason. The vantage now walks out until the column under the eye is water, the seabed is six
@@ -69,10 +87,16 @@ function stat(file,c){
     await ctx.addInitScript(()=>{ try{ localStorage.setItem('hollowcraft_grain','0'); }catch(e){} });
     const page=await ctx.newPage();
     page.on('pageerror',e=>console.log('  PAGEERROR:',String(e.message||e).slice(0,160)));
-    await page.goto(base+'/'+String(process.env.HC_PAGE||'index.html')+'?debug=1&rd=8',{waitUntil:'load',timeout:120000});
+    // HC_RD, and it is set THROUGH THE HOOK with the framerate pinned, because `?rd` does not hold: a saved localStorage value
+    // overwrites it and the adaptive ladder then climbs it back (tmp-sea-handover paid for that twice).
+    const RD=+(process.env.HC_RD||8);
+    await page.goto(base+'/'+String(process.env.HC_PAGE||'index.html')+'?debug=1&rd='+RD,{waitUntil:'load',timeout:120000});
     await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:300000});
     await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:420000});
-    await page.evaluate(`__hc.lock(true); __hc.pinScene(); __hc.cmdRun('/gamemode creative'); __hc.cmdRun('/fly on'); __hc.holdNone();`);
+    await page.evaluate(`__hc.lock(true); __hc.pinScene(); try{__hc.fpsPin(240);}catch(e){} __hc.rd(${RD}); __hc.cmdRun('/gamemode creative'); __hc.cmdRun('/fly on'); __hc.holdNone();`);
+    const rdLive=await page.evaluate(`__hc.rd()`);
+    console.log(`  render distance ${rdLive} (asked ${RD})`);
+    if(rdLive!==RD){ console.log('  RENDER DISTANCE DID NOT TAKE — refusing to measure'); return; }
     const S=await page.evaluate(`__hc.st()`);
     // The same shore search the night file uses — a run of six wet columns, nearest first.
     const shore=await page.evaluate(`(()=>{ const W=__hc.bid('water'); let best=null;
