@@ -2149,6 +2149,10 @@ let SHELF_K=0.35, SHELF_W=14;
 // PLAINS_DAMP is how much of the ridged/erosion relief a plain gives up — 0.85 leaves a seventh of it, because a biome
 // with none at all is a table, and the item is "flat", not "empty".
 let PLAINS_K=1, PLAINS_DAMP=0.85;
+// #68/streams: the river channel's half-width as a threshold on |river field|. `let`, like SHELF_K and PLAINS_K and for
+// the same reason — "three blocks wider" is a claim about a difference, and the only way to report a difference honestly
+// is to measure both settings on one page (__hc.riverWidth).
+let RIVER_W=0.055;
 // THE PLAINS MASK ON ITS OWN, for QA and for anything that wants to know what biome it is standing in. This is the
 // REGIONAL strength, before the height gate surfaceH applies — "is this a plains region", not "how much was this column
 // actually flattened", which is the number a census wants to correlate relief against. It duplicates surfaceH's domain
@@ -2317,7 +2321,7 @@ function surfaceH(wx, wz){
   // the inside of a curve, which is what braiding actually is.
   const rvS = fbm2(wxo*0.0020, wzo*0.0020, 91, 3);
   const rv = Math.abs(rvS);
-  const RW = 0.055;
+  const RW = RIVER_W;
   if (rv < RW*1.9){
     // The gradient, and how much it is turning. Six extra samples of a 3-octave fbm, and only for columns already near
     // a river — the whole island does not pay for this.
@@ -10793,6 +10797,7 @@ let _fpsPin=null;
 const _BUILDERS=[buildSpawnChest, buildMine, buildVillage, buildTowers, buildGraveyard, buildStandingStones, buildWell, buildCamp, buildFarm, buildApiary, buildBlind, buildShrine, buildWoodcutter, buildLighthouse, buildDock, buildTunnels, buildValley, buildGolgotha, buildChurch, buildPeakTowers, buildCathedral, buildSilo];
 let _builderIdx=0;
 let _mbInit=false;
+let _mbTapGuard=true;   // QA/bench: __hc.mbGuard({on}). false restores the pre-08-05 gather, where a world pixel beside the gun sampled INTO it and smeared it outward.
 let _grForce=null;   // QA only: __hc.godrays({forceStrength}) latches the god-ray gain past its per-frame elevation curve. Nothing in the game sets it.
 const _cq=new THREE.Quaternion(), _ce=new THREE.Euler(0,0,0,'YXZ');
 // =====================================================================
@@ -11727,7 +11732,8 @@ function loop(){ try{
     // frame it reaches about 1.4x further. Nothing but the viewmodel is ever that close except a wall you are pressed against, and
     // the sphere test already excluded that from the blur.
     { const n=camera.near, f=camera.far, z=U.uNear.value;
-      U.uNearD.value = 0.5 + 0.5*((f + n - 2.0*f*n/Math.max(z, n+1e-4)) / (f - n)); }
+      U.uNearD.value = _mbTapGuard ? (0.5 + 0.5*((f + n - 2.0*f*n/Math.max(z, n+1e-4)) / (f - n))) : 0.0; }   // 0 rejects no tap at all, which IS the old behaviour — that is the A/B
+    U.uEnabled.value = _mbMode?1:0;   // the pass stays in the chain as the scene bridge with the blur off (see _rtPath)
     U.uStrength.value = player.grabbed?0.0:0.6;                                         // no blur during the grab cutscene
     _mbW.set(wretch.pos.x, wretch.pos.y+1.2, wretch.pos.z);                             // Wretch object smear
     let wactive=0;
@@ -22183,10 +22189,18 @@ function brFlick(ph,t){ const s=Math.sin(t*1.7+ph)*Math.sin(t*0.63+ph*1.7);
 // geometry, and only the 2 nearest cast (6 faces each; 16 casters is unaffordable). So gate the pool by ROOM VISIBILITY
 // instead: your own room always, plus any room joined to it by an opening that is actually open. A shut door now
 // genuinely occludes its room's light. Recomputed a few times a second, not per frame.
-// How many open doorways the light gate may walk through. 1 was the current room plus its immediate neighbours, which is
-// what starved the view down a long hall. Not unbounded: every room admitted puts its fixtures into the competition for
-// 16 pool slots, so too deep a walk spends slots on tubes far behind you.
-const BR_LIT_HOPS=3;
+// How many open doorways the light gate may walk through. STAYS AT 1, AND WIDENING IT IS A MEASURED REGRESSION, NOT THE
+// FIX IT LOOKS LIKE. The plan for report E was "the gate throws away 106 of 139 fixtures within 95 m, replace it with
+// distance plus frustum". A/B on one HEAD, one character apart (bench/br-lights.mjs, `gate` and `pixels`):
+//   1 hop: litRooms 2, gatedOut 111, frame mean luminance 47.8
+//   2 hops: litRooms 4, gatedOut 111, luminance 44.7
+//   3 hops: litRooms 6, gatedOut 109, luminance 44.7
+// Admitting more rooms barely moves the gated-out count and makes the view DARKER, because the real constraint is the 16
+// pool slots, not the gate: brxUpdateLights sorts by distance and takes the nearest 16, so every extra room admitted only
+// spends slots on tubes further away. litRooms is an intermediate, not an outcome — it improved while the picture got worse.
+// E is therefore gated on A2, the voxel light grid, exactly as the plan says: with tubes writing into a grid there is no
+// 16-slot competition to lose.
+const BR_LIT_HOPS=1;
 let _brLitSet=null, _brLitT=0, _brLitRoom=-2;
 function brLitRooms(){ const me=brxRoomAt(player.pos.x,player.pos.z); const id=me?me.id:-1;
   if(_brLitSet && id===_brLitRoom && (_brLitT-=0.0166)>0) return _brLitSet;
@@ -23907,7 +23921,8 @@ const FF_LIGHTS=2;
 let _ffPts=null, _ffPos=null, _ffCol=null, _ffState=null, _ffLive=0, _ffLitN=0, _ffLight=true;
 // QA only (__hc.ffTune) — the light A/B, and a pin. A firefly drifts and blinks, so an unpinned one is never in the same place or
 // at the same brightness twice and a before/after pixel pair measures the insect's own wander instead of its light.
-let _ffPin=null;
+let _ffPin=null, _ffSolo=false;   // _ffSolo: only the pinned one gets a light, so an A/B is not swamped by the rest of the swarm
+                                  // wandering in and out of range — that noise measured 25 luminance levels against a 1.7 signal
 function _ffTex(){ return _starTex(); }   // the same round soft sprite the stars use — a firefly IS a pin-point glow
 function _ffSeat(i){
   // A seat over the forest floor: grass ground, a tree within a couple of blocks, and a height in the low canopy where they hover.
@@ -23986,7 +24001,7 @@ function updateFireflies(dt){
     // glowing drops): resident lights, producers register candidates each frame, the nearest win, and nothing is ever created.
     // Only while its own blink is bright, because that is what a firefly does — the ground under it lights as it pulses and goes
     // out with it. Distance 3.6 and a low intensity is the "albeit small": it reaches the leaf it is on and nothing further.
-    if(_ffLight && k>0.35 && d<14 && _ffLitN<FF_LIGHTS && typeof glowCand==='function'){
+    if(_ffLight && (!_ffSolo || i===0) && k>0.35 && d<14 && _ffLitN<FF_LIGHTS && typeof glowCand==='function'){
       glowCand(s.x, s.y, s.z, 1.9*k*fade*night, 3.6, 0xbdff62); _ffLitN++; }
     n++;
   }
@@ -27127,12 +27142,12 @@ window.__hc={
   // QA/bench: the light A/B and the pin. `light:false` is the pre-08-05 behaviour (sprites only, lighting nothing), which is what a
   // before/after pixel pair needs; `pin` holds firefly 0 at a world position with its blink at full, because an insect that drifts
   // and blinks is never twice in the same place at the same brightness and the pair would measure its wander.
-  ffTune(o){ try{ if(o){ if(o.light!=null) _ffLight=!!o.light;
+  ffTune(o){ try{ if(o){ if(o.light!=null) _ffLight=!!o.light; if(o.solo!=null) _ffSolo=!!o.solo;
         if(o.pin!==undefined) _ffPin=(o.pin?{x:+o.pin[0],y:+o.pin[1],z:+o.pin[2]}:null);
         if(o.pin && _ffState && _ffState[0]){ const s=_ffState[0]; s.x=_ffPin.x; s.y=_ffPin.y; s.z=_ffPin.z; s.hue=1; } }
       const g=(typeof glowPool!=='undefined')?glowPool.map(L=>({i:+L.intensity.toFixed(3), d:+L.distance.toFixed(2),
                  c:'#'+L.color.getHexString(), at:[+L.position.x.toFixed(2),+L.position.y.toFixed(2),+L.position.z.toFixed(2)]})):null;
-      return { light:_ffLight, pin:_ffPin, litLights:_ffLitN, max:FF_LIGHTS, live:_ffLive, glowPool:g }; }
+      return { light:_ffLight, solo:_ffSolo, pin:_ffPin, litLights:_ffLitN, max:FF_LIGHTS, live:_ffLive, glowPool:g }; }
     catch(e){ return {err:String(e.message||e)}; } },
   fireflies(){ try{ if(!_ffPts) return { built:false, live:0, day:+globalU.uDay.value.toFixed(4) };
       let mx=0, lit=0; for(let i=0;i<_ffLive;i++){ const g=_ffCol[i*3+1]; if(g>mx)mx=g; if(g>0.25)lit++; }
@@ -28620,6 +28635,29 @@ window.__hc={
   // has aimed at a river cell and put the camera in the channel or under the bank — the bank is what you want to stand
   // on, and it is the column BESIDE the water, two or three blocks above it.
   mudSpots(r){ return _mudSpots(Math.round(player.pos.x), Math.round(player.pos.z), r||140); },
+  riverWidth(v){ if(v!=null){ RIVER_W=+v; _hmCache.clear(); } return { riverW:RIVER_W }; },   // the dial, and the cache clear is the whole point: surfaceH would keep answering from the old setting
+  // HOW WIDE IS A STREAM, actually. "Three blocks wider" is a number, so it gets measured rather than argued: find
+  // river cells, walk PERPENDICULAR to the channel (across the field's gradient) and count the unbroken run of water.
+  // Reported as a distribution because a river is not one width — the point of the change is that it varies.
+  streamWidth(n,R){ const N=n||24, RR=R||420, px=Math.round(player.pos.x), pz=Math.round(player.pos.z);
+    const W=[], side=[];
+    for(let r=20;r<RR && W.length<N;r+=7) for(let a=0;a<24 && W.length<N;a++){
+      const th=a*0.2618, cx=px+Math.round(Math.cos(th)*r), cz=pz+Math.round(Math.sin(th)*r);
+      if(surfaceH(cx,cz)>CFG.SEA) continue;                                  // not water
+      if(Math.abs(_riverField(cx,cz))>0.06) continue;                        // not a river (the sea would swamp this)
+      const e=4, gx=_riverField(cx+e,cz)-_riverField(cx-e,cz), gz=_riverField(cx,cz+e)-_riverField(cx,cz-e);
+      const g=Math.hypot(gx,gz)||1e-6, ux=gx/g, uz=gz/g;                     // the gradient points ACROSS the channel
+      let w=1; for(let s=1;s<24;s++){ if(surfaceH(Math.round(cx+ux*s),Math.round(cz+uz*s))>CFG.SEA) break; w++; }
+      for(let s=1;s<24;s++){ if(surfaceH(Math.round(cx-ux*s),Math.round(cz-uz*s))>CFG.SEA) break; w++; }
+      if(w>=2 && w<40) W.push(w);
+      // A SIDE CHANNEL is water that is NOT in the main cut: past the main threshold, still wet.
+      for(const sgn of [1,-1]) for(let s=6;s<18;s++){ const sx=Math.round(cx+ux*s*sgn), sz2=Math.round(cz+uz*s*sgn);
+        if(surfaceH(sx,sz2)<=CFG.SEA && Math.abs(_riverField(sx,sz2))>0.055){ side.push([sx,sz2]); break; } }
+    }
+    W.sort((a,b)=>a-b);
+    return { n:W.length, min:W[0]||null, median:W.length?W[W.length>>1]:null, max:W[W.length-1]||null,
+             mean:W.length?+(W.reduce((s,v)=>s+v,0)/W.length).toFixed(2):null,
+             sideChannels:side.length, widths:W }; },
   // #68 follow-up: the three things the species commits shipped unverified. Each one drives the REAL path — the break
   // handler, groundStructure's own sweep, and saveGame/applySave — because a hook that re-implements the thing it is
   // testing tests the hook.
@@ -29126,6 +29164,14 @@ window.__hc={
   postfx(){ try{ return { mbOn:_mbOn, mbMode:_mbMode, motionPass:!!motionPass, softShadows:_softShadows, shadowType:renderer.shadowMap.type, grain:gradePass?+gradePass.uniforms.uGrain.value.toFixed(3):null,
       sceneRT:_sceneRT?_sceneRT.texture.type:null, sceneRTHalf:!!(_sceneRT&&_sceneRT.texture.type===THREE.HalfFloatType) }; }catch(e){ return {err:e.message}; } },
   setMB(on){ try{ return { mbMode:setMotionBlur(on) }; }catch(e){ return {err:e.message}; } },
+  // QA/bench: the motion blur's VIEWMODEL TAP GUARD (Ben 08-05: the blur must not touch hands, held items or guns,
+  // "especially on thier edges"). off = the old gather, where the gun stayed sharp but every world pixel beside it sampled
+  // backwards into it and dragged it outward. uNearD 0 rejects nothing, which is exactly that.
+  mbGuard(o){ try{ if(o&&o.on!=null) _mbTapGuard=!!o.on;
+      return { on:_mbTapGuard, uNearD:motionPass?+motionPass.uniforms.uNearD.value.toFixed(5):null,
+               uNear:motionPass?motionPass.uniforms.uNear.value:null, enabled:motionPass?motionPass.uniforms.uEnabled.value:null,
+               mbMode:_mbMode, rtPath:_rtPath };
+    }catch(e){ return {err:String(e.message||e)}; } },
   // QA: DOES THE HAT CONTAIN THE HEAD (Ben 08-05: "the players head shows through the top of the straw hat"). A round hat over a
   // square head has to clear the head's DIAGONAL, not its width, and its top has to be clear of the head's top face rather than
   // coplanar with it — two numbers no screenshot of a 120 px model can settle, and the meshes are module scope. Reads the real
