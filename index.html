@@ -5684,9 +5684,35 @@ const GodrayShader={
   // exact rather than tuned, and uSeedMin goes back to sorting bright sky (>0.85) from the rest of the dome.
   // The depth texture only exists on the motion-blur render path (_sceneRT's own attachment, the same one SSAO needs). Without
   // it the pass is DISABLED rather than run blind: no rays is honest, rays out of every lamp is not.
-  uniforms:{ tDiffuse:{value:null}, tDepth:{value:null}, uHasDepth:{value:0}, uSun:{value:new THREE.Vector2(0.5,0.5)}, uActive:{value:0}, uStrength:{value:0.5}, uSeedMin:{value:0.16}, uTint:{value:new THREE.Color(1.0,0.86,0.58)} },
+  // uInvVP / uTime / uCloud are for the CLOUD occlusion below (Ben 08-05: "I just want god rays anytime the sun is
+  // peeking through the clouds/peeking through something"). The pass works in screen space and had no idea which way
+  // any pixel was looking, which is why a cloud could not cast a shaft: the depth test calls a cloud 'empty sky',
+  // because a cloud is painted on the sky dome and writes no depth. The inverse view-projection turns a sample's UV
+  // back into a world direction, and the same field the sky draws its clouds with then says how much light gets
+  // through along it.
+  uniforms:{ tDiffuse:{value:null}, tDepth:{value:null}, uHasDepth:{value:0}, uSun:{value:new THREE.Vector2(0.5,0.5)}, uActive:{value:0}, uStrength:{value:0.5}, uSeedMin:{value:0.16}, uTint:{value:new THREE.Color(1.0,0.86,0.58)},
+             uInvVP:{value:new THREE.Matrix4()}, uTime:{value:0}, uCloud:{value:1.6}, uCloudOcc:{value:1} },
   vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
-  fragmentShader:`varying vec2 vUv; uniform sampler2D tDiffuse, tDepth; uniform vec2 uSun; uniform float uActive,uStrength,uSeedMin,uHasDepth; uniform vec3 uTint;
+  fragmentShader:`varying vec2 vUv; uniform sampler2D tDiffuse, tDepth; uniform vec2 uSun; uniform float uActive,uStrength,uSeedMin,uHasDepth,uTime,uCloud,uCloudOcc; uniform vec3 uTint; uniform mat4 uInvVP;
+    // The sky's own cloud field, copied rather than approximated. If this drifts from the sky shader's the shafts appear
+    // where there is no gap, which is worse than no shafts — three octaves instead of five because this runs 16 times a
+    // pixel and the small-scale detail decides an edge, not a beam.
+    float h13(vec3 p){ p=fract(p*0.3183099+0.1); p*=17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
+    float n3(vec3 x){ vec3 i=floor(x),f=fract(x); f=f*f*(3.0-2.0*f);
+      return mix(mix(mix(h13(i+vec3(0,0,0)),h13(i+vec3(1,0,0)),f.x),mix(h13(i+vec3(0,1,0)),h13(i+vec3(1,1,0)),f.x),f.y),
+                 mix(mix(h13(i+vec3(0,0,1)),h13(i+vec3(1,0,1)),f.x),mix(h13(i+vec3(0,1,1)),h13(i+vec3(1,1,1)),f.x),f.y),f.z); }
+    float fbmC3(vec3 p){ float v=0.0,a=0.5; for(int i=0;i<3;i++){ v+=a*n3(p); p*=2.02; a*=0.5;} return v; }
+    // 1 = clear along this line, 0 = solid cloud. Same mapping the sky uses: the cloud plane is dir/(dir.y*0.9+0.1),
+    // scaled 0.55 and drifting at the sky's own rate, and the coverage ramp is its 0.38..0.62 straddle of the mean.
+    float cloudClear(vec2 uv){
+      vec4 p=uInvVP*vec4(uv*2.0-1.0, 1.0, 1.0); vec3 dir=normalize(p.xyz/p.w);
+      if(dir.y<=0.02) return 1.0;                       // below the cloud deck there is nothing to block
+      vec3 cp=dir/(dir.y*0.9+0.1);
+      vec2 uvc=cp.xz*0.55 + vec2(uTime*0.006, uTime*0.002);
+      float d=fbmC3(vec3(uvc*1.3, uTime*0.02));
+      d = smoothstep(0.38,0.62,d) * smoothstep(0.02,0.25,dir.y) * uCloud;
+      return clamp(1.0 - d*uCloudOcc, 0.0, 1.0);
+    }
     void main(){
       vec4 base=texture2D(tDiffuse,vUv);
       if(uActive<0.5){ gl_FragColor=base; return; }
@@ -5699,7 +5725,11 @@ const GodrayShader={
         // HDR against a seed floor of 0.85, so a scene with no emitters in it accumulated almost nothing. What a shaft actually is
         // is the sun's light reaching the air along this line — so what is integrated is how much of the line to the sun is EMPTY
         // (depth at the far plane), and the sun's own brightness is uStrength, which already follows its elevation.
-        float sky=step(0.999999, texture2D(tDepth,uv).x);
+        // …AND A CLOUD IS NOT EMPTY SKY. The depth test cannot tell them apart — a cloud is painted on the dome and
+        // writes no depth — so before this every overcast noon had the same shafts as a clear one, and the sun coming
+        // through a break in the cloud looked exactly like the sun in the open. Multiplying the seed by the cloud's own
+        // transmittance is what turns a gap in the cover into a beam.
+        float sky=step(0.999999, texture2D(tDepth,uv).x) * cloudClear(uv);
         accum+=sky*decay; wsum+=decay; decay*=0.95; }
       accum = (wsum>0.0)? accum/wsum : 0.0;   // a FRACTION of the line, so the result does not depend on how many samples ran
       accum *= uSeedMin;   // uSeedMin is the gain now, not a threshold: how bright a fully unoccluded line to the sun gets
@@ -5877,7 +5907,10 @@ function buildComposer(){
   // god rays BEFORE bloom → the shafts pick up a soft bloom glow. Gated to High/Ultra; ?norays disables.
   // NO DEPTH ATTACHMENT, NO RAYS. The seed test is "is this pixel empty sky", which needs _sceneRT's depth texture — the same
   // one SSAO is gated on. Running the pass without it means seeding off brightness alone, which is the bug Ben reported twice.
-  if (CFG.quality!=='Low' && CFG.quality!=='Medium' && !Q.get('norays') && _rtPath && _sceneRT && _sceneRT.depthTexture){
+  // MEDIUM GETS THEM TOO. The pass measures 0.645 ms paired at 1000x560 (assert-godray-elevation) — it is not what a
+  // Medium machine is short of, and "I just want god rays" is a poor thing to answer with a quality tier. Low still
+  // has no depth attachment at all, so it cannot have them however much anyone wants them.
+  if (CFG.quality!=='Low' && !Q.get('norays') && _rtPath && _sceneRT && _sceneRT.depthTexture){
     godrayPass = new ShaderPass(GodrayShader);
     godrayPass.uniforms.tDepth.value=_sceneRT.depthTexture; godrayPass.uniforms.uHasDepth.value=1;
     composer.addPass(godrayPass); }
@@ -11785,6 +11818,11 @@ function loop(){ try{
     godrayPass.enabled = _grActive;                                                        // a DISABLED pass is skipped by the composer entirely — "uActive=0 passthrough" still paid a full-screen pass every frame (all night long)
     godrayPass.uniforms.uActive.value = _grActive ? 1 : 0;
     godrayPass.uniforms.uSun.value.set(_sunProj.x*0.5+0.5, _sunProj.y*0.5+0.5);
+    // The cloud terms, fed from the same places the sky reads them so the two can never disagree.
+    godrayPass.uniforms.uTime.value = globalU.uTime.value;
+    godrayPass.uniforms.uCloud.value = (typeof _uCloud!=='undefined') ? _uCloud.value : 1.6;
+    camera.updateMatrixWorld();
+    godrayPass.uniforms.uInvVP.value.multiplyMatrices(camera.matrixWorld, camera.projectionMatrixInverse);
     // STRONGEST AT A LOW SUN, not at midday (plan §4 Tier 1 item 5). It was 0.6*day, which peaks with the sun overhead and is
     // backwards: crepuscular rays are a grazing-light phenomenon — a long path through the atmosphere and shafts raking through
     // trunks at a shallow angle — and at noon the shafts are short, steep and mostly under the canopy where they cannot be seen.
