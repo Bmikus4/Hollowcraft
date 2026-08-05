@@ -564,10 +564,17 @@ PERF.baseline = { brShadowLights: 2, brMergeRigid: false, brStableLightCount: fa
 // ---------------------------------------------------------------------
 const TID = { input:0, sim:1, collision:2, entities:3, stream:4, meshApply:5, uniforms:6, cull:7, draw:8, hud:9,
               audio:10, br:11, brPortal:12, brStream:13, brBuild:14, post:15, sky:16, shadow:17, misc:18,
-              brain:19, wretch:20, animals:21, props:22, drift:23 };
+              brain:19, wretch:20, animals:21, props:22, drift:23,
+              // `misc` is the UNLABELLED REMAINDER, and it held 4,511 ms and 11,996 ms in the two worst frames of a
+              // control run. 66 new programs in those frames says shaders, but twelve seconds of nothing-in-particular
+              // says something else is in there as well, and no lighting rework may be justified by an unattributed
+              // number. These four close the last unscoped stretches of loop(): every statement in the loop body is now
+              // inside exactly one top-level scope, so `misc` at rest is the loop's own bookkeeping and nothing more.
+              fx:24, gate:25, adapt:26, postdraw:27 };
 const TN = ['input','sim','collision','entities','stream','meshApply','uniforms','cull','draw','hud',
             'audio','br','brPortal','brStream','brBuild','post','sky','shadow','misc',
-            'brain','wretch','animals','props','drift'];
+            'brain','wretch','animals','props','drift',
+            'fx','gate','adapt','postdraw'];
 const NSYS = TN.length;
 const PROF_RING = 4096;
 const T = (function(){
@@ -1963,13 +1970,14 @@ function surfaceH(wx, wz){
   // 0.0015 and is therefore already flat at the scale a person walks. Identical to damping the terms, easier to bound.
   //
   // *** THIS ITEM CAN MOVE LAND, and about twenty structures site off surfaceH — the cathedral wants the highest flattish
-  // dry ground, the village wants a real mountain, the silo wants flat ground. So the mask is gated on the column ALREADY
-  // BEING WELL ABOVE THE SEA, and the gate is a smoothstep rather than a threshold: at SEA+3 the strength is zero, it
-  // reaches full only by SEA+10, and the blend target can never be below SEA+4. No column above sea level can be pushed
-  // under it, no coast can move, and no dry land becomes water — the same by-construction argument the shallow shelf
-  // makes, and assert-plains measures the coastline on 24 bearings with the dial on and off to prove it rather than
-  // argue it. A radius gate was considered and rejected: the real coastline runs from about 220 to 280 blocks out, well
-  // inside ISLE_CORE, so no single radius separates inland from shore. Height does. ***
+  // dry ground, the village wants a real mountain, the silo wants flat ground. The relief it removes is worked out here
+  // and SPENT FURTHER DOWN, after the island falloff, and that placement is the whole safety argument. The first version
+  // damped here and the coast moved two blocks on 1 of 24 bearings: the falloff is
+  //     elev = SEA + (elev-SEA)*isle - (1-isle)*14
+  // so out near the ring a column needs about SEA+8 of raw height to survive as land at all, and a "safe" cut of three
+  // blocks taken before that line becomes a drop through the waterline after it. Cutting afterwards means the numbers in
+  // the guard mean what they say. A radius gate was considered and rejected: the real coastline runs from about 220 to
+  // 280 blocks out, well inside ISLE_CORE, so no single radius separates inland from shore. Height does. ***
   //
   // THE WINDOW IS MEASURED, NOT CHOSEN, and the numbers look wrong on purpose. fbm2 is NORMALISED to -1..1, so the
   // obvious window for picking "the top quarter of a region field" is something like 0.46..0.74 — and it selects
@@ -1984,17 +1992,64 @@ function surfaceH(wx, wz){
   // (1-mtn) would leave two thirds of the flattening running through the mountains. (That the mountain mask is itself
   // nearly inert in this world — the real peaks come from the ISLE core term, not from mtn*mtn*96 — is a separate
   // finding, and not one to fix inside a plains item: rewindowing mtn moves land across the whole map.)
-  let pl = PLAINS_K * smooth(-0.21, -0.10, fbm2(wxo*0.0009, wzo*0.0009, 77, 4)) * (1-smooth(0.42, 0.56, _mtnRaw));
-  if(pl>0.001){
-    pl *= smooth(CFG.SEA+3, CFG.SEA+10, elev);
-    if(pl>0.001) elev = lerp(elev, Math.max(CFG.SEA+4, CFG.SEA+2+cont*24), pl*PLAINS_DAMP);
-  }
+  const pl = PLAINS_K * smooth(-0.21, -0.10, fbm2(wxo*0.0009, wzo*0.0009, 77, 4)) * (1-smooth(0.42, 0.56, _mtnRaw));
+  // WHAT A PLAIN GIVES UP IS THE FINE DETAIL, NOT THE HEIGHT, and getting that distinction wrong is what made the first
+  // two versions of this item too weak to see. Blending the whole column toward the continental base
+  // (CFG.SEA+2+cont*24) is a flattening that also LOWERS: on this island a plains region five blocks above the sea has a
+  // continental base below the waterline, so the guard that stops it drowning also caps the flattening at about a block
+  // and the ground came out 23% smoother — measured, mean neighbour step 0.252 to 0.193, which is not a biome.
+  // What "flat" means to someone walking is the HIGH-FREQUENCY part: ridged runs five octaves up to 0.12 per block, an
+  // eight-block wavelength, and that is the roughness underfoot. So the two rough terms are blended toward their own
+  // TWO-OCTAVE versions: same broad shape, same approximate mean, no fine detail. Nearly mean-preserving, which is why
+  // it can be strong without threatening a coastline — the guard below stays anyway, because "nearly" is not "exactly"
+  // (a 2-octave ridged does not have quite the mean of a 5-octave one, and that residue is worth a block or two).
+  // Cost is two extra noise evaluations, and only on the fifth of columns where the mask is actually on.
+  // AND THE SUBTRACTION HAS TO BE WEIGHT-CORRECTED, which cost a whole measurement to notice. Both generators divide by
+  // the total of their octave amplitudes, so a 2-octave call is NOT the first two octaves of a 5-octave call — it is
+  // those two octaves weighted 0.75 instead of 0.96875. Subtracting one from the other therefore leaves a scaled copy of
+  // the LOW octaves in the difference as well, and the "flattening" measured 10% ROUGHER than the ground it replaced
+  // (mean step 0.252 to 0.277, span 9 to 10). Rescaling by the ratio of the totals makes the difference the high octaves
+  // and nothing else: 0.75/0.96875 for ridged, 1.5/1.875 for fbm2. Both ratios are specific to gain 0.5 and to these
+  // octave counts — change either and these constants are wrong.
+  // So it damps BOTH TERMS WHOLE, which is what the brief asked for in the first place, and the two caps below are what
+  // makes that safe. Removing only the high octaves (a weight-corrected 2-octave subtraction, which is the other thing
+  // tried here) is not enough on its own: measured, it took the mean neighbour step from 0.252 to 0.192 and the span
+  // across a patch from 9 blocks to 8, because the slope a walker feels over fifty blocks is the LOW octaves and the
+  // continental term, not the fine detail. Both together is what reads as a plain.
+  const plDelta = pl>0.001
+    ? -pl*PLAINS_DAMP * ( (rdg-0.4)*30*smooth(0.15,0.6,cont+0.3) - ero*7 )
+    : 0;
   elev += mtn*mtn*96;                                            // taller real peaks (snow/ice caps painted in genColumn)
   // ISLAND falloff + central highland → a self-contained landmass with a mountainous, snow-capped interior
   const idist=Math.hypot(wx-ISLE_X, wz-ISLE_Z);
   const core=Math.max(0, 1-idist/ISLE_CORE); elev += core*core*54;                        // interior rises into real peaks
   const isle=1-smooth(ISLE_R-ISLE_EDGE, ISLE_R, idist);                                    // 1 inside → 0 past the ring
   elev = CFG.SEA + (elev-CFG.SEA)*isle - (1-isle)*14;                                       // fade the coast down and sink to open ocean beyond the island
+  // ---- #69 PLAINS, SPENT HERE (see the note where pl and plRelief are worked out) ----
+  // The relief is faded by isle because that is what the falloff did to it, gated smoothly on real height above the sea,
+  // and — the part that matters — a DOWNWARD cut is capped by the room this column has above SEA+4. That cap is the
+  // guarantee, not the gate: no column above the waterline can be flattened through it, so no dry land becomes water and
+  // no coast moves, by construction rather than by luck. `min` and not a clamp, so where the cap binds the ground eases
+  // onto a floor instead of stepping onto a plateau with an edge — the failure the brief names for this item.
+  // An UPWARD cut (where the ridged term was negative and flattening means filling a hollow) needs no cap: the gate has
+  // already established the column is land, and raising land leaves it land.
+  // TWO CAPS ARE THE WHOLE GUARANTEE, AND THEY REPLACED A GATE THAT WAS THROWING THE ITEM AWAY. The first version faded
+  // the flattening in over SEA+4..SEA+9 as belt-and-braces on top of the caps; a plains region five blocks above the sea
+  // then had a gate value of 0.10, so nine tenths of the damping was discarded and the ground came out 15% smoother
+  // instead of flat. The caps alone are exact:
+  //   DOWNWARD may not spend more room than the column has above the waterline, so h stays above CFG.SEA and no land
+  //   becomes water. 0.6 and not 0, because h is round(elev) and 40.5 is where a column stops counting as land.
+  //   UPWARD is capped by the same room, which is ZERO on a water column — so no water becomes land either, while a
+  //   column already well above the sea can be raised freely, since raising land leaves it land.
+  // Both are `min`s of a smooth quantity, so where a cap binds the ground eases onto a floor rather than stepping onto a
+  // plateau. Between them, no column can cross the waterline in either direction: assert-plains reads the coast on 24
+  // bearings with the dial on and off and requires all 24 to be identical, and 2116 columns for a wet/dry flip.
+  if(plDelta!==0){
+    let d = plDelta*isle;                                           // isle, because that is what the falloff did to the terms this replaces
+    const room = Math.max(0, elev-(CFG.SEA+0.6));
+    d = d<0 ? -Math.min(-d, room) : Math.min(d, room);
+    elev += d;
+  }
   // ---- THE SHALLOW SHELF (Ben: "shoreline looks good, but water on shore needs expanded") ----
   // Measured before: the band of water no deeper than 2 ran min 8 / median 20 / mean 26 blocks over 24 bearings.
   //
@@ -2264,6 +2319,19 @@ function decorate(c){
     // PEBBLE CLUSTERS — RARE, and only on the forest floor (Ben 07-20 rev2: woods only, nowhere else); pick for flint
     { const pr=tileRng((wx*68899^wz*24499)>>>0)();
       if(pr<0.0009 && h>CFG.SEA+4 && h<=CFG.SEA+38 && trailDist(wx,wz)>2 && groundSeat(wx,h,wz)) placeSet(c, wx, h+1, wz, BID.pebbles, true); }
+    // LOW GRASS GOES ANYWHERE THERE IS GRASS (Ben 08-05). It used to be the first band of the understory roll further down, which
+    // sits behind four gates that all exist for TREES: the coastal setback that pulls the treeline up off the beach, the trail
+    // corridor and cabin footprint that keep trunks out of the way, and the pineAt short-circuit that hands the cell to a pine.
+    // None of those is a reason for a tuft of grass, and together they left every shoreline, every trailside and every tree's own
+    // cell bare. Run ahead of them, the only conditions left are the two that actually matter: it is a grass block, and the cell
+    // above it is empty. The trail needs no special case — its corridor is dirt, so isGrassBlock declines it for free.
+    // AND IT TAKES NO CELL THAT SOMETHING ELSE WANTED. Running first, it filled cells the understory roll below was going to use
+    // for a fern or a meadow tuft, which then found the cell occupied and skipped: measured, tallgrass 258 -> 361 but fern 107 ->
+    // 96 and both meadow variants down with it. So this asks the SAME roll what the understory would do here, and stands aside
+    // wherever the answer is anything but the band reserved for low grass. Bare ground is the only thing it takes.
+    if (dx>=0 && dx<CK && dz>=0 && dz<CK && isGrassBlock(getBlock(wx,h,wz)) && c.blocks[idx(dx,h+1,dz)]===AIR
+        && xhash(wx,7,wz,3371)<0.09){ const ur=xhash(wx,3,wz,919);
+      if(ur<0.09 || ur>=0.2762){ c.blocks[idx(dx,h+1,dz)]=BID.tallgrass; c.hasCross=true; } }
     if (h<=CFG.SEA+4 || h>=WH-28) continue;   // COASTAL SETBACK: trees start ≥4 blocks above sea (was +1), so the treeline pulls back off the beach/shore instead of crowding the waterline. Raise this number to push it further inland.
     if (trailDist(wx,wz)<2.6 || inCabin(wx,wz) || nearOpening(wx,wz)) continue;   // keep the dirt trail corridor + cabin footprint + trailhead clearings free of tree bases
     if (!isGrassSurface(wx,wz)) continue;   // pines only on grass → natural treeline; bare rock/snow/ice/beach stay clear (deterministic so border trees still straddle)
@@ -2272,7 +2340,7 @@ function decorate(c){
     if (!isGrassBlock(getBlock(wx,h,wz))) continue;   // the leaf-strewn variants are grass too (Ben 08-04)
     const r=xhash(wx,3,wz,919);
     let deco=AIR;
-    if (r<0.09) deco=BID.tallgrass;
+    if (r<0.09) deco=AIR;   // RESERVED, not deleted: low grass is placed by its own pass above, and the thresholds below are cumulative — dropping this band would widen the next one from 4% to 13%
     else if (r<0.13) deco=BID.meadow_grass;                            // the woods carry BOTH meadow variants now (Ben 07-20)
     else if (r<0.16) deco=BID.meadow_grass_tall;
     else if (r<0.20) deco=BID.fern;
@@ -3017,11 +3085,16 @@ const globalU = {
   // unlit surface's hue, and wrong to take all of it: a trace of colour left in the deep dark reads as night rather than as
   // greyscale, and the light you CARRY now restores the rest (uHandPos below).
   uScotAmt:{ value:0.85 },
-  uScotLo: { value:0.02 },
+  // 0.01 -> 0.45, WIDE (Ben 08-05: "places where the chromatic grey is not smoothly transitioned"). It was 0.02 -> 0.20, and that
+  // whole ramp is crossed inside one block at the edge of a torch's reach — so the colour did not fade back in, it stepped. The
+  // light level driving it is also part per-fragment (the block-light volume, trilinear over 1-block cells) and part PER FACE
+  // (aSky, a 4-bit scalar), so a narrow ramp turns the per-face part into visible edges wherever the sky term matters, which is
+  // dusk. A wide ramp cannot: the same face-to-face difference now moves the washout by a fraction of what it did.
+  uScotLo: { value:0.01 },
   // 0.20, not 0.35: colour has to be fully back by the time a torch's own falloff reaches a face, or a torch-lit cellar goes
   // grey where it should read amber. At 0.35 the measured night chroma is lower still (sat 0.155 vs 0.234) and the interior
   // pays for it.
-  uScotHi: { value:0.20 },
+  uScotHi: { value:0.45 },
   uTime:   { value:0 },
   uSunDir: { value:new THREE.Vector3(0.3,0.9,0.2) },
   uMoonDir:{ value:new THREE.Vector3(-0.3,-0.9,-0.2) },
@@ -3982,6 +4055,9 @@ const _farSeaGeo=(()=>{ const g=new THREE.RingGeometry(0.0005, 16.0, 128, 44);  
   g.rotateX(-Math.PI/2);                                               // RingGeometry is built in XY; the sea is a horizontal plane
   const n=g.attributes.position.count;
   g.setAttribute('aTop', new THREE.BufferAttribute(new Float32Array(n).fill(1), 1));    // every vertex is a top face: this is a surface, never a side
+  // MARKS THIS AS THE PAINTED SEA, so the fragment stage can throw it away where real water already exists. Chunk water carries no
+  // such attribute and WebGL reads a missing attribute as 0, so nothing else in the game is affected by it.
+  g.setAttribute('aFar', new THREE.BufferAttribute(new Float32Array(n).fill(1), 1));
   g.setAttribute('aDepth', new THREE.BufferAttribute(new Float32Array(n).fill(12), 1)); // deep, so Beer's-law absorption reads as open ocean rather than a shallow
   // aColD is the water column the world curve is allowed to fall into (see waterMat's vertex stage). It must be at least the
   // global cap so this disc takes the same drop as the chunk water it continues — the two meet at the render wall, and any
@@ -4019,8 +4095,17 @@ let farSea=null, _farSeaWant=true, _farSeaAllow=true;   // _farSeaWant is the QA
 // It is worth knowing how little linear headroom this number has: AgX has a strong toe and the grade lifts chroma, so this
 // arrives on screen about 2.4x brighter than its linear value suggests. 0.78 in here is a gentle step on screen, not a
 // quarter as dark.
-const _seaHorizon=new THREE.Color(0.0234,0.0390,0.0702);
-const _deepSea=new THREE.Color(0.008,0.055,0.27), _horizCamDir=new THREE.Vector3();   // the DEEP BLUE below the horizon — a DARKER, deeper deep-ocean navy (Ben 07-21): low R/G, still blue-dominant but lower value so the under-horizon band reads as deep ocean at ALL hours
+// ---- THE SEA'S PALETTE, IN ONE PLACE (Ben 08-05: "water just needs to look different, and the outer horizon plane needs to
+// ---- reflect that change") ----
+// THE BODY COLOUR IS WHAT MAKES WATER READ AS WATER. It was vec3(0.002,0.008,0.012) — near black, so looking down into deep water
+// showed a hole rather than a medium, and every bit of "transparency" work upstream of it was being sunk into pigment that has no
+// hue of its own. It is now a deep ocean teal at the same order of luminance: you see INTO something.
+// The far-sea plane and the horizon band read _deepSea and _seaHorizon, and _uWater is built from them below, so moving the body
+// colour without moving these two would split the sea line — the exact drift the comments around updateHorizon were written
+// against. All three are here, together, and __hc.seaLook moves them live.
+const _uWaterBody={ value:new THREE.Color(0.004,0.034,0.052) };
+const _seaHorizon=new THREE.Color(0.0206,0.0422,0.0624);
+const _deepSea=new THREE.Color(0.010,0.075,0.205), _horizCamDir=new THREE.Vector3();   // the DEEP BLUE below the horizon — a DARKER, deeper deep-ocean navy (Ben 07-21): low R/G, still blue-dominant but lower value so the under-horizon band reads as deep ocean at ALL hours
 // PINE TREELINE — a distant forest silhouette on the horizon, shown ONLY toward azimuths where REAL land continues
 // past the fog wall. A per-azimuth mask samples the actual terrain heightfield (surfaceH, pure noise — no chunks needed)
 // in the band just beyond the render edge; sea/shore/thin spits in that band → no pines. Recomputed only on movement.
@@ -4338,7 +4423,8 @@ function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.p
         _uWater.value.lerp(_seaTint.setRGB(_deepSea.r*s2,_deepSea.g*s2,_deepSea.b*s2), Math.min(1.5,_uSeaVib.value)); } }
     // The water surface fogs to this exact uniform (waterMat's uRing) and the sky's anchor IS it, so all three sides of the sea
     // line are one colour by construction rather than by three expressions agreeing.
-    _uHorizonBlend.value.copy(_uWater.value);
+    waterMat.uniforms.uMeshR.value=Math.max(24,(CFG.RENDER_DIST-1)*CK);   // where the painted disc hands over to real chunk water
+  _uHorizonBlend.value.copy(_uWater.value);
     // The haze dial acts HERE, on the shared anchor, which is the only place it can act without splitting the two sides apart.
     if(_uSeaHaze.value>0.001) _uHorizonBlend.value.lerp(scene.fog.color, Math.min(1, _uSeaHaze.value*day));
     { const cd=_horizCamDir; camera.getWorldDirection(cd); const yw=Math.atan2(cd.z,cd.x);
@@ -4447,10 +4533,20 @@ const waterMat = new THREE.ShaderMaterial({
   uniforms:Object.assign({
     uTime:globalU.uTime, uSunDir:globalU.uSunDir, uMoonDir:globalU.uMoonDir,
     uDay:globalU.uDay, uCamPos:globalU.uCamPos, uFogColor:{value:scene.fog.color},
-    uFresCap:{value:0.80},   // how far the grazing-angle reflection is allowed to replace the depth colour — 1.0 is the old behaviour
-    uFoam:{value:1},   // shoreline foam strength; 0 is the A/B off, __hc.foam({amt})
+    // 0.80 -> 0.42, AND THE REASON IS THE CERAPHIM FIGHT (Ben 08-05: "look at how water is made to look during the ceraphim boss
+    // battle, can we use that?"). It can be used, and it is free, because NOTHING about the water changes during that fight — every
+    // uniform, the fog, the ring and the depth dial were snapshotted before and after the boss was raised and are identical
+    // (bench/tmp-boss-water.mjs). What changes is that the boss is AIRBORNE, so he is looking DOWN, where F is 0.02 and the surface
+    // is almost pure depth colour: you see into the water and onto the seabed. That IS the transparency he is asking for, and the
+    // only thing standing between it and eye level is how much of the depth colour this cap lets the grazing reflection erase. At
+    // 0.80 a fifth survived; at 0.42 well over half does, so the sea reads as water from a shore as well as from the air.
+    uFresCap:{value:0.42},   // how far the grazing-angle reflection is allowed to replace the depth colour — 1.0 is the old behaviour
+    // OFF (Ben 08-05: "I want to get rid of the white foam"). The term stays because it is measured and harnessed and he may want it
+    // back at a lower strength; __hc.foam({amt:1}) is the whole way back. It costs nothing at 0 — the multiply is still there, but
+    // there is no branch to mispredict and no fetch behind it.
+    uFoam:{value:0},
     uGladeAfter:{value:1}, uGladeAmt:{value:1},   // where the sun/moon track is added (after the ring landing) and its overall strength — see the glade block
-    uFogDensity:{value:scene.fog.density}, uDeep:_uWaterDeep, uRing:_uWater, uRingFade:{value:2400},   // the far-sea annulus's outer radius, set per frame in updateHorizon
+    uMeshR:{value:96}, uBody:_uWaterBody, uFogDensity:{value:scene.fog.density}, uDeep:_uWaterDeep, uRing:_uWater, uRingFade:{value:2400},   // the far-sea annulus's outer radius, set per frame in updateHorizon
     // THE CURVE LIVES AT THE FAR END NOW (Ben 08-04: "i just want the ocean to look like its going on forever, and to have an
     // ever so slight world curve out at its end"). It used to be the opposite shape: R=20, k=0.0022 spends the whole fall by
     // 50 blocks out and is flat everywhere after that, so the sea bent right in front of you and then ran dead level to the
@@ -4468,10 +4564,10 @@ const waterMat = new THREE.ShaderMaterial({
     uWx:{value:0}, uCurveR:{value:170.0}, uCurveK:{value:0.000103}, uCurveClamp:{value:1}, uCurveCap:{value:8.0}   // THE WORLD CURVE — flat to 20 blocks, then k*(d-20)^2. k is small on purpose: at 40 blocks that is 0.9 down, at 96 it is 12.6, so the tip-over is gentle where you can see detail and only steepens where it reads as the sea falling away. "Subtle."
   }),
   vertexShader:`
-    attribute float aTop; attribute float aDepth; attribute float aColD; attribute vec2 aFlow; varying float vTop; varying float vDepth; varying vec3 vW; varying vec3 vN; varying float vFog; varying float vCrest; varying vec2 vFlow;
+    attribute float aFar; varying float vFar; attribute float aTop; attribute float aDepth; attribute float aColD; attribute vec2 aFlow; varying float vTop; varying float vDepth; varying vec3 vW; varying vec3 vN; varying float vFog; varying float vCrest; varying vec2 vFlow;
     uniform float uTime; uniform vec3 uCamPos; uniform float uCurveR, uCurveK, uCurveClamp, uCurveCap, uFlow;   // uCamPos is the SAME uniform the fragment stage already uses; declaring it in both stages costs nothing and avoids a second copy that could drift
     void main(){
-      vTop=aTop; vDepth=aDepth; vFlow=aFlow*uFlow; vec3 p=position; vec3 wp=(modelMatrix*vec4(p,1.0)).xyz;
+      vFar=aFar; vTop=aTop; vDepth=aDepth; vFlow=aFlow*uFlow; vec3 p=position; vec3 wp=(modelMatrix*vec4(p,1.0)).xyz;
       // WATER THAT MOVES SOMEWHERE (#74). aFlow is a velocity in blocks a second, baked per column by flowVec, and the
       // only thing either stage does with it is ADVECT THE SAMPLE POINT: every pattern on this surface is a function of
       // xz, so evaluating it at xz - v*t makes the whole thing travel at v without a single new octave of noise. Where
@@ -4550,12 +4646,20 @@ const waterMat = new THREE.ShaderMaterial({
     }`,
   fragmentShader:`
     precision highp float;
+    varying float vFar; uniform float uMeshR;
     varying float vTop; varying float vDepth; varying vec3 vW; varying vec3 vN; varying float vFog; varying float vCrest; varying vec2 vFlow;
-    uniform vec3 uSunDir,uMoonDir,uCamPos; uniform float uDay,uTime; uniform vec3 uFogColor; uniform float uFogDensity, uDeep, uWx; uniform vec3 uRing; uniform float uRingFade;
+    uniform vec3 uSunDir,uMoonDir,uCamPos; uniform float uDay,uTime; uniform vec3 uFogColor; uniform vec3 uBody; uniform float uFogDensity, uDeep, uWx; uniform vec3 uRing; uniform float uRingFade;
     uniform float uGladeAfter, uGladeAmt, uFresCap, uFoam;
     float h2(vec2 p){ return fract(sin(dot(p,vec2(12.9,78.2)))*43758.5); }
     float vn2(vec2 x){ vec2 i=floor(x),f=fract(x); f=f*f*(3.0-2.0*f); return mix(mix(h2(i),h2(i+vec2(1,0)),f.x),mix(h2(i+vec2(0,1)),h2(i+vec2(1,1)),f.x),f.y); }
     void main(){
+      // THE PAINTED SEA STOPS WHERE THE REAL SEA STARTS (Ben 08-05: "I break a few blocks upshore and I see water underground, just
+      // a plane, not real water"). The 08-04 fix gated this disc on the CAMERA's own column, which is right about a cave and wrong
+      // about a hole: stand on the shore above sea level, dig down, and the camera is over land while the hole you are looking into
+      // is not, so the plane shows through it. There is nothing to reason about per-camera. Inside the meshed radius the world's own
+      // water is already there, so the disc has no work to do and is thrown away per fragment; beyond it, it is the only sea there
+      // is. uMeshR is the chunk radius less a chunk, so the handover happens behind the fog rather than at the wall.
+      if(vFar>0.5 && length(vW.xz-uCamPos.xz) < uMeshR) discard;
       // The surface texture is the item, and it is one subtraction: uv carries the column's current, so all six noise
       // octaves below travel downstream together instead of each drifting on its own fixed heading. Their little
       // hand-tuned uTime offsets stay — they are what keeps still water alive, and they are all that is left where the
@@ -4624,7 +4728,7 @@ const waterMat = new THREE.ShaderMaterial({
       // unchanged where it matters: by six blocks this is still 0.92 and by twelve it is saturated, and the far-sea disc declares
       // aDepth 12, so open ocean is bit-identical.
       float absorb = 1.0 - exp(-vDepth*0.42);                         // 0 at a thin film -> ~1 in deep water
-      col = mix(col, vec3(0.002,0.008,0.012), absorb*0.97);           // sink toward near-black with depth — the deep must read genuinely DARK (Ben 07-20)
+      col = mix(col, uBody, absorb*0.97);                            // sink toward the body colour with depth — the deep must read genuinely DARK (Ben 07-20)
       // AFTER THE ABSORPTION, NOT BEFORE IT. The line above mixes 97% of the way to near-black in deep water, so a highlight
       // added before it is erased by the very thing that makes the deep sea read deep: measured, the sun sat 3 degrees over
       // the horizon, dead centre in frame, with the water beneath it completely flat. A reflection lives ON the surface and
@@ -7419,7 +7523,6 @@ defItem('dot_sight',{name:'Holosun Sight',max:1,icon:{t:'round',c:'#ff2a2a'}}); 
 // commands below (/set /replace /walls /clear) work on the box between them. It is a TOOL, not a block: `we:true` is what the
 // break and place paths test to take the click instead of mining or placing, which is the only way a marking click can avoid
 // destroying the very block it is marking.
-defItem('we_pencil',{name:'WorldEdit Pencil',max:1,we:true,icon:{t:'tool',kind:'sword',c:'#c8a24a'}});
 // SIGHTED gun variants — same behaviour as the base gun + a mounted Holosun holo reticle (dot:true). Made by crafting base gun + dot_sight.
 defItem('ar15_dot',{name:'AR-15 · Holosun',max:1,icon:{t:'tool',kind:'sword',c:'#26262c'},gun:true,dot:true});
 defItem('minigun_dot',{name:'Minigun · Holosun',max:1,icon:{t:'tool',kind:'sword',c:'#3a3a40'},gun:'auto',auto:true,rof:38,dot:true});
@@ -7897,7 +8000,6 @@ shapeless('hunting_rifle_suppressed',1,['hunting_rifle','suppressor']);         
 shapeless('ar15_suppressed',1,['ar15','suppressor']); shapeless('ar15_suppressed_dot',1,['ar15_dot','suppressor']); shapeless('ar15_suppressed_dot',1,['ar15_suppressed','dot_sight']);
 shapeless('minigun_suppressed',1,['minigun','suppressor']); shapeless('minigun_suppressed_dot',1,['minigun_dot','suppressor']); shapeless('minigun_suppressed_dot',1,['minigun_suppressed','dot_sight']);
 shapeless('revolver_suppressed',1,['revolver','suppressor']);                          // every gun threads a can (Ben 07-20)
-shapeless('we_pencil',1,['stick','diamond']);                                          // the WorldEdit pencil — obtainable in survival, not only from the creative menu (there is no gold in this game)
 shapeless('flint_and_steel',1,['flint','iron_ingot']);
 shapeless('flint',1,['snail_shell','snail_shell']);   // knap TWO snail shells down to one flint (Ben 07-20)
 shaped('sign',3,['PPP','PPP',' S '],{P:'planks',S:'stick'});
@@ -9002,54 +9104,11 @@ function _vaultBreak(h, drop){ const c=_vaultCells(h.x,h.y,h.z); if(!c) return f
   for(const p of [[c.x,c.y,c.z], ...c.parts]){ setBlockWorld(p[0],p[1],p[2],AIR,true); if(typeof netEdit==='function') netEdit(p[0],p[1],p[2],AIR); }
   if(!player.creative) drop();
   sfxBreak&&sfxBreak(BID.reinforced_wall,h.x,h.y,h.z); emitNoise(h.x,h.y,h.z,1.0); return true; }
-// ---- THE WORLDEDIT SELECTION (Ben 08-04) ----
-// Two opposite corners of a cuboid, marked by clicking with the pencil. Held as world cells rather than as a min/max pair,
-// because "corner 1" and "corner 2" are what the player marked and what they get told; the ordering into min/max is the
-// commands' business, done in weBox().
-const WE={a:null,b:null};
-function weMark(which,h){
-  if(!h) { weSay('the pencil needs a block to mark — you are pointing at sky'); return true; }
-  const c={x:h.x,y:h.y,z:h.z};
-  WE[which]=c;
-  const other=WE[which==='a'?'b':'a'];
-  let msg='corner '+(which==='a'?'1':'2')+' at '+c.x+' '+c.y+' '+c.z;
-  if(other){ const bx=weBox(); msg+='   |   selection '+bx.w+'x'+bx.h+'x'+bx.d+' = '+bx.n+' block'+(bx.n===1?'':'s'); }
-  else msg+='   |   now mark the opposite corner with the other mouse button';
-  weSay(msg);
-  return true;
-}
-// The pencil talks in the console, and opens it if it is closed — a selection you are told about in a window you cannot see is
-// the same as not being told.
-function weSay(text){ if(typeof cmdEcho==='function') cmdEcho(text,'#e8c76a'); if(typeof flashName==='function') flashName(text.split('   |   ')[0]); }
-function weBox(){ const a=WE.a, b=WE.b; if(!a||!b) return null;
-  const x0=Math.min(a.x,b.x), x1=Math.max(a.x,b.x), y0=Math.min(a.y,b.y), y1=Math.max(a.y,b.y), z0=Math.min(a.z,b.z), z1=Math.max(a.z,b.z);
-  return { x0,x1,y0,y1,z0,z1, w:x1-x0+1, h:y1-y0+1, d:z1-z0+1, n:(x1-x0+1)*(y1-y0+1)*(z1-z0+1) }; }
-// EVERY OPERATION GOES THROUGH HERE, so the cap, the dungeon rule and the co-op broadcast cannot be forgotten by one of them.
-// The cap is real: 200k cells at one setBlockWorld each would lock the frame for minutes, and a typo in three coordinates is a
-// much likelier way to reach that number than a deliberate build is.
-const WE_MAX=32768;   // 32^3 — a generous room, and small enough that the relight/remesh queue drains in a second or two
-function weApply(fn){
-  const bx=weBox(); if(!bx) return 'no selection — mark two corners with the WorldEdit Pencil first';
-  if(bx.n>WE_MAX) return 'selection is '+bx.n+' blocks; the limit is '+WE_MAX+' (a '+Math.cbrt(WE_MAX).toFixed(0)+'-cube). Mark a smaller box.';
-  let changed=0, blocked=0;
-  for(let x=bx.x0;x<=bx.x1;x++) for(let y=bx.y0;y<=bx.y1;y++) for(let z=bx.z0;z<=bx.z1;z++){
-    if(y<1) continue;                                                    // never carve the bedrock floor out from under the world
-    if(typeof inDungeon==='function' && inDungeon(x,y,z)){ blocked++; continue; }   // the dungeon will not yield to a pencil either
-    const was=getBlock(x,y,z), want=fn(x,y,z,was,bx);
-    if(want==null || want===was) continue;
-    setBlockWorld(x,y,z,want,true); if(typeof netEdit==='function') netEdit(x,y,z,want);
-    changed++;
-  }
-  return {changed, blocked, bx};
-}
-function weReport(verb,r){ if(typeof r==='string') return r;
-  return verb+' '+r.changed+' of '+r.bx.n+' block'+(r.bx.n===1?'':'s')+' ('+r.bx.w+'x'+r.bx.h+'x'+r.bx.d+')'+(r.blocked?('   — '+r.blocked+' left alone inside the dungeon'):''); }
-// Resolve a block NAME the way /setblock does, so the pencil commands and /setblock cannot disagree about what "air" means.
-function weBlockId(nm){ if(nm==null) return undefined; const s=String(nm); return (s==='air'||s==='0') ? 0 : BID[s]; }
+// The WorldEdit pencil and its cuboid selection were DELETED on Ben's instruction 08-05 ("the worldedit pencil doesnt
+// work, delete it entirely"). It shipped as 896171c: an item that marked two corners with the two mouse buttons, plus
+// /sel /set /replace /walls /clear over the box. Gone with it are WE, weMark, weSay, weBox, weApply, weReport, weBlockId
+// and WE_MAX. /setblock is untouched and is still the way to place a single block by coordinate.
 function doBreak(){
-  // THE PENCIL MARKS, IT DOES NOT MINE. This has to come before anything that reads the aimed block, or the first click would
-  // break the block it was meant to mark.
-  { const hs=heldSlot(); if(hs&&ITEMS[hs.id]&&ITEMS[hs.id].we){ weMark('a', raycastVoxel()); return; } }
   const h=raycastVoxel(); if(!h||h.y<=0||B[h.b].hard<0)return;
   if(inDungeon(h.x,h.y,h.z)){ flashName('the dungeon will not yield'); return; }
   if(B[h.b].use==='vault' && _vaultBreak(h, ()=>invAdd('vault_door_x',1))) return;   // any of the four cells takes the whole door and drops exactly one
@@ -9089,7 +9148,6 @@ function doPlace(){ if(player.grabbed)return;   // no right-click interactions w
   if(typeof tryTakeCabinRifle==='function' && tryTakeCabinRifle()) return;                 // grab the rifle racked in the cabin
   if(typeof tryTakeDungeonCuffs==='function' && tryTakeDungeonCuffs()) return;             // pick the handcuffs off the dungeon floor
   if(typeof tryCuffHerobrine==='function' && tryCuffHerobrine()) return;                   // click the held handcuffs onto the surrendered Herobrine's wrists
-  { const hs=heldSlot(); if(hs&&ITEMS[hs.id]&&ITEMS[hs.id].we){ weMark('b', h); return; } }   // the pencil's other corner — before any placing path, or it would build a block on the cell it is marking
   { const hs=heldSlot(); if(hs&&ITEMS[hs.id]&&ITEMS[hs.id].gun) return; }                  // holding a gun → right-click = aim down sights (see updateView), never place/use
   { const hs=heldSlot(); if(hs&&ITEMS[hs.id]&&ITEMS[hs.id].firestarter){ useFlintSteel(h,hs); return; } }   // flint & steel → strike a light
   { const hs=heldSlot(); if(hs&&ITEMS[hs.id]&&ITEMS[hs.id].egg){ spawnFromEgg(ITEMS[hs.id].egg, h); if(!player.creative){ hs.n--; if(hs.n<=0)inv[selSlot]=null; refreshHotbar(); } return; } }   // spawn egg → spawn the creature
@@ -10741,7 +10799,7 @@ function loop(){ try{
   if(!started){ updateMenuCam(dt); }                                       // menu cinematic owns the camera until you press play
   else { if(!intro.active) applyLook(dt); if(intro.active) updateIntro(dt); else updateCamera(dt); }
   T.end(TID.input);
-  applyWaterFog();
+  T.begin(TID.fx); applyWaterFog(); T.end(TID.fx);
   T.begin(TID.entities); T.begin(TID.props);
   updateDrops(dt); updateSpears(dt); updateStuckSpears(dt); updateParticles(dt); updateBubbles(dt); updateShells(dt); updateView(dt); if(typeof updateWings==='function')updateWings(dt); updateWatchers(dt); checkNotes(dt); updateSkyBirds(dt); updateFireflies(dt); updateLampHalos(dt); updateContactShadows(dt); updateLeaves(dt); if(typeof updateDungeonBugs==='function')updateDungeonBugs(dt);  // floating items, thrown/stuck spears, particles, ejected shell casings, held viewmodel, angel wings, watching-eyes, notes, sky birds, dungeon arachnids
   netUpdate(dt);                                                             // co-op: send my transform, interpolate peers, host broadcasts the Wretch/time
@@ -10770,9 +10828,13 @@ function loop(){ try{
   else skyDome.position.copy(camera.position);
   T.end(TID.sky);
   T.begin(TID.hud); updateHighlight(); updateBars(); updateMinimap(dt); T.end(TID.hud);
+  // `fx`, and updatePortal is the reason it is worth a scope of its own: the overworld Void Door renders the cosmos to a
+  // render target from HERE, outside TID.draw, so a program linked for that pass has always been charged to `misc`.
+  T.begin(TID.fx);
   updateBossRegen(dt); updatePeel(dt); if(typeof updatePortal==='function')updatePortal(dt); if(typeof updateBossCorpse==='function')updateBossCorpse(dt); updateVoid(dt); if(typeof _stage2Sky==='function')_stage2Sky(dt);
+  T.end(TID.fx);
   T.begin(TID.br); if(typeof updateBackrooms==='function'){ try{ updateBackrooms(dt); }catch(e){ if(!window._brErr){ window._brErr=String(e&&e.stack||e); console.error('[backrooms] update crashed — caught so the game keeps running:', e); } } } T.end(TID.br);
-  updateWretchBar();
+  T.begin(TID.fx); updateWretchBar(); T.end(TID.fx);
   T.begin(TID.uniforms);
   if(gradePass){ gradePass.uniforms.uTime.value=clock.elapsedTime; gradePass.uniforms.uDark.value=1-globalU.uDay.value; gradePass.uniforms.uWhiteVoid.value=(typeof VOID!=='undefined'&&VOID.on)?(VOID.whiteout==null?1:VOID.whiteout):0; }   // grain+vignette rise as it darkens; PURE white glow on the initial void switch, then FADES to standard as the fractal zooms in (VOID.whiteout ramp)
   if(godrayPass){ camera.updateMatrixWorld();                                            // project the sky-sun direction to screen space for the god-ray origin
@@ -10857,8 +10919,11 @@ function loop(){ try{
   T.end(TID.draw);
   // BENCH-ONLY: when the harness sets __benchInfo, accumulate renderer.info across ALL passes in the frame (autoReset off) and snapshot+reset here — otherwise info only ever shows the composer's final quad pass
   if(window.__benchInfo){ const _I=renderer.info; _I.autoReset=false; window.__benchInfoSnap={calls:_I.render.calls,tris:_I.render.triangles,geoms:_I.memory.geometries,tex:_I.memory.textures,progs:(_I.programs||[]).length}; _I.reset(); } else if(renderer.info.autoReset===false) renderer.info.autoReset=true;
+  // Two more render-target passes that live after the draw scope closes: the inventory mannequin and the ICBM board.
+  T.begin(TID.postdraw);
   if(openUI==='inv' && typeof renderPView==='function') renderPView(dt);   // spin the armor mannequin while the inventory is open
   if(typeof icbmBoardTick==='function') icbmBoardTick(dt);   // the launch board's screen, painted in the world when a player is near one
+  T.end(TID.postdraw);
   const t2=performance.now();
   // loading gate
   // ---- PRELOAD GATE (Ben 07-27): the overlay is not decoration, it is the work window. It stays up until the spawn
@@ -10912,6 +10977,10 @@ function loop(){ try{
           if(lb2) lb2.textContent='…learning the shape of the halls… '+Math.round(p2*100)+'%';
         } else {
         initialReady=true; document.getElementById('load').style.display='none'; _sigilStop(); } } } }
+  T.end(TID.gate);
+  // `adapt` is where applyResolution() lives, and that resizes every render target — the one thing in this stretch that
+  // can plausibly cost a frame rather than a microsecond, and it fires on a 75-frame tick that no other scope covers.
+  T.begin(TID.adapt);
   fpsAvg+=((dt>0?1/dt:60)-fpsAvg)*0.05;
   _retargetFps(dt);
   // ADAPTIVE QUALITY — setpoints derived from the DISPLAY-AWARE target (defend min(70, refresh), see _retargetFps)
@@ -10934,6 +11003,7 @@ function loop(){ try{
   }
   if(prof.style.display!=='none'){ prof.textContent='FPS '+Math.round(fpsAvg)+'\nchunks '+world.size+' draws '+renderer.info.render.calls+'\ntris '+(renderer.info.render.triangles/1000|0)+'k rd'+CFG.RENDER_DIST+'\nstream '+(t1-t0).toFixed(1)+'ms render '+(t2-t1).toFixed(1)+'ms\nXYZ '+player.pos.x.toFixed(0)+' '+player.pos.y.toFixed(0)+' '+player.pos.z.toFixed(0)+(player.fly?' FLY':'')+(player.creative?' CREA':''); }
   if(_fpsOn) _fpsEl.textContent=Math.round(fpsAvg)+' FPS';
+  T.end(TID.adapt);
   T.begin(TID.hud); updateMindFeed(dt); T.end(TID.hud);
   if(PERF.on){
     PERF.gpu.close(); PERF.gpu.poll(); PERF.gpu.endFrame();
@@ -14132,29 +14202,6 @@ const CMDS={
       if(id===undefined) return 'no such block: '+nm+(_cmdNear(nm,_cmdBlockIds())?('  — did you mean: '+_cmdNear(nm,_cmdBlockIds())):'');
       setBlockWorld(x,y,z,id,true); if(typeof netEdit==='function')netEdit(x,y,z,id);
       return 'set '+x+' '+y+' '+z+' to '+nm; } },
-  // ---- WORLDEDIT, over the cuboid marked with the WorldEdit Pencil (Ben 08-04) ----
-  // A leading slash is optional on all of these, because runCommand strips one before it looks the name up — so `set stone`
-  // typed into the console works exactly like `/set stone`.
-  sel:{ usage:'/sel  —  what is currently selected (and /sel clear to forget it)', run:(a)=>{
-      if(String(a[0]||'').toLowerCase()==='clear'){ WE.a=null; WE.b=null; return 'selection cleared'; }
-      const bx=weBox();
-      if(!bx) return 'no selection'+(WE.a?' yet — corner 1 is at '+WE.a.x+' '+WE.a.y+' '+WE.a.z+', mark the opposite corner':' — mark two corners with the WorldEdit Pencil');
-      return 'corner 1 '+WE.a.x+' '+WE.a.y+' '+WE.a.z+'   corner 2 '+WE.b.x+' '+WE.b.y+' '+WE.b.z
-           + '\n'+bx.w+'x'+bx.h+'x'+bx.d+' = '+bx.n+' blocks   (x '+bx.x0+'..'+bx.x1+'  y '+bx.y0+'..'+bx.y1+'  z '+bx.z0+'..'+bx.z1+')'; } },
-  set:{ usage:'/set <block>', run:(a)=>{ if(!a.length) return CMDS.set.usage;
-      const id=weBlockId(a[0]); if(id===undefined) return 'no such block: '+a[0]+(_cmdNear(a[0],_cmdBlockIds())?('  — did you mean: '+_cmdNear(a[0],_cmdBlockIds())):'');
-      return weReport('set', weApply(()=>id)); } },
-  replace:{ usage:'/replace <from> <to>', run:(a)=>{ if(a.length<2) return CMDS.replace.usage;
-      const from=weBlockId(a[0]), to=weBlockId(a[1]);
-      if(from===undefined) return 'no such block: '+a[0];
-      if(to===undefined) return 'no such block: '+a[1];
-      return weReport('replaced', weApply((x,y,z,was)=> was===from ? to : null)); } },
-  walls:{ usage:'/walls <block>', run:(a)=>{ if(!a.length) return CMDS.walls.usage;
-      const id=weBlockId(a[0]); if(id===undefined) return 'no such block: '+a[0];
-      // The four vertical faces only — no floor and no ceiling. That is what makes it "walls" and not "a hollow box", and it is
-      // the shape you want when you are walling a room you are standing in.
-      return weReport('walled', weApply((x,y,z,was,bx)=> (x===bx.x0||x===bx.x1||z===bx.z0||z===bx.z1) ? id : null)); } },
-  clear:{ usage:'/clear  —  empty the selection to air', run:()=>weReport('cleared', weApply(()=>0)) },
   players:{ usage:'/players', run:()=>{ const P=_cmdPlayers();
       return P.map(p=>(p.self?'* ':'  ')+p.name+'  (id '+p.id+')').join('\n')+'\n'+P.length+' connected'+(NET.on?(NET.host?' — you are the host':' — you are a guest'):' — offline'); } },
   backrooms:{ usage:'/backrooms [enter|exit]', run:(a)=>{ const w=String(a[0]||'').toLowerCase();
@@ -16242,8 +16289,14 @@ function updateView(dt){ updateRecoil(dt);                                      
     // below), because the tilt has to pivot at the butt and a pose term cannot express a rotation about a point.
     const sPx=swx*SWAY_POS + lat*0.010, sPy=-0.10 + b*0.3 + swy*SWAY_POS, sPz=-0.38;   // scope (cheek-weld) pose — flipped + tamed strafe lean
     const sRx=view.swing*0.4 + swy*SWAY_ROT, sRy=swx*SWAY_ROT + lat*0.022, sRz=-lat*0.028;
-    const hPx=0.17 + lat*0.024, hPy=-0.20+b-vert*0.020, hPz=-0.5;                             // hip (ready) pose — flipped + tamed strafe lean
-    const hRx=view.swing*0.55 + vert*0.055, hRy=0.05 + lat*0.05, hRz=-lat*0.055;   // and the muzzle tips with it, which is what reads as weight
+    const hPx=0.17 + lat*0.024, hPy=-0.20+b-vert*0.028, hPz=-0.5;                             // hip (ready) pose — flipped + tamed strafe lean
+    // THE MUZZLE TIPS THE OTHER WAY (Ben 08-05: "its also reversed, when jumping up, the gun should tilt down, when coming back,
+    // the gun should come back/tilt up"), and 0.078 rather than 0.055 because he also asked for it to be "slightly more present".
+    // A weapon carried at the hip is dead weight: as you leave the ground the muzzle lags DOWN, and it swings back up as you fall
+    // into the landing. +rotation.x takes a viewmodel's -z muzzle UP — which is why this was backwards and the AIMED pose was not:
+    // the scope pose drives its rx off swy, and swy already carries -vert*0.030 with "down as you rise" written next to it. So the
+    // two poses disagreed by a sign, and only the one you spend most of your time in was wrong.
+    const hRx=view.swing*0.55 - vert*0.078, hRy=0.05 + lat*0.05, hRz=-lat*0.055;   // and the muzzle tips with it, which is what reads as weight
     const e=adsT*adsT*(3-2*adsT);                                                                          // smoothstep so the raise starts & lands gently
     view.group.visible=true;
     let aPx=sPx,aPy=sPy,aPz=sPz,aRx=sRx,aRy=sRy,aRz=sRz;                                                   // aimed target = scope cheek-weld…
@@ -16466,8 +16519,10 @@ function updateView(dt){ updateRecoil(dt);                                      
     // momentum, 0.05 of yaw and 0.055 of roll into the lean, 0.055 of pitch into the momentum. Copied as numbers rather than
     // shared through a helper because the right hand's are inline in a pose blend that has no seam to factor at — but they are
     // the SAME numbers, and that is the whole of what was asked for.
-    if(_oIsGun){ offView.group.position.x += osx*0.024; offView.group.position.y += -osy*0.020;
-      offView.group.rotation.x += osy*0.055; offView.group.rotation.y += osx*0.05; offView.group.rotation.z += -osx*0.055; }
+    // …including the corrected vertical sign and the raised gain: these are still the RIGHT hand's hip coefficients verbatim, and
+    // they have to stay verbatim, or a gun in the left hand carries its weight the opposite way to the same gun in the right.
+    if(_oIsGun){ offView.group.position.x += osx*0.024; offView.group.position.y += -osy*0.028;
+      offView.group.rotation.x += -osy*0.078; offView.group.rotation.y += osx*0.05; offView.group.rotation.z += -osx*0.055; }
     // THE LEFT HAND BENDS TOO (Ben 08-04: "for offhand items"). Same probed signal as the right, same pivot arithmetic, at full
     // strength: the offhand never aims, so there is no cheek-weld to relax the tilt toward.
     blockOutHand(offView, view.gunBend||0, BLOCKOUT_TILT, BLOCKOUT_PULL); }
@@ -26967,17 +27022,10 @@ window.__hc={
       return out; }
     catch(e){ return {err:String(e.message||e)}; } },
   gunHandOn(){ try{ return !!GUN_HAND_ON; }catch(e){ return {err:String(e.message||e)}; } },
-  // QA: the WorldEdit pencil and its selection. ITEMS, RECIPES and WE are all module scope, so a bench has no other way to ask
-  // whether the item exists, whether it carries the flag the click paths test for, or what is currently selected. weSet exists
-  // for one case a bench cannot reach by clicking: an oversized selection, to prove the cap refuses it.
-  we(a,b){ try{
-      if(a&&b){ WE.a={x:a[0]|0,y:a[1]|0,z:a[2]|0}; WE.b={x:b[0]|0,y:b[1]|0,z:b[2]|0}; }
-      const it=ITEMS['we_pencil'], bx=weBox();
-      return { item: it?{name:it.name, we:!!it.we, max:it.max}:null,
-               recipes: (typeof RECIPES!=='undefined') ? RECIPES.filter(r=>r.out==='we_pencil').length : null,
-               a:WE.a?[WE.a.x,WE.a.y,WE.a.z]:null, b:WE.b?[WE.b.x,WE.b.y,WE.b.z]:null,
-               box: bx?{w:bx.w,h:bx.h,d:bx.d,n:bx.n,x0:bx.x0,x1:bx.x1,y0:bx.y0,y1:bx.y1,z0:bx.z0,z1:bx.z1}:null, cap:WE_MAX }; }
-    catch(e){ return {err:String(e.message||e)}; } },
+  // QA: the WorldEdit pencil is GONE (Ben 08-05). Kept as a probe rather than deleted so assert-worldedit fails loudly with a
+  // reason instead of throwing "__hc.we is not a function", and so nothing can quietly reintroduce the item.
+  we(){ return { removed:true, item:(typeof ITEMS!=='undefined' && ITEMS['we_pencil'])?'STILL PRESENT':null,
+                 recipes:(typeof RECIPES!=='undefined') ? RECIPES.filter(r=>r.out==='we_pencil').length : null }; },
   // QA: count blocks in a cuboid by name, in ONE call. The alternative is a round trip per cell, which for a 48-cell box is 48
   // evaluates and for the cap test would be 384000.
   countBox(a,b,names){ try{
@@ -27253,6 +27301,16 @@ window.__hc={
   // per-column clamp measured nothing, because the cap is what the far sea actually hits.
   // QA/bench: the sun's and moon's track on the water. `after` 0 restores the pre-08-04 path (added before the ring landing,
   // so erased past ~250 blocks); `amt` scales the whole thing.
+  // QA/bench: the sea's whole palette at once — the body colour you see INTO, and the deep colour the far plane and the horizon
+  // band are built from. Both together, because moving one without the other splits the sea line.
+  seaLook(o){ try{ if(o){ if(o.body) _uWaterBody.value.setRGB(+o.body[0],+o.body[1],+o.body[2]);
+        if(o.far) _deepSea.setRGB(+o.far[0],+o.far[1],+o.far[2]);
+        if(o.horizon) _seaHorizon.setRGB(+o.horizon[0],+o.horizon[1],+o.horizon[2]); }
+      const b=_uWaterBody.value, f=_deepSea, h=_seaHorizon;
+      return { body:[+b.r.toFixed(4),+b.g.toFixed(4),+b.b.toFixed(4)], far:[+f.r.toFixed(4),+f.g.toFixed(4),+f.b.toFixed(4)],
+               horizon:[+h.r.toFixed(4),+h.g.toFixed(4),+h.b.toFixed(4)],
+               ring:[+_uWater.value.r.toFixed(4),+_uWater.value.g.toFixed(4),+_uWater.value.b.toFixed(4)] };
+    }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: shoreline foam. amt 0 is the A/B off. It is driven off aDepth, so the readout carries nothing else to know.
   foam(o){ try{ const u=waterMat.uniforms; if(o&&o.amt!=null) u.uFoam.value=+o.amt; if(o&&o.on!=null) u.uFoam.value=o.on?1:0;
       return { amt:+u.uFoam.value.toFixed(3) }; }catch(e){ return {err:String(e.message||e)}; } },
