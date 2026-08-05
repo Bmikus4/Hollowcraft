@@ -134,9 +134,17 @@ function bestShift(A, B, S, R){
     console.log('\n--- 4  open ocean is still, and so is the disc beyond the render wall ---');
     chk(cen.open && cen.open.mag===0, 'water out of reach of any coast does not move',
       cen.open?('mag '+cen.open.mag+' at '+cen.open.x+','+cen.open.z):'no open-ocean sample');
+    // THE DISC IS NOT ZERO ANY MORE, and it must not be: it shares waterMat with chunk water, draws first through a
+    // transparent material, and sits three centimetres under every river and every coastal shallow — so a zero there was
+    // a motionless copy of the water showing through the flowing one (Ben 08-05). It carries the CAMERA's own current,
+    // one value for the whole plane. What is asserted is that the attribute EXISTS, is uniform, and agrees with the
+    // field at the camera; an attribute the shader declares and a geometry omits reads whatever was last bound.
     const disc = await page.evaluate('__hc.flowDisc()');
-    chk(!disc.missing && disc.max===0, 'the far-sea disc declares a zero current',
-      JSON.stringify(disc)+' — an attribute the shader declares but a geometry omits reads whatever was last bound');
+    chk(!disc.missing && disc.count>0, 'the far-sea disc declares a current at all', JSON.stringify(disc));
+    chk(disc.uniform===true, 'and one single value across the whole plane', 'uniform '+disc.uniform);
+    chk(Math.abs(disc.fx-disc.camFx)<0.03 && Math.abs(disc.fz-disc.camFz)<0.03,
+      'which is the current at the camera, so it moves with the water above it',
+      'disc ['+disc.fx+','+disc.fz+'] against camera ['+disc.camFx+','+disc.camFz+']');
 
     console.log('\n--- 5  the field is a pure function of position ---');
     const pure = await page.evaluate('__hc.flowPurity(300)');
@@ -214,6 +222,13 @@ function bestShift(A, B, S, R){
       await page.evaluate(`__hc.tpAt(${cen.river.x+0.5}, ${cen.river.h+1.2}, ${cen.river.z+0.5})`); await sleep(1200);
       await page.evaluate(`__hc.look(${cen.river.x+0.5+cen.river.fx*14}, ${cen.river.h+0.2}, ${cen.river.z+0.5+cen.river.fz*14})`); await sleep(1500);
       fs.writeFileSync(path.join(ROOT,'bench','results','flow-downstream.png'), await page.screenshot());
+      // …and now that the camera is standing IN the river, the disc under it must be carrying that current rather than
+      // the zero it holds out at sea. Checked here and not in section 4, because section 4 runs on dry land where the
+      // right answer is zero and a fill that never fires would pass.
+      const dr = await page.evaluate('__hc.flowDisc()');
+      console.log('  disc in river ' + JSON.stringify(dr));
+      chk(Math.hypot(dr.fx,dr.fz)>0.1 && Math.abs(dr.fx-dr.camFx)<0.03 && Math.abs(dr.fz-dr.camFz)<0.03,
+        'the plane under a river flows with the river', 'disc ['+dr.fx+','+dr.fz+'] camera ['+dr.camFx+','+dr.camFz+']');
       chk(true, 'wrote flow-river-down.png and flow-downstream.png for judging');
     }
 
