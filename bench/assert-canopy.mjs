@@ -70,7 +70,14 @@ const chk=(c,n,d)=>{ if(c){pass++;console.log('  PASS  '+n+(d?'   '+d:''));} els
       chk(p.chunks>0 && p.exposedFaces>200, 'there are canopies loaded to measure', p.chunks+' chunks, '+p.exposedFaces+' exposed faces');
       // Five quads on half the faces and three on the other half is 24 verts a face on average; the foliage mesh also
       // carries grass and kelp, so this is a floor, not an equality.
-      chk(p.vertsPerFace>12, 'every exposed face is carrying sprig geometry', p.vertsPerFace+' foliage verts per exposed leaf face');
+      // ONE SPRIG PER EXPOSED CELL, NOT PER EXPOSED FACE, since 627c232. A cell on a corner of the canopy has two
+      // perpendicular exposed faces; each grew its own crossed pair, the two pairs cut through each other, and Ben
+      // reported the X standing off the tree ("some overlaps corner to corner ... fix this too"). One axis per cell fixed
+      // it and halved the verts per exposed FACE, 24.5 -> 11.9, with every exposed cell still dressed — so the old
+      // threshold of >12 now asserts the bug. The floor is what a canopy cannot fall below without going bald: a dressed
+      // cell emits 3 quads plus a second cluster on half of them, and roughly half the exposed faces survive the axis
+      // rule, so anything under 8 means cells are being missed rather than de-duplicated.
+      chk(p.vertsPerFace>8, 'every exposed CELL is carrying sprig geometry', p.vertsPerFace+' foliage verts per exposed leaf face (one axis per cell since 627c232)');
       const t=p.sprigTiles;
       chk(t.pine!=null && t.birch!=null && t.oak!=null && t.pine!==t.birch && t.birch!==t.oak && t.pine!==t.oak,
         'the three species have three different sprig tiles', JSON.stringify(t));
