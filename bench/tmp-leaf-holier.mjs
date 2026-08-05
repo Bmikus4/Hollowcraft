@@ -55,7 +55,7 @@ function shares(file){
     await page.evaluate('__hc.look('+spot.x+','+(spot.h+12)+','+spot.z+')');
     await sleep(1500);
     fs.mkdirSync(path.join(ROOT,'bench','results'),{recursive:true});
-    for(const a of [0.5, 0.65, 0.8]){
+    for(const a of [0.5, 0, 0.5]){   // 0 is the value the dial exists for: discard nothing, so a hole renders as opaque tile. 0.5 twice, either side, because a dial that works must come BACK
       await page.evaluate('__hc.leafCut('+a+')'); await sleep(1200); await page.evaluate('__hc.setTime(0.25)'); await sleep(300);
       const f=path.join(ROOT,'bench','results','leaf-holier-'+String(a).replace('.','')+'.png');
       await page.screenshot({ path:f });
