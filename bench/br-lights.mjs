@@ -138,6 +138,22 @@ function ensureProbe(root){
     const errs=[]; page.on('pageerror',e=>errs.push(String(e.message||e).slice(0,180)));
     const ev=async(js)=>{ try{ return await page.evaluate(js); }catch(e){ return {err:String(e.message||e).slice(0,200)}; } };
 
+    // A SINGLE-FRAME LUMINANCE CANNOT BE COMPARED ACROSS TWO ARMS. 27 fixtures in range flicker, brFlick toggles a burst
+    // about 6.5 times a second, and `pixels()` reads ONE frame — so its mean carries whatever phase those tubes were in.
+    // Compared across arms that reads as a real difference: hop-depth arms once reported 47.8 / 44.7 / 44.7 on one tree and
+    // 47.8 / 40.2 / 47.8 on another, i.e. 2 hops darker than both 1 and 3, which is not monotonic and so is not the gate.
+    // Sampling has to cross REAL TIME, not a tight loop: brFlick is driven off performance.now(), and repeated renders
+    // inside one page.evaluate all land in the same millisecond and therefore the same phase.
+    // `contrib()` is exempt and stays as it is — its three reads happen in ONE synchronous block with the pool toggled
+    // between them, so brxUpdateLights cannot re-run and the phase is held constant. That is a same-tick A/B and sound.
+    const pixelsOverTime=async(n=24, gapMs=70)=>{
+      const ms=[]; for(let i=0;i<n;i++){ const p=await ev('__LT.pixels()'); if(p&&typeof p.mean==='number') ms.push(p.mean); await sleep(gapMs); }
+      if(!ms.length) return {err:'no samples'};
+      const mean=ms.reduce((a,b)=>a+b,0)/ms.length;
+      const sd=Math.sqrt(ms.reduce((a,b)=>a+(b-mean)*(b-mean),0)/ms.length);
+      return { n:ms.length, spanMs:n*gapMs, mean:+mean.toFixed(2), min:+Math.min(...ms).toFixed(1),
+               max:+Math.max(...ms).toFixed(1), swing:+(Math.max(...ms)-Math.min(...ms)).toFixed(1), sd:+sd.toFixed(2) }; };
+
     await page.goto(base+'/index.html?perf=1&debug=1&rd=8',{waitUntil:'load',timeout:90000});
     await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null,{timeout:90000});
     await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null,{timeout:90000});
@@ -156,7 +172,8 @@ function ensureProbe(root){
       if(Array.isArray(lv) && lv.length>1) break; }
     console.log('lights:   '+J(await ev('__LT.lights()')));
     console.log('fixtures: '+J(await ev('__LT.fixtures(24)')));
-    console.log('pixels:   '+J(await ev('__LT.pixels()')));
+    console.log('pixels:   '+J(await ev('__LT.pixels()'))+'   <- ONE FRAME, phase-dependent, do not compare arms on this');
+    console.log('pixelsAvg: '+J(await pixelsOverTime())+'   <- compare arms on THIS');
     console.log('heights:  '+J(await ev('__LT.heights()')));
     console.log('gate:     '+J(await ev('__LT.gate()')));
     console.log('duty:     '+J(await ev('__LT.duty(60)')));
@@ -164,6 +181,7 @@ function ensureProbe(root){
     console.log('under:    '+J(await ev('__LT.standUnderFixture()')));
     await sleep(500);
     console.log('pixels under fixture: '+J(await ev('__LT.pixels()')));
+    console.log('pixelsAvg under fixture: '+J(await pixelsOverTime()));
     console.log('lights here: '+J(await ev('__LT.lights()')));
     console.log('page errors: '+(errs.length?errs.slice(0,6).join(' | '):'none'));
     await browser.close();
