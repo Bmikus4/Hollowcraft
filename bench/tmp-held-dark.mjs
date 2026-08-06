@@ -88,7 +88,16 @@ const PAGE = process.argv[2]==='head' ? '_head.html' : 'index.html';
     // AT ONE END, LOOKING DOWN IT, TORCH IN HAND — and every one of those three is now checked rather than assumed.
     await page.evaluate('__hc.tpAt('+(site.x+0.5)+','+site.y+','+(site.z+0.5)+')');
     await sleep(1500);
-    const held=await page.evaluate('__hc.hold("torch")');   // returns {held, slot}: the earlier version read st().hold, which does not exist
+    // HELD versus PLACED, in the same cave from the same spot. If a torch on the FLOOR lights the floor and one at eye
+    // height does not, the fix is the held light's HEIGHT - one contained line - and not a wrap term in the lighting
+    // chunk that four sessions share and that cannot be scoped to point lights without wrapping the sun too.
+    let held;
+    if(process.env.HC_PLACED){
+      held=await page.evaluate('(()=>{ __hc.hold("field_guide"); return __hc.setBlockAt('+(site.x+2)+','+site.y+','+site.z+',"torch"); })()');
+      held={held:'PLACED torch at +2', block:held};
+    } else {
+      held=await page.evaluate('__hc.hold("torch")');   // returns {held, slot}: an earlier version read st().hold, which does not exist
+    }
     await sleep(1200);
     // FOUR WALLS, EACH A COUPLE OF BLOCKS AWAY. A long sightline down a cave is measured THROUGH the fog that filled
     // every earlier frame (mean luma 135.8 nineteen blocks underground); fog is a distance effect, so a wall two blocks
@@ -127,7 +136,8 @@ const PAGE = process.argv[2]==='head' ? '_head.html' : 'index.html';
     const nrm =await run('nrm','nrm');
     console.log('site ' + JSON.stringify(norm.site) + '  dug ' + JSON.stringify(norm.dug) +
                 '  held ' + JSON.stringify(norm.held) + '  camera ' + JSON.stringify(norm.where));
-    if(!norm.held || norm.held.held!=='torch') console.log('  *** NO TORCH IN HAND — every number below is void ***');
+    if(!norm.held || (norm.held.held!=='torch' && !/PLACED/.test(String(norm.held.held)))) console.log('  *** NO TORCH — every number below is void ***');
+    console.log('  light: ' + JSON.stringify(norm.held));
     if(norm.dug && norm.dug.air!==0) console.log('  *** THE CORRIDOR IS NOT AIR — the dig did not take ***');
     // per WALL, since the report is that only some blocks fail
     for(let w=0; w<norm.files.length; w++){
