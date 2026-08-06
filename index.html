@@ -11175,7 +11175,19 @@ function refreshHotbar(){ for(let i=0;i<9;i++){ const d=hotbarSlots[i], s=inv[i]
 let _lastHudOp='';
 function updateBars(){ const op=(player.grabbed||player.tied||(typeof intro!=='undefined'&&intro.active))?'0':'1';
   if(op!==_lastHudOp){ _lastHudOp=op; const hud=hotbarEl.parentElement; if(hud) hud.style.opacity=op; }   // bound in the dungeon / during the intro → hotbar + items vanish (style written only on change)
+  // NO HUD OVER A LOADING SCREEN OR THE MENU (Ben 08-05: "the hotbar and crosshair should be invisible in any loading
+  // screen"). Both were: the hotbar sat over the menu flythrough, and the crosshair was on screen half a second after
+  // pressing play. Three states, one test — the menu (!started), the loading circle and the cinematic (!initialReady
+  // covers the hold and intro.active the flythrough and wake).
+  // VISIBILITY, not opacity: updateCrosshair owns #xh's opacity and writes it whenever the ring's fade changes, so an
+  // opacity written from here would be overwritten within a frame or two, on a threshold that makes it look intermittent.
+  const hide = (!started || !initialReady || (typeof intro!=='undefined'&&intro.active)) ? 'hidden' : '';
+  if(hide!==_lastHudVis){ _lastHudVis=hide;
+    const hud=hotbarEl.parentElement; if(hud) hud.style.visibility=hide;
+    const xh=_xhEl||(_xhEl=document.getElementById('xh')); if(xh) xh.style.visibility=hide;
+    const mm=(typeof _mm!=='undefined'&&_mm&&_mm.wrap)?_mm.wrap:null; if(mm) mm.style.visibility=hide; }   // the minimap is HUD too, and it was on screen over the menu for the same reason
 }
+let _lastHudVis=null;
 // =====================================================================
 //  MINIMAP + HEALTH/HUNGER RINGS — circular compass map, health arc wrapped around it (Sons-of-the-Forest style),
 //  scope-glass rim, blips for real landmarks only. Replaces the old heart/hunger pip rows.
@@ -26775,7 +26787,13 @@ function buildCathedral(){ if(_cathedralDone)return;
     const want = gy0 - (d-CATH_PAD-1);                                  // first ring flush with the church's ground, then one down per ring
     if(want<1) continue;
     for(let wy=want+1; wy<=gy+56; wy++){ if(getBlock(cx+x,wy,cz+z)!==AIR) setBlockWorld(cx+x,wy,cz+z,AIR,true); }   // cut down to it
-    if(want<=gs && gs<=want+1) continue;                                // the feather has already met the ground: leave the terrain alone
+    // WHERE THE RAMP ALREADY MEETS THE GROUND, PAVE IT ANYWAY. This used to `continue` — no cut, no fill, leave the terrain — which is
+    // right about the EARTH and wrong about the SURFACE: 191 of the feather's 2299 columns came out of that branch still wearing their
+    // natural grass, in scattered patches through the paving, and patches are exactly what Ben is looking at when he says the
+    // foundation is grass. The column keeps its own height (no terracing, which is the whole point of the branch) and gets the cap.
+    if(want<=gs && gs<=want+1){ const nb=getBlock(cx+x,gs,cz+z);
+      if(nb!==AIR && nb!==WATER && gs>CFG.SEA+2) setBlockWorld(cx+x,gs,cz+z,BID.cobble,true);
+      continue; }
     // THE FOUNDATION IS PAVED, NOT MOWN (Ben 08-05: "replace the cathedrals foundation with cobblestone (its grass rn)"). The apron
     // over the pad has been cobble since 3699fcd; this feather — the ramp of rings that carries the apron back down to the promontory —
     // was capped in grass on the reasoning that a second flat masonry terrace read as a second base. From the ground it reads as the
@@ -28535,7 +28553,7 @@ window.__hc={
       lb:_lb? getComputedStyle(_lb).display : null, blink:_introBlink? +_introBlink.style.opacity : null,
       ttl:_introTtl? +getComputedStyle(_introTtl).opacity : null, bars:_lbTop? _lbTop.style.height : null }; }
     catch(e){ return {err:String(e&&e.message||e)}; } },
-  loadState(){ try{ return { started, initialReady, prewarmMs:+_prewarmMs.toFixed(0), prewarm:_PREWARM, matWarmMs:+_matWarmMs.toFixed(0), matWarm:!_NO_MATWARM, loadVisible:(document.getElementById('load')||{style:{}}).style.display!=='none',
+  loadState(){ try{ return { started, initialReady, playAt:+_playAt.toFixed(0), heldMs:_playAt? +(performance.now()-_playAt).toFixed(0):0, minMs:LOAD_MIN_MS, watchdog:_loadWatchdog, prewarmMs:+_prewarmMs.toFixed(0), prewarm:_PREWARM, matWarmMs:+_matWarmMs.toFixed(0), matWarm:!_NO_MATWARM, loadVisible:(document.getElementById('load')||{style:{}}).style.display!=='none',
       icons:_preI+'/'+((_preIcons&&_preIcons.length)||0), programs:(renderer.info.programs||[]).length }; }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: what three actually keys its shader programs on. NUM_POINT_LIGHTS counts lights that are VISIBLE (not ones
   // with intensity>0), and NUM_*_SHADOWS counts those with castShadow. If a program is compiled the moment one of these
@@ -31437,12 +31455,14 @@ window.__hc={
         const b=at(x,y,z); if(b!==BID.candle && b!==BID.red_torch && b!==BID.torch && b!==BID.torch_unlit) continue;
         if(b===BID.candle) candles++; else torches++;
         const below=at(x,y-1,z); if(!isSolid[below]){ floating++; if(floatAt.length<6) floatAt.push([x,y,z]); } }
-      // ---- 3. THE COLUMNS. The builder's own positions, walked up from the floor: how tall the pillar runs, and what is overhead.
+      // ---- 3. THE COLUMNS. solidTo is the claim: the highest course to which the column is UNBROKEN from the floor. Walking up to the
+      // first non-solid cell is the only measure that means "reaches" — a gap to "the first thing overhead" measures the roof VOID above
+      // the ceiling slab instead, which is 4 blocks of designed air over every bay and read as a failure when the pillars were fine.
       const pillars=[];
       for(const zz of [-6,6]) for(let x=-28;x<=10;x+=6){
-        let top=0; for(let y=1;y<=40;y++){ const b=at(x,y,zz); if(b===BID.stone||b===BID.mossy||b===BID.cobble) top=y; else break; }
-        let over=null; for(let y=top+1;y<=40;y++){ if(isSolid[at(x,y,zz)]){ over=y; break; } }
-        pillars.push({ x, z:zz, top, over, gap:(over==null?null:over-top-1) }); }
+        let solidTo=0; for(let y=1;y<=40;y++){ if(!isSolid[at(x,y,zz)]) break; solidTo=y; }
+        let over=null; for(let y=solidTo+1;y<=40;y++){ if(isSolid[at(x,y,zz)]){ over=y; break; } }
+        pillars.push({ x, z:zz, solidTo, over, gap:(over==null?null:over-solidTo-1) }); }
       const gaps=pillars.map(p=>p.gap).filter(g=>g!=null);
       return { featherGrass, featherCobble, featherSand, featherOther,
                torches, candles, floating, floatAt,
