@@ -32,13 +32,33 @@ const px=f=>decodePNG(fs.readFileSync(f));
     args:['--enable-gpu','--ignore-gpu-blocklist','--use-angle=d3d11','--mute-audio'] });
   // one room, dug once, then photographed by two page loads at the same spot — the world is deterministic and the room
   // is a block edit, so the second load has to re-dig it. Both arms do the same digging in the same order.
-  const CAVE=`(function(site){
-    // a 7x5x7 room with a pillar in the middle: the pillar's four walls face four different ways, which is the whole
-    // point — one held light, four orientations, in one frame.
-    for(let dx=-3;dx<=3;dx++) for(let dz=-3;dz<=3;dz++) for(let dy=0;dy<5;dy++)
-      __hc.setBlockAt(site.x+dx, site.h-9+dy, site.z+dz, 'air');
-    for(let dy=0;dy<4;dy++) __hc.setBlockAt(site.x, site.h-9+dy, site.z, 'stone');
-    return true; })`;
+  // A CORRIDOR, NOT A ROOM. The first version dug 7x5x7 and reported 99.44% of the frame LIT, which was not a bug in
+  // the classifier: a torch covers a room that size completely, so there were no dark faces to classify. A 26-block
+  // corridor puts the far end outside the light's 14 blocks and every intermediate face on the falloff, which is where
+  // "random blocks that don't light" have to live. Pillars every 5 blocks give four wall orientations at four distances.
+  // FIND A REAL CAVE, DO NOT DIG ONE. Two dug attempts failed the same way and the failure is instructive: a corridor
+  // 9 below the surface ran out of the side of a hill, and one 25 below broke into an existing cavern - both times the
+  // "cave" frame was daylight, at 98% and 99% lit. The bug is reported in the caves the game generates, so the probe
+  // goes to one: a cell with air around it, four blocks of solid rock overhead, and no sky in its column.
+  const FINDCAVE=`(function(){ const P=__hc.probe();
+    for(let r=8;r<260;r+=4) for(let a=0;a<24;a++){ const th=a*0.2618;
+      const x=Math.round(P.x+Math.sin(th)*r), z=Math.round(P.z+Math.cos(th)*r);
+      const g=__hc.treeGates(x,z); const h=g&&g.h; if(h==null||h<=P.sea+4) continue;
+      for(let y=h-30; y<h-8; y++){
+        if(__hc.blockAt(x,y,z)!==0 || __hc.blockAt(x,y+1,z)!==0) continue;          // standing room
+        if(__hc.blockAt(x,y-1,z)===0) continue;                                      // AND A FLOOR UNDER IT: tpAt does not
+        // snap, so a cell floating in a cavern drops the player out of the very cave the probe just found (camera y 31 -> 27,
+        // and the frame came back as daylight because they fell somewhere else entirely).
+        let roof=true; for(let k=2;k<=5;k++) if(__hc.blockAt(x,y+k,z)===0){ roof=false; break; }
+        if(!roof) continue;                                                          // four blocks of rock overhead
+        let air=0; for(let dx=-2;dx<=2;dx++) for(let dz=-2;dz<=2;dz++) for(let dy=0;dy<=2;dy++)
+          if(__hc.blockAt(x+dx,y+dy,z+dz)===0) air++;
+        if(air<18) continue;                                                         // a chamber, not a crack
+        // and something to LOOK at: the farthest air cell along +x inside 20 blocks
+        let far=0; for(let k=1;k<20;k++){ if(__hc.blockAt(x+k,y+1,z)===0) far=k; else break; }
+        return {x,y,z,h,air,far};
+      } }
+    return {err:'no natural cave found'}; })`;
   const run=async(dbg,tag)=>{
     const page=await (await browser.newContext({viewport:{width:800,height:450}})).newPage();
     page.on('pageerror',e=>console.log('  PAGEERROR:',String(e.message||e).slice(0,200)));
@@ -46,34 +66,35 @@ const px=f=>decodePNG(fs.readFileSync(f));
     await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null,{timeout:180000});
     await page.evaluate('__hc.setTime(0.25)');
     await sleep(3000);
-    const site=await page.evaluate(`(()=>{ const P=__hc.probe();
-      for(let r=10;r<200;r+=4) for(let a=0;a<16;a++){ const th=a*0.3927;
-        const x=Math.round(P.x+Math.sin(th)*r), z=Math.round(P.z+Math.cos(th)*r);
-        const g=__hc.treeGates(x,z); if(g&&g.h!=null && g.h>P.sea+6) return {x,z,h:g.h}; } return {err:'no site'}; })()`);
+    const site=await page.evaluate(FINDCAVE+'()');
     if(site.err) throw new Error(site.err);
-    await page.evaluate(CAVE+'('+JSON.stringify(site)+')');
-    await sleep(3000);
-    // stand back from the pillar, torch in hand, and look at it
-    await page.evaluate('__hc.tpAt('+(site.x+2.5)+','+(site.h-9)+','+(site.z+2.5)+')');
+    const dug={air:0, roof:1, natural:true, chamberAir:site.air, sightline:site.far};
+    await sleep(500);
+    // AT ONE END, LOOKING DOWN IT, TORCH IN HAND — and every one of those three is now checked rather than assumed.
+    await page.evaluate('__hc.tpAt('+(site.x+0.5)+','+site.y+','+(site.z+0.5)+')');
     await sleep(1500);
-    await page.evaluate('__hc.hold("torch")');
+    const held=await page.evaluate('__hc.hold("torch")');   // returns {held, slot}: the earlier version read st().hold, which does not exist
     await sleep(1200);
-    await page.evaluate('__hc.look('+(site.x+0.5)+','+(site.h-8)+','+(site.z+0.5)+')');
+    await page.evaluate('__hc.look('+(site.x+Math.max(2,site.far))+','+(site.y+1)+','+(site.z+0.5)+')');
     await sleep(800);
-    await page.evaluate('__hc.look('+(site.x+0.5)+','+(site.h-8)+','+(site.z+0.5)+')');
+    await page.evaluate('__hc.look('+(site.x+Math.max(2,site.far))+','+(site.y+1)+','+(site.z+0.5)+')');
     await page.evaluate('__hc.setTime(0.25)'); await sleep(500);
     const f=path.join(ROOT,'bench','results','helddark-'+tag+'.png');
     await page.screenshot({path:f});
-    const held=await page.evaluate('(()=>{ try{ return {hold:__hc.st().hold||null}; }catch(e){ return {err:String(e.message||e)}; } })()');
+    const where=await page.evaluate('(()=>{const p=__hc.probe(); return {y:+p.y.toFixed(1), at:__hc.blockAt(Math.floor(p.x),Math.floor(p.y)+1,Math.floor(p.z))};})()');
+    if(Math.abs(where.y-site.y)>1.5) console.log('  *** THE PLAYER FELL out of the cave: asked for y '+site.y+', ended at '+where.y+' ***');
     await page.context().close();
-    return { f, site, held };
+    return { f, site, held, dug, where };
   };
   try{
     await waitHttp('http://127.0.0.1:'+port+'/index.html');
     fs.mkdirSync(path.join(ROOT,'bench','results'),{recursive:true});
     const norm=await run(false,'normal');
     const lit =await run(true ,'lit');
-    console.log('site ' + JSON.stringify(norm.site) + '  held ' + JSON.stringify(norm.held));
+    console.log('site ' + JSON.stringify(norm.site) + '  dug ' + JSON.stringify(norm.dug) +
+                '  held ' + JSON.stringify(norm.held) + '  camera ' + JSON.stringify(norm.where));
+    if(!norm.held || norm.held.held!=='torch') console.log('  *** NO TORCH IN HAND — every number below is void ***');
+    if(norm.dug && norm.dug.air!==0) console.log('  *** THE CORRIDOR IS NOT AIR — the dig did not take ***');
     const A=px(norm.f), B=px(lit.f), ch=A.ch;
     let darkBoth=0, darkButLit=0, brightBoth=0, n=0;
     for(let y=60;y<380;y++) for(let x=100;x<700;x++){
@@ -85,6 +106,11 @@ const px=f=>decodePNG(fs.readFileSync(f));
       else if(a<24 && b<40) darkBoth++;
       else if(a>=24) brightBoth++;
     }
+    // IS THIS EVEN A CAVE? A frame that is 98% lit is either a torch doing its job in a small room or - as it was twice
+    // here - the open air. Mean luma settles it before any share is read.
+    let sum=0,sn=0; for(let y=60;y<380;y++) for(let x=100;x<700;x++){ const i=(y*A.w+x)*ch; sum+=(A.data[i]+A.data[i+1]+A.data[i+2])/3; sn++; }
+    const mean=+(sum/sn).toFixed(2);
+    console.log('  mean luma of the normal frame ' + mean + (mean>90?'   *** NOT A CAVE - this is daylight, the numbers below are void ***':''));
     const pc=v=>(100*v/n).toFixed(2)+'%';
     console.log('  dark on screen BUT lit in dbg=lit   ' + pc(darkButLit) + '   <- the wash ate delivered light');
     console.log('  dark in BOTH                        ' + pc(darkBoth)   + '   <- no light ever reached the face');
