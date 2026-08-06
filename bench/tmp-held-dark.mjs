@@ -49,7 +49,7 @@ const PAGE = process.argv[2]==='head' ? '_head.html' : 'index.html';
   // 9 below the surface ran out of the side of a hill, and one 25 below broke into an existing cavern - both times the
   // "cave" frame was daylight, at 98% and 99% lit. The bug is reported in the caves the game generates, so the probe
   // goes to one: a cell with air around it, four blocks of solid rock overhead, and no sky in its column.
-  const FINDCAVE=`(function(){ const P=__hc.probe();
+  const FINDCAVE=`(function(){ const P=__hc.probe(); let best=null;
     for(let r=8;r<260;r+=4) for(let a=0;a<24;a++){ const th=a*0.2618;
       const x=Math.round(P.x+Math.sin(th)*r), z=Math.round(P.z+Math.cos(th)*r);
       const g=__hc.treeGates(x,z); const h=g&&g.h; if(h==null||h<=P.sea+4) continue;
@@ -63,11 +63,17 @@ const PAGE = process.argv[2]==='head' ? '_head.html' : 'index.html';
         let air=0; for(let dx=-2;dx<=2;dx++) for(let dz=-2;dz<=2;dz++) for(let dy=0;dy<=2;dy++)
           if(__hc.blockAt(x+dx,y+dy,z+dz)===0) air++;
         if(air<18) continue;                                                         // a chamber, not a crack
+        // KEEP THE BIGGEST, do not take the first. Walls at 1 and 2 blocks are fully lit by any torch, so the first
+        // qualifying cell cannot show a falloff; the case has to live where the light runs out.
+        let wide=0; for(let dx=-6;dx<=6;dx++) for(let dz=-6;dz<=6;dz++) for(let dy=0;dy<=3;dy++)
+          if(__hc.blockAt(x+dx,y+dy,z+dz)===0) wide++;
+        if(!best || wide>best.wide) best={x,y,z,h,air,wide,far:0};
+        if(wide<220) continue;
         // and something to LOOK at: the farthest air cell along +x inside 20 blocks
         let far=0; for(let k=1;k<20;k++){ if(__hc.blockAt(x+k,y+1,z)===0) far=k; else break; }
         return {x,y,z,h,air,far};
       } }
-    return {err:'no natural cave found'}; })`;
+    return best || {err:'no natural cave found'}; })`;
   const run=async(dbg,tag)=>{
     const page=await (await browser.newContext({viewport:{width:800,height:450}})).newPage();
     page.on('pageerror',e=>console.log('  PAGEERROR:',String(e.message||e).slice(0,200)));
@@ -98,7 +104,11 @@ const PAGE = process.argv[2]==='head' ? '_head.html' : 'index.html';
       await page.evaluate('__hc.setTime(0.25)'); await sleep(400);
       const ff=path.join(ROOT,'bench','results','helddark-'+tag+'-'+d[0]+'_'+d[1]+'.png');
       await page.screenshot({path:ff});
-      files.push({dir:d, file:ff, dist:k});
+      // AND WHICH CHUNK THE WALL IS IN. If the dark faces turn out to align to 16-block boundaries the fault is the
+      // per-chunk material clone (each chunk compiles its own program), not per-face N.L - those look identical in a
+      // screenshot and completely different in a fix.
+      const wc=await page.evaluate('(()=>({cx:('+(site.x)+'+'+d[0]+'*'+k+')>>4, cz:('+(site.z)+'+'+d[1]+'*'+k+')>>4}))()');
+      files.push({dir:d, file:ff, dist:k, chunk:wc});
     }
     const f=files[0].file;
     const where=await page.evaluate('(()=>{const p=__hc.probe(); return {y:+p.y.toFixed(1), at:__hc.blockAt(Math.floor(p.x),Math.floor(p.y)+1,Math.floor(p.z))};})()');
@@ -126,7 +136,7 @@ const PAGE = process.argv[2]==='head' ? '_head.html' : 'index.html';
         if(a<24 && b>=40) dL++; else if(a<24) dB++; else br++;
       }
       const d=norm.files[w].dir;
-      console.log('  wall '+(d[0]>0?'+x':d[0]<0?'-x':d[1]>0?'+z':'-z')+' at '+norm.files[w].dist+' blocks   mean '+(sum/m).toFixed(1)+
+      console.log('  wall '+(d[0]>0?'+x':d[0]<0?'-x':d[1]>0?'+z':'-z')+' at '+norm.files[w].dist+' blocks   chunk '+JSON.stringify(norm.files[w].chunk)+'   mean '+(sum/m).toFixed(1)+
         '   darkButLit '+(100*dL/m).toFixed(2)+'%   darkBoth '+(100*dB/m).toFixed(2)+'%   lit '+(100*br/m).toFixed(2)+'%');
     }
     const A=px(norm.f), B=px(lit.f), ch=A.ch;
