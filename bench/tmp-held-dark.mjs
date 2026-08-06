@@ -77,7 +77,7 @@ const PAGE = process.argv[2]==='head' ? '_head.html' : 'index.html';
   const run=async(dbg,tag)=>{
     const page=await (await browser.newContext({viewport:{width:800,height:450}})).newPage();
     page.on('pageerror',e=>console.log('  PAGEERROR:',String(e.message||e).slice(0,200)));
-    await page.goto('http://127.0.0.1:'+port+'/'+PAGE+'?debug=1'+(dbg?'&dbg=lit':''),{waitUntil:'load',timeout:120000});
+    await page.goto('http://127.0.0.1:'+port+'/'+PAGE+'?debug=1'+(dbg?'&dbg='+dbg:''),{waitUntil:'load',timeout:120000});
     await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null,{timeout:180000});
     await page.evaluate('__hc.setTime(0.25)');
     await sleep(3000);
@@ -120,7 +120,11 @@ const PAGE = process.argv[2]==='head' ? '_head.html' : 'index.html';
     await waitHttp('http://127.0.0.1:'+port+'/index.html');
     fs.mkdirSync(path.join(ROOT,'bench','results'),{recursive:true});
     const norm=await run(false,'normal');
-    const lit =await run(true ,'lit');
+    const lit =await run('lit','lit');
+    // A THIRD FRAME IN ?dbg=nrm, which paints abs(normalize(vObjN)) as rgb. That is the face's AXIS per pixel - red x,
+    // green y, blue z - so the dark pixels can be bucketed by the orientation of the face under them without any new
+    // hook. It loses the SIGN, so it can say "these are all z faces" but not "-z"; the aim direction supplies the rest.
+    const nrm =await run('nrm','nrm');
     console.log('site ' + JSON.stringify(norm.site) + '  dug ' + JSON.stringify(norm.dug) +
                 '  held ' + JSON.stringify(norm.held) + '  camera ' + JSON.stringify(norm.where));
     if(!norm.held || norm.held.held!=='torch') console.log('  *** NO TORCH IN HAND — every number below is void ***');
@@ -135,7 +139,19 @@ const PAGE = process.argv[2]==='head' ? '_head.html' : 'index.html';
         m++; sum+=a;
         if(a<24 && b>=40) dL++; else if(a<24) dB++; else br++;
       }
+      // …and what the dark ones are made of, by axis
+      const N2=px(nrm.files[w].file);
+      let ax=0,ay=0,az=0, an=0;
+      for(let y=150;y<300;y++) for(let x=300;x<500;x++){
+        const i=(y*A2.w+x)*ch2;
+        const a=(A2.data[i]+A2.data[i+1]+A2.data[i+2])/3;
+        if(a>=24) continue;
+        const r=N2.data[i], g=N2.data[i+1], b=N2.data[i+2];
+        if(r>=g && r>=b) ax++; else if(g>=r && g>=b) ay++; else az++;
+        an++;
+      }
       const d=norm.files[w].dir;
+      if(an) console.log('    of its dark pixels: x-faces '+(100*ax/an).toFixed(1)+'%  y-faces '+(100*ay/an).toFixed(1)+'%  z-faces '+(100*az/an).toFixed(1)+'%   (n='+an+')');
       console.log('  wall '+(d[0]>0?'+x':d[0]<0?'-x':d[1]>0?'+z':'-z')+' at '+norm.files[w].dist+' blocks   chunk '+JSON.stringify(norm.files[w].chunk)+'   mean '+(sum/m).toFixed(1)+
         '   darkButLit '+(100*dL/m).toFixed(2)+'%   darkBoth '+(100*dB/m).toFixed(2)+'%   lit '+(100*br/m).toFixed(2)+'%');
     }
