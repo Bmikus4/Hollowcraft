@@ -3938,6 +3938,19 @@ const globalU = {
   // the dark pixels in a cave are y faces, and the same torch on the FLOOR leaves nothing dark at all.
   uHeld:{ value:new THREE.Vector4(0,0,0,0) },
   uHeldC:{ value:new THREE.Color(1,0.60,0.22) },
+  // ---- THE FLASHLIGHT, AS A VOLUME (Ben 08-06: "a flashlight item, which projects directional light") ----
+  // The SpotLight does the shaping and the shadowing; this is the same trick the held torch needs and for exactly the
+  // same reason. A spot light reaches a surface through saturate(N.L), so the FLOOR you are standing on and pointing
+  // the beam along takes N.L ~ 0 and stays black however bright the beam is — the measured fault behind "random blocks
+  // underground that dont become lit", one light-type over. Sampling the cone at the fragment's POSITION has no N.L in
+  // it at all, so a grazing floor inside the beam is lit; it rides on top of the SpotLight, which keeps walls shaped.
+  // xyz = the lamp's world position, w = its RANGE in blocks, and w == 0 is the whole switch: no branch cost when the
+  // flashlight is off or absent, which is almost always.
+  uFlash:{ value:new THREE.Vector4(0,0,0,0) },
+  // xyz = the beam's unit direction, w = cos(outer half-angle). Cosines rather than angles because the test is a dot
+  // product; converting per fragment would be an acos in the inner loop for a number the CPU already knows.
+  uFlashD:{ value:new THREE.Vector4(0,0,-1,0.9) },
+  uFlashC:{ value:new THREE.Color(0.92,0.95,1.0) },   // LINEAR, like uChunkTint and uHeldC — see the setRGB note where it is driven
   uCut:{ value:0.5 },
   uWhiteTile:{ value:(typeof TILEIDX!=='undefined'&&TILEIDX.vantawhite!=null)?TILEIDX.vantawhite:-1 },   // SHARED vantawhite-glow uniform (Ben 07-21): one reference every chunk material + clone points at, so the unlit-white override can never go stale across recompiles / composer rebuilds / VFX-setting toggles
   // THE HAND-LIGHT SPHERE IS GONE, and this is the answer to the open question about it. uHandPos/uHandK/uHandR fed the scotopic
@@ -3962,7 +3975,25 @@ const globalU = {
   // shade had become flat black holes with no form, and lowering it again is re-running a rejected experiment. The EXPONENT is the
   // shape: raising it darkens the MIDDLE of the range — a face at half sky — and leaves both ends exactly where he signed them off,
   // vSky 0 at the floor and vSky 1 untouched. `__hc.skyCurve({floor,exp})`, and 0.26/1.15 is the pre-dial build.
-  uSkyCurve: { value:new THREE.Vector2(0.26, 1.15) },
+  // ---- FLOOR 0.26 -> 0.00, EXPONENT 1.15 -> 0.55 (Ben 08-06: "if no light reaches an area at all, it should be
+  // completely dark", day and night, caves and above ground) ----
+  // THE FLOOR WAS NEVER THE THING KEEPING SHADE OFF BLACK, and that is why it could be raised twice without curing
+  // anything. Swept 0.26 -> 0.00 at a room carved sixteen blocks under the surface it moved the wall by 1.3 of 255,
+  // because a `max(colour, albedo*0.20)` further down the same shader was holding every face in the world at a fifth
+  // of its own texture whatever the light did (see the FOL_UNLIT_FLOOR note in injectAtlas). With that gated back to
+  // foliage, this curve has authority again and the floor is what it always claimed to be.
+  // A SUB-1 EXPONENT IS WHAT REPLACES THE FLOOR, and it is the shape both earlier instructions were reaching for. aSky
+  // is 4 bits, so the smallest non-zero sky a face can have is 1/15 = 0.0667. pow(0.0667, 0.55) = 0.22 — a face with a
+  // single step of sky keeps very nearly what the 0.26 floor was giving it — while pow(0, 0.55) is exactly 0, so a face
+  // with NO sky gets nothing. The old pair could not do both: at exponent 1.15 one step of sky is 0.046, which is the
+  // "dark random blocks in the woods during the day" report, and that is what the floor was raised to paper over.
+  // MEASURED (bench/assert-unlit-black.mjs), carved room, no block light, no delivered light:
+  //   noon  0.26/1.15  lum 5.54, near-black 94.4%   ->  0.00/0.55  lum 2.54, near-black 99.3%
+  //   night 0.26/1.15  lum 2.66                      ->  0.00/0.55  lum 2.70
+  // i.e. the room now reads the SAME at noon as at midnight, which is the whole claim: a sealed room cannot know what
+  // hour it is. A forest floor is untouched by all of this — leaves are not sky occluders (occludesSky, Ben 07-23) so
+  // it reads vSky ~1 and every value of this curve is 1 there (measured inert: 26.42 -> 26.41 across the whole sweep).
+  uSkyCurve: { value:new THREE.Vector2(0.0, 0.55) },
   // ---- DAYTIME SHADE (Ben 08-05: "absolute dark shadows during day time ... and THEN ALSO realistic daytime darkness too") ----
   // x is how much of its ambient a face keeps where THE SUN DOES NOT REACH IT, 1 being the pre-dial build. y is how fast a face
   // counts as sunlit as delivered light rises. Both take effect only in daylight (scaled by uDay in the shader), so nothing Ben has
@@ -3972,7 +4003,17 @@ const globalU = {
   // 07-23) so a forest floor reads vSky ~1 and `pow(vSky,e)` is 1 at every exponent. The only thing darkening a forest floor by day
   // is the SHADOW MAP, which lands on directDiffuse alone, and the ambient then fills the shadow back in. So shade has to be taken
   // out of the ambient, and the shadow is already in this shader — as the direct light that did not arrive.
-  uDayShade: { value:new THREE.Vector2(1.0, 6.0) },
+  // 1.0 -> 0.4 (Ben 08-06: "behind trees, I want realistic darkness/shadows"). x 1.0 was the inert A/B, left that way
+  // because before the albedo floor was gated the term had nothing to act on — a face crushed to zero ambient still
+  // rendered at a fifth of its texture. It has authority now, and the pick is the one that separates the two crops:
+  //   shaded forest floor, noon:  1.0 -> 26.4 | 0.6 -> 16.3 | 0.4 -> 10.8 | 0.25 -> 6.5 | 0.1 -> 3.5
+  //   OPEN ground, noon:          1.0 -> 69.1 | 0.4 -> 64.8 | 0.1 -> 61.6
+  // At 0.4 shade falls 59% and open sunlit ground falls 6%, which is the honest shape — a sunlit field is not being
+  // asked to change and mostly does not, and what does move in that crop is the shadowed pixels inside it, which is
+  // the point. 0.25 IS NOT THE PICK AND THE REASON IS BEN'S OWN CONSTRAINT ("you must be careful not to reintroduce
+  // our black pixel bug"): pure black in the open-ground crop is 0.000% at 0.4 and 4.7% at 0.1. The lever is bought
+  // exactly as far as it goes without crushing a daylit field.
+  uDayShade: { value:new THREE.Vector2(0.4, 6.0) },
   // THE SCOTOPIC DIALS ARE NOT HERE. They live in _scotG / _scotH at the top of this file, as Float32Arrays, because a globalU
   // entry can only be shared by materials this file injects by hand and Ben asked for the pass on every material in the game.
   // Why each value is what it is:
@@ -4044,6 +4085,7 @@ function injectAtlas(mat, opts={}){
     sh.uniforms.uSkyCurve = globalU.uSkyCurve; sh.uniforms.uDayShade = globalU.uDayShade; sh.uniforms.uDayS = globalU.uDay;   // SHARED refs, same reason as the pair above: every chunk clone must move together or half the world keeps the old curve
     sh.uniforms.uCut = globalU.uCut;
     sh.uniforms.uHeld = globalU.uHeld; sh.uniforms.uHeldC = globalU.uHeldC;
+    sh.uniforms.uFlash = globalU.uFlash; sh.uniforms.uFlashD = globalU.uFlashD; sh.uniforms.uFlashC = globalU.uFlashC;   // SHARED refs, same reason as the pair above: every per-chunk clone must see the beam move or half the world stays dark
     sh.uniforms.uWhiteTile = globalU.uWhiteTile;   // SHARED ref → the vantawhite glow survives every material clone / recompile / composer rebuild / VFX toggle (was a fresh per-material uniform that a pre-tile-index recompile could latch at -1)
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>',
@@ -4082,7 +4124,7 @@ function injectAtlas(mat, opts={}){
         // HC_SCOT_ATLAS routes the GLOBAL scotopic pass (patched into three's own lights/dithering chunks at the top of this
         // file) down the atlas branch, where `_bl` and `vSky` exist. Without it the wash still runs here, on the non-atlas
         // branch, and the cave descent would never fire on the one material that can tell a cave from a field.
-        '#include <common>\n#define HC_SCOT_ATLAS 1\n'+(opts.leafTrans?'uniform float uFolTrans;\n':'')+'precision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform vec3 uChunkTint;\nuniform float uSkyDirAmt;\nuniform float uSkyDirUp;\nuniform float uSkyDirDn;\nuniform vec2 uSkyCurve;\nuniform vec2 uDayShade;\nuniform float uDayS;\nuniform float uCut;\nuniform vec4 uHeld;\nuniform vec3 uHeldC;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
+        '#include <common>\n#define HC_SCOT_ATLAS 1\n'+(opts.leafTrans?'uniform float uFolTrans;\n':'')+'precision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform vec3 uChunkTint;\nuniform float uSkyDirAmt;\nuniform float uSkyDirUp;\nuniform float uSkyDirDn;\nuniform vec2 uSkyCurve;\nuniform vec2 uDayShade;\nuniform float uDayS;\nuniform float uCut;\nuniform vec4 uHeld;\nuniform vec3 uHeldC;\nuniform vec4 uFlash;\nuniform vec4 uFlashD;\nuniform vec3 uFlashC;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
       // ---- NIGHT VOLUMETRIC DARKNESS ON REAL FOLIAGE (Ben 07-29) ----
       // "volumetric darkness at night is applied to horizon pines, but not to forest trees." Correct, and the two fade to
       // different targets. The horizon backdrop fades to _uPineFog, which is scene.fog.color pulled toward storm blue and
@@ -4113,7 +4155,24 @@ function injectAtlas(mat, opts={}){
       // max(), not add: lit faces already exceed the floor and are left exactly as they were, so this only ever fills in black.
       // Placed BEFORE the night tint above (the token is still present after that replace, so this lands first), because the
       // distance darkening must be free to sink a floored leaf into the dark mass of a far wood.
-      .replace('#include <fog_fragment>', '\ngl_FragColor.rgb = max(gl_FragColor.rgb, diffuseColor.rgb * '+FOL_UNLIT_FLOOR.toFixed(3)+');\n#include <fog_fragment>')
+      // ---- ...AND IT IS FOR FOLIAGE. IT WAS ON EVERY BLOCK IN THE WORLD. ----
+      // This replace carried no `opts` test, so the floor landed on all five atlas materials — opaqueMat included. Every
+      // stone, dirt, plank and cobble face in the game therefore had a hard `max(colour, albedo*0.20)` applied AFTER all
+      // lighting, tone mapping and fog. No surface anywhere could render darker than a fifth of its own texture, at any
+      // hour, under any occlusion, and no lighting dial could reach it because a max() after the fact is not a light.
+      // MEASURED at a carved room sixteen blocks under the surface, vSky 0 / _bl 0 / delivered light 0 (bench/tmp-cave-why.mjs):
+      //   noon, shipped     lum 25.91  minCh 25.46  sat 0.086  near-black 11.3%
+      //   noon, ?folfloor=0 lum  5.47  minCh  4.88  sat 0.334  near-black 95.0%
+      // That is the whole of "unlit caves at all hours are NOT DARK" and it is why the sky curve's floor and uDayShade
+      // both swept INERT over their entire range at that site — 0.26 -> 0.00 moved the wall by 1.3 of 255, because the
+      // ambient was never what was lighting it.
+      // It is also, on the arithmetic, the "black voxeling / texture pixeling" hash: the floor is the fragment's OWN
+      // albedo, so in the dark every block lands on its own most-saturated hue and a patchwork of dirt, grass and sand
+      // becomes a mosaic of brown, green and yellow cubes. The 08-04 note in the plan attributes that to AgX's toe; the
+      // toe is real, but this floor is what was putting a coloured value there for the toe to act on.
+      // Gated on leafTrans, which is exactly the two materials the floor's own comment describes (leafMat, foliageMat)
+      // and none of the three it does not (opaqueMat, cutoutMat, paneMat).
+      .replace('#include <fog_fragment>', opts.leafTrans ? ('\ngl_FragColor.rgb = max(gl_FragColor.rgb, diffuseColor.rgb * '+FOL_UNLIT_FLOOR.toFixed(3)+');\n#include <fog_fragment>') : '#include <fog_fragment>')
       .replace('#include <color_fragment>',
         '#include <color_fragment>\n'+
         'vec2 _fr=fract(vBUV); _fr.y=1.0-_fr.y;\n'+
@@ -4175,9 +4234,35 @@ function injectAtlas(mat, opts={}){
         // grazing floor. Same gain and curve as the placed term, its own colour, ATLAS ONLY - no shared chunk, no prop
         // material, not the sun. It rides on top of the PointLight, which keeps the directional shaping on walls.
         'if(uHeld.w > 0.0){ float _hd = distance(vWPos, uHeld.xyz); float _hf = clamp(1.0 - _hd/uHeld.w, 0.0, 1.0);\n'+
-        '  irradiance += 3.6 * uHeldC * pow(_hf,1.45) * _fl; }\n')
+        '  irradiance += 3.6 * uHeldC * pow(_hf,1.45) * _fl; }\n'+
+        // ---- THE FLASHLIGHT CONE (Ben 08-06) ----
+        // The one emitter in the game that has a DIRECTION, so it is the one that cannot be a distance falloff. Three
+        // terms, and each of them is the physical thing rather than a shaped curve:
+        //   · INVERSE SQUARE. `_ff*_ff` on a linear reach is the real falloff of a point source, and a torch beam is the
+        //     one light here bright enough and long enough for the difference to read — a linear ramp looks like a
+        //     painted gradient at thirty blocks. It is also what the SpotLight this rides on uses (decay 2), so the two
+        //     halves of the same lamp agree instead of drifting the way the hand and the pool did.
+        //   · THE CONE, as a smoothstep between the outer cosine and a point 35% of the way to the axis. That is the
+        //     penumbra: a real reflector has a bright core and a soft edge, and a hard step reads as a stencil.
+        //   · NO N.L, deliberately — see the uFlash note in globalU. The SpotLight beside it supplies the shaping.
+        // Gated on uFlash.w so the whole block is skipped whenever no flashlight is lit, which is nearly every frame of
+        // nearly every session.
+        'if(uFlash.w > 0.0){ vec3 _fv = vWPos - uFlash.xyz; float _fd2 = length(_fv);\n'+
+        '  float _ff = clamp(1.0 - _fd2/uFlash.w, 0.0, 1.0);\n'+
+        '  float _fc = dot(_fv/max(_fd2,1e-4), uFlashD.xyz);\n'+
+        '  float _fcone = smoothstep(uFlashD.w, mix(uFlashD.w, 1.0, 0.35), _fc);\n'+
+        '  irradiance += 4.6 * uFlashC * _ff * _ff * _fcone; }\n')
       .replace('#include <aomap_fragment>',
-        '#include <aomap_fragment>\nreflectedLight.directDiffuse *= (0.17 + 0.83*smoothstep(0.16,0.9,vSky));\n'+
+        // ---- AND THE SUN'S OWN FLOOR, WHICH WAS THE OTHER 17% (Ben 08-06) ----
+        // This was `0.17 + 0.83*smoothstep(0.16, 0.9, vSky)`, so a face with NO sky whatsoever still took 17% of full
+        // direct sunlight. Inside the 46-block shadow frustum the shadow map hides that; beyond it nothing does, which
+        // is a sixth of the key light landing on the walls of every cave and interior in the world past that radius.
+        // A floor on an OCCLUSION term is a contradiction — it says "this face cannot see the sky, so give it some sun".
+        // Same curve as the ambient above (uSkyCurve.y), for the reason the two terms should share one: they are both
+        // answering "how much of the sky does this face see", and having them disagree is what let a face be lit by a
+        // sun it could not see while its ambient said it was enclosed. vSky 1 is 1.0 either way, so a sunlit field is
+        // bit-identical; one 4-bit step of sky reads 0.22 against the old 0.17-0.30; vSky 0 is now exactly 0.
+        '#include <aomap_fragment>\nreflectedLight.directDiffuse *= pow(clamp(vSky,0.0,1.0), uSkyCurve.y);\n'+
         // ---- CLOUDS BLOCKING THE SUN (Ben's note 7) ----
         // Multiplying directDiffuse at the same point vSky already scales it, exactly as the plan specifies: a cloud is an
         // occluder of the KEY light and nothing else, so ambient, block light and the sky term are all untouched and a shaded
@@ -5947,9 +6032,31 @@ scene.add(nvLight); scene.add(nvLight.target);
 // and the pool keeps `fl` (the flame's own curve, per-emitter seed) and `edge` (the fade that stops a lamp popping in at the pool's
 // range limit). Those describe how a light behaves, not how much light it is.
 const EL_DECAY = 1.3;
-const _EL_STRONG = { i:60, d:34, c:0xff9838 }, _EL_MID = { i:46, d:27, c:0xff6a22 }, _EL_DIM = { i:18, d:12, c:0xff6a22 };
-// Returns one of three shared objects, never a new one: this is called for every pool slot every frame.
-function emitterLight(lvl){ return (lvl>=15) ? _EL_STRONG : (lvl<=10) ? _EL_DIM : _EL_MID; }
+// ---- AND A LIGHT IS ONE COLOUR IN EVERY SYSTEM THAT DRAWS IT (Ben 08-06: "tinted lights should reflect their colour") ----
+// The level tiers below say how MUCH light an emitter is; they never said what colour it is, and the hard-coded warm hex on
+// each tier is why. The baked block-light volume has carried a per-block tint (LIGHT_PAL, `tint:` on the block def) since the
+// coloured-light work, so a crimson shrine torch already floods its own alcove red — and then this table lit every prop,
+// animal, creature and player standing in that alcove plain orange, because the dynamic pool and the hand both came through
+// here. The two halves of the same lamp disagreed.
+// KEYED ON (TIER, TINT), PRECOMPUTED, NEVER ALLOCATED: this is read for every pool slot every frame, so the nine
+// combinations are built once at boot and the function returns a shared object exactly as it always did.
+// TINT 0 KEEPS ITS EXACT HEXES, and that is deliberate rather than lazy. Every torch, lantern, candle, campfire and fire in
+// the game is tint 0, and those two numbers are what four rounds of night tuning were signed off against; deriving them from
+// LIGHT_PAL[0] instead would land on (255,138,57) against (255,152,56) and move every warm light in the world to answer a
+// report about the red ones. The tiers also differ from each other on purpose — a level-15 lamp reads whiter than a candle,
+// which is what a hotter flame does — and that shape is kept per tint.
+const _EL_TINT_HEX = [
+  null,        // 0 warm — uses the per-tier hexes below unchanged
+  [0xff2919, 0xff2010, 0xe01808],   // 1 crimson: LIGHT_PAL[1] (1.00,0.16,0.10) as a hex, tier-shaded the same way warm is
+  [0xd1e6ff, 0xc2dcff, 0xa8c8f0],   // 2 cold white: LIGHT_PAL[2] (0.82,0.90,1.00) — the industrial hanging lights
+];
+const _EL_BASE = [ { i:60, d:34, c:0xff9838 }, { i:46, d:27, c:0xff6a22 }, { i:18, d:12, c:0xff6a22 } ];   // strong / mid / dim
+const _EL = _EL_BASE.map((b,tier)=> LIGHT_PAL.map((_,tint)=> ({ i:b.i, d:b.d, c: tint===0 ? b.c : (_EL_TINT_HEX[tint]||[b.c,b.c,b.c])[tier] })));
+// Returns one of nine shared objects, never a new one: this is called for every pool slot every frame.
+// An out-of-range tint falls back to warm rather than throwing — a block def is allowed to name a palette entry that a later
+// edit removes, and a missing colour must not be able to put a light out.
+function emitterLight(lvl, tint){ const tier = (lvl>=15) ? 0 : (lvl<=10) ? 2 : 1;
+  const row=_EL[tier]; return row[(tint>=0 && tint<row.length) ? tint : 0]; }
 const LIGHT_POOL = 16;   // dynamic warm-light pool: the nearest placed torches/lanterns/candles are lit (the "baked" volume wasn't lighting spawned lights — dungeon/structures went dark)
 let _hwLightSlot = -1;            // index into pointPool reserved for the Horrific Wretch's eye glow, or -1
 const _lampV = new THREE.Vector3();   // scratch for a swinging lamp's bulb position — this is read inside the per-frame light loop
@@ -5991,6 +6098,43 @@ function applyOverworldShadowLights(){
 applyOverworldShadowLights();
 let _heldST=0;
 const heldLight = new THREE.PointLight(0xffb060, 0, 14, 2); scene.add(heldLight);   // torch/lantern in hand — NO shadow (baked world handles occlusion; the hand light is a soft personal glow)
+// ---- THE FLASHLIGHT (Ben 08-06: "adding a flashlight item, which projects directional light, not just volumetric light") ----
+// The only DIRECTIONAL light the player can carry, and the only SpotLight in the game.
+//
+// RESIDENT FROM BOOT, INTENSITY 0 WHEN OFF, AND THIS IS NOT A STYLE CHOICE. three keys every lit program on the light
+// COUNTS — numPointLights, numSpotLights — so a SpotLight added when a player picks one up would be a new shader variant
+// for all 225 materials in the game and a 50-300 ms hitch at the worst possible moment, exactly as the point-light pool
+// above records. Created here, before a frame is drawn, it costs one variant once and never moves again. Do not make this
+// conditional on owning a flashlight, and do not toggle `.visible`.
+// DECAY 2 IS TRUE INVERSE SQUARE, and it is the one light in the game entitled to it. The torch pool runs decay 1.3
+// because it is standing in for a 15-step flood that is not a physical falloff; a flashlight is a real reflector throwing
+// a real beam, so its falloff is the physical one and its reach is long enough that the difference is visible.
+// NO SHADOW MAP. A spot shadow is one more render of the scene every frame from a light that swings with the mouse, i.e.
+// it can never be cached on a cadence the way the sun's and the torch caster's both are (SHADOW_EVERY / OW_SHADOW_EVERY).
+// The world's own occlusion still applies through the baked volume; what is given up is the beam being interrupted by a
+// prop, and that is the cheapest thing on this list to give up.
+const FLASH_RANGE = 46, FLASH_ANGLE = 0.42;   // ~24 degrees off axis: a 48-degree beam, which is a hand torch rather than a searchlight
+const flashLight = new THREE.SpotLight(0xeef4ff, 0, FLASH_RANGE, FLASH_ANGLE, 0.45, 2);
+flashLight.castShadow = false; flashLight.position.set(0,-999,0); flashLight.target.position.set(0,-999,-1);
+scene.add(flashLight); scene.add(flashLight.target);
+let _flashOn = false;   // the switch; the item only matters while it is in a hand (see updateFlashlight)
+// The lamp itself: one model for the hotbar icon, the held viewmodel, a peer's hand and the dropped item, which is the
+// rule every other item in here follows (see itemModel). Built from four primitives so it reads at icon size — a body,
+// a stepped reflector head, a knurled grip band, and a lens that is EMISSIVE rather than lit, so the glass stays bright
+// in the dark room the thing exists for. The lens does not switch off with the beam on purpose: an unlit glass disc at
+// icon size is indistinguishable from a pipe.
+function buildFlashlight(){
+  const g=new THREE.Group();
+  const body=new THREE.Mesh(new THREE.CylinderGeometry(0.052,0.046,0.30,12), new THREE.MeshPhongMaterial({color:0x2b2f36, shininess:38, specular:0x555a63}));
+  body.rotation.x=Math.PI/2; g.add(body);
+  const grip=new THREE.Mesh(new THREE.CylinderGeometry(0.056,0.056,0.09,12), new THREE.MeshPhongMaterial({color:0x14161a, shininess:6}));
+  grip.rotation.x=Math.PI/2; grip.position.z=0.03; g.add(grip);
+  const head=new THREE.Mesh(new THREE.CylinderGeometry(0.082,0.056,0.10,14), new THREE.MeshPhongMaterial({color:0x9aa0aa, shininess:70, specular:0x8a9099}));
+  head.rotation.x=Math.PI/2; head.position.z=-0.19; g.add(head);
+  const lens=new THREE.Mesh(new THREE.CircleGeometry(0.074,14), new THREE.MeshBasicMaterial({color:0xdfeaff}));
+  lens.position.z=-0.241; lens.rotation.y=Math.PI; g.add(lens);   // faces -z, the viewmodel convention every item model in here is authored to
+  return g;
+}
 // GLOW POOL — the ONLY dynamic world-glow lights (cook fires, glowing drops, lair hall/crypt). Fixed
 // count, resident from boot, driven by intensity/position only: adding/removing/visible-toggling a
 // light changes the shader's light count and RECOMPILES every lit material (a 50-300ms hitch, and the
@@ -7395,7 +7539,12 @@ function buildModelBlocks(c,g){
       // those recomputations that works until someone moves a flame by a tenth of a block. An open fire throws embers,
       // a lantern and a candle are enclosed and do not; 2 is a fire you could cook on.
       const emberKind = m==='torch' ? 1 : m==='campfire' ? 2 : 0;
-      c.emitters.push([cx0+lx+0.5, ly+fy, cz0+lz+0.5, blockLight[id], emberKind, seed]);
+      // [6] IS THE EMITTER'S COLOUR CLASS, and it rides here for the same reason [4] and [5] do: it is known at this
+      // one point and nowhere downstream. The baked light VOLUME has carried a per-block tint since the coloured-light
+      // work, but the dynamic pool that lights props, animals and the player did not — it keyed colour off the light
+      // LEVEL alone — so a shrine's crimson torch flooded its alcove red through the volume and simultaneously threw
+      // plain orange onto everything standing in it. One emitter, two colours. See emitterLight.
+      c.emitters.push([cx0+lx+0.5, ly+fy, cz0+lz+0.5, blockLight[id], emberKind, seed, blockTint[id]]);
       // BIGGER, AND IT WRAPS THE RAG (Ben 08-05: "torches fire needs to be bigger, and it needs to oncompass the actual wrap on
       // the torch"). The rag rings sit at 0.52 +- 0.066, i.e. 0.465 to 0.586 with a 0.122 tube radius, and the flame was BASED at
       // 0.55 — above most of the cloth it is supposed to be burning. Based at 0.44 it starts under the lowest ring and rises
@@ -7842,7 +7991,7 @@ function assignPointLights(){
         const _fdepth = (e[4]>1) ? 1.15 : (e[4]===1) ? 1.0 : 0.35;
         const fl = 1 + (fireFlicker(t,_fseed)/0.87 - 1)*_fdepth;
         const dist=Math.sqrt(_plCand[i][0]), edge=clamp((34-dist)/12,0,1);
-        const _E=emitterLight(e[3]);
+        const _E=emitterLight(e[3], e[6]);   // e[6] is the emitter's colour class — see the push in buildModelBlocks
         pl.color.setHex(_E.c); pl.intensity=_E.i*fl*edge; pl.distance=_E.d; pl.decay=EL_DECAY;
         // A caster that HAS a light re-renders its cube on the sun's cadence — creatures move, so a one-shot map would
         // freeze their shadow in place. Gated on intensity because a torch faded out at the edge of the pool has nothing
@@ -7865,6 +8014,10 @@ function assignPointLights(){
   // viewmodel, and threw nothing into the world. The brighter of the two hands wins rather than the two summing, because
   // a torch in each hand is still one person holding a torch, and doubling the pool would out-glare a lantern.
   const _lightOf=(s)=>{ const it=s&&ITEMS[s.id]; const b=it?it.block:null; return (b!=null)?(blockLight[b]||0):0; };
+  // THE HAND READS THE SAME TINT THE WORLD DOES. A red_torch in your fist threw the plain warm hex — the pool's colour
+  // came off the light LEVEL and nothing in this path ever asked the block what colour it was — so the one emitter in the
+  // game that is not orange was orange in exactly the place a player looks at it most.
+  const _tintOf=(s)=>{ const it=s&&ITEMS[s.id]; const b=it?it.block:null; return (b!=null)?(blockTint[b]||0):0; };
   const hl=Math.max(_lightOf(inv[selSlot]), _lightOf(armor[EQ_OFF]));
   // AND IT SITS ON THE HAND THAT IS HOLDING IT (Ben: "lanterns create a blurry glow on the offhand on both hands"). The light was
   // at the EYE, exactly between the two viewmodel arms, so both were lit identically and the empty hand glowed as brightly as the
@@ -7880,14 +8033,58 @@ function assignPointLights(){
     if(_tpsAct && _tpsBody && _tpsBody.group.visible) heldLight.position.copy(_tpsHandW);
     else heldLight.position.set(camera.position.x + _m[0]*0.34*_side, camera.position.y-0.15 + _m[1]*0.34*_side, camera.position.z + _m[2]*0.34*_side);   // NO held light while grabbed — it blows out the throat jumpscare with glare
     // THE SAME TABLE THE POOL READS (emitterLight) — see it for why the hand's own numbers are gone. The flicker stays here.
-    const _H=emitterLight(hl); heldLight.color.setHex(_H.c);
+    // The tint of whichever hand actually won the level test above, so a red torch in the offhand is red and a lantern in
+    // the main hand beside it stays warm — the hue must follow the same slot the brightness came from.
+    const _ht = (_offL>_mainL) ? _tintOf(armor[EQ_OFF]) : _tintOf(inv[selSlot]);
+    const _H=emitterLight(hl, _ht); heldLight.color.setHex(_H.c);
     heldLight.intensity=_H.i*(1+Math.sin(t*11)*0.07+Math.sin(t*1.9)*0.05); heldLight.distance=_H.d; heldLight.decay=EL_DECAY;
     heldLight.castShadow=false;
     // the same light as a volume for the atlas. FIFTEEN blocks, matching the block-light volume's own fifteen steps -
     // the PointLight's `distance` is a shorter number that also has decay 2 working on it.
     globalU.uHeld.value.set(heldLight.position.x, heldLight.position.y, heldLight.position.z, 15.0);
-    globalU.uHeldC.value.setHex(_H.c); }
+    // ---- AND THE VOLUME TERM TAKES THE PALETTE, NOT THE HEX (the last place hand and world disagreed) ----
+    // This uniform is a LINEAR multiplier in the atlas shader, sitting beside the placed emitters' own
+    // `3.6 * uChunkTint * pow(_bl,1.45)`, where uChunkTint is set with setRGB straight off LIGHT_PAL. Setting it with
+    // setHex instead runs the value through three's sRGB->linear conversion, so 0xff9838 arrives as (1.00, 0.30, 0.04)
+    // against the placed light's (1.00, 0.54, 0.22) — the same lamp, twice as saturated in your hand as on the wall.
+    // setRGB writes the working (linear) space directly, which is the identical call _chunkMat makes on uChunkTint, so
+    // the two paths are now the same number from the same table.
+    { const _P = LIGHT_PAL[_ht] || LIGHT_PAL[0]; globalU.uHeldC.value.setRGB(_P[0], _P[1], _P[2]); } }
   else { heldLight.intensity=0; heldLight.castShadow=false; globalU.uHeld.value.w=0; }
+  updateFlashlight(t);
+}
+// ---- THE FLASHLIGHT, DRIVEN (Ben 08-06) ----
+// Same two-body treatment the held torch gets and for the same measured reason: the SpotLight shapes walls through N.L
+// and the shader's own cone term lights the floor the beam is skidding along, which N.L cannot.
+// IT AIMS WHERE YOU LOOK, FROM THE HAND. The eye is the honest origin for the DIRECTION — a beam that does not go where
+// the crosshair is reads as broken — but the lamp itself sits at the hand, offset to whichever side is holding it, which
+// is the fix the held torch already carries for "lanterns create a blurry glow on the offhand on both hands".
+// In third person it comes off the body's hand, again matching the torch: on a boom behind the player an eye-origin beam
+// starts three and a half blocks back and lights the player's own head.
+function updateFlashlight(t){
+  const _has = (s)=>{ const it=s&&ITEMS[s.id]; return !!(it&&it.flashlight); };
+  const main=_has(inv[selSlot]), off=_has(armor[EQ_OFF]);
+  const on = _flashOn && (main||off) && !player.grabbed && !player.dead;
+  if(!on){ flashLight.intensity=0; globalU.uFlash.value.w=0; return; }
+  const side = (!main && off) ? -1 : 1;
+  const m=camera.matrixWorld.elements;
+  // Columns of the camera's world matrix: m[0..2] is its X axis (right), m[8..10] its Z axis. three's camera looks down
+  // its own -Z, so the beam direction is -Z, not +Z. Getting that sign wrong is the same class of mistake as the
+  // reflect(+dir) one the water shader paid for twice — it points the cone backwards and the term reads as simply absent.
+  const dx=-m[8], dy=-m[9], dz=-m[10];
+  let px, py, pz;
+  if(_tpsAct && _tpsBody && _tpsBody.group.visible){ px=_tpsHandW.x; py=_tpsHandW.y; pz=_tpsHandW.z; }
+  else { px=camera.position.x + m[0]*0.30*side; py=camera.position.y-0.18 + m[1]*0.30*side; pz=camera.position.z + m[2]*0.30*side; }
+  flashLight.position.set(px,py,pz);
+  flashLight.target.position.set(px+dx*8, py+dy*8, pz+dz*8);
+  flashLight.target.updateMatrixWorld();
+  // A FILAMENT TORCH IS NOT A STEADY SOURCE, but it is nothing like a flame either: the pool's 12% two-note flicker would
+  // read as a fault in a battery lamp. This is a 1.5% wobble, which is the amount that stops a static beam looking painted.
+  flashLight.intensity = 150 * (1 + Math.sin(t*23.0)*0.015);
+  globalU.uFlash.value.set(px,py,pz, FLASH_RANGE);
+  // cos of the OUTER half angle. The shader's smoothstep runs from here toward the axis, so this one number carries both
+  // the cone's width and the edge the penumbra is measured against.
+  globalU.uFlashD.value.set(dx,dy,dz, Math.cos(FLASH_ANGLE));
 }
 function disposeChunkMeshes(c){
   if(!c.group) return;
@@ -8858,6 +9055,10 @@ defItem('iron_bars',{name:'Iron Bars',block:BID.iron_bars,max:64,icon:{t:'bars',
 defItem('diamond',{name:'Diamond',icon:{t:'gem',c:'#5be0d4'}});
 defItem('metal_spring',{name:'Metal Spring',max:16,icon:{t:'coil',c:'#c9ccd2'}});   // forged from iron; the AR-15's guts
 defItem('flint',{name:'Flint',icon:{t:'shard',c:'#3b3b46'}});
+// THE FLASHLIGHT (Ben 08-06). max 1 because it is a tool you own rather than a stack you carry, and it holds no state of
+// its own — the switch is `_flashOn`, one boolean on the player, so putting the lamp down and picking it back up cannot
+// desync from the light. Right-click toggles it (see doPlace).
+defItem('flashlight',{name:'Flashlight',max:1,flashlight:true,icon:{t:'bar',c:'#9aa0aa'}});
 // A HANDFUL OF STONE OFF THE GROUND (Ben 08-05: "when pebbles are broken they give a new stone item, which is a stone rock. four of
 // it can make cobblestone"). Its own item rather than dropping cobble directly: four rocks to a block is the point — a pebble
 // cluster is not a building block, it is the raw material for one.
@@ -9396,6 +9597,10 @@ shapeless('planks',4,['log']);
 shapeless('stick',4,['planks','planks']);
 shaped('table',1,['PP','PP'],{P:'planks'});
 shaped('torch',4,['C','S'],{C:'coal',S:'stick'});
+// A reflector, a lens and a body, around a cell. Iron for the barrel and the mirror, glass for the front, and the
+// diamond is the cell — the game has no battery item and inventing one for a single recipe is a worse answer than
+// spending the one material that already means "a thing that holds power" here.
+shaped('flashlight',1,['IGI','IDI',' I '],{I:'iron_ingot',G:'glass',D:'diamond'});
 shaped('chest',1,['PPP','P P','PPP'],{P:'planks'});
 shaped('backpack',1,['L L','LSL','LLL'],{L:'leather',S:'string'});   // six hides and a drawstring — the same shape as the chest, softened
 shaped('shield',1,['PIP','PPP',' P '],{P:'planks',I:'iron_ingot'});   // planks round an iron boss, tapering to a point
@@ -10653,6 +10858,12 @@ function doPlace(){ if(player.grabbed)return;   // no right-click interactions w
   { const hs=heldSlot(); if(hs&&ITEMS[hs.id]){ const iw=ITEMS[hs.id];
     if(iw.book){ (iw.healBook?turnHealPage:turnRecipePage)(); return; }                             // field guide / healing manual → flip to the next page
     if(iw.bible){ readBible(); return; }                                                           // the Bible → open / turn a page (sneak = back)
+    // THE FLASHLIGHT SWITCH. The state is on the player, not on the item stack, so swapping the lamp between hands or
+    // dropping and retrieving it cannot leave the light on with nothing holding it — updateFlashlight re-checks both
+    // hands every frame and the beam simply goes out.
+    if(iw.flashlight){ _flashOn=!_flashOn; flashName(_flashOn?'flashlight on':'flashlight off');
+      if(AC){ const p=panAt(player.pos.x,player.pos.y+1.5,player.pos.z); tone(p,{f:_flashOn?1400:900,type:'square',dur:0.035,vol:0.10,to:_flashOn?1900:600}); }   // a switch clicks
+      return; }
     if(iw.loot){ for(const [lid,ln] of iw.loot){ const left=invAdd(lid,ln); if(left>0 && typeof spawnDrop==='function') spawnDrop(lid,left, player.pos.x, player.pos.y+0.6, player.pos.z); }   // spill the bag; overflow drops at your feet
       hs.n--; if(hs.n<=0)inv[selSlot]=null; refreshHotbar(); flashName('the bag spills open'); if(AC)burst(panAt(player.pos.x,player.pos.y+0.5,player.pos.z),0.3,0.4,300,0.5,-120); return; }
     if(iw.atlas){ if(typeof useAtlas==='function' && useAtlas()){ hs.n--; if(hs.n<=0)inv[selSlot]=null; refreshHotbar(); } return; }   // the Atlas consumes itself only if it actually reverts (useAtlas returns true)
@@ -16527,6 +16738,7 @@ function itemModel(id){ const it=ITEMS[id];
   if(it&&it.syringe) return buildSyringe();   // 3D syringe (drop + inventory 3D icon + held)
   if(it&&it.ghost) return buildGhost();   // the Ghost renders as its full craft (drop + 3D inventory icon)
   if(it&&it.nvg) return buildNVG();        // night-vision goggles model (drop + 3D icon + held)
+  if(it&&it.flashlight) return buildFlashlight();   // one model for the icon, both hands, a peer's hand and the ground drop
   if(it&&it.book) return it.healBook?buildHealBook():buildBook();
   if(it&&it.bible) return buildBible();
   if(id==='monk_cross'){ const c=buildMonkCross(0.34,0.062,0.026); c.rotation.set(0,0.5,0); return c; }   // the monk's own cross, at a size that reads in the hand
@@ -31920,6 +32132,15 @@ window.__hc={
   // A/B off; lo/hi are on the FACE'S LIGHT LEVEL, max(blockLight, bakedSky*day, deliveredDirect, emissive), 0..1 — not on the
   // pixel, which is albedo-weighted and left bright sand coloured at midnight.
   // These write a shared Float32Array, so one call moves every material and every per-chunk clone at once with no recompile.
+  // QA: the flashlight, without a hand or an inventory. `on` flips the switch; the readout is what the shader is
+  // actually being handed, because a beam that is pointing the wrong way and a beam that is off look identical from
+  // outside and the direction's sign is the one thing here with real history behind it (see updateFlashlight).
+  flashlight(o){ try{ if(o&&o.on!=null) _flashOn=!!o.on;
+      const F=globalU.uFlash.value, D=globalU.uFlashD.value;
+      return { on:_flashOn, lit:flashLight.intensity>0, intensity:+flashLight.intensity.toFixed(2),
+               pos:[+F.x.toFixed(2),+F.y.toFixed(2),+F.z.toFixed(2)], range:+F.w.toFixed(1),
+               dir:[+D.x.toFixed(3),+D.y.toFixed(3),+D.z.toFixed(3)], cosOuter:+D.w.toFixed(4),
+               angle:+flashLight.angle.toFixed(3), decay:flashLight.decay, hasItem:!!(ITEMS.flashlight) }; }catch(e){ return {err:String(e.message||e)}; } },
   scot(o){ try{ if(o&&o.amt!=null) _scotG[0]=+o.amt; if(o&&o.lo!=null) _scotG[1]=+o.lo; if(o&&o.hi!=null) _scotG[2]=+o.hi;
       if(o&&o.on!=null) _scotG[0]=o.on?1:0;
       // litK: how much DELIVERED direct light counts as a light source touching the surface. 0 is the pre-08-05-late gate,
