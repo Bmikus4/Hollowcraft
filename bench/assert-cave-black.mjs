@@ -170,16 +170,27 @@ function stat(file,c){
     check('a lantern still lights the cave it stands in', lit.lum > dark.lum+8, `lum ${dark.lum} -> ${lit.lum}`);
     check('and what it lights is coloured, not descended', lit.sat > 0.30, `sat ${lit.sat}`);
 
-    // ---- 4. THE OPEN NIGHT FIELD DOES NOT DESCEND ------------------------------------------------------------------------
-    // Ben has asked four times for a genuinely black night and once, on 08-05, said "everything is very dark". Those pull in
-    // opposite directions, and the resolution is that this change is about ENCLOSURE, not about night: vSky is ~1 on open ground
-    // at any hour, so the descent term is multiplied by zero there and the night Ben is already looking at cannot move.
+    // ---- 4. THE OPEN NIGHT FIELD *DOES* DESCEND, AND THAT IS THE RULE NOW ------------------------------------------------
+    // THIS CHECK USED TO ASSERT THE OPPOSITE AND IT WAS RIGHT WHEN IT WAS WRITTEN. The rule then was "the descent is about
+    // ENCLOSURE, not about night": vSky is ~1 on open ground, so the term was multiplied out there and an open field could not move.
+    // `d1edd46` REVERSED THAT ON BEN'S EXPLICIT INSTRUCTION — "I just want extremely black/washed nights", "some places should be
+    // pitch black" — by multiplying the sky term by the day factor, so sky protects a face from descending only while the sky is a
+    // LIGHT. Open ground, a covered wood and a cave now descend together at night. He has signed the result off twice since,
+    // most recently 08-05: "keep the night black", and the unlit-night-ground value of 2 of 255 is APPROVED, not a bug.
+    // So the old assertion tested a world Ben has rejected, and it read red (min 26 vs 2, lum 28.86 vs 4.86) while the game was
+    // correct. A suite that is green about the wrong world is worse than one that is red about the right one, and a red nobody can
+    // fix is a red everybody learns to ignore. It is INVERTED rather than deleted, because the number it watches still matters:
+    // if open night ground ever stops descending, that is `d1edd46` being undone by accident and this is what would catch it.
+    // DO NOT "FIX" THIS BACK. The direction of this check is a decision of Ben's, not a property of the code.
     await page.evaluate(`__hc.tpAt(${SX}+0.5, __hc.groundY(${SX},${SZ}+18)+3.0, ${SZ}+18); __hc.cam({yaw:0, pitch:-0.42});`);
     for(let i=0;i<20;i++){ const f=await page.evaluate(`__hc.fill()`); if(f&&f.meshed>=f.want) break; await sleep(400); }
     await sleep(1400);
     const F=await ab('field-night',0.75);
-    check('open night ground is untouched by the descent', Math.abs(F.old.min-F.now.min)<=1.0 && Math.abs(F.old.lum-F.now.lum)<=2.0,
-      `min ${F.old.min} vs ${F.now.min}, lum ${F.old.lum} vs ${F.now.lum}`);
+    // The thresholds are the measured behaviour with a wide margin, not a tight fit: 26 -> 2 on min and 28.15 -> 4.86 on luma at the
+    // time of writing. Anything that still halves both is the descent working; the failure this guards is it NOT firing at all.
+    check('open night ground descends, which is the black night Ben approved',
+      F.now.min < F.old.min*0.5 && F.now.lum < F.old.lum*0.5,
+      `min ${F.old.min} -> ${F.now.min}, lum ${F.old.lum} -> ${F.now.lum} (luma-preserving vs descending)`);
 
     // ---- 5. THE PASS IS GLOBAL: A CHEST IS NOT AN ATLAS MATERIAL --------------------------------------------------------
     // Ben: "any pass you do visually should be a global thing", and the fault he named — "it doesnt even work for" roof tiles,
