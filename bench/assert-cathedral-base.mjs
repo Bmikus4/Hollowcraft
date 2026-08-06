@@ -52,9 +52,13 @@ let fails=0; const ok=(n,c,g)=>{ if(!c)fails++; console.log(`  ${c?'ok  ':'FAIL'
     // COBBLESTONE, NOT GRASS (Ben 08-05: "the cathedrals base needs to be cobblestone not grass"). The old base was a paved pad with
     // a ten-block dead-flat GRASS shore laid over its skirt, and from the ground a mown terrace and a paved one both read as base.
     ok('the base is cobble, with no grass on it', r.grassOnApron===0 && r.apronCobble>200, {grassOnApron:r.grassOnApron, apronCobble:r.apronCobble});
-    // …AND SMALLER, FITTING CLOSER (same ask). The apron is now every column within CATH_PAD of the CRUCIFORM outline rather than of
-    // its bounding box, so the cross's four empty corners are ground again. Masonry more than one ring past the apron is the fault.
-    ok('…and no masonry reaches past the apron', r.wideMasonry===0, {wideMasonry:r.wideMasonry, pad:r.pad});
+    // …AND SMALLER, FITTING CLOSER (same ask). The apron is every column within CATH_PAD of the CRUCIFORM outline rather than of its
+    // bounding box, so the cross's four empty corners are ground again.
+    // THE LINE MOVED OUT TO THE FEATHER'S EDGE, on Ben's own later instruction (08-05: "replace the cathedrals foundation with
+    // cobblestone (its grass rn)"). This asserted wideMasonry===0 — no masonry within three rings past the apron — which is now the
+    // paving he asked for, so it counts 260 by design. What must still be zero is masonry OUTSIDE the feather altogether: that is the
+    // base sprawling into untouched land, which is what "wayy too massive" meant and is still the fault.
+    ok('…and no masonry reaches past the foundation', r.beyondMasonry===0, {beyondMasonry:r.beyondMasonry, where:r.beyondSample, paved:r.wideMasonry, pad:r.pad, feather:r.feather});
     // NO TREES ON THE BASE, TREES AROUND IT.
     ok('nothing grows on the base', r.treesOnPad===0, {treesOnPad:r.treesOnPad});
     ok('…and the wood still surrounds it', r.treeColumnsAround>40, {treeColumnsAround:r.treeColumnsAround});
