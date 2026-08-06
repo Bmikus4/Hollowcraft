@@ -65,8 +65,13 @@ function luma(file,x0,y0,w,h){ const P=decodePNG(fs.readFileSync(file)); const c
     if(site.err) throw new Error(site.err);
     console.log('site ' + JSON.stringify(site));
     // A 4x4x4 STONE BOX. Its -x wall and its -z wall are the pair: same block, same height, same hour, one frame.
+    // TWO DIFFERENT BLOCKS, so each wall is a POPULATION OF PIXELS and not a rectangle: stone everywhere, sand on the
+    // -z wall. Crops could not separate them - removing the -z wall moved the "-x" crop by 58 against the "-z" crop's 85
+    // - so every earlier number here mixed the two walls together. Albedo differs between sand and stone, which does not
+    // matter: each wall is compared against ITSELF across the day, so its own albedo cancels out of the shape.
     await page.evaluate(`(()=>{ for(let dx=0;dx<4;dx++) for(let dz=0;dz<4;dz++) for(let dy=1;dy<=4;dy++)
-        __hc.setBlockAt(${site.x}+dx, ${site.h}+dy, ${site.z}+dz, 'stone'); })()`);
+        __hc.setBlockAt(${site.x}+dx, ${site.h}+dy, ${site.z}+dz, 'stone');
+      for(let dx=0;dx<4;dx++) for(let dy=1;dy<=4;dy++) __hc.setBlockAt(${site.x}+dx, ${site.h}+dy, ${site.z}, 'sand'); })()`);
     await sleep(3000);
     fs.mkdirSync(path.join(ROOT,'bench','results'),{recursive:true});
     // Stand off the box's -x/-z corner, level with its middle, so its -x wall fills the left of the frame and its -z wall
@@ -90,10 +95,18 @@ function luma(file,x0,y0,w,h){ const P=decodePNG(fs.readFileSync(file)); const c
         for(let y=140;y<280;y++) for(let x=230;x<560;x++){ const i=(y*P.w+x)*ch, r=P.data[i], gg=P.data[i+1], b=P.data[i+2];
           n++; const mx2=Math.max(r,gg,b), mn=Math.min(r,gg,b); if(mx2>18 && mx2-mn<12) g++; }
         return +(g/n).toFixed(3); })();
-      const mx=luma(f, 250,150, 120,120), mz=luma(f, 430,150, 120,120);
-      rows.push({t, negX:mx, negZ:mz, greyShare:grey});
+      // GREY IS THE -x WALL (stone), WARM IS THE -z WALL (sand). One pass over the box's part of the frame.
+      const pops=(()=>{ const P=decodePNG(fs.readFileSync(f)); const ch=P.ch; let gs=0,gn=0,ws=0,wn=0;
+        for(let y=120;y<300;y++) for(let x=200;x<600;x++){ const i=(y*P.w+x)*ch, r=P.data[i], g=P.data[i+1], b=P.data[i+2];
+          const L=(r+g+b)/3, mx2=Math.max(r,g,b), mn=Math.min(r,g,b);
+          if(mx2<12) continue;
+          if(mx2-mn<10){ gs+=L; gn++; }                       // neutral: stone
+          else if(r>=g && g>b && r-b>18){ ws+=L; wn++; } }    // warm: sand
+        return { stone: gn?+(gs/gn).toFixed(2):null, sand: wn?+(ws/wn).toFixed(2):null, stonePx:gn, sandPx:wn }; })();
+      const mx=pops.stone, mz=pops.sand;
+      rows.push({t, negX:mx, negZ:mz, greyShare:grey, px:[pops.stonePx, pops.sandPx]});
       if(grey<0.15) console.log('    (only '+(100*grey).toFixed(1)+'% of the crop area is stone-grey — the box is not in shot)');
-      console.log('  t='+t+'   -x wall '+mx+'   -z wall '+mz+'   stone-grey share of the crop area '+grey);
+      console.log('  t='+t+'   -x wall (stone) '+mx+'   -z wall (sand) '+mz+'   px '+JSON.stringify([pops.stonePx,pops.sandPx]));
     }
     // WHICH HALF OF THE FRAME IS WHICH WALL, PROVED BY CONSTRUCTION. Reasoning about screen handedness from a view
     // direction is exactly the kind of thing that is wrong half the time, and a swapped label would invert every
