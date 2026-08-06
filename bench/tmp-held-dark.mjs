@@ -11,7 +11,7 @@
 //     14-block range. Then the fault is the light, not the wash, and "random" is what per-face N.L looks like in a cave.
 // Counting those two populations IS the answer to his report, and neither is a flag.
 // node bench/tmp-held-dark.mjs
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import http from 'node:http';
 import path from 'node:path';
@@ -25,7 +25,16 @@ function waitHttp(u,t=15000){ return new Promise((res,rej)=>{ const t0=Date.now(
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const px=f=>decodePNG(fs.readFileSync(f));
 
+// `node bench/tmp-held-dark.mjs head` serves a copy of HEAD instead of the working file. Four sessions share
+// index.html, so it is regularly mid-write and will not boot - it was `let _cine` declared twice while this was being
+// run. HEAD carries every shipped change, so measuring against it is honest, and it beats waiting or - far worse -
+// "fixing" another session's half-written work.
+const PAGE = process.argv[2]==='head' ? '_head.html' : 'index.html';
 (async()=>{
+  if(PAGE==='_head.html'){
+    fs.writeFileSync(path.join(ROOT,'_head.html'), execSync('git show HEAD:index.html',{cwd:ROOT,maxBuffer:64*1024*1024}));
+    console.log('serving HEAD, not the working tree');
+  }
   const port=await freePort();
   const server=spawn(process.execPath,[path.join(ROOT,'mp-server.js')],{cwd:ROOT,env:{...process.env,MP_PORT:String(port),MP_DISC:String(port+1)},stdio:'ignore'});
   const browser=await chromium.launch({ executablePath:'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', headless:true,
@@ -62,7 +71,7 @@ const px=f=>decodePNG(fs.readFileSync(f));
   const run=async(dbg,tag)=>{
     const page=await (await browser.newContext({viewport:{width:800,height:450}})).newPage();
     page.on('pageerror',e=>console.log('  PAGEERROR:',String(e.message||e).slice(0,200)));
-    await page.goto('http://127.0.0.1:'+port+'/index.html?debug=1'+(dbg?'&dbg=lit':''),{waitUntil:'load',timeout:120000});
+    await page.goto('http://127.0.0.1:'+port+'/'+PAGE+'?debug=1'+(dbg?'&dbg=lit':''),{waitUntil:'load',timeout:120000});
     await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null,{timeout:180000});
     await page.evaluate('__hc.setTime(0.25)');
     await sleep(3000);
@@ -75,16 +84,27 @@ const px=f=>decodePNG(fs.readFileSync(f));
     await sleep(1500);
     const held=await page.evaluate('__hc.hold("torch")');   // returns {held, slot}: the earlier version read st().hold, which does not exist
     await sleep(1200);
-    await page.evaluate('__hc.look('+(site.x+Math.max(2,site.far))+','+(site.y+1)+','+(site.z+0.5)+')');
-    await sleep(800);
-    await page.evaluate('__hc.look('+(site.x+Math.max(2,site.far))+','+(site.y+1)+','+(site.z+0.5)+')');
-    await page.evaluate('__hc.setTime(0.25)'); await sleep(500);
-    const f=path.join(ROOT,'bench','results','helddark-'+tag+'.png');
-    await page.screenshot({path:f});
+    // FOUR WALLS, EACH A COUPLE OF BLOCKS AWAY. A long sightline down a cave is measured THROUGH the fog that filled
+    // every earlier frame (mean luma 135.8 nineteen blocks underground); fog is a distance effect, so a wall two blocks
+    // from the eye is measured through almost none of it. Four directions because the fault is reported as RANDOM
+    // blocks, and per-face N.L against a light at the player is exactly what varies with orientation.
+    const files=[];
+    for(const d of [[1,0],[-1,0],[0,1],[0,-1]]){
+      const k=await page.evaluate('(()=>{ let k=1; while(k<7 && __hc.blockAt('+site.x+'+'+d[0]+'*k, '+(site.y+1)+', '+site.z+'+'+d[1]+'*k)===0) k++; return k; })()');
+      const tx=site.x+0.5+d[0]*k, tz=site.z+0.5+d[1]*k;
+      await page.evaluate('__hc.look('+tx+','+(site.y+1)+','+tz+')');
+      await sleep(700);
+      await page.evaluate('__hc.look('+tx+','+(site.y+1)+','+tz+')');
+      await page.evaluate('__hc.setTime(0.25)'); await sleep(400);
+      const ff=path.join(ROOT,'bench','results','helddark-'+tag+'-'+d[0]+'_'+d[1]+'.png');
+      await page.screenshot({path:ff});
+      files.push({dir:d, file:ff, dist:k});
+    }
+    const f=files[0].file;
     const where=await page.evaluate('(()=>{const p=__hc.probe(); return {y:+p.y.toFixed(1), at:__hc.blockAt(Math.floor(p.x),Math.floor(p.y)+1,Math.floor(p.z))};})()');
     if(Math.abs(where.y-site.y)>1.5) console.log('  *** THE PLAYER FELL out of the cave: asked for y '+site.y+', ended at '+where.y+' ***');
     await page.context().close();
-    return { f, site, held, dug, where };
+    return { f, files, site, held, dug, where };
   };
   try{
     await waitHttp('http://127.0.0.1:'+port+'/index.html');
@@ -95,6 +115,20 @@ const px=f=>decodePNG(fs.readFileSync(f));
                 '  held ' + JSON.stringify(norm.held) + '  camera ' + JSON.stringify(norm.where));
     if(!norm.held || norm.held.held!=='torch') console.log('  *** NO TORCH IN HAND — every number below is void ***');
     if(norm.dug && norm.dug.air!==0) console.log('  *** THE CORRIDOR IS NOT AIR — the dig did not take ***');
+    // per WALL, since the report is that only some blocks fail
+    for(let w=0; w<norm.files.length; w++){
+      const A2=px(norm.files[w].file), B2=px(lit.files[w].file), ch2=A2.ch;
+      let dB=0, dL=0, br=0, m=0, sum=0;
+      for(let y=150;y<300;y++) for(let x=300;x<500;x++){   // frame centre only: the wall being aimed at
+        const i=(y*A2.w+x)*ch2;
+        const a=(A2.data[i]+A2.data[i+1]+A2.data[i+2])/3, b=(B2.data[i]+B2.data[i+1]+B2.data[i+2])/3;
+        m++; sum+=a;
+        if(a<24 && b>=40) dL++; else if(a<24) dB++; else br++;
+      }
+      const d=norm.files[w].dir;
+      console.log('  wall '+(d[0]>0?'+x':d[0]<0?'-x':d[1]>0?'+z':'-z')+' at '+norm.files[w].dist+' blocks   mean '+(sum/m).toFixed(1)+
+        '   darkButLit '+(100*dL/m).toFixed(2)+'%   darkBoth '+(100*dB/m).toFixed(2)+'%   lit '+(100*br/m).toFixed(2)+'%');
+    }
     const A=px(norm.f), B=px(lit.f), ch=A.ch;
     let darkBoth=0, darkButLit=0, brightBoth=0, n=0;
     for(let y=60;y<380;y++) for(let x=100;x<700;x++){
