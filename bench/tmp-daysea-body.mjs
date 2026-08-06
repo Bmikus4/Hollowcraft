@@ -28,10 +28,21 @@
 // A curve cannot do that. Two populations of pixels can, and only one of them is following uBody. So the question is no longer "how
 // dark is the water" — it is WHICH PIXELS ARE THE OTHER POPULATION, and the shipped value is simply where the two happen to sit far
 // enough apart to read as black beside blue.
-// THE NEXT RUN, and it is a two-line change to this file: split the sea band's histogram in two at luminance 3 and report the MEDIAN
-// OF EACH HALF, per uBody value. If the dark half stays pinned near zero while the bright half tracks uBody, the dark half is not
-// water at all and the next place to look is what else is drawn over the sea (the far disc, kelp, foam) — none of which seaLook
-// touches. `?albedo` and the ?dbg views at this vantage would name it in one frame each.
+// THAT SPLIT WAS RUN ON THESE FRAMES AND IT IS DECISIVE. Median and MAXIMUM of each half of the band:
+//   shipped   dark half n=33304  med 0.00  MAX 0.00   |   light half n=33896  med 42.81
+//   zero      dark half n=44043  med 1.07  max 2.93   |   light half n=23157  med  5.44
+//   darker    dark half n=0                            |   light half n=67200  med 22.77
+//   1.5x      dark half n=32     med 0.00  MAX 0.00   |   light half n=67168  med 54.12
+//   3x/bright dark half n=0                            |   light half n=67200  med 83.21 / 86.92
+// AT THE SHIPPED VALUE 33,304 PIXELS ARE EXACTLY ZERO — median 0.00 AND maximum 0.00, not 1, not 0.4. Nothing that is shaded lands on
+// exactly zero across 33k pixels; a genuinely dark sea does not (the `zero` row's dark half is 1.07 with a max of 2.93, which is what
+// dim water looks like). These pixels are NOT DARK WATER, they are pixels nothing wrote — a discard, or a NaN, which most drivers
+// resolve to zero. That is also why brighter uBody values "fix" it and why the fix would have been a lie: the population does not
+// brighten, it stops being produced.
+// SO THE FIX IS NOT A FLOOR, AND THE FLOOR I WAS ABOUT TO WRITE WOULD HAVE PAINTED OVER A NaN. The next session should hunt the NaN or
+// the discard: it is value-dependent (shipped triggers it, 0.004,0.015,0.019 does not, 32 pixels survive at 1.5x), which points at an
+// expression that goes non-finite for particular uBody inputs rather than at geometry. NOTE THE TRAP FROM THE LAND-SIDE WORK: a NaN
+// packed through a Math.round or a bit shift arrives as ZERO silently, so search for the value going non-finite, never for NaN itself.
 //
 //   node bench/tmp-daysea-body.mjs
 import { spawn } from 'node:child_process'; import { createServer } from 'node:net';
