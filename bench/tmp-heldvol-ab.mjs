@@ -56,7 +56,12 @@ const FINDCAVE=`(function(){ const P=__hc.probe(); let best=null;
     await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null,{timeout:180000});
     await page.evaluate('__hc.setTime(0.25)');
     await sleep(3000);
-    const site=await page.evaluate(FINDCAVE+'()');
+    // HC_CAVE=x,y,z pins the cave instead of searching. The search returns the BIGGEST chamber, which is not the same
+    // as one that shows the defect: (350,32,28) has no dark pixels in either arm and cannot grade a fix, while
+    // (288,27,12) is where dark y-faces were actually seen. A fixture has to be the place the symptom lives.
+    const site = process.env.HC_CAVE
+      ? (([x,y,z])=>({x:+x,y:+y,z:+z,pinned:true}))(process.env.HC_CAVE.split(','))
+      : await page.evaluate(FINDCAVE+'()');
     if(site.err) throw new Error(site.err);
     await page.evaluate('__hc.tpAt('+(site.x+0.5)+','+site.y+','+(site.z+0.5)+')');
     await sleep(1500);
@@ -65,29 +70,39 @@ const FINDCAVE=`(function(){ const P=__hc.probe(); let best=null;
     // THE FLOOR, not a wall. The mechanism under test says a wall is fine either way - its normal points at the light -
     // and that the gain is on GRAZING faces, so aiming at a wall measures the one surface the fix is not for. The first
     // run of this A/B did exactly that and reported +7 luma on a wall with no dark pixels in either arm.
-    const k=await page.evaluate('(()=>{ let k=1; while(k<9 && __hc.blockAt('+site.x+', '+(site.y+1)+', '+site.z+'-k)===0) k++; return k; })()');
-    const fz=site.z+0.5-Math.max(2,k-1);
-    await page.evaluate('__hc.look('+(site.x+0.5)+','+(site.y-0.6)+','+fz+')');
-    await sleep(700);
-    await page.evaluate('__hc.look('+(site.x+0.5)+','+(site.y-0.6)+','+fz+')');
-    const means=[], darks=[];
-    for(let i=0;i<6;i++){
-      await page.evaluate('__hc.setTime(0.25)'); await sleep(320);
-      const f=path.join(ROOT,'bench','results','heldvol-'+tag+'-'+i+'.png');
-      await page.screenshot({path:f});
-      const st=stat(f); means.push(st.mean); darks.push(st.dark);
+    // SWEEP THE AIMS. One view cannot be assumed to hold the defect: the fixture is whichever view shows dark pixels in
+    // the HEAD arm, and it has to show them on every frame, not on a lucky flicker phase.
+    const AIMS=[];
+    for(const dz of [2,4,6]) for(const dy of [-1.2,-0.6,0.2]) AIMS.push({tag:'z'+dz+'y'+dy, x:site.x+0.5, y:site.y+dy, z:site.z+0.5-dz});
+    const views=[];
+    for(const A of AIMS){
+      await page.evaluate('__hc.look('+A.x+','+A.y+','+A.z+')'); await sleep(500);
+      await page.evaluate('__hc.look('+A.x+','+A.y+','+A.z+')'); await sleep(300);
+      const means=[], darks=[];
+      for(let i=0;i<6;i++){
+        await page.evaluate('__hc.setTime(0.25)'); await sleep(300);
+        const f=path.join(ROOT,'bench','results','heldvol-'+tag+'-'+A.tag+'-'+i+'.png');
+        await page.screenshot({path:f});
+        const st=stat(f); means.push(st.mean); darks.push(st.dark);
+      }
+      views.push({ aim:A.tag, mean:med(means), dark:med(darks), darkMin:+Math.min(...darks).toFixed(2),
+                   spread:+(Math.max(...means)-Math.min(...means)).toFixed(2) });
     }
     await page.context().close();
-    return { site, held, k, mean:med(means), dark:med(darks), spread:+(Math.max(...means)-Math.min(...means)).toFixed(2) };
+    return { site, held, views };
   };
   try{
     await waitHttp('http://127.0.0.1:'+port+'/index.html');
     fs.mkdirSync(path.join(ROOT,'bench','results'),{recursive:true});
     const before=await run('_head.html','head');
     const after =await run('index.html','fix');
-    console.log('cave ' + JSON.stringify(after.site) + '   floor at ' + Math.max(2,after.k-1) + ' blocks   torch ' + JSON.stringify(after.held));
-    console.log('  HEAD (no volume term)   median FLOOR luma ' + before.mean + '   dark ' + before.dark + '%   flicker spread ' + before.spread);
-    console.log('  WITH the volume term    median FLOOR luma ' + after.mean  + '   dark ' + after.dark  + '%   flicker spread ' + after.spread);
-    console.log('  (the placed-torch control on this wall measured 186.6 and 0% dark)');
+    console.log('cave ' + JSON.stringify(after.site) + '   torch ' + JSON.stringify(after.held));
+    console.log('  aim        HEAD mean / dark%   |   ARM2 mean / dark%   (dark% is a median of 6 frames; darkMin is the worst frame)');
+    for(let i=0;i<before.views.length;i++){
+      const b=before.views[i], a=after.views[i];
+      const fixture = b.darkMin>0.3 ? '   <== FIXTURE: shows the defect on every frame' : '';
+      console.log('  '+b.aim.padEnd(9)+'  '+String(b.mean).padStart(7)+' / '+String(b.dark).padStart(5)+'%  |  '+
+                  String(a.mean).padStart(7)+' / '+String(a.dark).padStart(5)+'%   spread '+b.spread+fixture);
+    }
   } finally { await browser.close(); server.kill(); try{ fs.unlinkSync(path.join(ROOT,'_head.html')); }catch(e){} }
 })();
