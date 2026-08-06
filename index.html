@@ -6027,10 +6027,10 @@ const GodrayShader={
   // because a cloud is painted on the sky dome and writes no depth. The inverse view-projection turns a sample's UV
   // back into a world direction, and the same field the sky draws its clouds with then says how much light gets
   // through along it.
-  uniforms:{ tDiffuse:{value:null}, tDepth:{value:null}, uHasDepth:{value:0}, uSun:{value:new THREE.Vector2(0.5,0.5)}, uActive:{value:0}, uStrength:{value:0.5}, uSeedMin:{value:0.16}, uTint:{value:new THREE.Color(1.0,0.86,0.58)},
+  uniforms:{ tDiffuse:{value:null}, tDepth:{value:null}, uHasDepth:{value:0}, uSun:{value:new THREE.Vector2(0.5,0.5)}, uActive:{value:0}, uStrength:{value:0.5}, uSeedMin:{value:0.16}, uSeedEmit:{value:1}, uTint:{value:new THREE.Color(1.0,0.86,0.58)},
              uInvVP:{value:new THREE.Matrix4()}, uTime:{value:0}, uCloud:{value:1.6}, uCloudOcc:{value:1} },
   vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
-  fragmentShader:`varying vec2 vUv; uniform sampler2D tDiffuse, tDepth; uniform vec2 uSun; uniform float uActive,uStrength,uSeedMin,uHasDepth,uTime,uCloud,uCloudOcc; uniform vec3 uTint; uniform mat4 uInvVP;
+  fragmentShader:`varying vec2 vUv; uniform sampler2D tDiffuse, tDepth; uniform vec2 uSun; uniform float uActive,uStrength,uSeedMin,uSeedEmit,uHasDepth,uTime,uCloud,uCloudOcc; uniform vec3 uTint; uniform mat4 uInvVP;
     // The sky's own cloud field, copied rather than approximated. If this drifts from the sky shader's the shafts appear
     // where there is no gap, which is worse than no shafts — three octaves instead of five because this runs 16 times a
     // pixel and the small-scale detail decides an edge, not a beam.
@@ -6067,7 +6067,24 @@ const GodrayShader={
         // through a break in the cloud looked exactly like the sun in the open. Multiplying the seed by the cloud's own
         // transmittance is what turns a gap in the cover into a beam.
         float sky=step(0.999999, texture2D(tDepth,uv).x) * cloudClear(uv);
-        accum+=sky*decay; wsum+=decay; decay*=0.95; }
+        // AND A LAMP SEEDS ONE TOO (Ben 08-05: "light rays have dissapeared from held/placed lights near the cabin, so its fair to
+        // assume they are gone globally"). The depth gate above is what removed them and it did so BY CONSTRUCTION — a lantern is
+        // geometry, its depth is not the far plane, so it can never qualify however bright it gets. That gate went in to answer his
+        // OPPOSITE report of 08-04 ("SOMETIMES NON-sun light sources also emit god rays"); 08-05 supersedes it, and this is the
+        // switch between the two rather than a re-tune, so either position is one call away ('__hc.godrays({seedEmit})', 0 = the
+        //   ^ SINGLE QUOTES, NOT BACKTICKS, and not a style preference: this comment lives INSIDE the fragmentShader template
+        //   literal, so a backtick here closes the template early and the rest of the file becomes garbage. It did — the page
+        //   died with "Unexpected identifier '__hc'" at window.__hc and the game would not boot at all. Not my comment; changed
+        //   only the two backticks, no words.
+        // depth-only build he had this morning).
+        // A SEPARATE TERM, NOT A LOWER uSeedMin: uSeedMin is the GAIN on the whole accumulation now, not the threshold it used to be,
+        // so lowering it would dim the sun's shafts rather than admit a lamp. This adds the emitter as its own seed, scaled by
+        // uSeedEmit, and leaves the sun's path arithmetically untouched at uSeedEmit 0.
+        // 2.0 IS ABOVE THE SKY AND UNDER A LAMP, measured on this pass's own input: the bright sky beside the sun tops out at 1.15
+        // in linear HDR and a lantern's block-light gain reaches 3.6. So the sky cannot double-seed through this branch and a lamp
+        // can. It is deliberately the one number 1154aaa got right for the wrong reason.
+        float emit=uSeedEmit * step(2.0, dot(texture2D(tDiffuse,uv).rgb, vec3(0.2126,0.7152,0.0722)));
+        accum+=max(sky,emit)*decay; wsum+=decay; decay*=0.95; }
       accum = (wsum>0.0)? accum/wsum : 0.0;   // a FRACTION of the line, so the result does not depend on how many samples ran
       accum *= uSeedMin;   // uSeedMin is the gain now, not a threshold: how bright a fully unoccluded line to the sun gets
       float edge=1.0-smoothstep(0.35,0.95,distance(vUv,uSun));   // rays strongest near the sun, fade with screen distance
@@ -9776,8 +9793,12 @@ function achPoll(dt){ _achT+=dt; if(_achT<0.7)return; _achT=0; if(player.creativ
     // RES is the whole test — it is the save being applied on this line — so a start without one wipes the ledger, in memory AND in
     // storage, or the next load reads the stale record back.
     if(!RES) objNewGame();
-    if(RES){ try{ applySave(RES); flashName('the wood remembers you'); }catch(e){ console.error('resume failed',e); if(typeof startIntro==='function')startIntro(); } }   // resume a saved world — no intro, wake exactly where you saved
-    else if(typeof startIntro==='function')startIntro();   // cinematic flythrough → wake on the beach; drop the menu dungeon diorama
+    // BOTH PATHS OPEN THE HOLD, and only a new world flies. The hold is what stops the player walking around behind the
+    // loading circle, so a resumed save needs it as much as a new one — it just releases straight to the player instead
+    // of into the flythrough. _playAt starts the clock the circle is measured against (see the gate).
+    _playAt=performance.now(); _introFly=!RES;
+    if(typeof startIntro==='function')startIntro();
+    if(RES){ try{ applySave(RES); flashName('the wood remembers you'); }catch(e){ console.error('resume failed',e); _introFly=true; } }   // resume a saved world — wake exactly where you saved
     // PREWARM the seraph boss off the summon path (build model + compile shaders during
     // the intro flythrough) so the first summon doesn't stall a frame. Idempotent; no AI.
     try{ (window.requestIdleCallback||((f)=>setTimeout(f,800)))(()=>{ try{ seraphPrewarm({scene,camera,renderer}); }catch(e){} }); }catch(e){}
@@ -11445,6 +11466,14 @@ let audioResume=null, sfxBreak=null, sfxPlace=null;
 // =====================================================================
 const clock=new THREE.Clock();
 let acc=0, fpsAvg=60, initialReady=false, adaptTick=0; const RD_MAX=CFG.RD_MAX;   // adaptive quality can climb back to the full ceiling (not the possibly-low restored RD)
+// THE LOADING WINDOW. _playAt is stamped when the player presses a start button; LOAD_MIN_MS is how long the circle is
+// held even if the work finishes early, and LOAD_MAX_MS is the watchdog that releases a world whose spawn chunk never
+// meshed. _introFly says whether the release hands over to the flythrough or straight to the player (a resumed save).
+let _playAt=0, _introFly=false, _loadWatchdog=false; const LOAD_MIN_MS=20000, LOAD_MAX_MS=45000;
+function _loadDone(){ if(initialReady) return; initialReady=true;
+  const el=document.getElementById('load'); if(el)el.style.display='none';
+  try{ _sigilStop(); }catch(e){}
+  try{ if(typeof introRelease==='function') introRelease(_introFly); }catch(e){ console.error('intro release failed',e); } }
 // DISPLAY-AWARE FPS TARGET — rAF can never beat the display's refresh, so fixed setpoints are wrong on both
 // 60Hz (a >70 restore threshold would never fire → quality wedged at minimum) and 144Hz (a 58 restore leaves
 // 70fps undefended). Track the fastest credible frame delta ever seen (= the vsync floor), derive the target:
@@ -11485,10 +11514,32 @@ function _introDOM(){ if(_lb)return;
   _lb.append(_lbTop,_lbBot,_introTtl,_introSub,_introBlink); document.body.appendChild(_lb);
   addEventListener('keydown',e=>{ if(intro.active && (e.code==='Escape'||e.code==='Space'||e.code==='Enter'))skipIntro(); });
   addEventListener('mousedown',()=>{ if(intro.active && intro.phase==='fly')skipIntro(); }, true); }
-function startIntro(){ _introDOM(); intro.active=true; intro.phase='wake'; intro.t=0;   // the fly-through now lives BEHIND the menu (updateMenuCam); pressing play cuts straight to waking on the beach
+// PRESSING PLAY OPENS A HOLD, NOT A CINEMATIC. Two things were wrong here, and they were the same line: this function
+// hid #load the instant it was called, one statement after startGame had put it up — so the circular loading screen
+// never appeared at all — and it set phase straight to 'wake', so the fifteen-second flythrough in _flyKeys was never
+// entered on any path. What played was a 3.6 s camera rise behind a faint blink, with the letterbox at 0% and the title
+// at opacity 0 the whole time. Measured with __hc.intro(): phase 'wake' from the first frame, bars '0%', ttl 0.
+//
+// So: 'hold' parks the camera and suspends the world while the preload gate does its work behind the loading circle,
+// and the gate calls introRelease() when it is done. intro.active during the hold is load-bearing beyond the camera —
+// the render loop uses it to suspend entity, ghost and look updates, so a player cannot walk off the beach behind an
+// overlay they cannot see past.
+function startIntro(){ _introDOM(); intro.active=true; intro.phase='hold'; intro.t=0;
   intro.sx=player.pos.x; intro.sz=player.pos.z; intro.sy=player.pos.y; intro.gy=surfaceH(Math.floor(intro.sx),Math.floor(intro.sz))+1;
-  const ld=document.getElementById('load'); if(ld)ld.style.display='none';
-  _lb.style.display='block'; _lbTop.style.height='0%'; _lbBot.style.height='0%'; _introBlink.style.opacity='1'; _introTtl.style.opacity='0'; _introSub.style.opacity='0'; }
+  _lb.style.display='none'; _lbTop.style.height='0%'; _lbBot.style.height='0%'; _introBlink.style.opacity='0'; _introTtl.style.opacity='0'; _introSub.style.opacity='0'; }
+// The gate is done. A new world flies; a resumed one wakes you exactly where you saved, which is why RES has never had
+// an intro — it gets the hold (so the load is still guarded) and then hands straight over to the player.
+function introRelease(fly){
+  if(!intro.active || intro.phase!=='hold') return false;
+  intro.sx=player.pos.x; intro.sz=player.pos.z; intro.sy=player.pos.y; intro.gy=surfaceH(Math.floor(intro.sx),Math.floor(intro.sz))+1;   // re-read: the world streamed in while the circle was up
+  if(!fly){ intro.active=false; _lb.style.display='none'; return true; }
+  intro.phase='fly'; intro.t=0;
+  _lb.style.display='block'; _lbTop.style.height='12%'; _lbBot.style.height='12%';
+  _introBlink.style.opacity='1';                                     // open from black — the fly branch drives this down
+  // NEXT FRAME, not this one: opacity is transitioned in CSS (1.6s) and a value written in the same tick as
+  // display:block is the START of the transition, so the title would snap on instead of fading up.
+  requestAnimationFrame(()=>{ if(intro.phase!=='fly')return; _introTtl.style.opacity='1'; _introSub.style.opacity='1'; });
+  return true; }
 // ---- DUNGEON DIORAMA — a self-contained mossy great-hall set piece parked deep in the void, shown ONLY during the menu's "the dungeon" shot.
 //      The real lair is 118 blocks away + 23 down (never streamed at the menu), so we build a faithful stand-in instead. Everything is UNLIT
 //      MeshBasic with fog OFF — the scene's shadowless sun would otherwise flood a void room with daylight, wrecking the mood — so the dark is fully hand-controlled.
@@ -11575,19 +11626,30 @@ function _camBlocked(x,y,z){ if(typeof solidAt!=='function')return false;
 const _FLY_DUR=15, _WAKE_DUR=3.6, _iv0=new THREE.Vector3(), _iv1=new THREE.Vector3(), _ie=new THREE.Euler(0,0,0,'YXZ');
 function _flyKeys(){ const sx=intro.sx,sy=intro.sy,sz=intro.sz; return [ [[sx-90,70,sz-90],[sx-8,26,sz-8]], [[sx-18,42,sz+72],[sx,22,sz]], [[sx+58,26,sz-24],[sx,12,sz]], [[sx+6,5,sz+9],[sx,2.6,sz]] ]; }
 function updateIntro(dt){ intro.t+=dt;
+  // HOLD — the loading circle is up and the world is still being built. Park the camera where the wake will begin and
+  // do nothing else. This must be its own branch and must return: the final `else` below IS the wake, so without this
+  // the hold would run the wake animation to completion behind the overlay and there would be nothing left to play.
+  if(intro.phase==='hold'){ camera.position.set(intro.sx, intro.gy+0.28, intro.sz); camera.up.set(0,1,0);
+    _ie.set(0.5, player.yaw, 0, 'YXZ'); camera.quaternion.setFromEuler(_ie); return; }
   if(intro.phase==='fly'){ const K=_flyKeys(), seg=_FLY_DUR/(K.length-1); let i=Math.floor(intro.t/seg);
     if(i>=K.length-1){ intro.phase='wake'; intro.t=0; _lbTop.style.height='0%'; _lbBot.style.height='0%'; _introTtl.style.opacity='0'; _introSub.style.opacity='0'; _introBlink.style.opacity='1'; return; }
     let f=intro.t/seg-i; f=f*f*(3-2*f); const A=K[i],B=K[i+1];
     _iv0.set(A[0][0]+(B[0][0]-A[0][0])*f, A[0][1]+(B[0][1]-A[0][1])*f, A[0][2]+(B[0][2]-A[0][2])*f);
     _iv1.set(A[1][0]+(B[1][0]-A[1][0])*f, A[1][1]+(B[1][1]-A[1][1])*f, A[1][2]+(B[1][2]-A[1][2])*f);
     camera.position.copy(_iv0); camera.up.set(0,1,0); camera.lookAt(_iv1);
+    // OPEN FROM BLACK, CLOSE BACK INTO IT. _introBlink carries no CSS transition — the wake branch below writes it every
+    // frame — so a fade has to be driven here or the flythrough starts on a hard cut from the loading screen.
+    const fin=Math.max(0,1-intro.t/1.4), fout=Math.max(0,(intro.t-(_FLY_DUR-1.2))/1.2);
+    _introBlink.style.opacity=Math.min(1,Math.max(fin,fout)).toFixed(2);
+    if(intro.t>_FLY_DUR-2.6){ _introTtl.style.opacity='0'; _introSub.style.opacity='0'; }   // titles out before the cut, on the same 1.6s CSS fade they came in on
   } else { const u=clamp(intro.t/_WAKE_DUR,0,1), e=u*u*(3-2*u);
     camera.position.set(intro.sx, intro.gy+0.28 + (EYE-0.28)*e, intro.sz); camera.up.set(0,1,0);   // start lying ON the sand, rise to eye — never below the surface
     _ie.set((1-e)*0.5 + player.pitch*e, player.yaw, (1-e)*0.26*Math.cos(intro.t*3), 'YXZ'); camera.quaternion.setFromEuler(_ie);
     const bl = u<0.14?1-u/0.14 : u<0.34?(u-0.14)/0.2*0.65 : u<0.5?0.65-(u-0.34)/0.16*0.65 : Math.max(0,0.22-(u-0.5)*0.55); _introBlink.style.opacity=bl.toFixed(2);
     if(u>=1){ intro.active=false; _lb.style.display='none'; _introBlink.style.opacity='0'; player.pos.y=intro.gy; player.vel.set(0,0,0); } }
 }
-function skipIntro(){ if(!intro.active)return; intro.phase='wake'; intro.t=_WAKE_DUR-0.35; _lbTop.style.height='0%'; _lbBot.style.height='0%'; _introTtl.style.opacity='0'; _introSub.style.opacity='0'; }
+function skipIntro(){ if(!intro.active)return; if(intro.phase==='hold')return;   // nothing to skip while the world is still being built — and skipping the hold would hand over a half-loaded world
+  intro.phase='wake'; intro.t=_WAKE_DUR-0.35; _lbTop.style.height='0%'; _lbBot.style.height='0%'; _introTtl.style.opacity='0'; _introSub.style.opacity='0'; }
 // VANTABLACK DEATH VOID — a huge black plane parented to the camera, shown ONLY during the final devour close-up.
 // It sits 9 units in front of the camera (well beyond the creature, whose maw hangs at ~1.5), so the creature reads
 // clearly in front while the plane blots out the ENTIRE viewport behind it. renderOrder=1 makes it paint over the
@@ -11975,6 +12037,35 @@ function updateTpsBody(dt){
 const TPS_GRIP=-0.42;   // how the fist itself is cocked: a shade forward of level, the angle a person carries a tool at
 // The offhand's item, built by the same resolver as everything else (itemModel) so a shotgun is a shotgun in every hand. Its own
 // function rather than a second argument to setAvatarHeld, because that one is the NETWORK avatar's and is called per peer.
+// ONE SHIELD POSE, BOTH HANDS (Ben 08-05: "make the main hand shield in 3rd person look like that one, its tiny and rotated").
+// setAvatarHeld had no shield branch at all, so a board in the MAIN hand fell into the generic tools/materials else — scale 0.5,
+// which on a 0.46-tall model is a 23 cm plate, canted -0.4 about X and +0.25 about Z. Tiny and rotated, exactly as he described it.
+// The offhand's own fitting (d2787c6) lived inline in _tpsSetOff where the other hand could not reach it; it is this function now,
+// so the two hands cannot drift apart again and a future change to the pose lands on both.
+//   FITTED, NOT SCALED BY A GUESS: 0.85 along the model's longest axis, so the board stays a heater shield covering forearm and ribs
+// if the model is ever rebuilt at a different size, and re-centred on its own bounding box so it hangs off the fist rather than
+// being skewered through the middle.
+//   THE FORWARD TILT (Ben 08-05: "rotate shields forward slightly in the off hand in 3rd person"). The board is extruded along its
+// own +Z, so its face normal is local Z and a rotation about X tips the top edge. The wrapper also carries rotation.y = PI, because
+// every item model is authored facing -z for the viewmodel — which is why the sign that leans the top toward the body's FACING is
+// negative here rather than positive. Measured through __hc.tpsShield in body-local space, not guessed: 0.22 rad puts the top edge
+// 12.6 degrees forward of vertical.
+// A `let`, not a const, and not for tidiness: which SIGN leans the board toward the body's front cannot be read off this line. The
+// wrapper is turned PI about Y, and the hand node it hangs from cancels the arm's carry angle and keeps the grip, so the board's
+// world orientation is the product of three rotations. __hc.tpsShieldTilt sweeps this value and reports the top edge's direction in
+// body space, which is how the sign below was chosen: +0.22 carries the top edge FORWARD (top z -0.593 -> -0.363), -0.22 pushes it
+// further back. It also leaves Ben a dial for "slightly", since that word is his to define.
+let TPS_SHIELD_TILT=0.22;
+const TPS_SHIELD_ROLL=-0.12, TPS_SHIELD_SPAN=0.85;
+function _tpsShieldPose(m,w){
+  const bb=new THREE.Box3().setFromObject(m), sz=bb.getSize(new THREE.Vector3()), ctr=bb.getCenter(new THREE.Vector3());
+  const s=TPS_SHIELD_SPAN/(Math.max(sz.x,sz.y,sz.z)||1);
+  m.scale.setScalar(s); m.position.set(-ctr.x*s,-ctr.y*s,-ctr.z*s);
+  w.rotation.set(TPS_SHIELD_TILT, Math.PI, TPS_SHIELD_ROLL); w.position.set(0,-0.10,-0.05);
+  // QA only (see __hc.tpsShield): the board's own size after the fit. A world AABB of the finished wrapper cannot answer "is it
+  // body-sized" on its own — it is the box of a TILTED plate, so it reads 0.80 for a board fitted to 0.85 and reports a 0.63 m
+  // "thickness" that is the tilt spreading a 2 cm plank across z. The drawn box is still measured; this is what it is compared to.
+  w.userData.fit={ span:+TPS_SHIELD_SPAN.toFixed(3), w:+(sz.x*s).toFixed(3), h:+(sz.y*s).toFixed(3), d:+(sz.z*s).toFixed(3) }; }
 function _tpsSetOff(P,id){
   if(P.offMesh){ P.handOff.remove(P.offMesh); try{ _disposeView(P.offMesh); }catch(e){} P.offMesh=null; }
   if(!id||!ITEMS[id]) return; const it=ITEMS[id]; let m; try{ m=itemModel(id); }catch(e){ return; }
@@ -11986,10 +12077,7 @@ function _tpsSetOff(P,id){
   // instead of multiplied by a guess: 0.85 along its longest axis is a heater shield that covers the forearm and the ribs, and it
   // stays that size if the model is ever rebuilt at a different scale. Dropped and tilted so the board hangs off the fist rather
   // than being skewered through its centre.
-  else if(it.shield){ const bb=new THREE.Box3().setFromObject(m), sz=bb.getSize(new THREE.Vector3()), ctr=bb.getCenter(new THREE.Vector3());
-    const s=0.85/(Math.max(sz.x,sz.y,sz.z)||1);
-    m.scale.setScalar(s); m.position.set(-ctr.x*s,-ctr.y*s,-ctr.z*s);
-    w.rotation.z=-0.12; w.position.set(0,-0.10,-0.05); }
+  else if(it.shield){ _tpsShieldPose(m,w); }
   else { m.scale.setScalar(0.55); w.rotation.z=-0.2; w.position.set(0,0.04,-0.02); }
   w.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
   P.handOff.add(w); P.offMesh=w; }
@@ -12155,6 +12243,7 @@ function setAvatarHeld(a,id){ if(a.heldMesh){ a.hand.remove(a.heldMesh); _dispos
     else w.position.set(0.02,0.07,0.12); }                                                                      // rifle at low-ready, barrel down the body's forward — carried at chest height, not slung by the knee (Ben: "guns are too low")
   else if(it.block===BID.torch||it.block===BID.lantern||it.block===BID.candle){ m.scale.setScalar(0.6); w.position.set(0,0.12,0.02); }   // upright torch/lantern in the fist
   else if(it.block!=null){ m.scale.setScalar(0.85); w.position.set(0,0.02,0); }                                 // a block cube gripped
+  else if(it.shield){ _tpsShieldPose(m,w); }                                                                    // the same board as the offhand, same fit and same forward tilt — see _tpsShieldPose
   else { m.scale.setScalar(0.5); w.rotation.set(-0.4,0,0.25); w.position.set(0,0.04,-0.02); }                   // tools/materials: canted up out of the grip like the viewmodel
   a.hand.add(w); a.heldMesh=w; }
 const _netEditQ=[], _netDropQ=[];   // per-frame outbound batching — a burst (explosion, laser, log shower) used to emit one relay message per block/drop and trip the relay's 240 msg/s cap (silent drops = permanent desync)
@@ -12558,7 +12647,18 @@ function loop(){ try{
           const lb2=document.querySelector('#load .lb'); const p2=brPrecompileStep();
           if(lb2) lb2.textContent='…learning the shape of the halls… '+Math.round(p2*100)+'%';
         } else {
-        initialReady=true; document.getElementById('load').style.display='none'; _sigilStop(); } } } }
+        // THE CIRCLE STAYS UP FOR THE WHOLE WORK WINDOW (Ben 08-05: "the circular loading screen should be visible when
+        // a player loads in for about 20s while the world renders"). It used to be hidden one statement after it was
+        // shown, by startIntro. Two clocks decide when it goes: the work must be DONE, and LOAD_MIN_MS must have passed
+        // since play — a floor, not a delay, because the gate keeps compiling and baking inside it either way, and a
+        // fast machine finishing in four seconds should not get a flash of a sigil and a hard cut into the world.
+        if(performance.now()-_playAt < LOAD_MIN_MS){
+          const lb3=document.querySelector('#load .lb');
+          if(lb3) lb3.textContent='…the circle is drawn…';
+        } else _loadDone(); } } }
+    // WATCHDOG. Everything above sits behind `c && c.meshed`, so a spawn chunk that never meshes leaves the player
+    // staring at a sigil for ever with no way out. This is the only path that does not depend on the work finishing.
+    if(!initialReady && _playAt && performance.now()-_playAt > LOAD_MAX_MS){ _loadWatchdog=true; _loadDone(); } }
   T.end(TID.gate);
   // `adapt` is where applyResolution() lives, and that resizes every render target — the one thing in this stretch that
   // can plausibly cost a frame rather than a microsecond, and it fires on a 75-frame tick that no other scope covers.
@@ -28405,6 +28505,13 @@ window.__hc={
   // cold-boot cost is 58 of these, and a program is compiled on the frame its material is first drawn.
   // initialReady is when the loading screen actually hides — `started` flips well before it, so a program compiled after
   // `started` may still be costing the loading screen rather than the player. The two must not be conflated.
+  // QA: THE INTRO'S OWN STATE. "The cinematics are invisible" is a claim about pixels, and a screenshot can only show
+  // that nothing is on screen — it cannot say whether the sequence ran and ended, or never started. intro is module
+  // scope, so no harness can read it without this.
+  intro(){ try{ return { active:intro.active, phase:intro.phase, t:+intro.t.toFixed(2), wakeDur:_WAKE_DUR, flyDur:_FLY_DUR,
+      lb:_lb? getComputedStyle(_lb).display : null, blink:_introBlink? +_introBlink.style.opacity : null,
+      ttl:_introTtl? +getComputedStyle(_introTtl).opacity : null, bars:_lbTop? _lbTop.style.height : null }; }
+    catch(e){ return {err:String(e&&e.message||e)}; } },
   loadState(){ try{ return { started, initialReady, prewarmMs:+_prewarmMs.toFixed(0), prewarm:_PREWARM, matWarmMs:+_matWarmMs.toFixed(0), matWarm:!_NO_MATWARM, loadVisible:(document.getElementById('load')||{style:{}}).style.display!=='none',
       icons:_preI+'/'+((_preIcons&&_preIcons.length)||0), programs:(renderer.info.programs||[]).length }; }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: what three actually keys its shader programs on. NUM_POINT_LIGHTS counts lights that are VISIBLE (not ones
@@ -31689,6 +31796,7 @@ window.__hc={
                ledgeAtWall:{ shelf3:ledge(182,3), shelf6:ledge(182,6), deep20:ledge(182,20) } };
     }catch(e){ return {err:String(e.message||e)}; } },
   godrays(o){ try{ if(o&&o.on!=null) _godraysOn=!!o.on;
+      if(o&&o.seedEmit!=null&&godrayPass) godrayPass.uniforms.uSeedEmit.value=+o.seedEmit;   // 1 = lamps seed shafts again (Ben 08-05); 0 = the depth-only build (his 08-04 position)
       if(o&&o.seedMin!=null&&godrayPass) godrayPass.uniforms.uSeedMin.value=+o.seedMin;   // 0.62 is the pre-08-04 value, where any bright emitter seeded shafts
       // cloudOcc:0 is the pass as it was before the cloud transmittance went in — the only way to answer "did the clouds
       // take my shafts away, or were they never there at this vantage", since the cover is deterministic but not uniform.
@@ -31707,6 +31815,7 @@ window.__hc={
                sunProjXY:[+_sunProj.x.toFixed(3),+_sunProj.y.toFixed(3)], camFar:camera.far, dayGate:globalU.uDay.value>0.15,
                strength:godrayPass?+godrayPass.uniforms.uStrength.value.toFixed(4):null,
                seedMin:godrayPass?godrayPass.uniforms.uSeedMin.value:null,
+               seedEmit:godrayPass?godrayPass.uniforms.uSeedEmit.value:null,
                hasDepth:godrayPass?godrayPass.uniforms.uHasDepth.value:null, mbMode:_mbMode,   // no depth attachment => no pass at all: the seed test is 'is this pixel empty sky'
                sunY:+globalU.uSunDir.value.y.toFixed(4), elevDeg:+(Math.asin(Math.max(-1,Math.min(1,globalU.uSunDir.value.y)))*57.29578).toFixed(2),
                day:+globalU.uDay.value.toFixed(3), quality:CFG.quality };
@@ -31765,6 +31874,35 @@ window.__hc={
   // colour on that ray; the run colours are how the bench tells water from hunger from health from stamina.
   //   getImageData IGNORES the context transform, so everything is measured in backing-store pixels and divided by z (1.25) to come
   // back in the 440x360 space the drawing code is authored in — the same units as updateMinimap._geo.
+  // QA: BOTH THIRD-PERSON SHIELDS, MEASURED THE SAME WAY (Ben 08-05: the offhand tilted forward, the main hand made to match).
+  // A scale factor cannot answer either question — the models come in different sizes and each wrapper carries its own rotation —
+  // so this reports metres and degrees: the board's world AABB, and its top edge and face normal expressed in the BODY's own space.
+  // Body-local is the whole point: the rig is built facing +z, so a top edge with a positive z leans toward where the body is
+  // looking, which is what "forward" means, and the numbers do not move when the player turns.
+  tpsShield(){ try{ const P=_tpsBody; if(!P) return {no:'no rig'};
+      const inv=new THREE.Matrix4().copy(P.group.matrixWorld).invert();
+      const read=(w)=>{ if(!w) return null; w.updateWorldMatrix(true,true);
+        const bb=new THREE.Box3().setFromObject(w), s=bb.getSize(new THREE.Vector3());
+        // The wrapper's own axes, carried into body space. The rotation part only — a direction has no position.
+        const R=new THREE.Matrix4().extractRotation(w.matrixWorld).premultiply(new THREE.Matrix4().extractRotation(inv));
+        const up=new THREE.Vector3(0,1,0).applyMatrix4(R).normalize();      // the board's TOP edge
+        const nrm=new THREE.Vector3(0,0,1).applyMatrix4(R).normalize();     // the board's FACE
+        return { span:+Math.max(s.x,s.y,s.z).toFixed(3), w:+s.x.toFixed(3), h:+s.y.toFixed(3), d:+s.z.toFixed(3),
+                 fit:w.userData.fit||null, scale:+w.children[0].scale.x.toFixed(4),
+                 rot:[+w.rotation.x.toFixed(3),+w.rotation.y.toFixed(3),+w.rotation.z.toFixed(3)],
+                 top:[+up.x.toFixed(3),+up.y.toFixed(3),+up.z.toFixed(3)],
+                 face:[+nrm.x.toFixed(3),+nrm.y.toFixed(3),+nrm.z.toFixed(3)],
+                 tiltDeg:+(Math.atan2(up.z,up.y)*57.29578).toFixed(2) }; };   // >0 = the top leans toward the body's facing
+      return { main:read(P.heldMesh), off:read(P.offMesh), tilt:TPS_SHIELD_TILT, span:TPS_SHIELD_SPAN }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // QA: SWEEP THE FORWARD TILT AND SEE WHICH WAY THE BOARD ACTUALLY GOES. Rebuilds both hands at the given value — clearing P.held
+  // and P.offHeld is what makes updateTpsBody re-run the two setters, since both are guarded on "has the id changed".
+  tpsShieldTilt(v){ try{ const P=_tpsBody; if(!P) return {no:'no rig'};
+      if(v!=null) TPS_SHIELD_TILT=+v;
+      const h=P.held, o=P.offHeld; P.held=null; P.offHeld=null;
+      updateTpsBody(0.016);
+      return { set:TPS_SHIELD_TILT, rebuilt:{main:P.held===h, off:P.offHeld===o}, ...this.tpsShield() }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   hudRing(){ try{
       if(typeof _mm==='undefined' || !_mm) return {no:'no minimap yet'};
       player.health=20; player.hunger=20; player.water=20; if(player.stamMax)player.stam=player.stamMax; _mmStam=1;
