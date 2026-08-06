@@ -44,7 +44,12 @@ const FINDCAVE=`(function(){ const P=__hc.probe(); let best=null;
   return best || {err:'no cave'}; })`;
 
 (async()=>{
-  fs.writeFileSync(path.join(ROOT,'_head.html'), execSync('git show HEAD:index.html',{cwd:ROOT,maxBuffer:64*1024*1024}));
+  // HC_BASE names the commit the first arm is built from - default HEAD, but once a fix is IN head the baseline has to
+  // be the commit before it. HC_SURFACE=1 stands on open ground instead of in a cave and HC_TIME pins the clock, which
+  // is how the same rig checks that a cave fix has not brightened a signed-off night or daylight.
+  const BASE = process.env.HC_BASE || 'HEAD';
+  fs.writeFileSync(path.join(ROOT,'_head.html'), execSync('git show '+BASE+':index.html',{cwd:ROOT,maxBuffer:64*1024*1024}));
+  console.log('baseline ' + BASE + (process.env.HC_SURFACE?'   SURFACE':'   cave') + '   time ' + (process.env.HC_TIME||'0.25'));
   const port=await freePort();
   const server=spawn(process.execPath,[path.join(ROOT,'mp-server.js')],{cwd:ROOT,env:{...process.env,MP_PORT:String(port),MP_DISC:String(port+1)},stdio:'ignore'});
   const browser=await chromium.launch({ executablePath:'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', headless:true,
@@ -54,12 +59,19 @@ const FINDCAVE=`(function(){ const P=__hc.probe(); let best=null;
     page.on('pageerror',e=>console.log('  PAGEERROR:',String(e.message||e).slice(0,200)));
     await page.goto('http://127.0.0.1:'+port+'/'+file+'?debug=1',{waitUntil:'load',timeout:120000});
     await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null,{timeout:180000});
-    await page.evaluate('__hc.setTime(0.25)');
+    const T = process.env.HC_TIME || '0.25';
+    await page.evaluate('__hc.setTime('+T+')');
     await sleep(3000);
     // HC_CAVE=x,y,z pins the cave instead of searching. The search returns the BIGGEST chamber, which is not the same
     // as one that shows the defect: (350,32,28) has no dark pixels in either arm and cannot grade a fix, while
     // (288,27,12) is where dark y-faces were actually seen. A fixture has to be the place the symptom lives.
-    const site = process.env.HC_CAVE
+    const site = process.env.HC_SURFACE
+      ? await page.evaluate(`(()=>{ const P=__hc.probe();
+          for(let r=12;r<200;r+=4) for(let a=0;a<16;a++){ const th=a*0.3927;
+            const x=Math.round(P.x+Math.sin(th)*r), z=Math.round(P.z+Math.cos(th)*r);
+            const g=__hc.treeGates(x,z); if(g&&g.h!=null&&g.h>P.sea+3&&!g.emits) return {x, y:g.h+1, z, surface:true}; }
+          return {err:'no open ground'}; })()`)
+      : process.env.HC_CAVE
       ? (([x,y,z])=>({x:+x,y:+y,z:+z,pinned:true}))(process.env.HC_CAVE.split(','))
       : await page.evaluate(FINDCAVE+'()');
     if(site.err) throw new Error(site.err);
@@ -80,7 +92,7 @@ const FINDCAVE=`(function(){ const P=__hc.probe(); let best=null;
       await page.evaluate('__hc.look('+A.x+','+A.y+','+A.z+')'); await sleep(300);
       const means=[], darks=[];
       for(let i=0;i<6;i++){
-        await page.evaluate('__hc.setTime(0.25)'); await sleep(300);
+        await page.evaluate('__hc.setTime('+T+')'); await sleep(300);
         const f=path.join(ROOT,'bench','results','heldvol-'+tag+'-'+A.tag+'-'+i+'.png');
         await page.screenshot({path:f});
         const st=stat(f); means.push(st.mean); darks.push(st.dark);
