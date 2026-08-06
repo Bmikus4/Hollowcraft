@@ -11696,28 +11696,37 @@ let _rec=null, _recFadeEl=null;
 function recShots(){
   const sx=spawnX+0.5, sz=spawnZ+0.5, sy=surfaceH(spawnX,spawnZ);
   const cabX=spawnX+22, cabZ=spawnZ-14, cy=surfaceH(cabX,cabZ);
-  const L=(typeof wretch!=='undefined')?wretch.lair:null;
+  // Seeded here when the Wretch has not run: same function the AI uses, so there is no second definition of the site.
+  const L=(typeof wretch==='undefined')? null : (wretch.lair || (wretch.lair=lairSite()));
   const S=[
     { name:'shore',  at:[sx-26,sy+5,sz+3],   look:[sx,sy+1.5,sz],     drift:[0.30,0,0.38] },
     { name:'cabin',  at:[cabX+1.5,cy+3.8,cabZ+7], look:[cabX,cy+3.2,cabZ], drift:[0.22,0,-0.26] },
     { name:'island', at:[sx+6,sy+48,sz-6],   look:[sx+8,sy,sz-4],     drift:[0.34,0,0.34] } ];
-  // THE REAL LAIR, when it has been carved. cx/fy are only set once the dungeon generates, so this shot appears in the
-  // list only when there is something to fly through — an absent shot is better than a shot of unlit stone.
+  // THE REAL LAIR. cx/fy exist only once the dungeon has actually been carved, and it is carved when its chunks
+  // generate — which needs someone standing there. So the surface shot above the lair is not decoration: it is what
+  // streams the dungeon in. The interior shot joins the list on a later pass, which is why recShots() is re-read at
+  // every cut rather than built once. Measured before this: 3 shots, no dungeon at all, because cx was still null.
+  if(L && L.x!=null){
+    const gy=(typeof groundYAt==='function')? groundYAt(L.x,L.z) : (L.y||64);
+    S.splice(1,0,{ name:'lair-mouth', at:[L.x-7, gy+6, L.z-7], look:[L.x, gy+1, L.z], drift:[0.26,0,0.26] }); }
   if(L && L.cx!=null && L.fy!=null)
-    S.splice(1,0,{ name:'dungeon', at:[L.cx-8, L.fy+4.2, L.cz-1.5], look:[L.cx, L.fy+2.2, L.cz+0.5], drift:[0.42,0,0.18] });
+    S.splice(2,0,{ name:'dungeon', at:[L.cx-8, L.fy+4.2, L.cz-1.5], look:[L.cx, L.fy+2.2, L.cz+0.5], drift:[0.42,0,0.18] });
   return S; }
-function recFade(a){ if(!_recFadeEl){ _recFadeEl=document.createElement('div');
+function recFade(a){ if(!_recFadeEl){ _recFadeEl=document.createElement('div'); _recFadeEl.id='recfade';
     _recFadeEl.style.cssText='position:fixed;inset:0;background:#000;z-index:60;pointer-events:none;opacity:0';
     document.body.appendChild(_recFadeEl); }
   _recFadeEl.style.opacity=a.toFixed(3); }
 function recStart(){
   // EVERY overlay off, by id, and then anything else the game appends over the viewport. A recording must have no UI in
   // it at all, and hiding only #boot leaves the hotbar, the crosshair, the minimap and the objective tracker on screen.
-  for(const id of ['boot','load','pause','death','objhud','prof','director','err','mind'])
-    { const e=document.getElementById(id); if(e) e.style.display='none'; }
-  const hb=(typeof hotbarEl!=='undefined'&&hotbarEl)?hotbarEl.parentElement:null; if(hb) hb.style.display='none';
-  const xh=document.getElementById('xh'); if(xh) xh.style.display='none';
-  if(typeof _mm!=='undefined'&&_mm&&_mm.wrap) _mm.wrap.style.display='none';
+  // ONE RULE, NOT A LIST OF IDS. A list only hides what I remembered to name, and it cannot touch what the game appends
+  // LATER — a flashName toast, a tip, the vignette layer, the whole #ui tree. Measured with bench/cine-record.mjs: naming
+  // nine ids still left #vig, #ui and an anonymous div on screen at every sample. This spares the world canvas and the
+  // fade, and hides everything else whenever it appears. It lives in <head> so it cannot hide itself.
+  const st=document.createElement('style');
+  st.textContent='body > *:not(canvas#c):not(#recfade){ display:none !important; }';
+  document.head.appendChild(st);
+  recFade(0);   // create the fade FIRST, so the rule above has something to spare
   _rec={ i:0, t:0, phase:'move', shots:recShots() };
   recFade(1);
   console.log('[cine] '+_rec.shots.length+' shots: '+_rec.shots.map(s=>s.name).join(', ')+
@@ -11734,6 +11743,12 @@ function updateRecCam(dt){
   const d=(C.phase==='show')? C.t*1 : 0;
   camera.position.set(S.at[0]+S.drift[0]*d, S.at[1]+S.drift[1]*d, S.at[2]+S.drift[2]*d);
   camera.up.set(0,1,0); camera.lookAt(S.look[0],S.look[1],S.look[2]);
+  // CARVE IT, ONCE, while standing over it. buildDungeon is normally called from updateWretch, which a recording session
+  // never runs — so without this the interior shot can never appear, however long the recorder loops. Gated behind
+  // ?cine=1 and a one-shot flag: if it throws, the shot list simply stays without a dungeon in it.
+  if(S.name==='lair-mouth' && C.phase==='show' && !C.carved && meshed){ C.carved=true;
+    try{ if(typeof _bulkRun==='function' && typeof buildDungeon==='function') _bulkRun(buildDungeon); }
+    catch(e){ console.log('[cine] dungeon carve failed: '+(e&&e.message||e)); } }
   if(C.phase==='show'){
     const fin=Math.max(0,1-C.t/CINE_FADE), fout=Math.max(0,(C.t-(CINE_SHOW-CINE_FADE))/CINE_FADE);
     recFade(Math.min(1,Math.max(fin,fout)));
@@ -13798,6 +13813,10 @@ function playerRoofed(){ const rx=Math.floor(player.pos.x), rz=Math.floor(player
 //   excluded from the skylight mask (Ben 07-23) — so under isOpaque a dense canopy counted as a roof and standing in the woods
 //   turned the fog off. Fog rolls through a wood. This is the same mask the skylight bake and the cave descent both use, which is
 //   the point: "am I enclosed" should have ONE answer in this file.
+// WHERE THE LAIR GOES. Pulled out of updateWretch so the cinematic recorder can seed it without running the Wretch's
+// AI: ?cine=1 never starts a session, so updateWretch never runs, so wretch.lair stayed null and the dungeon shot
+// silently dropped out of the shot list. One owner beats two copies of spawnX+95.
+function lairSite(){ const lx=spawnX+95, lz=spawnZ+70; return {x:lx, z:lz, y:groundYAt(lx,lz)}; }   // dungeon ≥100 blocks from spawn (hypot ~118)
 function fogEnclosure(){
   const rx=Math.floor(player.pos.x), rz=Math.floor(player.pos.z), ry=Math.floor(player.pos.y);
   let n=0, roofed=0;
@@ -13882,7 +13901,7 @@ function updateWretch(dt){
   if(wretch.boss && wretch.active && !player.dead){ bossUpdate(dt); return; }   // THE MEGA-WRETCH runs FIRST — nothing else (lurk/dawn/despawn/grab) can touch it, so it never gets stuck or vanishes
   const P=wretch.P;
   if(HORROR._firstNight) wretch.hunger=clamp(wretch.hunger-dt*0.14,0,100);   // gentle hunger tick (~8 min from full to the forage threshold) — the old 0.66/s drained it to starving in ~80s, which read as "always starving"
-  if(!wretch.lair){ const lx=spawnX+95, lz=spawnZ+70; wretch.lair={x:lx,z:lz,y:groundYAt(lx,lz)}; }   // dungeon ≥100 blocks from spawn (hypot ~118)
+  if(!wretch.lair) wretch.lair=lairSite();
   _bulkRun(buildDungeon);   // bulk-edit mode: the lair is a huge one-shot carve — write blocks flat, remesh via the sliced queue
   if(wretch._lurk){ lurkTick(dt); return; }                                          // a daytime tree-watch is in progress — it owns the Wretch (never hunts)
   { const dayLike = !HORROR.huntArmed || globalU.uDay.value>0.34;                   // grace (day 1 + night 1) OR any daytime → it must not hunt, only lurk
