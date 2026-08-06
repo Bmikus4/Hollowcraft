@@ -3931,6 +3931,13 @@ const globalU = {
   // colour. That is the only honest A/B of what a canopy's cutout costs, and it was not reachable.
   // SHARED ref, same reason as uWhiteTile: every chunk material clone has to move together or half the world keeps its
   // holes and the measurement is of nothing.
+  // THE HELD LIGHT AS A VOLUME (Ben: "random blocks underground that still dont become lit when the player is holding a
+  // torch"). A placed emitter is flood-filled into the chunk volume and sampled at the fragment's POSITION with no N.L;
+  // a held light is a PointLight about 1.6 blocks above the floor, so beyond a couple of blocks the direction to it lies
+  // almost in the floor's plane, N.L collapses, and floors and ceilings go black while walls stay lit. Measured: 100% of
+  // the dark pixels in a cave are y faces, and the same torch on the FLOOR leaves nothing dark at all.
+  uHeld:{ value:new THREE.Vector4(0,0,0,0) },
+  uHeldC:{ value:new THREE.Color(1,0.60,0.22) },
   uCut:{ value:0.5 },
   uWhiteTile:{ value:(typeof TILEIDX!=='undefined'&&TILEIDX.vantawhite!=null)?TILEIDX.vantawhite:-1 },   // SHARED vantawhite-glow uniform (Ben 07-21): one reference every chunk material + clone points at, so the unlit-white override can never go stale across recompiles / composer rebuilds / VFX-setting toggles
   // THE HAND-LIGHT SPHERE IS GONE, and this is the answer to the open question about it. uHandPos/uHandK/uHandR fed the scotopic
@@ -4036,6 +4043,7 @@ function injectAtlas(mat, opts={}){
     sh.uniforms.uSkyDirAmt = globalU.uSkyDirAmt; sh.uniforms.uSkyDirUp = globalU.uSkyDirUp; sh.uniforms.uSkyDirDn = globalU.uSkyDirDn;
     sh.uniforms.uSkyCurve = globalU.uSkyCurve; sh.uniforms.uDayShade = globalU.uDayShade; sh.uniforms.uDayS = globalU.uDay;   // SHARED refs, same reason as the pair above: every chunk clone must move together or half the world keeps the old curve
     sh.uniforms.uCut = globalU.uCut;
+    sh.uniforms.uHeld = globalU.uHeld; sh.uniforms.uHeldC = globalU.uHeldC;
     sh.uniforms.uWhiteTile = globalU.uWhiteTile;   // SHARED ref → the vantawhite glow survives every material clone / recompile / composer rebuild / VFX toggle (was a fresh per-material uniform that a pre-tile-index recompile could latch at -1)
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>',
@@ -4074,7 +4082,7 @@ function injectAtlas(mat, opts={}){
         // HC_SCOT_ATLAS routes the GLOBAL scotopic pass (patched into three's own lights/dithering chunks at the top of this
         // file) down the atlas branch, where `_bl` and `vSky` exist. Without it the wash still runs here, on the non-atlas
         // branch, and the cave descent would never fire on the one material that can tell a cave from a field.
-        '#include <common>\n#define HC_SCOT_ATLAS 1\n'+(opts.leafTrans?'uniform float uFolTrans;\n':'')+'precision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform vec3 uChunkTint;\nuniform float uSkyDirAmt;\nuniform float uSkyDirUp;\nuniform float uSkyDirDn;\nuniform vec2 uSkyCurve;\nuniform vec2 uDayShade;\nuniform float uDayS;\nuniform float uCut;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
+        '#include <common>\n#define HC_SCOT_ATLAS 1\n'+(opts.leafTrans?'uniform float uFolTrans;\n':'')+'precision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform vec3 uChunkTint;\nuniform float uSkyDirAmt;\nuniform float uSkyDirUp;\nuniform float uSkyDirDn;\nuniform vec2 uSkyCurve;\nuniform vec2 uDayShade;\nuniform float uDayS;\nuniform float uCut;\nuniform vec4 uHeld;\nuniform vec3 uHeldC;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
       // ---- NIGHT VOLUMETRIC DARKNESS ON REAL FOLIAGE (Ben 07-29) ----
       // "volumetric darkness at night is applied to horizon pines, but not to forest trees." Correct, and the two fade to
       // different targets. The horizon backdrop fades to _uPineFog, which is scene.fog.color pulled toward storm blue and
@@ -4162,7 +4170,12 @@ function injectAtlas(mat, opts={}){
         // carrying a `tint:` of its own moves. uChunkTint is set per material clone from the chunk's dominant emitter (see
         // _chunkMat and buildLightTexture) — the hue must NOT ride on the sampled level, or the falloff curve gets applied to it
         // a second time and every coloured light collapses.
-        'irradiance += 3.6 * uChunkTint * pow(_bl,1.45) * _fl;')   // warm torch glow added to indirect — falloff SOFTENED from _bl² (Ben 07-20: in truly dark chunks the squared curve collapsed the glow to an invisible puddle; ^1.45 carries the light to its full flood radius) + peak brightened ~16%
+        'irradiance += 3.6 * uChunkTint * pow(_bl,1.45) * _fl;'+   // warm torch glow added to indirect — falloff SOFTENED from _bl² (Ben 07-20: in truly dark chunks the squared curve collapsed the glow to an invisible puddle; ^1.45 carries the light to its full flood radius) + peak brightened ~16%
+        // THE HELD LIGHT ENTERS THE SAME WAY, sampled at the fragment's position with no N.L, so it cannot fall off a
+        // grazing floor. Same gain and curve as the placed term, its own colour, ATLAS ONLY - no shared chunk, no prop
+        // material, not the sun. It rides on top of the PointLight, which keeps the directional shaping on walls.
+        'if(uHeld.w > 0.0){ float _hd = distance(vWPos, uHeld.xyz); float _hf = clamp(1.0 - _hd/uHeld.w, 0.0, 1.0);\n'+
+        '  irradiance += 3.6 * uHeldC * pow(_hf,1.45) * _fl; }\n')
       .replace('#include <aomap_fragment>',
         '#include <aomap_fragment>\nreflectedLight.directDiffuse *= (0.17 + 0.83*smoothstep(0.16,0.9,vSky));\n'+
         // ---- CLOUDS BLOCKING THE SUN (Ben's note 7) ----
@@ -7869,8 +7882,12 @@ function assignPointLights(){
     // THE SAME TABLE THE POOL READS (emitterLight) — see it for why the hand's own numbers are gone. The flicker stays here.
     const _H=emitterLight(hl); heldLight.color.setHex(_H.c);
     heldLight.intensity=_H.i*(1+Math.sin(t*11)*0.07+Math.sin(t*1.9)*0.05); heldLight.distance=_H.d; heldLight.decay=EL_DECAY;
-    heldLight.castShadow=false; }
-  else { heldLight.intensity=0; heldLight.castShadow=false; }
+    heldLight.castShadow=false;
+    // the same light as a volume for the atlas. FIFTEEN blocks, matching the block-light volume's own fifteen steps -
+    // the PointLight's `distance` is a shorter number that also has decay 2 working on it.
+    globalU.uHeld.value.set(heldLight.position.x, heldLight.position.y, heldLight.position.z, 15.0);
+    globalU.uHeldC.value.setHex(_H.c); }
+  else { heldLight.intensity=0; heldLight.castShadow=false; globalU.uHeld.value.w=0; }
 }
 function disposeChunkMeshes(c){
   if(!c.group) return;
