@@ -758,8 +758,9 @@ if (Q.get('rd')) CFG.RENDER_DIST = Math.max(2, Math.min(16, +Q.get('rd')));
 // CINEMATIC RECORDING MODE. A class on <body>, not a per-frame JS sweep, because the elements it hides are owned by
 // four different systems that each write their own visibility — CSS is the only place one rule outranks all of them.
 // See the body.cinema block in the head for what is hidden and what is deliberately left alone.
-function setCinema(on){ document.body.classList.toggle('cinema', !!on);
-  return document.body.classList.contains('cinema'); }
+let _cinemaMode=false;
+function setCinema(on){ _cinemaMode = !!on; document.body.classList.toggle('cinema', _cinemaMode);
+  return _cinemaMode; }
 if (Q.get('cinema') && Q.get('cinema') !== '0') setCinema(true);
 try{ const sq=localStorage.getItem('hollowcraft_q'); if(sq&&['Low','Medium','High','Ultra'].indexOf(sq)>=0) CFG.quality=sq; }catch(e){}   // restore the chosen quality tier (a ?q override still wins below)
 if (Q.get('q')) CFG.quality = Q.get('q');
@@ -5314,6 +5315,101 @@ const _uTreeBase={value:25.0}, _uTreeAmp={value:10.0}, _uSpikeAmp={value:0.6}, _
 // one call instead of four edits: __hc.treeShape({skirt}).
 const _uSkirt={value:0.22};
 const _uPineFog=new THREE.Color(0.1,0.13,0.2), _stormBlue=new THREE.Color(0.09,0.12,0.19), _fogShellCol=new THREE.Color(0xbfc4cc);
+// =====================================================================
+//  BACKGROUND MOUNTAINS (Ben 08-10: "I want to add depth ... I also want background mountains", "all hyperrealistic")
+// =====================================================================
+// The horizon had two layers and no mass behind either of them: past the treeline the frame was bare sky, which is why
+// an elevated shore vista reads flat however well the near ground is lit (bench/results/vista-morning-0.png).
+//
+// TWO RANGES, AND THE DEPTH IS IN THE HAZE, NOT THE GEOMETRY. A single ridge silhouette reads as a cut-out whatever
+// shape it is given. What makes a real mountain vista deep is aerial perspective: each range further back is paler,
+// bluer and lower in contrast than the one in front, because there is more atmosphere in the way. So the near range is
+// drawn at uDist and the far one at 1.9x that, and the far one is mixed much harder toward the sky colour. That single
+// relationship does more for depth than any amount of ridge detail.
+//
+// RIDGED noise, not plain noise: 1-|2n-1| creases at its maxima, which is what gives a skyline sharp peaks and rounded
+// valleys instead of the rolling dune profile plain fBm produces. Same hash/nz pair the treeline uses, so the two
+// silhouettes are cut from the same grain and cannot drift into different visual languages.
+//
+// THE ROCK COLOUR IS DERIVED FROM THE SKY, never authored flat. uSky is the same uniform the ocean band and the pines
+// read, so the range warms at dawn, greys under overcast and goes blue at dusk along with everything else in the frame.
+// A fixed grey would be correct at exactly one hour and wrong at the other twenty-three, and cohesion is the whole point.
+// DEFAULT OFF, and that is a statement about the LOOK, not the wiring. The layer renders (paired on/off moves 8.1% of
+// the frame) and the architecture is right, but at the shore vantage it reads as a pale fog bank rather than as rock,
+// and shipping that on by default would put a white band across every horizon in the game. Turn it on with
+// __hc.mountains({on:true}). What is NOT yet known, and is the next thing to establish: where in the frame it is
+// actually drawing. A band-crop A/B read 152.7 with it on and 152.66 with it off -- identical -- while a whole-frame
+// A/B moved 8.1%, so the visible pale band and the layer are in different places and every colour number taken off
+// that crop was measuring sky. Find the layer's real extent first (dump the frame with uOn as the only variable and
+// difference it per row), then tune rock/haze/snow against a crop that is genuinely on it.
+const _uMtn={ h:{value:190.0}, d:{value:1700.0}, haze:{value:0.22}, snow:{value:0.80}, on:{value:0} };
+const mountainMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, side:THREE.BackSide, fog:false,
+  uniforms:{ uSky:_uSky, uFogCol:{value:_uPineFog}, uDay:globalU.uDay, uCamY:{value:CFG.SEA+2}, uWx:{value:0},
+    uSunAz:{value:0}, uHeight:_uMtn.h, uDist:_uMtn.d, uHaze:_uMtn.haze, uSnow:_uMtn.snow, uOn:_uMtn.on },
+  vertexShader:_horizVert, fragmentShader:[
+  'precision highp float; varying vec3 vPos;',
+  'uniform vec3 uSky, uFogCol; uniform float uDay, uCamY, uWx, uSunAz, uHeight, uDist, uHaze, uSnow, uOn;',
+  'float hash(float n){ return fract(sin(n)*43758.5453); }',
+  'float nz(float x){ float i=floor(x),f=fract(x); return mix(hash(i),hash(i+1.0),f*f*(3.0-2.0*f)); }',
+  'float ridge(float x){ return 1.0-abs(2.0*nz(x)-1.0); }',
+  // Four octaves, ridged on the first three and plain on the last: the plain term is scree and tree texture on the
+  // flanks, and ridging it as well put creases at that scale too, which read as noise rather than as rock.
+  'float range(float az, float sd, float f){ return ridge(az*f+sd)*0.60 + ridge(az*f*2.13+sd*1.7)*0.27 + ridge(az*f*4.70+sd*2.3)*0.10 + nz(az*f*9.10+sd)*0.03; }',
+  'void main(){',
+  '  if(uOn<0.5) discard;',
+  '  vec3 d=normalize(vPos); float elev=d.y; float az=atan(vPos.z,vPos.x);',
+  // The base sits a touch BELOW the true horizon so the range never floats: the sea band and the treeline both draw
+  // over its foot, and a gap there is the one artefact that instantly reads as a pasted-on backdrop.
+  '  float horiz=-0.010;',
+  '  if(elev<horiz) discard;',
+  // A LOW-FREQUENCY ENVELOPE OVER THE RIDGE NOISE. Without it every bearing carries the same amplitude and the skyline
+  // reads as one repeating profile dragged round the horizon. The envelope is what gives a range massifs in some
+  // directions and low saddles in others, which is the difference between a mountain range and a texture.
+  '  float envN=0.30+0.70*nz(az*1.70+3.1), envF=0.26+0.74*nz(az*1.15+9.7);',
+  '  float hN=uHeight*envN*(0.34+0.66*range(az, 11.3, 6.0));',
+  '  float hF=uHeight*1.55*envF*(0.28+0.72*range(az, 51.7, 3.7));',
+  '  float dN=uDist, dF=uDist*1.9;',
+  '  float topN=hN/sqrt(dN*dN+hN*hN), topF=hF/sqrt(dF*dF+hF*hF);',
+  '  float isNear; float top; float sd;',
+  '  if(elev<topN){ isNear=1.0; top=topN; sd=11.3; }',
+  '  else if(elev<topF){ isNear=0.0; top=topF; sd=51.7; }',
+  '  else discard;',
+  '  float t=clamp((elev-horiz)/max(top-horiz,1e-4),0.0,1.0);',   // 0 at the foot of the range, 1 at its skyline
+  // FORM FROM THE REAL SUN. The slope's facing is approximated by the derivative of the ridge across azimuth, so a
+  // flank turned toward the sun's bearing lifts and the one away from it falls. Without this the range is a flat
+  // stencil: the ridge line is interesting and everything under it is one value.
+  '  float dAz=az-uSunAz; float face=cos(dAz);',
+  '  float slope=(range(az+0.004,sd,6.0)-range(az-0.004,sd,6.0))*26.0;',
+  '  float lit=clamp(0.5+0.5*face+slope*0.55,0.0,1.0);',
+  '  float sun=mix(0.62,1.28,lit)*mix(0.45,1.0,uDay);',
+  // Rock, snow and the atmosphere between. The snowline is noisy so it does not read as a contour drawn round the peak.
+  // ROCK STAYS ROCK. Mixing 0.42 toward the sky put the range within a few levels of the sky it stands against, and a
+  // silhouette that shares its background's value has no shape at all. 0.18 is enough to keep it tied to the hour.
+  '  vec3 rock=mix(vec3(0.11,0.13,0.18), uSky, 0.12)*sun;',
+  // SNOW ONLY ON WHAT IS ACTUALLY HIGH, and only near the summit. The gate here was smoothstep(0.15,0.55,top*7.0),
+  // which for a range subtending 0.097 rad evaluates to exactly 1 -- so every peak was snow-capped over its top 45%,
+  // and with a near-white cap that turned the whole band into what read as a fog bank. Two changes: the cap starts
+  // much further up the slope, and the gate is on the range's own angular height against a threshold it can fail.
+  '  float snowT=uSnow+0.07*nz(az*54.0+sd);',
+  '  float snow=smoothstep(snowT, snowT+0.13, t)*smoothstep(0.055,0.115,top);',
+  '  vec3 col=mix(rock, mix(vec3(0.80,0.84,0.92), uSky, 0.34)*mix(0.55,1.10,uDay), snow*0.80);',
+  // AERIAL PERSPECTIVE. Haze rises with range and falls with height up the slope, because the air column you look
+  // through is deepest at the foot of a mountain and shallowest at its summit. This is the term that carries the depth.
+  // MEASURED, not assumed: uSky is (0.60,0.68,0.78) and uFogCol (0.77,0.77,0.80) in daylight, so the haze TARGET is
+  // very nearly white. The first build mixed the far range 0.71 of the way to it, which put the whole range within a
+  // few levels of the sky and produced a fog bank rather than mountains. The ceiling is what matters here, not the
+  // curve: a distant ridge may approach the sky's value but must never reach it, or it stops being a silhouette.
+  '  float haze=uHaze*mix(0.55,1.0,1.0-t);',
+  '  haze=mix(haze, min(0.62, haze*1.45+0.10), 1.0-isNear);',
+  '  col=mix(col, mix(uSky,uFogCol,0.5), haze);',
+  // Contrast falls with distance too. Two ranges at the same local contrast read as one range with a seam in it.
+  '  col=mix(vec3(dot(col,vec3(0.2126,0.7152,0.0722))), col, mix(0.55,0.92,isNear));',
+  '  float a=(1.0-smoothstep(0.0,0.030,elev-top+0.030))*0.35+0.65;',   // a soft two-pixel skyline edge, so the ridge is not aliased against the sky
+  '  a*=clamp(1.0-uWx*1.25,0.0,1.0);',                                  // weather fog owns the horizon, exactly as it does for the pines
+  '  gl_FragColor=vec4(col, a);',
+  '}'].join('\n') });
+const mountainLayer=new THREE.Mesh(_horizGeo, mountainMat); mountainLayer.frustumCulled=false; mountainLayer.renderOrder=-7; scene.add(mountainLayer);   // -7: behind the ocean band (-6) and the treeline (-5), which both draw over its foot
+
 const pineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, side:THREE.BackSide, fog:false,
   uniforms:{ uMask:{value:_pineMask}, uPine:_uPine, uFogCol:{value:_uPineFog}, uFogAmt:{value:0}, uWx:{value:0}, uCamY:{value:CFG.SEA+2}, uVisD:{value:CFG.RENDER_DIST*CK},
     uTreeBase:_uTreeBase, uTreeAmp:_uTreeAmp, uSpikeAmp:_uSpikeAmp, uCrownAmp:_uCrownAmp, uSkirt:_uSkirt,
@@ -5538,6 +5634,11 @@ function entrancePoint(){ if(_ENT_PT) return _ENT_PT;
   return _ENT_PT; }
 let _pineLastX=1e9, _pineLastZ=1e9, _pineLastRD=0;
 function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.position.copy(camera.position); const day=globalU.uDay.value;
+  // The range follows the camera like the other two horizon layers but never rotates, so it stays world-anchored: the
+  // peaks hold their bearings as the player turns, which is the whole difference between a mountain and a wallpaper.
+  mountainLayer.position.copy(camera.position);
+  mountainMat.uniforms.uCamY.value=camera.position.y;
+  { const sd=globalU.uSunDir.value; mountainMat.uniforms.uSunAz.value=Math.atan2(sd.z, sd.x); }   // slope shading reads the REAL sun bearing, so the lit flank turns with the day
   // The far sea sits at sea level in WORLD terms while its parent follows the camera, so its local y is the difference.
   // Scaled from the live render wall outward, so it begins exactly where chunk water stops and never leaves a gap or
   // double-draws over real water -- and it moves with the render-distance slider instead of being pinned to one setting.
@@ -18957,6 +19058,11 @@ function updateCrosshair(dt, isGun){
 function updateView(dt){ updateRecoil(dt);                                          // camera recoil integrates every frame (kick + smooth recovery)
   if(player.grabbed){ view.group.visible=false; _hideOffHand(); if(view.holoRet)view.holoRet.visible=false; return; }   // no hands/held item during the capture — only the maw fills the screen
   if(!started || intro.active){ view.group.visible=false; _hideOffHand(); if(view.holoRet)view.holoRet.visible=false; return; }   // CINEMATICS own the camera — no floating hand/held item in the menu flythrough or the wake-up (Ben 07-20)
+  // RECORDING MODE DROPS THE VIEWMODEL TOO. Hiding the DOM overlays left a first-person fist or gun parked in the
+  // bottom-right of every frame, which is the most conspicuous thing in a landscape shot. It takes the same early
+  // return as the hide-HUD setting below rather than a rule of its own, because these two want identical behaviour
+  // and the one below is already the path every "hide the hands" caller was taught to use.
+  if(_cinemaMode){ view.group.visible=false; _hideOffHand(); if(view.holoRet)view.holoRet.visible=false; return; }
   if(cineMode){ if(!heldSlot()){ view.group.visible=false; _hideOffHand(); if(view.holoRet)view.holoRet.visible=false; return; } view.group.visible=true; }   // CINEMATIC (Ben 07-21): a HELD item stays in hand; only the EMPTY hand is hidden
   else if(!_hudOn){ view.group.visible=false; _hideOffHand(); if(view.holoRet)view.holoRet.visible=false; return; }   // the hide-HUD setting still drops the whole viewmodel
   // A SPENT OFFHAND ITEM IS CLEARED HERE, the one place that runs every frame. In offhand-use mode the action paths
@@ -32557,6 +32663,18 @@ window.__hc={
                rain:+weather.rain.toFixed(3), rainColor:'#'+rainMesh.material.color.getHexString(), fogColor:'#'+scene.fog.color.getHexString() };
     }catch(e){ return {err:String(e.message||e)}; } },
   skyToSea(v){ try{ if(v!=null) skyMat.uniforms.uSkyToSea.value=+v; return skyMat.uniforms.uSkyToSea.value; }catch(e){ return {err:String(e.message||e)}; } },
+  // The background range. height/dist are the SHAPE (how tall, how far, and therefore how much of the frame it fills),
+  // haze is the aerial-perspective gain that carries the depth, snow is the snowline as a fraction up the slope.
+  mountains(o){ try{ if(o){ if(o.on!=null) _uMtn.on.value=o.on?1:0; if(o.height!=null) _uMtn.h.value=+o.height;
+        if(o.dist!=null) _uMtn.d.value=+o.dist; if(o.haze!=null) _uMtn.haze.value=+o.haze; if(o.snow!=null) _uMtn.snow.value=+o.snow; }
+      // The colours it is HANDED, not just the dials it is set with. This layer derives its rock from uSky and its haze
+      // target from uFogCol, both shared by reference from the sky system, so "the range is too pale" is usually a
+      // question about what those two are at that hour rather than about anything in this shader.
+      const c=x=>[+x.r.toFixed(3),+x.g.toFixed(3),+x.b.toFixed(3)], u=mountainMat.uniforms;
+      return { on:!!_uMtn.on.value, height:_uMtn.h.value, dist:_uMtn.d.value, haze:_uMtn.haze.value, snow:_uMtn.snow.value,
+               sunAz:+u.uSunAz.value.toFixed(3), uSky:c(u.uSky.value), uFogCol:c(u.uFogCol.value),
+               uDay:+u.uDay.value.toFixed(3), exposure:+renderer.toneMappingExposure.toFixed(3) };
+    }catch(e){ return {err:String(e.message||e)}; } },
   // The sea's fake world curve, and the clamp that stops it sinking under the terrain. clamp:0 is the pre-fix behaviour.
   // clamp:0 restores the WHOLE pre-fix behaviour, cap included — a 58-block fall with no seabed clamp. Toggling only the
   // per-column clamp measured nothing, because the cap is what the far sea actually hits.
@@ -32633,6 +32751,11 @@ window.__hc={
                day:+globalU.uDay.value.toFixed(3), quality:CFG.quality };
     }catch(e){ return {err:String(e.message||e)}; } },
   shadowSoft(o){ try{ if(o&&o.radius!=null){ sunLight.shadow.radius=+o.radius; sunLight.shadow.needsUpdate=true; }
+      // CAST ON/OFF, so "are there shadows here" is a paired measurement in one page rather than an opinion about a
+      // screenshot. It reported `casting` and had no way to change it, which makes the claim "shadows stop working in
+      // fog" untestable: fog washes the whole frame out, so frame contrast alone cannot separate a lost shadow from a
+      // correctly greyed one. Toggling the caster and differencing isolates what the shadow map itself contributes.
+      if(o&&o.cast!=null){ sunLight.castShadow=!!o.cast; sunLight.shadow.needsUpdate=true; }
       // FILTER SWAP, for pricing only. Changing shadowMap.type needs every material recompiled and the map rebuilt — the same
       // work setSoftShadows() does — so this borrows its body rather than half-doing it and reporting a number from a stale
       // shader. PCF is the only filter here that honours radius, and buying penumbra means paying for its taps.
@@ -32643,7 +32766,10 @@ window.__hc={
       return { radius:sunLight.shadow.radius, type:T,
                typeName:(T===THREE.BasicShadowMap?'Basic':T===THREE.PCFShadowMap?'PCF':T===THREE.PCFSoftShadowMap?'PCFSoft':T===THREE.VSMShadowMap?'VSM':'?'),
                honoursRadius:(T===THREE.PCFShadowMap||T===THREE.VSMShadowMap),
-               mapSize:sunLight.shadow.mapSize.width, casting:sunLight.castShadow };
+               mapSize:sunLight.shadow.mapSize.width, casting:sunLight.castShadow,
+               // The sun's own intensity, because that is the other way a daytime shadow disappears: updateSky scales
+               // it by overcast, and a shadow cast by a light of intensity 0 is absent for a reason no shadow dial can fix.
+               sunI:+sunLight.intensity.toFixed(3), fog:+weather.fog.toFixed(2), overcast:+weather.overcast.toFixed(2) };
     }catch(e){ return {err:String(e.message||e)}; } },
   hits(x,y,z){ try{ return aabbHits(+x,+y,+z); }catch(e){ return {err:String(e.message||e)}; } },   // QA: does the player's AABB collide at this exact point? A collision claim tested by walking into something is really a claim about physics, friction and step-up as well
   // The flock's shared material against the air colour it is mixed toward. Reported as numbers because "the birds are black
