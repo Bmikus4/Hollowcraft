@@ -56,7 +56,23 @@ function stat(file,c){
            sunShade:+(med(hi)/Math.max(0.5,med(lo))).toFixed(2) };
 }
 // THE CEILING THIS BUILD MEASURED. Asserted, not printed: a guard that only prints is a guard nobody runs.
-const BASE={ open:{ pureBlack:0.0, isoBlack:0.0 }, canopy:{ pureBlack:0.0, isoBlack:0.0 } };
+//
+// ---- RE-BASED 2026-08-06, AND THE CANOPY'S pureBlack CEILING IS DELETED RATHER THAN RAISED ----
+// The 0.0% recorded here was not a decision. It was a property of a bug: FOL_UNLIT_FLOOR was applied to every
+// voxel-atlas material, so `max(colour, albedo*0.20)` made a pure-black land pixel ARITHMETICALLY IMPOSSIBLE anywhere
+// in the world at any hour. This harness could not have measured anything else, on any build, however dark.
+// With that gated back to foliage, the two statistics stop meaning the same thing, and only one of them was ever the
+// bug Ben named:
+//   · isoBlack — a lone crushed pixel with lit neighbours. THAT is "the black pixel bug", and its ceiling is unchanged
+//     at 0.05%. It is what picks uDayShade (0.65 measures 0.039%, 0.5 measures 0.122%).
+//   · pureBlack — contiguous black. That is a SHADOW, and Ben asked for it by name on 08-06: "in dark areas/areas
+//     where no light reaches, in caves, behind trees, I want realistic darkness/shadows. if no light reaches an area
+//     at all, it should be completely dark." A ceiling of 0.05% on it is a ceiling on the feature.
+// So the canopy keeps a pureBlack ceiling only as a RUNAWAY guard — a wood going 60% black is a fault whatever was
+// asked for — and the open vantage keeps the tight one, because nothing about a sunlit field was ever meant to move
+// and it measures 0.02% at every setting of every dial in the sweep.
+// The direction of this change is Ben's instruction, not a property of the code. Do not "fix" it back to 0.0.
+const BASE={ open:{ pureBlack:0.0, isoBlack:0.0 }, canopy:{ pureBlack:8.0, isoBlack:0.0 } };
 const TOL=0.05;   // in PERCENT of the crop — 0.05% of a 1000x560 crop is roughly 90 pixels, i.e. a visible speckle, not a rounding wobble
 (async()=>{
   const port=await freePort();
@@ -112,7 +128,13 @@ const TOL=0.05;   // in PERCENT of the crop — 0.05% of a 1000x560 crop is roug
     console.log(`  canopy spot ${spot?spot.x+','+spot.z:'none'} — ${spot?spot.cover:0} covered cells overhead`);
     check('a real canopy column was found, not the beach', !!spot && spot.cover>=4, JSON.stringify(spot));
     const canopy=await vantage('canopy', spot.x+0.5, spot.g+1.7, spot.z+0.5, Math.PI*0.5, -0.22);
-    check('the daylight frame is actually daylit', open.med>40 && canopy.med>10, `open med ${open.med}, canopy med ${canopy.med}`);
+    // ON THE CANOPY'S p90, NOT ITS MEDIAN. This is a sanity guard — "is the sun actually up in these frames" — and a
+    // median cannot answer it under thirteen cells of cover: the crop is mostly deep shade by construction, so its
+    // median is small on any build that lets shade be dark, and it read 5.7 even with the shade dial fully off. What
+    // says the sun is up is that there is SUNLIGHT somewhere in the frame, which is the p90 — 136 through every row of
+    // the sweep, against a median that moves 5.7 -> 1.4 across it. Dappled light is exactly a low median with a high
+    // p90, so the statistic that distinguishes "night" from "a wood at noon" is the top of the distribution.
+    check('the daylight frame is actually daylit', open.med>40 && canopy.p90>60, `open med ${open.med}, canopy p90 ${canopy.p90} (med ${canopy.med})`);
     for(const [tag,r] of [['open',open],['canopy',canopy]]){
       check(`${tag}: no pure black`, r.pureBlack<=BASE[tag].pureBlack+TOL, `${r.pureBlack}% against a ceiling of ${BASE[tag].pureBlack+TOL}%`);
       check(`${tag}: no isolated black`, r.isoBlack<=BASE[tag].isoBlack+TOL, `${r.isoBlack}% against a ceiling of ${BASE[tag].isoBlack+TOL}%`);

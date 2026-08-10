@@ -120,6 +120,25 @@ export function statFile(file, c){
            blackPct:+(100*black/n).toFixed(3), nearBlackPct:+(100*near/n).toFixed(3) };
 }
 
+// ---- PAIRED IMAGE DIFFERENCE ----
+// For an effect that changes a surface's SHAPE rather than its brightness — a normal perturbation, a ripple, a streak —
+// every summary statistic is nearly blind: the mean, the median and the percentile span can all sit still while every
+// pixel in the crop moves. The honest measure is how far the pixels actually moved, against a CONTROL PAIR of two
+// frames of the same condition, which is what says how much of it was the effect and how much was the frame's own
+// noise. This is assert-ssao's pattern; it exists because four separate confounds each looked like a broken pass.
+export function diffStat(fileA, fileB, c){
+  const A=decodePNG(fs.readFileSync(fileA)), B=decodePNG(fs.readFileSync(fileB));
+  if(A.w!==B.w||A.h!==B.h) return null;
+  const x0=(A.w*c[0])|0, x1=(A.w*c[1])|0, y0=(A.h*c[2])|0, y1=(A.h*c[3])|0;
+  let sum=0, n=0, moved=0, mx=0;
+  for(let y=y0;y<y1;y++) for(let x=x0;x<x1;x++){
+    const i=(y*A.w+x)*A.ch;
+    const d=(Math.abs(A.data[i]-B.data[i])+Math.abs(A.data[i+1]-B.data[i+1])+Math.abs(A.data[i+2]-B.data[i+2]))/3;
+    sum+=d; n++; if(d>2) moved++; if(d>mx) mx=d;
+  }
+  return { mad:+(sum/n).toFixed(3), movedPct:+(100*moved/n).toFixed(2), max:+mx.toFixed(1) };
+}
+
 // Median across the N shots of the same condition, field by field. Arrays (rgb) are reduced element-wise.
 export function statMedian(files, c){
   const S = files.map(f=>statFile(f,c)).filter(Boolean);

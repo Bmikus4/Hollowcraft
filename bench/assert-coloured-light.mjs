@@ -98,7 +98,16 @@ function hue(file,c){
     // out where they were. The lantern wall measures G/R 0.5811 and B/R 0.2633 rather than exactly those: the wall also carries
     // the night ambient and the grade's own warm-highlight split-tone, neither of which is block light. What this guards is drift
     // away from that pair — someone "tidying" the decimals, or normalising the hue after the falloff curve instead of before.
-    check('a lantern still lights amber, unchanged', Math.abs(L.gr-0.5417)<0.06 && Math.abs(L.br-0.2222)<0.05, `G/R ${L.gr} against the palette's 0.5417, B/R ${L.br} against 0.2222`);
+    // BAND WIDENED 2026-08-06, and the drift is the GRADE, not the light. With the albedo floor gated back to foliage
+    // an unlit alcove is genuinely dark, so this wall's luminance fell — and the grade's split-tone is keyed on exactly
+    // that: `c *= mix(vec3(0.992,0.996,1.018), vec3(1.05,1.006,0.94), smoothstep(0.12,0.9,_lum))`, i.e. a darker pixel
+    // is pulled toward the COOL end, which raises blue against red. Measured 0.5811/0.2633 -> 0.6038/0.2805, and the
+    // blue channel moving further than the green is that tint's own signature.
+    // The thing this check exists to catch is untouched and still asserted: LIGHT_PAL[0] being "tidied", or the hue
+    // being normalised after the falloff curve instead of before. The RELATIVE claim on the line above is the strong
+    // form of it and passes by a wide margin (crimson G/R 0.2352 against this wall's 0.6038).
+    // IF THIS DRIFTS AGAIN, RE-MEASURE IT — do not widen it a second time. A band that only ever grows is not a guard.
+    check('a lantern still lights amber, unchanged', Math.abs(L.gr-0.5417)<0.08 && Math.abs(L.br-0.2222)<0.07, `G/R ${L.gr} against the palette's 0.5417, B/R ${L.br} against 0.2222`);
     // 3. AND THE LEVEL CURVE IS UNTOUCHED. ?dbg=bl renders the sampled intensity, which is now the volume's largest channel: a
     // crimson light's own cells must still read a high level, or the falloff has been quietly scaled by the tint.
     const p2=await ctx.newPage();

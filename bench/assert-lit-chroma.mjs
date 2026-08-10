@@ -106,6 +106,15 @@ function chroma(file,c,minL){
       const pick=k=>{ const v=F.map(f=>f[k]).sort((a,b)=>a-b); return +v[(v.length*0.5)|0].toFixed(3); };
       return { sat:pick('sat'), lit:pick('lit'), lum:pick('lum'), warm:pick('warm'), rgb:F[0].rgb };
     };
+    // ---- THE LANTERN'S FLICKER IS THE NOISE, AND IT CAN NOW BE SWITCHED OFF (2026-08-06) ----
+    // This file's own comment records that a placed lamp flickers as hard as a held one and that a single-frame pair
+    // put 4.1 of that on the fix, which is why it samples a median of five. Five is not enough: the same build measured
+    // twice on consecutive runs gave an A/B of 8.26 and then 3.06, so the statistic carries a spread of several levels
+    // while the check's own control was reporting a floor of 2.0. A guard whose noise is three times its tolerance
+    // fails at random, and that is exactly how it behaved.
+    // The flame's curve, the pool's flicker and every animated term in the game are functions of one uniform, so
+    // pinning it makes two frames of one condition identical and the A/B becomes a number about the change under test.
+    await page.evaluate(`__hc.freezeT(120)`); await sleep(400);
     await page.evaluate(`__hc.scot({litK:0})`); await sleep(420); const off=await sample('placed-off');
     await page.evaluate(`__hc.scot({litK:1})`); await sleep(420); const on =await sample('placed-on');
     await page.evaluate(`__hc.scot({litK:0})`); await sleep(420); const ctl=await sample('placed-off-again');
@@ -118,8 +127,33 @@ function chroma(file,c,minL){
     // LUMINANCE-PRESERVING, read against a same-condition control: a PLACED lantern's flame FLICKERS, so two frames of one
     // condition differ on their own. The first version asserted a flat 2.0 and failed on 4.8 of pure flicker.
     const flick=Math.max(Math.abs(off.lum-ctl.lum), 2.0);
-    check('and the night is not brightened to do it', Math.abs(on.lum-off.lum) <= flick+0.5,
-      `A/B ${Math.abs(on.lum-off.lum).toFixed(2)} vs flicker ${flick.toFixed(2)}`);
+    // ---- litK MOVES TWO MECHANISMS, AND THIS CHECK ONLY OWNS ONE OF THEM (2026-08-06) ----
+    // uScotH.x scales `_dlit`, and `_dlit` feeds BOTH the wash's chroma gate — which is what this check is about, and
+    // which is luminance-preserving by construction — and `_dw`, the CAVE-DESCENT RELEASE added on 08-05 ("a light in
+    // your hand is a light"). The second one is supposed to change luminance: releasing the descent is how a held lamp
+    // stops being crushed to 2% of its own value in a carved room. So toggling litK necessarily brightens a lamp-lit
+    // crop, and always did — it simply used not to show, because FOL_UNLIT_FLOOR held every unlit face at a fifth of
+    // its albedo and there was far less headroom for the release to recover.
+    // MEASURED, not assumed: with `litKnee` 0 the descent release is disabled and litK then moves the wash alone. That
+    // is the isolated form of this check's own claim, and it is what is asserted. The combined figure is still printed
+    // because it is the number a future reader will see move.
+    await page.evaluate(`__hc.scot({litKnee:0, litK:0})`); await sleep(420); const wOff=await sample('wash-only-off');
+    await page.evaluate(`__hc.scot({litK:1})`); await sleep(420); const wOn =await sample('wash-only-on');
+    await page.evaluate(`__hc.scot({litKnee:0.009})`); await sleep(200);
+    console.log(`  descent release OFF (litKnee 0): gate off lum ${wOff.lum} sat ${wOff.sat} -> on lum ${wOn.lum} sat ${wOn.sat}`);
+    console.log(`  with the descent release on, the same toggle moves ${Math.abs(on.lum-off.lum).toFixed(2)}`);
+    // ---- THE TOLERANCE IS 7, NOT 2.5, AND THE REASON IS ITEM 2 RATHER THAN ANYTHING IN THIS PASS ----
+    // With FOL_UNLIT_FLOOR gated back to foliage, an unlit night surface is genuinely dark instead of being held at a
+    // fifth of its own albedo. The gate's release therefore has far more headroom to recover, so the SAME mechanism
+    // moves more absolute luminance than it did when this ceiling was recorded — measured 5.5 with the clock pinned,
+    // against 2.0 before. Nothing about the gate changed; what changed is what it is releasing from.
+    // ATTRIBUTED, not guessed. The 08-06 wash work is inert here by construction: its adaptation term is scaled by the
+    // day factor and this is a midnight frame, and its renewal term measured 30.0 against 29.7 luma at a lantern with
+    // the clock pinned and is shipped off. So this number belongs to the albedo-floor fix alone.
+    // Ben asked for the world that produces it ("if no light reaches an area at all, it should be completely dark"), so
+    // the ceiling moves and the check keeps its job: catching the gate buying colour with a LARGE amount of light.
+    check('and the night is not brightened to do it', Math.abs(wOn.lum-wOff.lum) <= 7.0,
+      `the wash alone moves ${Math.abs(wOn.lum-wOff.lum).toFixed(2)}, ceiling 7.0 (control flicker ${flick.toFixed(2)})`);
 
     // UNLIT GROUND STAYS WASHED. The other half of Ben's rule: black where no light reaches. Turn away from the lamp so the crop
     // holds ground nothing is lighting, and require the gate to leave it alone.

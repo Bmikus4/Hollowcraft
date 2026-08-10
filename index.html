@@ -415,6 +415,43 @@ const _scotG = new Float32Array([0.85, 0.01, 0.45, 1]);
 // as black four times. `?dbg=lit` cannot be used to read these values: it writes gl_FragColor before the post chain, so its 28/255 on
 // that same wall is a GRADED number and reading the knee off it put the first attempt 17x too high, moving the frame by 2 levels.
 const _scotH = new Float32Array([1.0, 0.02, 0.5, 0.009]);
+// ---- WHAT THE WASH IS, PHYSICALLY, AND WHY IT NEEDED A THIRD VECTOR (Ben 08-06) ----
+// "A realistic wash is actually a biological affect of the human eye, and when everything in the frame is dark, colors
+// tend to look more washed out. This affect should be most prominent during the night. Light itself renews this wash,
+// meaning that more light, and direct light sources, actually bring color back to the game."
+//
+// He is describing the Purkinje shift, and it has TWO inputs, not one. Human colour vision is carried by cones, which
+// stop responding below about 0.01 cd/m2; below that only the rods are left and they are monochromatic. The pass has
+// always modelled the second input — how much light reaches THIS surface — and never the first, which is what the eye
+// as a whole is adapted to. Those are different questions and they pull opposite ways:
+//   · a dim corner at NOON is seen by an eye adapted to a sunlit field, with a small pupil and cones dominant. It reads
+//     BLACK. It does not read grey, because there is not enough light there to lift it to visibility at that adaptation.
+//   · the same corner at NIGHT is seen by a rod-adapted eye. It reads grey, desaturated, and legible.
+// Modelling only the per-surface term gives one answer to both, which is the flat grey Ben has now reported twice.
+//
+// [0] THE DAYTIME WASH MULTIPLIER. 1.0 is the pre-dial build (the wash at full strength at every hour); 0.45 is
+// photopic adaptation — by day a dark place gets its darkness from the descent and from having no light in it, not from
+// being painted grey. This is the "most prominent during the night" half.
+// [1] HOW MUCH FASTER A REAL LIGHT SOURCE RESTORES COLOUR THAN THE SKY DOES, as a divisor on the wash's own upper knee.
+// This is the "light itself renews this wash" half, and it is deliberately keyed on DELIVERED DIRECT light rather than
+// on the general light level: sky and bounce are diffuse and weak and leave a surface mesopic, while a lamp a few
+// blocks away puts real photons on it and the cones come back. 2.5 means colour is fully back at 0.18 of delivered
+// light where the general ramp would need 0.45.
+// MEASURED, and it is what pushed this from "would be nice" to "is a bug": with the albedo floor gone,
+// assert-coloured-light read a lantern's own alcove at G/R 0.606 against the palette's 0.5417 — the lamp's amber was
+// being greyed by 12% by the very pass that is supposed to leave lit surfaces alone.
+// [1] IS 0 — OFF — AND THAT IS A MEASURED RETREAT, NOT AN UNFINISHED FEATURE.
+// The renewal was built to answer "light itself renews this wash", then measured against its own off switch at a
+// placed lantern at midnight with the shader clock pinned, on the wall the lamp is actually on:
+//   renew OFF   lum 30.0   sat 0.754
+//   renew 2.5   lum 29.7   sat 0.757
+// It moves nothing. And the reason is worth keeping, because it is the argument against ever adding it back: `_slit`
+// ALREADY gates the whole wash on delivered light, so by the time a lamp is close enough for a second release to
+// matter, the first one has already taken the wash to zero. The colour was always coming back in a lamp's puddle; this
+// was a second door into a room that was already open.
+// Kept as a dial rather than deleted, with an explicit off branch in the shader, so the claim can be re-tested in one
+// call rather than rebuilt: __hc.scot({renew:2.5}).
+const _scotK = new Float32Array([0.45, 0, 0, 0]);
 // ---- A PROP IN SHADE IS NOT A PROP AT NIGHT (Ben 08-05: the scarecrow near spawn "is completely black") ----
 // (r, g, b, -). The daylight SKY FILL that every non-atlas lit material was missing.
 //
@@ -430,7 +467,7 @@ const _scotH = new Float32Array([1.0, 0.02, 0.5, 0.009]);
 // black nights, with the light in them coming from lamps.
 const _propFill = new Float32Array([0.237, 0.267, 0.30, 0]);
 { const L='vec3(0.2126,0.7152,0.0722)';
-  THREE.ShaderChunk.lights_pars_begin += '\nuniform vec4 uScotG;\nuniform vec4 uScotH;\nuniform vec4 uPropFill;\n';
+  THREE.ShaderChunk.lights_pars_begin += '\nuniform vec4 uScotG;\nuniform vec4 uScotH;\nuniform vec4 uScotK;\nuniform vec4 uPropFill;\n';
   // ATLAS MATERIALS ARE EXCLUDED BY THE SAME DEFINE THE WASH BRANCHES ON, and the exclusion is the whole point: a block
   // already has this term, baked and sky-occluded, so adding a flat one would lift caves and interiors by daylight.
   // diffuseColor-weighted, so a dark prop stays dark and a pale one lifts — a flat add is a fog, not a fill.
@@ -538,8 +575,47 @@ const _propFill = new Float32Array([0.237, 0.267, 0.30, 0]);
     // A canopy is therefore NOT covered by this (leaves are not sky occluders, so a forest floor is `_open` 1) — his report is
     // "in dark caves", and the wash's own `_w` still protects anything a light reaches strongly, anywhere.
     '  _dw=mix(_dw, 1.0, _open);\n'+
-    '  float _des=mix(1.0, uScotH.y, min(_w,_dw)*(1.0-_open*uScotG.w));\n'+
-    '  gl_FragColor.rgb=mix(gl_FragColor.rgb, vec3(_sl*_des), uScotG.x*_w);\n'+
+    // ---- THE DESCENT AND THE WASH ARE TWO OPERATIONS, AND SPLITTING THEM IS WHAT MAKES THE RENEWAL HONEST ----
+    // They used to be one mix toward vec3(_sl*_des): a single blend that darkened AND desaturated together. That works
+    // while nothing modulates it, and stops working the moment something does — the renewal below reduces the blend,
+    // and reducing a blend whose target is darker than the source BRIGHTENS the pixel. Measured: assert-lit-chroma's
+    // lamp-lit crop moved 4.36 levels when the gate was toggled, against a 2.00 flicker floor, so colour was being
+    // bought with brightness. That is the fault the whole pass was built to avoid.
+    // Written as two steps the two claims are separable and each is exactly true:
+    //   1. THE DESCENT is a multiply on value. It is what makes an unlit cave black and light does not renew it — a
+    //      lamp carried past a cave mouth must not brighten the cave.
+    //   2. THE WASH is a mix toward the pixel's OWN luma, taken AFTER the descent, so it is luminance-preserving by
+    //      construction rather than by arithmetic that happens to cancel. This is the half light brings back.
+    '  float _dAmt=min(_w,_dw)*(1.0-_open*uScotG.w);\n'+
+    // WEIGHTED BY uScotG.x, AND THAT IS NOT DECORATION — it is what makes this a faithful rewrite rather than a
+    // different feature. In the single-mix form the descent could only ever reach uScotG.x of the way to its floor,
+    // because it lived inside a blend of amount 0.85: a fully descended pixel was 0.15*colour + 0.85*luma*0.02, i.e.
+    // about 0.16 of itself. Applied as a plain multiply it reaches 0.02, which is SEVEN TIMES darker, and that is
+    // exactly what the first version of this split did — a lantern in a carved room fell 6.74 to 3.92 and a night
+    // canopy went from 17% pure black to 81%. Carrying the weight across keeps the descent's magnitude where four
+    // rounds of night tuning left it (0.167 against the old 0.15) while still separating value from chroma.
+    '  gl_FragColor.rgb *= mix(1.0, uScotH.y, _dAmt*uScotG.x);\n'+
+    '  _sl=dot(gl_FragColor.rgb,'+L+');\n'+
+    // ---- THE EYE'S OWN ADAPTATION (Ben 08-06: "this affect should be most prominent during the night") ----
+    // The wash's STRENGTH follows the whole scene, because that is what an eye adapts to; `_w` above follows this one
+    // surface. By day the multiplier drops the pass toward photopic, so a dark place is dark rather than grey — which
+    // is now a real distinction, since a face with no light reaching it renders black on its own and no longer needs
+    // the wash to stand in for darkness. At night uScotG.w is 0 and this is exactly 1, so every night frame Ben has
+    // signed off is arithmetically untouched.
+    '  float _adapt = mix(1.0, uScotK.x, clamp(uScotG.w,0.0,1.0));\n'+
+    // ---- AND LIGHT RENEWS IT (Ben 08-06: "more light, and direct light sources, actually bring color back") ----
+    // Keyed on DELIVERED DIRECT light, not on the general gate `_slit`. The two are different claims: `_slit` counts the
+    // sky and the baked flood, which are diffuse and leave a surface mesopic, while this counts what a lamp, a fire or
+    // the sun actually put on the fragment. A torch therefore does not merely stop the wash — it reverses it, over a
+    // ramp uScotK.y times tighter than the general one, so the puddle around a lamp is where the world's colour comes
+    // back and the dark beyond it is where it drains away. That gradient IS the effect being asked for.
+    // Applied to the DESATURATION only and never to the descent below: the descent is what makes an unlit cave black, and letting
+    // this reach it would light a cave up simply by carrying a lamp past its mouth.
+    // 0 IS OFF, AND IT HAS TO BE AN EXPLICIT BRANCH. max(uScotK.y, 1.0) clamps the divisor up, so every value from 0 to
+    // 1 produces the SAME ramp — there was no setting of the dial that disabled the term, which meant the one A/B that
+    // matters (is this term worth its cost) could not be run at all. Found while trying to run it.
+    '  float _renew = (uScotK.y > 0.0) ? smoothstep(uScotG.y, uScotG.z/max(uScotK.y,1.0), max(_dlit,_emi)) : 0.0;\n'+
+    '  gl_FragColor.rgb=mix(gl_FragColor.rgb, vec3(_sl), uScotG.x*_w*_adapt*(1.0-_renew));\n'+
     // ---- THE FOG BETWEEN YOU AND A LAMP IS LIT BY IT (Ben 08-05: "light should be visible through nighttime black fog") ----
     // `fogFactor` is declared by three's fog_fragment inside main() with no braces around it, so it is still in scope here — and
     // here is AFTER the fog mix, which is the whole point: what the fog took, this puts back in proportion to how much fog was in
@@ -557,7 +633,7 @@ const _propFill = new Float32Array([0.237, 0.267, 0.30, 0]);
 // the 225 call sites; an entry the GLSL never references is dropped by seqWithValue and costs nothing.
 for(const k of ['lambert','phong','standard','physical','toon','dashed','basic','points','sprite']){
   const S=THREE.ShaderLib[k]; if(!S||!S.uniforms) continue;
-  S.uniforms.uScotG={ value:_scotG }; S.uniforms.uScotH={ value:_scotH }; S.uniforms.uPropFill={ value:_propFill };
+  S.uniforms.uScotG={ value:_scotG }; S.uniforms.uScotH={ value:_scotH }; S.uniforms.uScotK={ value:_scotK }; S.uniforms.uPropFill={ value:_propFill };
 }
 
 // =====================================================================
@@ -3917,6 +3993,8 @@ const _cloudShadowTex = (()=>{
   g.putImageData(im,0,0);
   const t=new THREE.CanvasTexture(cv); t.wrapS=t.wrapT=THREE.RepeatWrapping; t.minFilter=THREE.LinearMipmapLinearFilter;
   t.magFilter=THREE.LinearFilter; t.generateMipmaps=true; t.needsUpdate=true; return t; })();
+// QA ONLY: when non-null this pins the shader clock (see where globalU.uTime is driven, and __hc.freezeT).
+let _pinT = null;
 const globalU = {
   uCloudTex:{ value:_cloudShadowTex },
   // Strength, set per frame in updateSky from the live cloud cover and the sun's own elevation. 0 disables the whole term, which
@@ -4008,12 +4086,19 @@ const globalU = {
   // rendered at a fifth of its texture. It has authority now, and the pick is the one that separates the two crops:
   //   shaded forest floor, noon:  1.0 -> 26.4 | 0.6 -> 16.3 | 0.4 -> 10.8 | 0.25 -> 6.5 | 0.1 -> 3.5
   //   OPEN ground, noon:          1.0 -> 69.1 | 0.4 -> 64.8 | 0.1 -> 61.6
-  // At 0.4 shade falls 59% and open sunlit ground falls 6%, which is the honest shape — a sunlit field is not being
-  // asked to change and mostly does not, and what does move in that crop is the shadowed pixels inside it, which is
-  // the point. 0.25 IS NOT THE PICK AND THE REASON IS BEN'S OWN CONSTRAINT ("you must be careful not to reintroduce
-  // our black pixel bug"): pure black in the open-ground crop is 0.000% at 0.4 and 4.7% at 0.1. The lever is bought
-  // exactly as far as it goes without crushing a daylit field.
-  uDayShade: { value:new THREE.Vector2(0.4, 6.0) },
+  // THE NUMBER IS SET BY THE SPECKLE, NOT BY THE SHADE, and that distinction is the whole of Ben's "careful not to
+  // reintroduce our black pixel bug". Two different things read as black in a crop and only one of them is the bug:
+  // CONTIGUOUS black is shadow, which is what he asked for by name ("behind trees, I want realistic darkness"), while
+  // ISOLATED black is a lone crushed pixel in a lit surface, which is the artefact. assert-daylight-black measures both
+  // separately, and the isolated share at the canopy vantage is what picks this value (HC_SWEEP=1, 13 covered cells
+  // overhead, against its 0.05% ceiling):
+  //   dark   1.00   0.65   0.50   0.35   0.20
+  //   iso%   0.000  0.039  0.122  0.229  0.401
+  //   pure%  0.022  2.559  8.031  22.92  36.92
+  // 0.65 is the largest darkening whose isolated black is still under the ceiling; 0.5 is over it by 2.4x. Open sunlit
+  // ground is unmoved at every setting (iso 0.02-0.03% throughout, median 88.9 -> 88.1), which is the other thing that
+  // had to stay true.
+  uDayShade: { value:new THREE.Vector2(0.65, 6.0) },
   // THE SCOTOPIC DIALS ARE NOT HERE. They live in _scotG / _scotH at the top of this file, as Float32Arrays, because a globalU
   // entry can only be shared by materials this file injects by hand and Ben asked for the pass on every material in the game.
   // Why each value is what it is:
@@ -5631,6 +5716,26 @@ const waterMat = new THREE.ShaderMaterial({
     // there is no branch to mispredict and no fetch behind it.
     uFoam:{value:0},
     uGladeAfter:{value:1}, uGladeAmt:{value:1},   // where the sun/moon track is added (after the ring landing) and its overall strength — see the glade block
+    // ---- THE SKY THE WATER REFLECTS (Ben 08-06: "water reflections look very gamey ... I want sharp and reflective water") ----
+    // These four are the DOME'S OWN anchors, by reference, and that is the whole reason this is safe to do in-shader.
+    // The alternative — porting the sky's procedural dome into the water shader — is the mistake the god-ray pass's
+    // cloud field already paid for: two copies of a field that must agree, drifting apart silently. A gradient built
+    // from the same two colours the dome is built from cannot drift, because there is only one set of numbers.
+    uHorizonC:globalU.uHorizon, uZenithC:globalU.uZenith, uSunColU:globalU.uSunCol,
+    // The reflection's overall strength, and the sharpness of the sky's own sun lobe in it. 0 on the first restores the
+    // flat-uRing surface exactly, which is the A/B (__hc.waterRefl({amt:0})).
+    uReflAmt:{value:1}, uReflSharp:{value:1},
+    // ---- THE LAMPS ON THE WATER (Ben 08-06: "reflections from held, placed, and the suns light source") ----
+    // The sun and the moon have had their own specular tracks for two days; every other light in the game had none, so
+    // a lantern on a jetty at midnight lit the planks and left the water beneath it dead black. Four slots, packed as
+    // xyz = world position and w = radius, filled per frame from the light pool by the nearest emitters (see
+    // updateWaterLights). Four because that is what fits in the fragment's register budget without a loop over the
+    // whole 16-slot pool for every water pixel in frame, and because a fifth lamp's track is behind the first four.
+    uLampP:{value:[new THREE.Vector4(0,-999,0,0),new THREE.Vector4(0,-999,0,0),new THREE.Vector4(0,-999,0,0),new THREE.Vector4(0,-999,0,0)]},
+    uLampC:{value:[new THREE.Color(0,0,0),new THREE.Color(0,0,0),new THREE.Color(0,0,0),new THREE.Color(0,0,0)]},
+    // THE CURRENT, AS SOMETHING YOU CAN SEE (Ben 08-06: "lines in the water that flow with the current"). Gain on the
+    // streak field; 0 is the A/B off and restores the pre-streak surface exactly.
+    uStreak:{value:1},
     uMeshR:{value:96}, uBody:_uWaterBody, uFogDensity:{value:scene.fog.density}, uDeep:_uWaterDeep, uRing:_uWater, uRingFade:{value:2400},   // the far-sea annulus's outer radius, set per frame in updateHorizon
     // THE CURVE LIVES AT THE FAR END NOW (Ben 08-04: "i just want the ocean to look like its going on forever, and to have an
     // ever so slight world curve out at its end"). It used to be the opposite shape: R=20, k=0.0022 spends the whole fall by
@@ -5736,8 +5841,33 @@ const waterMat = new THREE.ShaderMaterial({
     uniform vec3 uSunDir,uMoonDir,uCamPos; uniform float uDay,uTime; uniform vec3 uFogColor; uniform vec3 uBody; uniform float uFogDensity, uDeep, uWx; uniform vec3 uRing; uniform float uRingFade; uniform vec3 uSeaNight;
     uniform float uGladeAfter, uGladeAmt, uFresCap, uFoam;
     uniform vec4 uScotG, uScotH;   // the scotopic vectors, shared by reference with the land — see the night wash at the end of main()
+    uniform vec3 uHorizonC, uZenithC, uSunColU; uniform float uReflAmt, uReflSharp, uStreak;
+    uniform vec4 uLampP[4]; uniform vec3 uLampC[4];
     float h2(vec2 p){ return fract(sin(dot(p,vec2(12.9,78.2)))*43758.5); }
     float vn2(vec2 x){ vec2 i=floor(x),f=fract(x); f=f*f*(3.0-2.0*f); return mix(mix(h2(i),h2(i+vec2(1,0)),f.x),mix(h2(i+vec2(0,1)),h2(i+vec2(1,1)),f.x),f.y); }
+    // ---- WHAT THE SURFACE IS ACTUALLY LOOKING AT ----
+    // A reflection is a function of the mirror DIRECTION, and this shader had none: skyRefl was uRing, one flat colour
+    // for every angle, every ripple and every hour. That is the "gamey" read and it is structural rather than a tuning
+    // miss — a surface whose reflection does not change with the surface's own normal is a painted lid by construction,
+    // which is exactly what the uFresCap note further down was written to work around.
+    // Built from the dome's OWN two anchors so the sea and the sky cannot disagree at the same elevation (see the
+    // uniform note). Three terms and nothing else:
+    //   · the elevation gradient, horizon to zenith. pow(h, 0.42) rather than a linear mix because the real dome
+    //     compresses its horizon band into the first few degrees, and a linear ramp puts the horizon colour halfway up
+    //     the sky — which reads as haze, not as a reflection.
+    //   · a downward branch. A ripple can face slightly DOWN relative to the eye, and a gradient clamped at zero makes
+    //     every such facet the horizon colour, which is what turns chop into a field of bright specks.
+    //   · the sun's forward scatter and its disc, as two lobes. The broad one is what makes the whole sun side of the
+    //     water brighter than the other side, which is most of what a real sea does and none of what uRing did.
+    vec3 skyAt(vec3 d){
+      float h = d.y;
+      vec3 c = mix(uHorizonC, uZenithC, pow(clamp(h,0.0,1.0), 0.42));
+      c = mix(uHorizonC*0.72, c, smoothstep(-0.22, 0.02, h));
+      float sd = max(dot(d, normalize(uSunDir)), 0.0);
+      float above = smoothstep(-0.06, 0.05, uSunDir.y);
+      c += uSunColU * (pow(sd, 7.0)*0.22 + pow(sd, mix(90.0, 260.0, uReflSharp))*1.9) * uDay * above;
+      return c;
+    }
     void main(){
       // THE PAINTED SEA STOPS WHERE THE REAL SEA STARTS (Ben 08-05: "I break a few blocks upshore and I see water underground, just
       // a plane, not real water"). The 08-04 fix gated this disc on the CAMERA's own column, which is right about a cave and wrong
@@ -5779,6 +5909,39 @@ const waterMat = new THREE.ShaderMaterial({
         vec3 fine=normalize(vec3((f1-0.5)*1.15+(f2-0.5)*0.8+(f3-0.5)*0.5, 1.0, (f2-0.5)*1.0+(f3-0.5)*0.65));
         N = normalize(mix(N, normalize(N*0.62+fine*0.72), _near));
       }
+      // ---- LINES IN THE WATER THAT FLOW WITH THE CURRENT (Ben 08-06) ----
+      // Every octave above is ISOTROPIC — the same noise in x and z — which is what makes the surface read as a
+      // generic bumpy material rather than as water going somewhere. Moving water is streaked ALONG its direction of
+      // travel, because a disturbance is carried downstream faster than it spreads sideways.
+      // One rotated, anisotropic sample gets it: build a frame from the flow direction, squash the noise hard across
+      // that axis (0.16) and stretch it along it (5.4), and the field becomes long thin filaments lying down the
+      // current. It is advected by the same "- vFlow*uTime" every other octave uses, so the filaments travel rather
+      //   ^ DOUBLE QUOTES. This comment is inside waterMat's fragmentShader template literal, so a backtick here closes
+      //   the string and the rest of the file becomes garbage — the page does not boot and the error names a token
+      //   hundreds of lines away. It is the same trap skyMat and the god-ray shader each carry their own warning about,
+      //   and it cost this change one boot.
+      // than sitting on the world like a printed texture.
+      // WHERE THERE IS NO CURRENT THERE ARE STILL LINES, and this is the part that decides whether the item reads at
+      // all: aFlow is zero over open ocean and every pond, which is most of the water in the game. With no current the
+      // axis falls back to the dominant WAVE heading (D0, normalize(1,0.3)), so a sea gets the long swell-aligned
+      // streaking a real sea has and a river gets its own.
+      // It perturbs the NORMAL rather than the colour, so it is lit and reflected like the rest of the surface instead
+      // of being a decal painted over it — the streaks catch the sky, the sun track and the lamps, which is the whole
+      // reason to do it here and not in the albedo.
+      if(uStreak > 0.001){
+        vec2 fdir = (length(vFlow) > 0.02) ? normalize(vFlow) : normalize(vec2(1.0,0.3));
+        vec2 perp = vec2(-fdir.y, fdir.x);
+        vec2 suv = vec2(dot(uv, fdir)*0.16, dot(uv, perp)*5.4);
+        float s1 = vn2(suv + vec2(uTime*0.10, 0.0));
+        float s2 = vn2(suv*2.3 - vec2(uTime*0.16, 0.0));
+        float sgrad = (s1-0.5)*0.68 + (s2-0.5)*0.34;
+        // The tilt is ACROSS the flow: a groove running downstream has its slope on the perpendicular axis. Tilting
+        // along the flow instead would corrugate the current like a washboard, which is what a river does not do.
+        vec3 str = normalize(vec3(perp.x*sgrad, 1.0, perp.y*sgrad));
+        // Top faces only, for the same reason the capillary detail above is: uv is vW.xz, which is constant down a
+        // vertical face, so any noise off it streaks into bars on the side of a water column.
+        N = normalize(mix(N, normalize(N*0.72 + str*0.55), uStreak*vTop*0.85));
+      }
       vec3 V=normalize(uCamPos-vW); float cosT=clamp(dot(N,V),0.0,1.0);
       float F=0.02+0.98*pow(1.0-cosT,5.0);
       vec3 deep=vec3(0.004,0.015,0.019), shallow=vec3(0.02,0.065,0.07);
@@ -5802,7 +5965,14 @@ const waterMat = new THREE.ShaderMaterial({
       // uFresCap keeps a fifth of the depth colour at any angle, which is what carries the layered read Ben is asking for out to
       // the horizon. It caps the COLOUR mix only — F itself is untouched, so the specular, the glade and the alpha term still
       // see the true Fresnel.
-      vec3 skyRefl=uRing;
+      // THE MIRROR DIRECTION, and the sign is the one the plan's section 7 records two separate casualties for: V points
+      // FROM the surface TOWARD the eye, so the ray arriving is -V and the reflected ray is reflect(-V, N). Written the
+      // other way it points into the water and the term is silently zero forever.
+      vec3 R = reflect(-V, N);
+      // A reflected ray that has gone below the horizon is looking at the sea itself, not at the sky. Folding it back up
+      // is what a real second bounce approximates, and it stops the underside of a steep ripple reading as a hole.
+      R.y = abs(R.y)*0.55 + R.y*0.45;
+      vec3 skyRefl = mix(uRing, skyAt(normalize(R)), uReflAmt);
       vec3 col=mix(base, skyRefl, min(F, uFresCap));
       // NO specular glints and NO white foam crests — they read as "shiny white flashes". Removed on purpose.
       // MOONGLADE — moved BELOW the absorption, next to the sunglade it was copied from. See the block after it.
@@ -5887,6 +6057,30 @@ const waterMat = new THREE.ShaderMaterial({
         float track = smoothstep(0.55, 1.0, abs(N.x)+abs(N.z));           // only the tilted ripple faces catch it → broken, watery path
         glade += vec3(0.28,0.34,0.42) * (glint*(0.35 + 0.65*track) + halo) * night * mAbove * 3.4;
       }
+      // ---- AND EVERY OTHER LIGHT IN THE GAME (Ben 08-06: "reflections from held, placed, and the suns light source") ----
+      // The sun and the moon are at infinity, so their tracks are a lobe about a fixed DIRECTION. A lantern is not: it
+      // is a point a few blocks away, so its reflection is a lobe about the direction to THAT POINT from THIS fragment,
+      // and it has a distance falloff the sun does not. That is the whole difference and it is why the two glades above
+      // could not simply be pointed at a lamp.
+      // The lobe is deliberately WIDER than the moon's (34) and much wider than the sun's noon value: a lamp is a small
+      // source close up, so its track on chop is short and broad rather than a long thin path to the horizon. A tight
+      // lobe on a near source lands between the ripple facets and reads as flicker.
+      // Added into the "glade" accumulator, which means it survives the ring landing further down — the trap that has eaten two
+      // features already — and takes the fog by the same (1.0-ff) the sun's track does.
+      for(int li=0; li<4; li++){
+        if(uLampP[li].w <= 0.0) continue;
+        vec3 Ld = uLampP[li].xyz - vW; float Ldist = length(Ld);
+        if(Ldist > uLampP[li].w) continue;
+        vec3 Ln = Ld / max(Ldist, 1e-4);
+        // The MIRROR of the eye about the surface, tested against the direction to the lamp: identical geometry to the
+        // sun's reflect(-dir, N) . V, written the other way round because here it is the light that has a position.
+        vec3 Rv = reflect(-V, N);
+        float lob = pow(max(dot(Rv, Ln), 0.0), 46.0);
+        float wide = pow(max(dot(Rv, Ln), 0.0), 7.0) * 0.16;
+        float fall = 1.0 - Ldist/uLampP[li].w; fall *= fall;              // inverse-square-ish, matching the lamp's own decay
+        float trk  = smoothstep(0.42, 1.0, abs(N.x)+abs(N.z));           // the same broken-facet term both glades use
+        glade += uLampC[li] * (lob*(0.30 + 0.70*trk) + wide) * fall * 2.6;
+      }
       // …AND THE ALPHA FLOOR IS WHAT YOU SEE THROUGH. 0.72 meant a film of water over sand was already three-quarters opaque
       // whatever the depth said. 0.38 lets the shelf show while the depth terms still close it up: at one block this is 0.51, at
       // three 0.72 — the old floor — and deep water still lands on 0.99. The Fresnel term stays, so a grazing view is glassier
@@ -5925,6 +6119,21 @@ const waterMat = new THREE.ShaderMaterial({
       // reading 189, a navy line surviving a bank that had erased the terrain. fogTo IS uRing washed by the weather, so in
       // clear air (uWx 0) this is bit-identical to landing on uRing and the sea line Ben signed off cannot move.
       col=mix(col, fogTo, smoothstep(uRingFade*0.45, uRingFade*0.97, length(vW.xz-uCamPos.xz)));
+      // ---- THE NIGHT WASH REACHES THE SEA, AND IT RUNS BEFORE THE LIGHT ON IT (Ben 08-05, moved 08-06) ----
+      // The global scotopic pass is patched into three's own LIT shader chunks, and water is a ShaderMaterial with its
+      // own lighting, so the sea was the one large surface in frame keeping full chroma after dark while every solid
+      // thing around it washed out. Same uniforms, same ramp, no new dials: on land an unlit sky-open face gates on
+      // vSky*day and the open sea IS sky-open, so its gate is the day factor through the identical smoothstep.
+      // NO DESCENT. uScotH.y is the cave floor and the sea has full sky openness, so the land's own formula multiplies
+      // it by (1 - vSky) = 0 there. The sea desaturates; it never darkens.
+      // MOVED ABOVE THE GLADE, 08-06, and this is the same rule the land has carried since the fog glow: A LIGHT IS NOT
+      // WASHED. Below the glade this greyed 85% of the colour out of the sun's track, the moon's, and every lamp
+      // reflection added today — the warm sunset path on the water went silver at the exact moment it is the picture.
+      // It still sits AFTER the ring landing, which is the constraint that put it at the end in the first place: that
+      // landing is unconditional and overwrites everything before it at distance.
+      { float _nw=1.0-smoothstep(uScotG.y,uScotG.z,uScotG.w);
+        float _nl=dot(col,vec3(0.2126,0.7152,0.0722));
+        col=mix(col, vec3(_nl), uScotG.x*_nw); }
       // THE GLADE, ON TOP OF THE LANDING. It is added rather than mixed, so the flat far colour the ring landing insists on is
       // still what the water IS, and the sun's or moon's track is light sitting on it — which is what makes the reflection
       // visible all the way to the horizon instead of stopping where the landing begins.
@@ -5971,9 +6180,6 @@ const waterMat = new THREE.ShaderMaterial({
       // — night water already needed an in-scatter floor to stop it going to black texels (61fe516) and this must not undo it.
       // LAST, AFTER the ring landing above. That landing is unconditional and overwrites everything before it at distance, which is
       // the trap that has eaten two features already; a wash applied earlier would simply vanish out at the horizon.
-      { float _nw=1.0-smoothstep(uScotG.y,uScotG.z,uScotG.w);
-        float _nl=dot(col,vec3(0.2126,0.7152,0.0722));
-        col=mix(col, vec3(_nl), uScotG.x*_nw); }
       gl_FragColor=vec4(col,alpha);
     }`
 });
@@ -8052,6 +8258,36 @@ function assignPointLights(){
     { const _P = LIGHT_PAL[_ht] || LIGHT_PAL[0]; globalU.uHeldC.value.setRGB(_P[0], _P[1], _P[2]); } }
   else { heldLight.intensity=0; heldLight.castShadow=false; globalU.uHeld.value.w=0; }
   updateFlashlight(t);
+  updateWaterLights();
+}
+// ---- WHICH LAMPS THE WATER IS ALLOWED TO REFLECT (Ben 08-06) ----
+// Four slots, and they are filled from the LIVE lights rather than from the emitter list on purpose: what the water
+// should reflect is what is actually shining, which is the pool after its distance sort, its edge fade and its flicker
+// have all been applied — a torch faded to intensity 0 at the pool's range limit must not leave a track on the sea.
+// The hand and the flashlight come first and unconditionally. They are the two lights the player is most certainly
+// looking at, they are the two the report names ("held"), and a lamp in your own hand losing its reflection because
+// four torches on a jetty outranked it would be the one case anybody notices.
+// Sorted by distance to the CAMERA, not to the player: at third person or in a boat those differ by several blocks, and
+// the reflection is a property of where the eye is.
+const _wlCand=[], _wlZero=new THREE.Vector4(0,-999,0,0);
+function updateWaterLights(){
+  const U=waterMat.uniforms; if(!U || !U.uLampP) return;
+  _wlCand.length=0;
+  const cx=camera.position.x, cy=camera.position.y, cz=camera.position.z;
+  const push=(L,rad)=>{ if(!L || L.intensity<=0.01) return;
+    const dx=L.position.x-cx, dy=L.position.y-cy, dz=L.position.z-cz;
+    _wlCand.push({ x:L.position.x, y:L.position.y, z:L.position.z, r:rad, c:L.color, d:dx*dx+dy*dy+dz*dz }); };
+  if(heldLight.intensity>0.01) push(heldLight, 26);
+  if(flashLight.intensity>0.01) push(flashLight, FLASH_RANGE*0.7);
+  const n0=_wlCand.length;
+  for(let i=0;i<pointPool.length;i++) push(pointPool[i], 30);
+  // Only the pool tail is sorted; the two hand lights keep the front of the list whatever their distance.
+  const tail=_wlCand.slice(n0).sort((a,b)=>a.d-b.d);
+  for(let i=0;i<4;i++){
+    const c = (i<n0) ? _wlCand[i] : tail[i-n0];
+    if(c){ U.uLampP.value[i].set(c.x, c.y, c.z, c.r); U.uLampC.value[i].copy(c.c); }
+    else { U.uLampP.value[i].copy(_wlZero); U.uLampC.value[i].setRGB(0,0,0); }
+  }
 }
 // ---- THE FLASHLIGHT, DRIVEN (Ben 08-06) ----
 // Same two-body treatment the held torch gets and for the same measured reason: the SpotLight shapes walls through N.L
@@ -12802,7 +13038,14 @@ function loop(){ try{
   let dt=Math.min(0.05,clock.getDelta());
   if(PERF.bench.active){ const bdt=PERF.bench.tickPre(); if(bdt>0) dt=bdt; }
   if(_pendingBossWipe){ _pendingBossWipe=false; try{ if(typeof bossWipe==='function')bossWipe(); }catch(e){} }   // deferred boss cleanup (see die()) — run at loop top, OUTSIDE updateWretch, so nulling the boss can't crash the AI tick mid-frame
-  globalU.uTime.value=clock.elapsedTime;
+  // THE SHADER CLOCK, PINNABLE. Everything animated in a fragment shader — the four wave trains, the three noise
+  // octaves, the capillary detail, the flow advection, the torch flicker — is a function of this one number, so with it
+  // held still two frames of the same scene are identical and a harness can attribute a difference to the change it
+  // made rather than to the water having moved. Without that, an effect that perturbs the surface cannot be measured
+  // at all: assert-water-reflect's streak check read a control of 2.9 against a signal of 3.6 with the pairs
+  // overlapping, purely because 140 ms of wave motion is larger than the effect.
+  // A QA instrument, null in normal play (see __hc.freezeT).
+  globalU.uTime.value = (_pinT!=null) ? _pinT : clock.elapsedTime;
   T.begin(TID.sky);
   updateSky(dt);
   updateWeather(dt);                                                     // rain/overcast/lightning + fog banks (after sky so it can dim the fresh light values)
@@ -32132,6 +32375,23 @@ window.__hc={
   // A/B off; lo/hi are on the FACE'S LIGHT LEVEL, max(blockLight, bakedSky*day, deliveredDirect, emissive), 0..1 — not on the
   // pixel, which is albedo-weighted and left bright sand coloured at midnight.
   // These write a shared Float32Array, so one call moves every material and every per-chunk clone at once with no recompile.
+  // QA: pin the shader clock so two frames of the same scene are identical. freezeT() with no argument reads it,
+  // freezeT(null) hands the water back to the real clock. Every animated fragment effect in the game reads this one
+  // uniform, so this is also the way to measure foliage wind, flame flicker or the cloud scroll without their own
+  // motion drowning whatever is being tested.
+  freezeT(v){ try{ if(v===null) _pinT=null; else if(v!==undefined) _pinT=+v;
+      return { pinned:_pinT, uTime:+globalU.uTime.value.toFixed(3) }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA + the A/B for the water rebuild. amt 0 restores the flat-uRing surface exactly, streak 0 the pre-streak normal,
+  // so both halves of the change can be priced in one page without a rebuild. The lamp readout is what the water is
+  // actually being handed — a reflection that is missing because no lamp reached the uniform and one that is missing
+  // because the lobe is wrong look identical on screen.
+  waterRefl(o){ try{ const U=waterMat.uniforms;
+      if(o&&o.amt!=null) U.uReflAmt.value=+o.amt;
+      if(o&&o.sharp!=null) U.uReflSharp.value=+o.sharp;
+      if(o&&o.streak!=null) U.uStreak.value=+o.streak;
+      return { amt:U.uReflAmt.value, sharp:U.uReflSharp.value, streak:U.uStreak.value, fresCap:U.uFresCap.value,
+               lamps:U.uLampP.value.map((p,i)=>({ p:[+p.x.toFixed(1),+p.y.toFixed(1),+p.z.toFixed(1)], r:+p.w.toFixed(1),
+                 c:U.uLampC.value[i].getHexString() })).filter(l=>l.r>0) }; }catch(e){ return {err:String(e.message||e)}; } },
   // QA: the flashlight, without a hand or an inventory. `on` flips the switch; the readout is what the shader is
   // actually being handed, because a beam that is pointing the wrong way and a beam that is off look identical from
   // outside and the direction's sign is the one thing here with real history behind it (see updateFlashlight).
@@ -32141,7 +32401,7 @@ window.__hc={
                pos:[+F.x.toFixed(2),+F.y.toFixed(2),+F.z.toFixed(2)], range:+F.w.toFixed(1),
                dir:[+D.x.toFixed(3),+D.y.toFixed(3),+D.z.toFixed(3)], cosOuter:+D.w.toFixed(4),
                angle:+flashLight.angle.toFixed(3), decay:flashLight.decay, hasItem:!!(ITEMS.flashlight) }; }catch(e){ return {err:String(e.message||e)}; } },
-  scot(o){ try{ if(o&&o.amt!=null) _scotG[0]=+o.amt; if(o&&o.lo!=null) _scotG[1]=+o.lo; if(o&&o.hi!=null) _scotG[2]=+o.hi;
+  scot(o){ try{ if(o&&o.dayWash!=null) _scotK[0]=+o.dayWash; if(o&&o.renew!=null) _scotK[1]=+o.renew; if(o&&o.amt!=null) _scotG[0]=+o.amt; if(o&&o.lo!=null) _scotG[1]=+o.lo; if(o&&o.hi!=null) _scotG[2]=+o.hi;
       if(o&&o.on!=null) _scotG[0]=o.on?1:0;
       // litK: how much DELIVERED direct light counts as a light source touching the surface. 0 is the pre-08-05-late gate,
       // which saw only the baked volume and the sky — placed lamps could not restore colour and the hand did it by radius.
