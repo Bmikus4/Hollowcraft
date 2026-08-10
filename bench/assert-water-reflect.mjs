@@ -161,7 +161,13 @@ async function azSweep(W, tag, t){
     // against 4.11 with the streaks on, with one of three pairs coming out the wrong way round. Looking out to about
     // thirty blocks clears the fade while staying well inside uRingFade's landing, and the same measurement separates
     // cleanly. The streaks are not weaker there; the noise they were being compared against was louder.
-    await P.evaluate(`__hc.cam({yaw:0, pitch:-0.18})`); await sleep(400);
+    // FROM HEIGHT, OVER OPEN SEA. This check has now been run at four vantages and only this one separates reliably:
+    // low and close, the surface is dominated by the capillary octaves and by whatever intermittent work still makes
+    // two "identical" frames differ by up to 4 levels (the control swung 0.63 to 4.02 there with BOTH clocks pinned).
+    // From a hundred blocks up the crop is a wide field of open water at a shallow reflected angle, where the streaks
+    // are the largest thing on the surface and the noise is smallest.
+    await P.evaluate(`__hc.tp(${OX}, 112, ${OZ}, 0, -0.44)`); await sleep(1600);
+    await P.evaluate(`__hc.cam({yaw:0, pitch:-0.44})`); await sleep(400);
     // ...AND WITH THE SURFACE HELD STILL. Even past the capillary fade the control pairs overlapped the signal
     // (control 2.91/4.45/2.86 against 6.76/2.87/3.57) because 140 ms of wave motion moves more of the crop than the
     // streaks do. Pinning the shader clock makes two frames of one condition bit-identical, so the control collapses to

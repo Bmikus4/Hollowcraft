@@ -115,7 +115,18 @@ function readCrop(file, crop){
     // AND THE NIGHT DID NOT GET BRIGHTER. Ben has asked four separate times for night to be genuinely black, so the fix has to be
     // chroma-only. The mix is luminance-preserving in linear space; the residual +1 level is the grade's own per-channel curves
     // (S-curve, vibrance, split-tone) landing differently on a grey than on a saturated colour of the same luminance.
-    check('night keeps its value', Math.abs(NonD.lum-NoffD.lum)<2.0 && Math.abs(NonG.lum-NoffG.lum)<2.0, `dirt ${NoffD.lum}->${NonD.lum}, grass ${NoffG.lum}->${NonG.lum}`);
+    // ---- THIS CHECK PREDATES THE DESCENT, AND THE DESCENT IS THE THING BEN ASKED FOR ----
+    // Written when the wash was chroma-only and luminance-preserving. It has not been that since 08-05, when Ben
+    // reported the opposite fault — "unlit caves at all hours are NOT DARK, and this is because of the mono pass as
+    // well" — and uScotH.y was added to make the wash DESCEND toward black as well as desaturate. Mixing a pixel
+    // toward its own luma holds its brightness by construction, which is precisely why a fully washed surface read as
+    // flat mid-grey; the descent is the correction, and it is supposed to take the value down.
+    // It only started failing now because the descent finally has room to act: with the albedo floor gone, unlit night
+    // ground is dark enough that 0.85 of the way to 2% of luma is a real fall (11.7 -> 4.8) instead of a rounding
+    // error against a floored surface.
+    // So the bound is on the RATIO, not on the difference, and it is one-sided: the wash may darken and may not
+    // brighten. Brightening is still the fault worth catching — it is how colour gets bought with light.
+    check('night is not brightened by the wash', NonD.lum <= NoffD.lum+1.5 && NonG.lum <= NoffG.lum+1.5 && NonD.lum > NoffD.lum*0.25 && NonG.lum > NoffG.lum*0.25, `dirt ${NoffD.lum}->${NonD.lum}, grass ${NoffG.lum}->${NonG.lum}`);
     // DAYLIGHT IS UNTOUCHED. This is the check that killed the pixel-luminance gate: gated on the pixel, daylit dirt lost 14% of
     // its saturation at the thresholds that worked at night, because a shadowed daylit block is a dark PIXEL in full daylight.
     check('daylight chroma does not move', Math.abs(DonD.sat-DoffD.sat)<0.02, `${DoffD.sat} -> ${DonD.sat}`);

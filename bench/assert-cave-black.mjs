@@ -143,7 +143,15 @@ function stat(file,c){
       // The control is read against the SAME condition twice, so a drifting clock or a flickering source cannot be mistaken for
       // the effect.
       const drift=Math.max(Math.abs(R.old.min-R.ctl.min), 0.6);
-      check(`${tag}: the min channel comes down`, R.old.min - R.now.min > drift+0.5, `min ${R.old.min} -> ${R.now.min} (drift ${drift.toFixed(2)})`);
+      // ---- INVALIDATED BY SUCCESS, 2026-08-06, AND RE-AIMED RATHER THAN DELETED ----
+      // This asserted that switching the descent ON brings the min channel DOWN. It now reads 0 -> 0, because the
+      // interior's min channel is ALREADY 0 with the descent off: FOL_UNLIT_FLOOR was gated back to foliage, so an
+      // unlit face no longer sits at a fifth of its own albedo and the room is black before this pass runs at all.
+      // The check cannot measure a fall from zero. What still matters — and what the number was always standing in for
+      // — is that the interior IS at the floor, so that is what is asserted now. It fails in exactly the case worth
+      // catching: the descent, or the darkness that made it unnecessary, being undone.
+      check(`${tag}: the interior is at the floor`, R.now.min <= 1 && R.old.min <= 2,
+            `min channel ${R.old.min} with the descent off, ${R.now.min} with it on (drift ${drift.toFixed(2)})`);
       check(`${tag}: and the flat-grey share collapses`, R.now.grey <= R.old.grey*0.5+1.0, `grey ${R.old.grey}% -> ${R.now.grey}%`);
       // The floor is 0.15 of luma and the wash keeps 15% of the original pixel, so the arithmetic bottom of this crop is about 10
       // of 255 before the grade — not 0. The thresholds are set to pass that comfortably and to fail anything like the 36 the bug
