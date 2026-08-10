@@ -6405,10 +6405,23 @@ let composer, bloomPass;
 // colour: no blur pass, because the taps are already spread over the disc and the noise reads as the grain that follows.
 const SSAOShader={
   uniforms:{ tDiffuse:{value:null}, tDepth:{value:null}, uResolution:{value:new THREE.Vector2(1,1)},
-             uNear:{value:0.1}, uFar:{value:1000}, uStrength:{value:0.55}, uRadius:{value:26.0}, uBias:{value:0.035} },
+             // uRadius IS IN METRES, and uFocal is what turns it into pixels. It used to be a bare pixel number
+             // divided by depth, which is a world radius only if you also pin the resolution and the field of view —
+             // and this game pins neither. At 560p and fov 74 the shipped 26 worked out to a SEVEN CENTIMETRE
+             // occlusion radius in a world whose blocks are a metre, which is why the pass read indoors (where the
+             // 1.5 px clamp floor gave it artificial size at close range) and was absent outdoors: measured, it moved
+             // 25.9% of pixels in the cabin and 1.3% in the village, against a 0.1-2.5% same-frame noise floor.
+             // 0.30 m, a third of a block, from a sweep of 0.07/0.15/0.30/0.50/0.80 at three sites. It is chosen on
+             // the INTERIOR, because that is the only place this pass can act: it moves 29.6% of cabin pixels for
+             // 2.3 of 255 off the frame's luminance, where 0.50 buys 6.7 more points of coverage for a 3.3 dim that
+             // starts reading as the picture going flat. Outdoors the radius is irrelevant -- village held ~1.4% and
+             // forest ~2.6% moved at EVERY radius in the sweep -- because an open landscape has almost no contact
+             // creases in frame. Do not reach for this dial to add outdoor depth; it cannot supply it.
+             uNear:{value:0.1}, uFar:{value:1000}, uStrength:{value:0.55}, uRadius:{value:0.30}, uBias:{value:0.035},
+             uFocal:{value:372.0} },
   vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
   fragmentShader:`varying vec2 vUv; uniform sampler2D tDiffuse, tDepth; uniform vec2 uResolution;
-    uniform float uNear, uFar, uStrength, uRadius, uBias;
+    uniform float uNear, uFar, uStrength, uRadius, uBias, uFocal;
     float lin(float d){ return (2.0*uNear*uFar)/(uFar+uNear-(2.0*d-1.0)*(uFar-uNear)); }   // window depth -> metres from the eye
     void main(){
       vec4 col = texture2D(tDiffuse, vUv);
@@ -6419,7 +6432,11 @@ const SSAOShader={
       float zc = lin(dc);
       // Radius in PIXELS, from a world-space radius over the distance: near geometry gets a wide disc, far geometry a tight
       // one, so a crease is the same size in the world at every distance instead of swelling as you walk away from it.
-      float rad = clamp(uRadius / zc, 1.5, 42.0);
+      // uFocal = (frameHeight/2)/tan(fov/2), written per frame from the LIVE camera. Both halves of that matter for
+      // cohesion: without the height term the crease changes size when the window is resized (uResolution was set once
+      // at buildComposer and never on resize), and without the fov term it changes size when the player aims down
+      // sights, because ADS drives camera.fov. A world-space effect that moves when you zoom reads as a bug in the zoom.
+      float rad = clamp(uRadius * uFocal / zc, 1.5, 42.0);
       // one rotation per pixel breaks the eight directions into noise rather than an eight-armed star on every corner
       float ang = fract(sin(dot(vUv*uResolution, vec2(12.9898,78.233)))*43758.5453)*6.2831853;
       float occ = 0.0;
@@ -13154,6 +13171,14 @@ function loop(){ try{
   // still differed by about a level, which is the same order as the effects a harness is trying to measure. Pinning
   // one and not the other is what left assert-water-reflect's control at 0.9 instead of 0.
   if(gradePass){ gradePass.uniforms.uTime.value=(_pinT!=null)?_pinT:clock.elapsedTime; gradePass.uniforms.uDark.value=1-globalU.uDay.value; gradePass.uniforms.uWhiteVoid.value=(typeof VOID!=='undefined'&&VOID.on)?(VOID.whiteout==null?1:VOID.whiteout):0; }   // grain+vignette rise as it darkens; PURE white glow on the initial void switch, then FADES to standard as the fractal zooms in (VOID.whiteout ramp)
+  // THE OCCLUSION RADIUS IS A WORLD SIZE, so its pixel size has to be re-derived whenever the projection changes.
+  // Per frame rather than on a resize event: camera.fov is animated by aiming down sights, so a resize hook would
+  // still leave the crease swelling every time the player raised a scope.
+  if(ssaoPass && ssaoPass.enabled){
+    ssaoPass.uniforms.uResolution.value.set(innerWidth, innerHeight);
+    ssaoPass.uniforms.uFocal.value = (innerHeight*0.5)/Math.tan(camera.fov*Math.PI/360);
+    ssaoPass.uniforms.uNear.value = camera.near; ssaoPass.uniforms.uFar.value = camera.far;   // far scales with the render-distance slider
+  }
   if(godrayPass){ camera.updateMatrixWorld();                                            // project the sky-sun direction to screen space for the god-ray origin
     // INSIDE THE FAR PLANE, or this pass never runs at all. The sun proxy was placed 2000 blocks along the sun direction and
     // projected; camera.far is 326.4 at rd=8 (it scales with render distance and is never remotely 2000), so the point was always
