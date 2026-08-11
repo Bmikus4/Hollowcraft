@@ -24,6 +24,22 @@
         mix-blend-mode:difference; z-index:5; opacity:.85; }
   /* NO CENTRE DOT (Ben 08-04) — the ring alone. A dot in the middle of a ring that describes spread is a lie: it says
      "the shot goes exactly here" while the ring says "somewhere in this circle". */
+  /* GRAIN ON THE RING, ALWAYS (Ben 08-11: "the center aim circle should ALWAYS have grain applied to it"). The film grain is
+     a post-process on the WebGL canvas (GradeShader, uGrain) and #xh is a DOM element sitting on top of that canvas, so the
+     reticle was the one thing on screen that could never receive any — clean vector white over a world that is grained at
+     every quality level. This puts it back where it belongs, on the ring itself.
+     WHY IT NEEDS NO JS: the mask keeps a 3px annulus measured from the element's own edge, and updateCrosshair already
+     writes width/height as the ring breathes — so the grain follows the ring with no arithmetic on the JS side, and it
+     survives every path that resizes or fades it. The stepped animation is what makes the noise BOIL; a static tile reads as
+     a dirty ring rather than as grain. feColorMatrix saturate=0 is load-bearing: raw feTurbulence randomises each channel
+     independently, which is coloured television static, not film grain. */
+  #xh::after{ content:''; position:absolute; inset:0; border-radius:50%; pointer-events:none; opacity:.5;
+        background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix type='saturate' values='0'/></filter><rect width='64' height='64' filter='url(%23n)'/></svg>");
+        background-size:64px 64px;
+        -webkit-mask:radial-gradient(closest-side,transparent calc(100% - 3px),#000 calc(100% - 3px));
+                mask:radial-gradient(closest-side,transparent calc(100% - 3px),#000 calc(100% - 3px));
+        animation:xhgrain .48s steps(1,end) infinite; }
+  @keyframes xhgrain{ 0%{background-position:0 0} 25%{background-position:17px 11px} 50%{background-position:31px 29px} 75%{background-position:7px 43px} }
   #hud { position:fixed; left:0; right:0; bottom:8px; z-index:5; display:flex; flex-direction:column;
          align-items:center; gap:6px; pointer-events:none; }
   #bars { display:flex; gap:120px; align-items:flex-end; height:22px; }
@@ -459,7 +475,14 @@ const _scotH = new Float32Array([1.0, 0.02, 0.5, 0.009]);
 // was a second door into a room that was already open.
 // Kept as a dial rather than deleted, with an explicit off branch in the shader, so the claim can be re-tested in one
 // call rather than rebuilt: __hc.scot({renew:2.5}).
-const _scotK = new Float32Array([0.45, 0, 0, 0]);
+// [2] = THE LIT-FACE TEXEL FLOOR (Ben 08-11). Read the arithmetic and it is simpler than it looks: the floor is
+// k*light and the surface is albedo*light, so max() of the two is light*max(albedo,k) - a MINIMUM ALBEDO of k, applied
+// identically at every light level and worth exactly nothing where no light arrives. That scale-invariance is why it
+// cannot flatten a sunlit texture (only texels darker than k move, and they move in proportion) and cannot lift a cave
+// (light 0, floor 0). 0.030 is the knee measured at a shaded step under canopy, bench/tmp-texel-black.mjs: pure black
+// 22.5% -> 1.7% for +1.6 levels of 255 on the shade median. 0.015 does almost nothing (19.2%) and 0.060 is too much
+// (+11 levels). The cost to know: a texture with deliberately pure-black texels has them lifted to 3% albedo.
+const _scotK = new Float32Array([0.45, 0, 0.030, 0]);
 // ---- A PROP IN SHADE IS NOT A PROP AT NIGHT (Ben 08-05: the scarecrow near spawn "is completely black") ----
 // (r, g, b, -). The daylight SKY FILL that every non-atlas lit material was missing.
 //
@@ -634,6 +657,27 @@ const _propFill = new Float32Array([0.237, 0.267, 0.30, 0]);
     '#ifdef USE_FOG\n'+
     '  gl_FragColor.rgb += reflectedLight.directDiffuse * fogFactor * uScotH.z * (1.0-uScotG.w);\n'+
     '#endif\n'+
+    // ---- A LIT FACE MAY NOT SHOW A FULLY BLACK TEXEL (Ben 08-11, his rule verbatim: "if light hits the surface making
+    // it non-black, we cant display fully black texels") ----
+    // THE FAULT IS A MULTIPLY, NOT A THRESHOLD. A texture's dark texels and its bright texels are multiplied by the same
+    // irradiance, so as that irradiance falls the dark ones reach zero first and the face breaks into hard black speckle
+    // while its bright neighbours are still fine. It is worst where the most terms stack on the ambient at once - a
+    // vertical face, in shade, under canopy, with sky direction, day shade and canopy depth all multiplying.
+    // SO THE FIX IS A MINIMUM ALBEDO, APPLIED AS A SCALE. Written this way it has three properties that a floor written
+    // as max(colour, X) cannot have, and each of them was paid for:
+    //   · IT CANNOT LIFT BLACK. Scaling zero gives zero, so a face no light reaches still renders black with no gate,
+    //     no test and no way for a future change to break it. The max() form needed the light measured to stay honest,
+    //     and measuring it one line too early - before the sky curve, the one term that zeroes ambient in an enclosed
+    //     space - lifted a sealed room at noon off the floor within the hour.
+    //   · IT CANNOT DESATURATE. max() against a grey vector raises all three channels to the same value, which is why
+    //     the first version turned a lantern-lit cave wall grey (assert-unlit-black: sat 0.096 against a 0.25 floor) -
+    //     Ben's "lit dark caves dont act as they should". A scale preserves the ratio between channels exactly.
+    //   · IT NEEDS NO UNITS. The max() form compared a floor built from `_bl`, which is a light LEVEL in 0..1, against a
+    //     rendered radiance - quantities an order of magnitude apart, so the floor swamped the surface entirely.
+    // WHY THIS IS NOT FOL_UNLIT_FLOOR COMING BACK: that was max(colour, albedo*0.20), an ADD in disguise, which made a
+    // pure-black land pixel arithmetically impossible at any hour. This one is dark-texel-only and light-respecting.
+    '  float _albL = dot(diffuseColor.rgb, '+L+');\n'+
+    '  if(uScotK.z > 0.0 && _albL > 1e-5 && _albL < uScotK.z) gl_FragColor.rgb *= (uScotK.z/_albL);\n'+
     '}\n'+
     '#endif\n';
 }
@@ -4420,7 +4464,7 @@ function injectAtlas(mat, opts={}){
       // toe is real, but this floor is what was putting a coloured value there for the toe to act on.
       // Gated on leafTrans, which is exactly the two materials the floor's own comment describes (leafMat, foliageMat)
       // and none of the three it does not (opaqueMat, cutoutMat, paneMat).
-      .replace('#include <fog_fragment>', opts.leafTrans ? ('\ngl_FragColor.rgb = max(gl_FragColor.rgb, diffuseColor.rgb * '+FOL_UNLIT_FLOOR.toFixed(3)+');\n#include <fog_fragment>') : '#include <fog_fragment>')
+      .replace('#include <fog_fragment>', (opts.leafTrans && FOL_UNLIT_FLOOR>0) ? ('\ngl_FragColor.rgb = max(gl_FragColor.rgb, diffuseColor.rgb * '+FOL_UNLIT_FLOOR.toFixed(3)+');\n#include <fog_fragment>') : '#include <fog_fragment>')
       .replace('#include <color_fragment>',
         '#include <color_fragment>\n'+
         'vec2 _fr=fract(vBUV); _fr.y=1.0-_fr.y;\n'+
@@ -4470,6 +4514,15 @@ function injectAtlas(mat, opts={}){
         // taking the direct term here as well would put out the dappled light that is the best thing about a wood.
         // Day-gated by uDayS for the same reason uDayShade is — a wood at night is already dark and Ben has signed it off.
         'irradiance *= mix(1.0, max(uCanopy.y, pow(uCanopy.x, vCan)), clamp(uDayS,0.0,1.0));\n'+
+        // THE LIGHT ON THIS FACE, WITHOUT ITS TEXTURE. Every term above has finished with `irradiance`, and irradiance is
+        // the one quantity here that says how much light lands on this fragment while knowing nothing about what colour
+        // the surface is. That distinction is the whole of Ben's rule (08-11): "if light hits the surface making it
+        // non-black, we cant display fully black texels". A floor taken from the OUTPUT cannot tell a dark texel on a lit
+        // face from a lit texel on a dark face. A floor taken from here can, and that is why it is captured before the
+        // albedo is ever multiplied in - and AFTER the sky curve, which is the whole difference between a floor that
+        // respects a cave and one that does not. Captured one line earlier, before that curve, it missed the only
+        // term that takes ambient to ZERO in an enclosed space (pow(vSky,e) with vSky 0), so a sealed interior at noon
+        // got a non-zero floor and assert-cave-black caught it lifting off the floor within the hour.
         'irradiance *= (uSkyCurve.x + (1.0-uSkyCurve.x)*pow(vSky,uSkyCurve.y));\n'+   // skylight CONTRAST curve, now globalU.uSkyCurve (floor, exponent) — see it, and __hc.skyCurve(). Was the literal (0.26 + 0.74*pow(vSky,1.15)): — floor 0.035→0.16 (Ben 07-20) →0.26 with a softer exponent (Ben 07-27, "black pixels everywhere"): under a canopy vSky≈0, and 16% of a 0.6 hemi is indistinguishable from black, so the forest floor and any dappled shade read as solid black holes. Caves/interiors still go dark (they also lose the direct term below) and torches still dominate.
         'vec3 _lpc = vLP + normalize(vObjN)*0.5;\n'+   // FACE→AIR offset (Ben 07-21): a face sits on the solid/air boundary; sampling there blended the solid cell (light 0) with the air cell → half-lit AND a per-cell checkerboard on lit surfaces. Push half a cell along the normal so we sample the LIT air cell at its texel centre.
         // RADIANCE, three channels: the volume carries each light's own colour premultiplied by its level (see LIGHT_PAL and
@@ -4878,16 +4931,41 @@ const skyMat = new THREE.ShaderMaterial({
       // a starless field while the sky above it was not, and that reads as the sky stopping. step(0.02,dir.y) becomes a soft
       // ramp that keeps them coming all the way down: the gate exists so stars do not sit ON the waterline, which a ramp still
       // prevents, rather than to end the sky.
-      float st=h13(floor(dir*280.0));
-      if(st>0.9972){
+      // SHAPED, DIM AND OCCASIONAL (Ben 08-11: "star shimmers should not have halos, they should be small diamond/starlike
+      // shimmers, and less frequent"). Three separate faults, and only one of them was in this block:
+      //   HALOS came from the BLOOM THRESHOLD, which is 1.15. The brightest star reached sc*(0.30+0.75)*2.0 = 2.1, so every
+      // bright star was a bloom source and the mip-blur chain drew the halo. Nothing here can shape that away — the amplitude
+      // has to come DOWN under the threshold, which is what (0.20+0.34*mag) does: peak 0.54*2.0 = 1.08.
+      //   SHAPE: the star WAS the hash cell — a solid square of colour, roughly a fifth of a degree on a side. Now the cell is
+      // just the bucket and the star is drawn inside it: an L1 (diamond) core with four thin spikes, on the two axes
+      // perpendicular to whichever face of the cube the ray is looking through, so the diamond does not shear near the poles.
+      //   FREQUENCY: the old twinkle was a continuous 2.4-7.4 rad/s sine, so every star in the sky was always mid-shimmer.
+      // Now each holds steady and flashes briefly on its own ~10-25 s cycle, and the spikes exist only during that flash —
+      // which is what makes the flash read as a shimmer rather than as a brightness wobble.
+      //   THE CELL GRID HAD TO COARSEN FOR THE SHAPE TO EXIST AT ALL, and that is arithmetic, not taste. At dir*280 a cell
+      // subtends about 0.2 degrees, which at a 50-degree vertical fov over 640 lines is 2.6 px — so a diamond a fifth of a
+      // cell across is a THIRD OF A PIXEL and no amount of shaping is visible. At 150 the cell is ~4.9 px and the four points
+      // span it. Coarser cells also mean fewer of them: (150/280)^2 = 0.287 as many, so the threshold comes DOWN to 0.9925 to
+      // land at roughly three quarters of the old star count — fewer stars, each one actually a star.
+      vec3 sp3=dir*150.0; float st=h13(floor(sp3));
+      if(st>0.9925){
         float mag=fract(st*71.0);                                                     // per-star brightness
-        float tw =0.72+0.28*sin(uTime*(2.4+mag*5.0)+st*77.0);                         // and its own twinkle rate
+        vec3 fr=fract(sp3)-0.5, ad=abs(dir);
+        vec2 q=(ad.x>=ad.y&&ad.x>=ad.z)?fr.yz:((ad.y>=ad.z)?fr.xz:fr.xy);
+        float R=0.19+0.11*mag, l1=abs(q.x)+abs(q.y);
+        float core=pow(max(0.0,1.0-l1/R),1.7);
+        float ph=fract(uTime*(0.04+0.06*fract(st*17.0))+fract(st*57.0));
+        float flash=pow(max(0.0,1.0-abs(ph-0.5)*11.0),3.0);                           // one brief spike per cycle, not a sine
+        float thin=min(abs(q.x),abs(q.y)), lng=max(abs(q.x),abs(q.y));
+        float spike=max(0.0,1.0-lng/0.46)*max(0.0,1.0-thin/0.05);                     // the four points, only while it flashes
+        float shape=min(1.0, core + spike*flash*0.85);
+        float tw =(0.55+0.45*flash)*shape;
         vec3 sc =mix(vec3(0.72,0.82,1.0), vec3(1.0,0.86,0.68), fract(st*311.0));      // blue-white through to amber
         // NO GATE AT ALL, not a softened one. The ramp this replaces still ended the star field about fourteen degrees under the
         // horizon: measured, 163 star pixels below it against 1116 above. Nothing needs the gate — the sea and the terrain draw
         // over this dome, so the only rays where these stars can be seen are the ones with nothing in front of them, which is
         // exactly where the sky is supposed to keep going.
-        add += sc*(0.30+0.75*mag)*tw*(1.0-uDay)*uStars;
+        add += sc*(0.20+0.34*mag)*tw*(1.0-uDay)*uStars;   // peak 1.08 at uStars=2 — deliberately under the 1.15 bloom threshold
       }
       // ---- CLOUDS: two layers ---- low cumulus with a lit rim and a dark base, plus thin high cirrus. One layer gave the
       // whole sky a single texture at a single altitude; the difference in speed and shape between two is most of what makes
@@ -7954,9 +8032,38 @@ MODEL_ITEM_BUILDERS.birdhouse=(bd)=>{ const g=new THREE.Group();   // 2 BLOCKS T
   const hole =new THREE.Mesh(cyl(0.085,0.085,0.05,10),darkM); hole.rotation.x=Math.PI/2; hole.position.set(0,1.42,0.21); g.add(hole);
   const perch=new THREE.Mesh(cyl(0.017,0.017,0.14,6),roofM); perch.rotation.x=Math.PI/2; perch.position.set(0,1.30,0.25); g.add(perch);
   return g; };
+// GLAZED CHINA (Ben 08-11: "texture teapots and teacups and their plate"). The tea set was three flat-tinted Phong
+// materials — the only reason it read as ceramic at all was the specular highlight, and a highlight on an untextured
+// surface is what plastic looks like. So: crazing (the hairline cracks an old glaze grows), glaze speckle, and a cobalt
+// band, which is the thing that actually says "china" rather than "white cylinder".
+//
+// WHERE THE BAND LANDS IS A FACT ABOUT THE GEOMETRY, not a guess. A lathe (sphere or cylinder side) runs v up the
+// object, so a horizontal stripe in the texture is a ring around the belly. A cylinder's END CAP maps its UVs as a
+// disc centred on (0.5,0.5), so on the saucer a CIRCLE in the texture is the concentric ring on a plate — which is why
+// the plate gets its own variant instead of sharing the cup's.
+const _chinaTexCache={};
+function chinaTex(kind){ if(_chinaTexCache[kind]) return _chinaTexCache[kind];
+  const S=64, cv=document.createElement('canvas'); cv.width=cv.height=S; const c=cv.getContext('2d');
+  c.fillStyle='rgb(250,249,245)'; c.fillRect(0,0,S,S);
+  c.strokeStyle='rgba(118,108,94,0.15)'; c.lineWidth=0.6;                                    // crazing
+  for(let k=0;k<26;k++){ let x=Math.random()*S, y=Math.random()*S; c.beginPath(); c.moveTo(x,y);
+    for(let n=0;n<4;n++){ x+=(Math.random()-0.5)*15; y+=(Math.random()-0.5)*15; c.lineTo(x,y); } c.stroke(); }
+  const COBALT='rgba(38,68,134,0.88)';
+  if(kind==='plate'){ c.strokeStyle=COBALT;
+    for(const [r,w] of [[27,2.4],[22,0.9],[11,0.9]]){ c.lineWidth=w; c.beginPath(); c.arc(S/2,S/2,r,0,6.2832); c.stroke(); }
+    c.fillStyle=COBALT; for(let k=0;k<10;k++){ const a=k/10*6.2832; c.beginPath(); c.arc(S/2+Math.cos(a)*17,S/2+Math.sin(a)*17,1.7,0,6.2832); c.fill(); } }
+  else { const y0=(kind==='pot')?S*0.44:S*0.50, h=(kind==='pot')?5:3.5;
+    c.fillStyle=COBALT; c.fillRect(0,y0,S,h); c.fillRect(0,y0-4,S,1);                          // belly band + a hairline above it
+    for(let x=0;x<S;x+=8){ c.beginPath(); c.arc(x+4,y0+h+5,2.0,0,6.2832); c.fill(); } }        // and a repeat of dots below
+  const img=c.getImageData(0,0,S,S), d=img.data;                                               // glaze speckle, last so it sits over the paint too
+  for(let i=0;i<d.length;i+=4){ const j=(Math.random()-0.5)*10; d[i]+=j; d[i+1]+=j; d[i+2]+=j; }
+  c.putImageData(img,0,0);
+  const tx=new THREE.CanvasTexture(cv); tx.colorSpace=THREE.SRGBColorSpace; tx.wrapS=tx.wrapT=THREE.RepeatWrapping; tx.anisotropy=2;
+  tx.name='china:'+kind;
+  _chinaTexCache[kind]=tx; return tx; }
 // teapot — squashed ceramic sphere + curved spout + loop handle + domed lid + knob
 MODEL_ITEM_BUILDERS.teapot=(bd)=>{ const g=new THREE.Group();
-  const cer=new THREE.MeshPhongMaterial({color:bd.col!=null?bd.col:0xdaf0e8,shininess:70,specular:0xffffff});
+  const cer=new THREE.MeshPhongMaterial({color:bd.col!=null?bd.col:0xdaf0e8,shininess:70,specular:0xffffff,map:chinaTex('pot')});
   const body=new THREE.Mesh(sphereG(0.3),cer); body.scale.set(1,0.82,1); body.position.y=0.3; g.add(body);
   const spout=new THREE.Mesh(cyl(0.03,0.07,0.32,8),cer); spout.position.set(0.28,0.36,0); spout.rotation.z=-0.9; g.add(spout);
   const handle=new THREE.Mesh(new THREE.TorusGeometry(0.13,0.028,8,16),cer); handle.position.set(-0.28,0.34,0); handle.rotation.y=Math.PI/2; g.add(handle);
@@ -7965,8 +8072,9 @@ MODEL_ITEM_BUILDERS.teapot=(bd)=>{ const g=new THREE.Group();
   return g; };
 // teacup — flared bowl + loop handle + saucer disk
 MODEL_ITEM_BUILDERS.teacup=(bd)=>{ const g=new THREE.Group();
-  const cer=new THREE.MeshPhongMaterial({color:bd.col!=null?bd.col:0xf2ece0,shininess:70,specular:0xffffff});
-  const saucer=new THREE.Mesh(cyl(0.28,0.24,0.035,16),cer); saucer.position.y=0.02; g.add(saucer);
+  const cer=new THREE.MeshPhongMaterial({color:bd.col!=null?bd.col:0xf2ece0,shininess:70,specular:0xffffff,map:chinaTex('cup')});
+  const plateM=cer.clone(); plateM.map=chinaTex('plate');   // the saucer's pattern is drawn for a disc UV, not for a lathe — see chinaTex
+  const saucer=new THREE.Mesh(cyl(0.28,0.24,0.035,16),plateM); saucer.position.y=0.02; g.add(saucer);
   const cup=new THREE.Mesh(cyl(0.17,0.11,0.2,16),cer); cup.position.y=0.15; g.add(cup);
   const handle=new THREE.Mesh(new THREE.TorusGeometry(0.08,0.02,8,14),cer); handle.position.set(0.2,0.15,0); handle.rotation.y=Math.PI/2; g.add(handle);
   return g; };
@@ -8047,16 +8155,24 @@ MODEL_ITEM_BUILDERS.corner=(bd)=>{ const g=new THREE.Group();
 MODEL_ITEM_BUILDERS.roof=(bd)=>{ roofGeos(); const g=new THREE.Group();
   const plank=new THREE.MeshLambertMaterial({map:tileTex('planks'),side:THREE.DoubleSide});
   const tile =new THREE.MeshLambertMaterial({map:tileTex(bd.tile||'roof_tile'),side:THREE.DoubleSide});
-  g.add(new THREE.Mesh(_roofWedge,plank)); g.add(new THREE.Mesh(_roofSlab,tile)); return g; };
+  const gable=new THREE.MeshLambertMaterial({map:tileTex('log_side'),side:THREE.DoubleSide});   // in the hand there is no block below, so the log_side fallback is the honest preview
+  g.add(new THREE.Mesh(_roofWedge,plank)); g.add(new THREE.Mesh(_roofWedgeSide,gable)); g.add(new THREE.Mesh(_roofSlab,tile)); return g; };
 // roof wedge (plank triangular body, high on +z) + the thin tiled slab that lies on its slope — built once, reused
-let _roofWedge=null, _roofSlab=null;
+//
+// THE GABLE TRIANGLES ARE A SEPARATE GEOMETRY (`_roofWedgeSide`) because they wear a DIFFERENT texture from the rest of
+// the wedge: the block the roof sits on, so a roof run reads as the continuation of the wall under it (Ben 08-11), and
+// log_side when it sits on nothing. That is per-cell data, so the sides cannot share the body's single instanced mesh.
+// Their UVs also cannot come from the body's (x,z) planar map — a face at constant x collapses to one u there and the
+// bark streaks — so they are mapped (z,y).
+let _roofWedge=null, _roofWedgeSide=null, _roofSlab=null;
 function roofGeos(){ if(_roofWedge) return;
   const A=[-.5,-.5,-.5],B=[.5,-.5,-.5],C=[.5,-.5,.5],D=[-.5,-.5,.5],E=[.5,.5,.5],F=[-.5,.5,.5];
-  const P=[]; const tri=(a,b,c)=>P.push(a[0],a[1],a[2],b[0],b[1],b[2],c[0],c[1],c[2]);
-  tri(A,C,D); tri(A,B,C); tri(D,C,E); tri(D,E,F); tri(A,E,B); tri(A,F,E); tri(A,D,F); tri(B,E,C);   // bottom, back, slope, two sides
-  const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.Float32BufferAttribute(P,3));
-  const uv=[]; for(let i=0;i<P.length;i+=3) uv.push(P[i]+0.5, P[i+2]+0.5); g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));
-  g.computeVertexNormals(); _roofWedge=g;
+  const mk=(tris,uvXZ)=>{ const P=[]; for(const [a,b,c] of tris) P.push(a[0],a[1],a[2],b[0],b[1],b[2],c[0],c[1],c[2]);
+    const gm=new THREE.BufferGeometry(); gm.setAttribute('position',new THREE.Float32BufferAttribute(P,3));
+    const uv=[]; for(let i=0;i<P.length;i+=3) uv.push(uvXZ?P[i]+0.5:P[i+2]+0.5, uvXZ?P[i+2]+0.5:P[i+1]+0.5);
+    gm.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2)); gm.computeVertexNormals(); return gm; };
+  _roofWedge    =mk([[A,C,D],[A,B,C],[D,C,E],[D,E,F],[A,E,B],[A,F,E]], true);    // bottom, back, slope
+  _roofWedgeSide=mk([[A,D,F],[B,E,C]], false);                                   // the two gable ends
   const slab=new THREE.BoxGeometry(1.0,0.12,1.5); slab.rotateX(-Math.PI/4); slab.translate(0,0.06,0.03); _roofSlab=slab; }   // thin tiled surface laid on the 45° slope, slight overhang
 // ===== SANDBAGS ======================================================================================================
 // A revetment is bags LAID: courses about a quarter of a cell deep, each course turned across the one below so the wall
@@ -8296,13 +8412,28 @@ function buildModelBlocks(c,g){
           arr=keep; }
         continue; }
       if(m==='candle'){ addIM(cyl(0.06,0.07,0.3,6), new THREE.MeshPhongMaterial({color:0xe8dcc0,shininess:10}), 0.15); continue; }
-      if(m==='campfire'){ const wood=new THREE.MeshLambertMaterial({color:0x3a2a1a}); const logGeo=cyl(0.07,0.07,0.92,5);
-        // SEATED ON THE GROUND (Ben 08-05: "make sure campfires are actually seated on the ground"). The logs are cylinders of
-        // radius 0.07 laid nearly flat, so a centre at 0.12 puts their undersides at 0.05 — the whole fire hovered five
-        // centimetres over the cell floor. At 0.07 the log rests ON it, which is what the radius means.
+      // FIREWOOD IS SPLIT LOGS, NOT DOWELS (Ben 08-11: "make thicker and texture campfire logs"). Radius 0.07 is a broom
+      // handle; 0.125 is a piece of wood someone put on a fire. Bark, too: the material was flat 0x3a2a1a, and 0x3a2a1a with
+      // a bark tile over it is nearly black, so the tint is lifted to 0x7a6350 for the map to multiply into — the same
+      // reasoning as the `_tint` lerp further down this loop, just aimed at wood that should still read as dark and sooty.
+      // ry=2 repeats the tile twice along the log's length: one tile stretched over 0.92 turns bark into smears.
+      if(m==='campfire'){ const wood=new THREE.MeshLambertMaterial({map:tileTex('log_side',2,1),color:0x7a6350}); const logGeo=cyl(0.125,0.125,0.92,7);
+        // SEATED ON THE GROUND (Ben 08-05: "make sure campfires are actually seated on the ground"). The logs are cylinders
+        // laid nearly flat, so the centre height IS the radius — at anything less the fire hovers, at anything more it sinks.
+        // That coupling is why this number moved with the thickness above.
         for(const rot of [0.0,Math.PI/2]){ const im=new THREE.InstancedMesh(logGeo,wood,arr.length); im.castShadow=true; im.receiveShadow=true;
-          for(let i=0;i<arr.length;i++){ const a=arr[i]; _e.set(0,rot,Math.PI*0.46); _q.setFromEuler(_e); _v.set(a[0]+0.5,a[1]+0.07,a[2]+0.5); m4.compose(_v,_q,_one); im.setMatrixAt(i,m4); }
+          for(let i=0;i<arr.length;i++){ const a=arr[i]; _e.set(0,rot,Math.PI*0.46); _q.setFromEuler(_e); _v.set(a[0]+0.5,a[1]+0.125,a[2]+0.5); m4.compose(_v,_q,_one); im.setMatrixAt(i,m4); }
           im.instanceMatrix.needsUpdate=true; im.userData.modelMat=wood; g.add(im); }
+        // THE STONE RING (Ben 08-11: "you can add stones around them by placing pebbles in them"). Nine rocks on a 0.40 radius —
+        // the same cobble-textured boxes the pebble prop is made of, so a fire ring and a pebble cluster are visibly the same
+        // stone. 0.40 plus a half-width keeps every rock inside its own cell, which matters because the neighbouring cell is
+        // usually the floor of a room and a rock poking through it reads as a bug.
+        //   DETERMINISTIC VARIATION, from the angle rather than from Math.random: a chunk is re-meshed on every edit near it,
+        // and a random size here means the ring visibly reshuffles when you break a block across the room.
+        { const stone=new THREE.MeshLambertMaterial({map:tileTex('cobble'),color:0xc1c2c7}), ring=[];
+          for(let k=0;k<9;k++){ const a2=k/9*Math.PI*2, w=0.13+0.045*Math.sin(k*2.4), hh=0.10+0.035*Math.sin(k*1.7+1.1);
+            const r2=box(w,hh,w*0.85); r2.rotateY(a2); r2.translate(Math.sin(a2)*0.40, hh*0.5, Math.cos(a2)*0.40); ring.push(r2); }
+          addIM(_mergeGeos(ring), stone, 0); }
         // HOT COALS IN THE BASE (Ben 08-05: "campfires base should have hot coals in it" / "campfires fire has a little blip"). The
         // base was ONE flattened sphere of MeshBasic 0xff5a1e — an unlit, fully saturated orange dome 0.6 across sitting between the
         // logs. Unlit means it ignores the scene entirely, so at any hour it read as a flat orange blob under the flame rather than
@@ -8358,9 +8489,21 @@ function buildModelBlocks(c,g){
       if(m==='roof'){ roofGeos();
         const plankMat=new THREE.MeshLambertMaterial({map:tileTex('planks'),side:THREE.DoubleSide}), tileMat=new THREE.MeshLambertMaterial({map:tileTex(bd.tile||'roof_tile'),side:THREE.DoubleSide});
         const rot={n:0,e:Math.PI/2,s:Math.PI,w:-Math.PI/2}[bd.dir]||0;
-        for(const [geo,mat] of [[_roofWedge,plankMat],[_roofSlab,tileMat]]){ const im=new THREE.InstancedMesh(geo,mat,arr.length); im.castShadow=true; im.receiveShadow=true;
-          for(let i=0;i<arr.length;i++){ const a=arr[i]; _e.set(0,rot,0); _q.setFromEuler(_e); _v.set(a[0]+0.5,a[1]+0.5,a[2]+0.5); m4.compose(_v,_q,_one); im.setMatrixAt(i,m4); }
-          im.instanceMatrix.needsUpdate=true; im.userData.modelMat=mat; g.add(im); } continue; }
+        const putRoof=(geo,mat,cells)=>{ if(!cells.length) return; const im=new THREE.InstancedMesh(geo,mat,cells.length); im.castShadow=true; im.receiveShadow=true;
+          for(let i=0;i<cells.length;i++){ const a=cells[i]; _e.set(0,rot,0); _q.setFromEuler(_e); _v.set(a[0]+0.5,a[1]+0.5,a[2]+0.5); m4.compose(_v,_q,_one); im.setMatrixAt(i,m4); }
+          im.instanceMatrix.needsUpdate=true; im.userData.modelMat=mat; g.add(im); };
+        putRoof(_roofWedge,plankMat,arr); putRoof(_roofSlab,tileMat,arr);
+        // The gable ends take the SIDE tile of whatever the roof stands on, so a run of roof over a stone wall reads as that
+        // wall carried up to the ridge rather than as a plank box (Ben 08-11); a roof standing on nothing gets log_side.
+        // Grouped by that tile because one material per instanced mesh is the whole constraint here — a chunk of roof over
+        // mixed walls costs one extra draw per distinct wall material, and typically there is exactly one.
+        { const byTile={};
+          for(const a of arr){ const bd2=B[getBlock(cx0+a[0], a[1]-1, cz0+a[2])];
+            let t=(bd2&&bd2.cat!=='air')?((bd2.t&&bd2.t[1])||bd2.tile):null;
+            if(!t||TILEIDX[t]==null) t='log_side';
+            (byTile[t]=byTile[t]||[]).push(a); }
+          for(const t in byTile) putRoof(_roofWedgeSide, new THREE.MeshLambertMaterial({map:tileTex(t),side:THREE.DoubleSide}), byTile[t]); }
+        continue; }
       if(m==='bed'||m==='bed_head'){ const wood=new THREE.MeshLambertMaterial({color:0x6a4326}), sheet=new THREE.MeshLambertMaterial({color:bd.col||0x9a3b3b});
         // a bed is TWO cells; every part spans the FULL cell so the pair reads as ONE solid continuous bed (Ben 07-20); the head cell adds the pillow
         const legs=[]; for(const [lx,lz] of [[-0.42,-0.42],[0.42,-0.42],[-0.42,0.42],[0.42,0.42]]){ const l=box(0.1,0.26,0.1); l.translate(lx,0.13,lz); legs.push(l); }
@@ -8386,7 +8529,11 @@ function buildModelBlocks(c,g){
           const r2=new THREE.TorusGeometry(0.035,0.014,6,12); r2.rotateX(Math.PI/2); r2.translate(sx+0.03,0.98,0); parts.push(r2);
           const hk=box(0.03,0.14,0.03); hk.translate(sx,0.75,0); parts.push(hk); }
         addIM(_mergeGeos(parts), iron, 0); continue; }
-      if(m==='rocking_chair'){ const wood=new THREE.MeshLambertMaterial({color:0x7a5230}); const P=[];
+      // TEXTURED like every other wooden prop (Ben 08-11: "texture rockingchairs"). This branch is instanced and therefore
+      // never reaches the `_wooden` map/tint pass at the bottom of this loop, which is the whole reason the one chair you can
+      // sit in was still flat brown. Same rule as that pass: the planks tile carries the wood, and the block's own 0x7a5230
+      // is lerped 45% toward white first (-> 0xb59f8d) so multiplying by the tile does not darken it twice.
+      if(m==='rocking_chair'){ const wood=new THREE.MeshLambertMaterial({map:tileTex('planks'),color:0xb59f8d}); const P=[];
         const seat=box(0.44,0.06,0.42); seat.translate(0,0.4,0.02); P.push(seat);
         const back=box(0.44,0.02,0.5); back.rotateX(1.36); back.translate(0,0.64,-0.2); P.push(back);   // reclined backrest
         for(const bx of [-0.16,-0.055,0.055,0.16]){ const sp=box(0.03,0.03,0.5); sp.rotateX(1.36); sp.translate(bx,0.64,-0.2); P.push(sp); }   // back spindles
@@ -8583,7 +8730,12 @@ function buildModelBlocks(c,g){
       // declared tile as well as the planks fallback, because the ladder declares tile:'ladder' and would otherwise keep it.
       // Gates are deliberately NOT in the list: he did not name them, and a gate in a bark fence run is his call to make.
       const _logLike = (m==='door'||m==='door_open'||m==='trapdoor'||m==='trapdoor_open'||m==='fence'||m==='ladder'||m==='chest');
-      const _tile = _logLike ? 'log_side' : (bd.tile || (_wooden ? (bd.wattle?'log_side':'planks') : null));
+      // STONE AND SULFUR ARE ROCK (Ben 08-11: "texture sulfur piles and pebble piles"). Both are merged boxes with no declared
+      // tile, so they fell through every branch above and stayed flat tints — the two props in the game made of the same
+      // material as the ground they sit on, and the only two that did not look like it. sulfur_ore already had a painted tile
+      // with no one using it; pebbles borrow cobble, which is what a handful of them crafts into.
+      const _rocky = (m==='sulfur') ? 'sulfur_ore' : (m==='pebble') ? 'cobble' : null;
+      const _tile = _logLike ? 'log_side' : (_rocky || bd.tile || (_wooden ? (bd.wattle?'log_side':'planks') : null));
       const _map = _tile ? tileTex(_tile) : null;
       const _tint = _map ? (((((col>>16&255)+(255-(col>>16&255))*0.45)|0)<<16) | ((((col>>8&255)+(255-(col>>8&255))*0.45)|0)<<8) | (((col&255)+(255-(col&255))*0.45)|0)) : col;
       addIM(geo, new THREE.MeshLambertMaterial(_map?{map:_map, color:_tint}:{color:col}), m==='trapdoor'?0.08:-geo.boundingBox.min.y);   // rest the model's BASE on the cell floor (not floating at cell-centre)
@@ -26391,7 +26543,11 @@ function updateFireflies(dt){
     const g=new THREE.BufferGeometry();
     g.setAttribute('position',new THREE.BufferAttribute(_ffPos,3)); g.setAttribute('color',new THREE.BufferAttribute(_ffCol,3));
     g.setDrawRange(0,0);
-    _ffPts=new THREE.Points(g,new THREE.PointsMaterial({size:0.26,map:_ffTex(),sizeAttenuation:true,vertexColors:true,
+    // 0.26 -> 0.16 (Ben 08-11: "make fireflies decently smaller"). A firefly is an insect, and at 0.26 world units the sprite
+    // was a quarter of a block across — bigger than the thing it represents, which is what made a close one read as a floating
+    // lamp rather than as a bug. Checked against the sub-pixel floor the lamp halos ran into: 0.16 at the far end of FF_R still
+    // covers ~1.2 px at 640 lines, so it fades out by distance rather than being averaged away by FXAA.
+    _ffPts=new THREE.Points(g,new THREE.PointsMaterial({size:0.16,map:_ffTex(),sizeAttenuation:true,vertexColors:true,
       transparent:true,opacity:1,depthWrite:false,blending:THREE.AdditiveBlending,fog:false}));
     // fog:false with a MANUAL distance fade below — additive sprites multiplied by fog turn grey rather than fading out, and a
     // grey firefly reads as dirt on the screen.
@@ -26640,6 +26796,73 @@ function animalTex(type,spec){
   const tx=new THREE.CanvasTexture(cv); tx.colorSpace=THREE.SRGBColorSpace; tx.wrapS=tx.wrapT=THREE.RepeatWrapping; tx.anisotropy=2;
   _animalTexCache[type]=tx; return tx;
 }
+// ===== CLOTH: the robes Jesus and the monks wear ======================================================================
+// WOVEN, AND THE WEAVE IS GREY (Ben 08-11: "make jesus and monks robes more flowy, and texture them"). The map is a
+// near-white weave and the garment's colour stays on `material.color`, because a map that carries the colour AS WELL
+// multiplies it by itself — the monk's 0x223160 rason would come out 0x0a1024, which is the black-hole bug his emissive
+// was raised to fix in the first place. Mean luminance is held near 240 for the same reason.
+const _clothTexCache={};
+function clothTex(kind){ if(_clothTexCache[kind]) return _clothTexCache[kind];
+  const S=64, cv=document.createElement('canvas'); cv.width=cv.height=S; const c=cv.getContext('2d');
+  const wool=(kind==='wool');
+  c.fillStyle='rgb(242,242,242)'; c.fillRect(0,0,S,S);
+  // warp and weft at a two-pixel pitch: cloth is threads crossing, and one direction alone reads as corduroy
+  for(let x=0;x<S;x+=2){ c.fillStyle='rgba(0,0,0,'+(wool?0.10:0.06)+')'; c.fillRect(x,0,1,S); }
+  for(let y=0;y<S;y+=2){ c.fillStyle='rgba(0,0,0,'+(wool?0.08:0.05)+')'; c.fillRect(0,y,S,1); }
+  for(let y=1;y<S;y+=4){ c.fillStyle='rgba(255,255,255,0.16)'; c.fillRect(0,y,S,1); }              // the lifted shed catches light
+  const img=c.getImageData(0,0,S,S), d=img.data, gr=wool?26:14;                                     // slub — thread thickness is never even
+  for(let i=0;i<d.length;i+=4){ const j=(Math.random()-0.5)*gr; d[i]+=j; d[i+1]+=j; d[i+2]+=j; }
+  c.putImageData(img,0,0);
+  if(wool){ c.strokeStyle='rgba(255,255,255,0.10)'; c.lineWidth=1.2;                                // wool fluff; linen has none, which is the difference you can see at ten paces
+    for(let k=0;k<70;k++){ c.beginPath(); c.arc(Math.random()*S,Math.random()*S,0.8+Math.random()*1.8,0,3.4); c.stroke(); } }
+  else { c.fillStyle='rgba(0,0,0,0.045)';                                                           // linen creases where it has been folded and put away
+    for(let k=0;k<7;k++){ const y=Math.random()*S; c.fillRect(0,y,S,1+Math.random()); } }
+  const tx=new THREE.CanvasTexture(cv); tx.colorSpace=THREE.SRGBColorSpace; tx.wrapS=tx.wrapT=THREE.RepeatWrapping; tx.anisotropy=2;
+  tx.name='cloth:'+kind;   // named for the same reason tileTex names its own — a bench can then say WHICH texture, not just "there is one"
+  _clothTexCache[kind]=tx; return tx; }
+// A ROBE IS CLOTH, NOT A LATHE. Both robes were `CylinderGeometry(rTop,rBot,h,10)` — a smooth ten-sided cone, the one
+// silhouette hanging cloth never has. This is the same taper carrying vertical FOLDS whose amplitude OPENS TOWARD THE HEM
+// (a robe is pinched at the shoulder and full at the floor, so a uniform ripple looks like fluting on a column) and a hem
+// that rises and falls with them, because a dead-level hem is most of what made the old cone read as moulded plastic.
+//
+// THE FRONT CENTRELINE IS ALWAYS A FOLD RIDGE, and that is load-bearing, not incidental: `cos(folds*th)` peaks at th=0,
+// which is +z, which is where the monk's pectoral cross and the bible are pinned. Change the phase and the cross sinks
+// into a valley or floats over a ridge — the exact fault the long note at that cross records fixing once already.
+//
+// `fp` is the flare exponent; pass 0 for folds of constant depth (the sash band, which has to ride over the robe's own
+// ridges at every height rather than fade out at its top).
+const _robeGeoCache={};
+function robeGeo(rTop,rBot,h,folds,amp,hemAmp,fp){
+  if(fp===undefined) fp=1.35;
+  const key=[rTop,rBot,h,folds,amp,hemAmp,fp].join('|'); if(_robeGeoCache[key]) return _robeGeoCache[key];
+  const SEG=folds*4, RINGS=16, pos=[], uv=[], idx=[];
+  for(let j=0;j<=RINGS;j++){ const t=j/RINGS, flare=Math.pow(1-t,fp);          // t = 0 at the hem, 1 at the collar
+    for(let i=0;i<=SEG;i++){ const th=i/SEG*Math.PI*2;
+      const r=(rBot+(rTop-rBot)*t)*(1+amp*flare*Math.cos(folds*th));
+      const y=-h/2+t*h + hemAmp*Math.cos(folds*th+0.9)*Math.pow(1-t,3);        // the hem wave dies within the lowest fifth
+      pos.push(Math.sin(th)*r, y, Math.cos(th)*r); uv.push(i/SEG*folds*0.5, t*h*2.2); } }
+  for(let j=0;j<RINGS;j++) for(let i=0;i<SEG;i++){ const a=j*(SEG+1)+i; idx.push(a,a+SEG+1,a+1, a+1,a+SEG+1,a+SEG+2); }
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+  g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));
+  g.setIndex(idx); g.computeVertexNormals();
+  // WINDING IS CHECKED, NOT GUESSED: a robe wound the wrong way is lit from the inside and reads as a dark hole with a head
+  // on it, which is indistinguishable from the emissive bug this file already carries a note about. The radial dot says which
+  // way the normals actually point, so this is right whichever way the ring is traced.
+  { const n=g.attributes.normal, p=g.attributes.position, vi=SEG+1;            // ring 1, th=0 — off the seam, radius non-zero
+    if(n.getX(vi)*p.getX(vi)+n.getZ(vi)*p.getZ(vi) < 0){ const a=g.index.array;
+      for(let i=0;i<a.length;i+=3){ const t2=a[i]; a[i]=a[i+2]; a[i+2]=t2; } g.index.needsUpdate=true; g.computeVertexNormals(); } }
+  _robeGeoCache[key]=g; return g; }
+// A SLEEVE: the same cloth, short, flaring to an open cuff. The arms were boxes, and a box arm under a folded robe is the
+// part your eye lands on.
+function sleeveGeo(rTop,rCuff,h){ return robeGeo(rTop,rCuff,h,6,0.09,h*0.05,0.8); }
+// THE VEIL (epanokamelavkion) — a hanging panel, not the 0.03-thick slab it was. Curved across its width and rippling more
+// the further it falls from the pin at the hat, which is how a cloth hung from one edge behaves.
+function veilGeo(w,h){ const g=new THREE.PlaneGeometry(w,h,10,12), p=g.attributes.position;
+  for(let i=0;i<p.count;i++){ const x=p.getX(i), y=p.getY(i), drop=(h/2-y)/h;   // drop: 0 at the pinned top edge, 1 at the loose hem
+    p.setZ(i, -Math.cos(x/w*Math.PI)*w*0.13 + Math.sin(x/w*14.0)*w*0.07*drop);
+    p.setY(i, y - Math.cos(x/w*11.0)*h*0.035*drop*drop); }                       // …and the loose hem is not a straight line
+  g.computeVertexNormals(); return g; }
 // the SERAPHIM's photoreal eye photo, cropped (via UV offset/repeat) to a square framed on the iris.
 // `flip` mirrors it horizontally so a left/right pair looks symmetric. Shared load; one clone per eye. (Ben 07-21)
 let _eyeTexBase=null;
@@ -26685,9 +26908,18 @@ function buildAnimalMesh(type,corrupt){ const spec=ANIMALS[type], g=new THREE.Gr
     for(const sx of [-1,1]){ const arm=new THREE.Mesh(new THREE.BoxGeometry(0.09*s,0.4*s,0.11*s),robe); arm.position.set(sx*0.22*s,0.6*s,0); g.add(arm); }
     for(const sx of [-1,1]){ const leg=new THREE.Mesh(new THREE.BoxGeometry(0.11*s,0.42*s,0.13*s),new THREE.MeshLambertMaterial({color:0x3a3550})); leg.position.set(sx*0.09*s,0.21*s,0); g.add(leg); }
     animalGroup.add(g); return g; }
-  if(type==='jesus'){ const robe=new THREE.MeshLambertMaterial({color:0xf1ede1,emissive:0x50483a,emissiveIntensity:0.55}), skin=new THREE.MeshLambertMaterial({color:0xd9b48c,emissive:0x4a3626,emissiveIntensity:0.5}), hair=new THREE.MeshLambertMaterial({color:0x5a3a22,emissive:0x2a1c12,emissiveIntensity:0.45}), sash=new THREE.MeshLambertMaterial({color:0x9a2a2a,emissive:0x4a1414,emissiveIntensity:0.5});   // white robe, olive skin, brown hair/beard, red sash — self-lit so the holy figure reads bright, not a dark silhouette (Ben 07-21)
-    const robeB=new THREE.Mesh(new THREE.CylinderGeometry(0.20*s,0.30*s,0.9*s,10),robe); robeB.position.y=0.55*s; robeB.castShadow=true; g.add(robeB);   // flowing robe (tapered → hides the feet, so he glides on the water)
-    const sashB=new THREE.Mesh(new THREE.CylinderGeometry(0.205*s,0.205*s,0.12*s,10),sash); sashB.position.y=0.72*s; g.add(sashB);
+  if(type==='jesus'){ const robe=new THREE.MeshLambertMaterial({color:0xf1ede1,emissive:0x50483a,emissiveIntensity:0.55,map:clothTex('linen')}), skin=new THREE.MeshLambertMaterial({color:0xd9b48c,emissive:0x4a3626,emissiveIntensity:0.5}), hair=new THREE.MeshLambertMaterial({color:0x5a3a22,emissive:0x2a1c12,emissiveIntensity:0.45}), sash=new THREE.MeshLambertMaterial({color:0x9a2a2a,emissive:0x4a1414,emissiveIntensity:0.5,map:clothTex('linen')});   // white robe, olive skin, brown hair/beard, red sash — self-lit so the holy figure reads bright, not a dark silhouette (Ben 07-21)
+    // LINEN, FOLDED (see robeGeo). The hem widens 0.30 -> 0.34 with the folds, so the fullness comes from cloth rather than
+    // from a wider cone: the fold valleys still sit inside the old silhouette, and the feet stay hidden — which is the whole
+    // reason this shape is a tapered skirt and not legs, since he walks on water.
+    const robeB=new THREE.Mesh(robeGeo(0.20*s,0.34*s,0.9*s,12,0.10,0.030*s),robe); robeB.position.y=0.55*s; robeB.castShadow=true; g.add(robeB);
+    // The sash RIDES the folds instead of cutting through them. It was a smooth 0.205 cylinder against a robe whose surface
+    // at that height is 0.231 — it was buried, and the red band Ben asked for was not visible at all. Constant-depth folds
+    // (fp=0) and a 4% stand-off put it proud of every ridge.
+    // Arithmetic, since eyeballing it is what buried it: the robe surface spans y 0.10-1.00, so at the sash's lower edge
+    // (0.66) its fold valley is 0.246 and its ridge 0.260, and at the upper edge (0.78) valley 0.231, ridge 0.238. A band at
+    // 0.268/0.250 with 5.5% in-phase folds clears the valleys everywhere and stands ~0.02 proud of the ridges.
+    const sashB=new THREE.Mesh(robeGeo(0.250*s,0.268*s,0.12*s,12,0.055,0,0),sash); sashB.position.y=0.72*s; g.add(sashB);
     const head=new THREE.Mesh(new THREE.BoxGeometry(0.24*s,0.26*s,0.24*s),skin); head.position.y=1.12*s; g.add(head);   // face front sits at z=+0.12*s
     // long hair — crown + back + side locks, its FRONT pulled BEHIND the face (was reaching z=+0.12*s, coplanar with the face → z-fighting hair through the front) (Ben 07-21)
     const hairB=new THREE.Mesh(new THREE.BoxGeometry(0.29*s,0.20*s,0.24*s),hair); hairB.position.set(0,1.20*s,-0.055*s); g.add(hairB);   // front now at z≈+0.065*s, clear of the face
@@ -26696,15 +26928,17 @@ function buildAnimalMesh(type,corrupt){ const spec=ANIMALS[type], g=new THREE.Gr
     // EYES — the seraphim's photoreal eye photo mapped onto two small planes on the face front (Ben 07-21)
     for(const ex of [-1,1]){ const eye=new THREE.Mesh(new THREE.PlaneGeometry(0.072*s,0.052*s), new THREE.MeshBasicMaterial({map:jesusEyeTex(ex>0),transparent:false}));
       eye.position.set(ex*0.055*s,1.15*s,0.1215*s); g.add(eye); }   // fully lit (MeshBasic) so the eyes read even in the dark
-    for(const sx of [-1,1]){ const arm=new THREE.Mesh(new THREE.BoxGeometry(0.08*s,0.42*s,0.1*s),robe); arm.position.set(sx*0.25*s,0.62*s,0.02*s); arm.rotation.z=sx*0.15; g.add(arm); }   // arms slightly open
+    const sleeves=[];
+    for(const sx of [-1,1]){ const arm=new THREE.Mesh(sleeveGeo(0.055*s,0.105*s,0.42*s),robe); arm.position.set(sx*0.25*s,0.62*s,0.02*s); arm.rotation.z=sx*0.15; arm.userData.rz0=arm.rotation.z; g.add(arm); sleeves.push(arm); }   // open sleeves, flaring to the cuff
     const halo=new THREE.Mesh(new THREE.TorusGeometry(0.16*s,0.02*s,8,20),new THREE.MeshBasicMaterial({color:0xffe680})); halo.rotation.x=Math.PI/2; halo.position.y=1.3*s; g.add(halo);   // golden halo
+    g.userData.robeSway=[robeB,sashB].concat(sleeves);   // cloth lags the body — see the sway in updateAnimalsFrame
     animalGroup.add(g); return g; }
   if(type==='monk'){   // MOUNT ATHOS: the rason (a wide unbelted robe to the floor), the kalimavkion (a stiff cylinder hat with a
     // flat wider top), the epanokamelavkion veil hanging down the back, a long grey beard, and gold crosses on hat and chest.
     // Dark blue, as asked, but NOT the 0x1b2a5e/0.55-emissive pair Jesus carries: those work on a near-white robe and on a dark
     // blue they do not — every face turned off the sun went black and the monk read as a hole with a head on it. Lifted colour
     // plus nearly double the self-lighting is what makes the shaded half of the robe still say BLUE.
-    const robe=new THREE.MeshLambertMaterial({color:0x223160,emissive:0x18214c,emissiveIntensity:0.80}),
+    const robe=new THREE.MeshLambertMaterial({color:0x223160,emissive:0x18214c,emissiveIntensity:0.80,map:clothTex('wool')}),
           skin=new THREE.MeshLambertMaterial({color:0xd0ab84,emissive:0x3c2c1e,emissiveIntensity:0.45}),
           beardM=new THREE.MeshLambertMaterial({color:0xd8d4c8,emissive:0x38383a,emissiveIntensity:0.4}),
           gold=new THREE.MeshBasicMaterial({color:0xd4af37}),
@@ -26713,7 +26947,9 @@ function buildAnimalMesh(type,corrupt){ const spec=ANIMALS[type], g=new THREE.Gr
     // The rason's top is NARROW (0.16) and ends at 0.95, leaving a collar gap under the chin. The first pass had it at radius
     // 0.19 reaching 1.01 — flush with the head — and the beard, sitting at 0.97, was entirely inside the cylinder: the monk came
     // out clean-shaven with a robe up to his jaw. Anything moved here has to stay clear of the beard's front at 0.18.
-    const rason=new THREE.Mesh(new THREE.CylinderGeometry(0.16*s,0.33*s,0.94*s,10),robe); rason.position.y=0.48*s; rason.castShadow=true; g.add(rason);
+    //   AND IT IS FOLDED CLOTH NOW (see robeGeo). The hem opens 0.33 -> 0.36 to carry the folds; the collar radius, the
+    // collar height and therefore the beard clearance above are all untouched, which is the constraint this note guards.
+    const rason=new THREE.Mesh(robeGeo(0.16*s,0.36*s,0.94*s,14,0.11,0.032*s),robe); rason.position.y=0.48*s; rason.castShadow=true; g.add(rason);
     // HEAD LOWERED 0.03*s (Ben: "monks heads need moved down slightly"). The whole assembly moved by the SAME amount — head,
     // eyes, kalimavkion, its crown, the hat cross and the veil — because every one of those is positioned against the head and
     // moving the box alone takes the face apart.
@@ -26726,7 +26962,10 @@ function buildAnimalMesh(type,corrupt){ const spec=ANIMALS[type], g=new THREE.Gr
       eye.position.set(ex*0.05*s,1.14*s,0.1165*s); g.add(eye); }   // the same photoreal eye as Jesus — MeshBasic, so they read in an unlit nave
     const kal=new THREE.Mesh(new THREE.CylinderGeometry(0.125*s,0.125*s,0.24*s,10),robe); kal.position.y=1.35*s; g.add(kal);            // kalimavkion barrel
     const kalTop=new THREE.Mesh(new THREE.CylinderGeometry(0.165*s,0.165*s,0.035*s,10),robe); kalTop.position.y=1.47*s; g.add(kalTop);   // its flat, wider crown
-    const veil=new THREE.Mesh(new THREE.BoxGeometry(0.24*s,0.42*s,0.03*s),robe); veil.position.set(0,1.13*s,-0.135*s); g.add(veil);     // epanokamelavkion down the back
+    // A CLONED material, not `robe` itself: a single-surface panel needs DoubleSide, and setting it on the shared material
+    // would make the rason and the hat double-sided too — twice the fragment work on the two biggest meshes he has.
+    const veilM=robe.clone(); veilM.side=THREE.DoubleSide;
+    const veil=new THREE.Mesh(veilGeo(0.24*s,0.44*s),veilM); veil.position.set(0,1.13*s,-0.135*s); g.add(veil);   // epanokamelavkion down the back — a hanging panel now, not a slab
     { const c=cross(0.11*s,0.022*s,0.012*s); c.position.set(0,1.34*s,0.128*s); g.add(c); }                                              // gold cross on the hat
     // ON the robe, not in front of it (Ben 08-04: "the crosses on monks robes not hat need moved to actually be up against thier
     // robe"). The rason is a cone: radius 0.33 at its hem (y 0.01) tapering to 0.16 at the collar (y 0.95), so at the cross's own
@@ -26740,12 +26979,18 @@ function buildAnimalMesh(type,corrupt){ const spec=ANIMALS[type], g=new THREE.Gr
     // slope it makes contact along its whole length instead. -x, because R_x(θ) takes the top to z=+y·sinθ and the top has to
     // go BACK. Then 0.211 instead of 0.219 seats it INTO the weave rather than just touching: the cloth is at 0.213 here and
     // the centre boss stands 0.015 proud of the face, so the front still reads and nothing z-fights.
-    { const c=cross(0.2*s,0.038*s,0.016*s); c.rotation.x=-0.179; c.position.set(0,0.66*s,0.211*s); g.add(c); }                          // gold pectoral cross on the robe
+    //   THE FOLDS MOVED IT, AND THE SAME ARITHMETIC PLACES IT AGAIN. The rason now runs r=0.36 at y=0.01 to r=0.16 at y=0.95,
+    // so at 0.66 the mean cloth is at 0.2217 and the FRONT CENTRELINE IS A FOLD RIDGE by construction (robeGeo's phase — see
+    // the note there), standing at 0.2267. Half the cross's thickness past that is 0.235; 0.232 seats it into the weave with
+    // the centre boss still proud. The lean is the new cone's own: dr/dy = -0.2128, atan = 0.210 rad back from vertical.
+    { const c=cross(0.2*s,0.038*s,0.016*s); c.rotation.x=-0.210; c.position.set(0,0.66*s,0.232*s); g.add(c); }                          // gold pectoral cross on the robe
     // ARMS held in front, cradling the bible — the hands are inside the sleeves, so the book sits on the sleeve ends.
-    for(const sx of [-1,1]){ const arm=new THREE.Mesh(new THREE.BoxGeometry(0.085*s,0.4*s,0.11*s),robe); arm.position.set(sx*0.2*s,0.66*s,0.09*s); arm.rotation.x=-0.5; g.add(arm); }
+    const sleeves=[];
+    for(const sx of [-1,1]){ const arm=new THREE.Mesh(sleeveGeo(0.055*s,0.1*s,0.4*s),robe); arm.position.set(sx*0.2*s,0.66*s,0.09*s); arm.rotation.x=-0.5; arm.userData.rx0=-0.5; g.add(arm); sleeves.push(arm); }
     const book=new THREE.Mesh(new THREE.BoxGeometry(0.26*s,0.06*s,0.19*s),bookM); book.position.set(0,0.62*s,0.25*s); book.rotation.x=-0.22; g.add(book);
     { const c=cross(0.09*s,0.018*s,0.01*s); c.rotation.x=-Math.PI/2+0.22; c.position.set(0,0.655*s,0.252*s); g.add(c); }                // gold cross on the bible's cover
     g.userData.monkBook=book; g.userData.monkHead=head;
+    g.userData.robeSway=[rason,veil].concat(sleeves);   // the kalimavkion is deliberately NOT here: it is a stiff hat, and stiff is the whole point of it
     // EVERYTHING FROM THE COLLAR UP IS ONE SILHOUETTE, as far as the creature-clip pass is concerned (see _meshBuried). Head,
     // beard, eyes, kalimavkion, its crown, the hat cross and the veil are seven separate meshes that each used to answer "am I in
     // a block" alone, so a head grazing a doorframe left a hat and a beard hanging over nothing. Selected by height rather than
@@ -27103,6 +27348,13 @@ function updateAnimalsFrame(dt){
     a.mesh.rotation.y = a.yaw + (a.type==='villager'?Math.sin(et*0.8+i)*0.06:0);
     a.mesh.rotation.z = (a.type==='villager'? Math.sin(et*0.9+i*2.1)*0.035 : idleSway*0.012);
     if(isMonk){ const bk=a.mesh.userData.monkBook; if(bk) bk.rotation.z=Math.sin(et*(a._chant>0?2.4:0.9)+i)*(a._chant>0?0.10:0.025); }   // the bible rocks in his hands, harder while he sings
+    // CLOTH LAGS THE BODY. The folded geometry alone still reads as a carved statue while it walks, because the fold that is
+    // on the left stays on the left; what makes a robe read as cloth is that its hem arrives after the hips do. Two out-of-step
+    // frequencies rather than one, so the swing never settles into a metronome, and a floor under `mv` so a standing monk is
+    // still breathing rather than set in stone.
+    { const R=a.mesh.userData.robeSway;
+      if(R){ const mv=(spd>0.3?1:0.3), sw=Math.sin(et*2.1+i*1.3)*mv, tw=Math.sin(et*1.37+i*0.7)*mv;
+        for(const p of R){ p.rotation.z=(p.userData.rz0||0)+sw*0.055; p.rotation.x=(p.userData.rx0||0)+tw*0.030; p.rotation.y=tw*0.045; } } }
     if(a.type==='spider'||a.type==='daddy'){ const LG=a.mesh.userData.spiderLegs; if(LG){ const mv=spd>0.3?1:0, sp=et*(a.type==='daddy'?7:11); for(const lg of LG){ const ph=sp+lg.i*1.1+(lg.side>0?3.14:0); lg.femG.rotation.z=lg.fz+Math.sin(ph)*0.18*mv; lg.tibG.rotation.z=lg.tz+Math.cos(ph)*0.24*mv; } } }   // 8 legs shuffle as it scuttles (daddy sways slower)
   } }
   // WRETCH PREDATION: hungry + prey within reach → grab, gorge (jaw flares open), spray blood, leave a split carcass
@@ -28281,8 +28533,11 @@ function updateWeather(dt){
       weather.sdist=_sd;
       weather.flash=1; weather.thunderT=_sd/343; weather._delay0=weather.thunderT; }   // _delay0 is QA only (see __hc.strikeRead): thunderT itself counts down
     if(AC && !weather._rainNode){ try{ const rb=SFX['rain']&&SFX['rain'][0]; const n=AC.createBufferSource(); const g=AC.createGain(); g.gain.value=0;
-        if(rb){ n.buffer=rb; n.loop=true; n.connect(g); weather._rainVol=0.62; }                                              // REAL CC0 rain loop
-        else { n.buffer=NB; n.loop=true; const hp=AC.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=1050; n.connect(hp); hp.connect(g); weather._rainVol=0.22; }   // synth hiss fallback
+        // 8% QUIETER (Ben 08-11: "make rain 8% less loud") — 0.62 -> 0.570 and the fallback 0.22 -> 0.202, both times 0.92.
+        // BOTH have to move: whichever one is playing is "the rain", and the synth hiss is what you get whenever the CC0
+        // buffer has not decoded yet, which is most of a fresh load.
+        if(rb){ n.buffer=rb; n.loop=true; n.connect(g); weather._rainVol=0.570; }                                              // REAL CC0 rain loop
+        else { n.buffer=NB; n.loop=true; const hp=AC.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=1050; n.connect(hp); hp.connect(g); weather._rainVol=0.202; }   // synth hiss fallback
         g.connect(ambBus); n.start(); weather._rainNode=g; }catch(e){} }   // rain loop
   } else if(rainMesh.visible) rainMesh.visible=false;
   if(weather._rainNode && AC) weather._rainNode.gain.setTargetAtTime((weather.raining&&!under)?weather.rain*(weather._rainVol||0.5):0, AC.currentTime, 0.6);
@@ -30839,6 +31094,22 @@ window.__hc={
         muzzleInBlock:fl?!!(isOpaque[getBlock(Math.floor(w.x),Math.floor(w.y),Math.floor(w.z))]):null,
         tip:tip(view), off:tip(offView) }; }catch(e){ return {err:String(e.message||e)}; } },
   blockOutReset(){ try{ view._blockOutN=0; return 0; }catch(e){ return {err:String(e.message||e)}; } },
+  // THE ROBES AS NUMBERS. "Is it flowy" is an opinion; the fold depth is arithmetic. For every robed figure alive it reports
+  // the widest and narrowest radius found on the robe's lowest ring (equal = a lathe, spread = folds), how far the hem rises
+  // and falls, and which texture each cloth material carries. A 120px figure in a bench frame cannot answer any of the three.
+  robeProbe(){ try{ const out=[];
+      for(const a of animals){ if(a.dead || (a.type!=='monk' && a.type!=='jesus')) continue;
+        const R=a.mesh.userData.robeSway; if(!R||!R.length){ out.push({type:a.type,err:'no robeSway'}); continue; }
+        const robe=R[0], p=robe.geometry.attributes.position; let ymin=1e9;
+        for(let i=0;i<p.count;i++) ymin=Math.min(ymin,p.getY(i));
+        let rlo=1e9, rhi=0, hlo=1e9, hhi=-1e9, n=0;
+        for(let i=0;i<p.count;i++){ const y=p.getY(i); if(y>ymin+0.09) continue;                 // the hem band, whatever the figure's scale
+          const r=Math.hypot(p.getX(i),p.getZ(i)); rlo=Math.min(rlo,r); rhi=Math.max(rhi,r); hlo=Math.min(hlo,y); hhi=Math.max(hhi,y); n++; }
+        out.push({ type:a.type, parts:R.length, hemVerts:n,
+                   rLo:+rlo.toFixed(3), rHi:+rhi.toFixed(3), foldDepth:+(rhi-rlo).toFixed(3), hemWave:+(hhi-hlo).toFixed(3),
+                   maps:R.map(m=>(m.material&&m.material.map&&m.material.map.name)||null),
+                   sway:R.map(m=>+m.rotation.z.toFixed(4)) }); }
+      return { n:out.length, robes:out }; }catch(e){ return {err:String(e.message||e)}; } },
   heldParts(){ try{ let n=0, sprite=false; if(view.mesh) view.mesh.traverse(o=>{ if(o.isMesh){ n++; if(o.userData&&o.userData.extruded) sprite=true; } });
       return { id:view.id, meshes:n, sprite }; }catch(e){ return {err:String(e.message||e)}; } },
   // #75 audit: the same item, signed at each of its representations. toolSig = the itemModel dispatch (icon /
@@ -30857,12 +31128,16 @@ window.__hc={
       return { id:(which==='off')?offView.id:view.id, parts }; }catch(e){ return {err:String(e.message||e)}; } },
   // …and the same question for a block that has been PLACED, which is drawn by a different builder entirely (buildModelBlocks).
   // A held torch and a placed torch wearing different finishes is the failure this is here to catch.
-  placedMats(cols){ try{ const want=(cols||[]).map(c=>String(c).replace('#','').toLowerCase()); const parts=[];
-      chunkRoot.traverse(o=>{ if(!o.isInstancedMesh) return; const mt=o.material; if(!mt||!mt.color) return;
+  // `mapName` is the answer to "is this prop textured, and WITH WHAT" — tileTex stamps its cache key onto texture.name for
+  // exactly this, and `map:true` alone cannot tell planks from bark. `all` includes the per-block CLONE path (plain Meshes:
+  // teapots, teacups, lanterns), which the instanced-only walk was blind to, so "the tea set is untextured" was unmeasurable.
+  placedMats(cols,all){ try{ const want=(cols||[]).map(c=>String(c).replace('#','').toLowerCase()); const parts=[]; let seen=0, meshes=0;
+      chunkRoot.traverse(o=>{ seen++; if(o.isMesh||o.isInstancedMesh) meshes++;
+        if(!(o.isInstancedMesh||(all&&o.isMesh))) return; const mt=o.material; if(!mt||!mt.color) return;
         const c=mt.color.getHexString().toLowerCase(); if(want.length && !want.includes(c)) return;
-        parts.push({ t:mt.type, col:'#'+c, map:!!mt.map, transparent:!!mt.transparent, opacity:+(mt.opacity!=null?mt.opacity:1).toFixed(2),
-                     depthWrite:mt.depthWrite!==false, n:o.count }); });
-      return { parts }; }catch(e){ return {err:String(e.message||e)}; } },
+        parts.push({ t:mt.type, col:'#'+c, map:!!mt.map, mapName:(mt.map&&mt.map.name)||null, transparent:!!mt.transparent, opacity:+(mt.opacity!=null?mt.opacity:1).toFixed(2),
+                     depthWrite:mt.depthWrite!==false, n:o.count||1, verts:(o.geometry&&o.geometry.attributes.position)?o.geometry.attributes.position.count:0 }); });
+      return { parts, seen, meshes }; }catch(e){ return {err:String(e.message||e)}; } },   // seen/meshes: an empty `parts` is otherwise indistinguishable from an empty chunkRoot
   // QA/bench: an ITEM ICON as numbers. Rows and columns of set pixels are enough to tell a silhouette apart from the circle that
   // drawIcon falls back to when an icon type has no painter — a circle of r=5 about (8,8) cannot reach row 1 or row 14, and a
   // cross reaches both. Same rasterising trick ammoIcons uses.
@@ -33022,6 +33297,12 @@ window.__hc={
   // throw mid-flight from the console without reloading and losing the world you were flying over.
   cinema(on){ try{ return { cinema: setCinema(on===undefined ? !document.body.classList.contains('cinema') : on) }; }
     catch(e){ return {err:String(e.message||e)}; } },
+  // BEN'S RULE, AS A DIAL (08-11): a lit face may not show a fully black texel. `k` is the floor as a fraction of the
+  // light landing on the fragment, so 0 is off and every value above it scales with the light rather than with the
+  // texture. Guard any change with bench/tmp-texel-black.mjs, which is the vantage the fault was reported at, and with
+  // bench/assert-cave-black + assert-unlit-black, which are the two that fail if this ever floors an UNLIT face.
+  texFloor(o){ try{ if(o&&o.k!=null) _scotK[2]=+o.k;
+      return { k:+_scotK[2].toFixed(5) }; }catch(e){ return {err:String(e.message||e)}; } },
   freezeT(v){ try{ if(v===null) _pinT=null; else if(v!==undefined) _pinT=+v;
       return { pinned:_pinT, uTime:+globalU.uTime.value.toFixed(3) }; }catch(e){ return {err:String(e.message||e)}; } },
   // QA + the A/B for the water rebuild. amt 0 restores the flat-uRing surface exactly, streak 0 the pre-streak normal,
