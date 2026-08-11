@@ -6756,6 +6756,74 @@ const SSAOShader={
       gl_FragColor = vec4(col.rgb * (1.0 - uStrength*occ), col.a);
     }`
 };
+// =====================================================================
+//  HEIGHT FOG — the third of the three things Ben's art-direction note names
+// =====================================================================
+// His list was "shadows, colour temperature, volumetric/height fog", and the first two are done. This is the last, and
+// it is the one that costs the least and changes the most: a landscape reads as deep when the air between you and it is
+// visible, and this island has 128 blocks of vertical relief with nothing in the air at all.
+//
+// ANALYTIC, NOT MARCHED. The integral of an exponentially height-decaying density along a ray has a closed form
+// (Quilez), so this is a handful of instructions per pixel rather than a loop of samples: with density a, falloff b and
+// a ray from C in direction V for distance t,
+//     fog = (a/b) * exp(-(C.y - baseY)*b) * (1 - exp(-t*V.y*b)) / V.y
+// The V.y -> 0 case is the horizontal ray, where the density does not change along the path and the integral collapses
+// to a*t*exp(...); it is not a singularity but it is a division by zero, so it is branched rather than clamped.
+//
+// IT DOES NOT TOUCH THE SKY BY DEFAULT. The horizon in this game is already three tuned layers - ocean band, treeline,
+// mountains - each with its own haze, and fogging the sky on top of them would fight all three and undo the work of the
+// last two sessions. uSky is the dial for anyone who wants it; 0 means the pass only ever draws on geometry, which is
+// what "mist in the valleys" actually means.
+//
+// FORWARD SCATTER is the whole reason mist is beautiful rather than grey: air lit from behind glows along the line to
+// the sun. One dot product, raised to a power, mixing the fog colour toward the sun's - and it is why uSunCol is taken
+// from the live key light rather than being a constant, so the mist goes amber at dusk with everything else.
+//
+// SHIPPED OFF, and the pass is not even added to the chain until it is turned on (`__hc.heightFog({on:true})` rebuilds
+// the composer, the same way the motion-blur toggle does), so it costs exactly nothing until someone asks for it. It is
+// a look change on a build where Ben has not yet reviewed eight of them; the honest form is a candidate, not a default.
+const HeightFogShader={
+  uniforms:{ tDiffuse:{value:null}, tDepth:{value:null}, uInvVP:{value:new THREE.Matrix4()}, uCamPos:{value:new THREE.Vector3()},
+    uDensity:{value:0.030}, uFalloff:{value:0.055}, uBaseY:{value:62.0}, uMaxDist:{value:900.0},
+    uColor:{value:new THREE.Color(0.62,0.68,0.76)}, uSunCol:{value:new THREE.Color(1.0,0.86,0.66)}, uSunDir:{value:new THREE.Vector3(0,1,0)},
+    uAniso:{value:0.55}, uSky:{value:0.0}, uAmt:{value:1.0}, uDbg:{value:0} },
+  vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
+  fragmentShader:`varying vec2 vUv; uniform sampler2D tDiffuse, tDepth; uniform mat4 uInvVP; uniform vec3 uCamPos, uColor, uSunCol, uSunDir;
+    uniform float uDensity, uFalloff, uBaseY, uMaxDist, uAniso, uSky, uAmt, uDbg;
+    void main(){
+      vec3 src=texture2D(tDiffuse,vUv).rgb;
+      float depth=texture2D(tDepth,vUv).x;
+      bool sky = depth>=0.9999;
+      if(sky && uSky<0.001){ gl_FragColor=vec4(src,1.0); return; }
+      vec4 wp=uInvVP*vec4(vUv*2.0-1.0, depth*2.0-1.0, 1.0); wp/=wp.w;
+      vec3 d=wp.xyz-uCamPos; float t=length(d);
+      // A SKY PIXEL HAS NO WORLD POSITION worth reading - the unprojection at depth 1 lands on the far plane, which moves
+      // with the render-distance slider - so its ray is taken from the direction alone and its length is uMaxDist.
+      vec3 V = sky ? normalize(uInvVP*vec4(vUv*2.0-1.0, 0.0, 1.0)).xyz : d/max(t,1e-4);
+      if(sky){ V=normalize((uInvVP*vec4(vUv*2.0-1.0, 0.5, 1.0)).xyz-uCamPos); t=uMaxDist; }
+      t=min(t,uMaxDist);
+      float b=max(uFalloff,1e-4);
+      float head=(uDensity/b)*exp(-(uCamPos.y-uBaseY)*b);
+      float f = abs(V.y)<1e-4 ? uDensity*t*exp(-(uCamPos.y-uBaseY)*b)
+                              : head*(1.0-exp(-t*V.y*b))/V.y;
+      f=1.0-exp(-max(f,0.0));
+      f*=uAmt*(sky?uSky:1.0);
+      // FORWARD SCATTER: the air glows toward the sun. pow on a saturated dot, so it is a tight lobe around the disc
+      // rather than a warm cast over the whole frame.
+      float s=pow(max(dot(V,normalize(uSunDir)),0.0), 8.0)*uAniso;
+      vec3 col=mix(uColor, uSunCol, s);
+      // uDbg: 1 = the fog fraction itself, 2 = ray length over uMaxDist, 3 = V.y remapped to 0..1, 4 = reconstructed
+      // world height over 128. A term that disagrees with its own arithmetic is found by looking at the terms, and every
+      // one of these is a single line that costs nothing when uDbg is 0.
+      if(uDbg>0.5){
+        if(uDbg<1.5) gl_FragColor=vec4(vec3(clamp(f,0.0,1.0)),1.0);
+        else if(uDbg<2.5) gl_FragColor=vec4(vec3(t/uMaxDist),1.0);
+        else if(uDbg<3.5) gl_FragColor=vec4(vec3(V.y*0.5+0.5),1.0);
+        else gl_FragColor=vec4(vec3(wp.y/128.0),1.0);
+        return; }
+      gl_FragColor=vec4(mix(src, col, clamp(f,0.0,1.0)), 1.0);
+    }`
+};
 const GodrayShader={
   // uSeedMin is WHAT COUNTS AS THE SUN (Ben 08-04: "SOMETIMES NON-sun light sources also emit god rays"). This pass has no
   // idea what it is looking at: it marches from every pixel toward the sun's screen position and accumulates any sample
@@ -7016,6 +7084,7 @@ try{
   _mbMode = _rtPath && _mbOn;   // re-enabled (Ben 07-21): depth-correct per-pixel motion blur; classic fallback if the GPU can't do the depth RT
 }catch(e){ _rtPath=false; _mbMode=false; }
 if(!_rtPath && _sceneRT){ try{ _sceneRT.dispose(); }catch(e){} _sceneRT=null; }
+let heightFogPass=null, _HFOG_ON=false;   // see HeightFogShader: shipped off, and not in the chain at all until it is on
 function buildComposer(){
   composer = new EffectComposer(renderer);
   // _rtPath, NOT _mbMode: this pass is also the scene→composer BRIDGE, and with uEnabled 0 it is a single texture read that
@@ -7041,6 +7110,15 @@ function buildComposer(){
     ssaoPass.uniforms.uResolution.value.set(innerWidth, innerHeight);
     composer.addPass(ssaoPass);
   } else ssaoPass=null;
+  // HEIGHT FOG after AO and before the god rays, so a shaft is drawn through the mist rather than under it, and before
+  // bloom so a lit bank glows. Same depth gate as the two passes around it: no depth attachment, no fog. Absent from the
+  // chain entirely while off, so the default build pays nothing for it.
+  if(_HFOG_ON && _rtPath && _sceneRT && _sceneRT.depthTexture && CFG.quality!=='Low'){
+    heightFogPass = new ShaderPass(HeightFogShader);
+    heightFogPass.material.depthTest=false; heightFogPass.material.depthWrite=false;
+    heightFogPass.uniforms.tDepth.value=_sceneRT.depthTexture;
+    composer.addPass(heightFogPass);
+  } else heightFogPass=null;
   // god rays BEFORE bloom → the shafts pick up a soft bloom glow. Gated to High/Ultra; ?norays disables.
   // NO DEPTH ATTACHMENT, NO RAYS. The seed test is "is this pixel empty sky", which needs _sceneRT's depth texture — the same
   // one SSAO is gated on. Running the pass without it means seeding off brightness alone, which is the bug Ben reported twice.
@@ -13580,6 +13658,20 @@ function loop(){ try{
     // sun straight overhead does still throw short shafts through its gaps, and that dappling is the one thing this pass renders
     // that is not about the horizon. Deliberate deviation, and small enough that noon reads as haze rather than as beams.
     godrayPass.uniforms.uStrength.value = (_grForce!=null) ? _grForce : 0.62*_above*(0.22+0.78*_low); }   // _grForce is the QA latch (__hc.godrays({forceStrength})): this line runs every frame and would overwrite a bare assignment
+  if(heightFogPass){
+    camera.updateMatrixWorld();
+    const U=heightFogPass.uniforms;
+    U.uInvVP.value.multiplyMatrices(camera.matrixWorld, camera.projectionMatrixInverse);
+    U.uCamPos.value.copy(camera.position);
+    U.uSunDir.value.copy(globalU.uSunDir.value);
+    // THE FOG TAKES THE SCENE'S OWN COLOURS rather than carrying constants of its own, which is the whole of "cohesion":
+    // the distance fog, the horizon layers and this pass then agree at every hour and in every weather without three
+    // separate tables to keep in step. The sun colour comes off the live key light, so the mist goes amber at dusk with
+    // everything else, and the fog colour off scene.fog, which the weather system already drives.
+    if(scene.fog) U.uColor.value.copy(scene.fog.color);
+    U.uSunCol.value.copy(sunLight.color);
+    U.uMaxDist.value=camera.far;
+  }
   if(_rtPath && motionPass){                                                           // depth-reprojection motion blur uniforms (uEnabled 0 = bridge only, blur off)
     camera.updateMatrixWorld();
     _curVP.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
@@ -32196,7 +32288,23 @@ window.__hc={
   // the frame four levels of 255, and cutting the treeline's gain to a quarter moved it 25 -- which says something
   // downstream sets their value more than the materials do. The composer runs render, ssao, godray, bloom, OutputPass
   // (tone map) and grade, and there was no way to switch any of them off, so the question could not be asked.
-  pass(name, on){ try{ const P={ ssao:ssaoPass, godray:godrayPass, bloom:bloomPass, grade:gradePass, motion:motionPass };
+  // HEIGHT FOG (see HeightFogShader). `on` rebuilds the composer, because the pass is absent from the chain while off
+  // rather than present-and-neutered - a look feature nobody has asked for yet should not cost a full-screen texture
+  // read on every frame of every build. Everything else is live.
+  //   density  overall thickness      falloff  how fast it thins with height (per block)
+  //   baseY    the height it is thickest at (sea level is 62)   maxDist  the ray length cap
+  //   aniso    forward scatter toward the sun    sky  whether it draws on sky pixels at all (0 = never)
+  heightFog(o){ try{
+      if(o && o.on!=null && !!o.on!==_HFOG_ON){ _HFOG_ON=!!o.on; try{ if(composer&&composer.dispose)composer.dispose(); }catch(e){} buildComposer(); applyResolution(); }
+      if(o && heightFogPass){ const U=heightFogPass.uniforms, f=(k,u)=>{ if(o[k]!=null) U[u].value=+o[k]; };
+        f('density','uDensity'); f('falloff','uFalloff'); f('baseY','uBaseY'); f('aniso','uAniso'); f('sky','uSky'); f('amt','uAmt'); f('dbg','uDbg'); }
+      if(!heightFogPass) return { on:_HFOG_ON, inChain:false, note:_HFOG_ON?'needs the depth path: motion blur on, quality above Low':'off' };
+      const U=heightFogPass.uniforms, r=k=>+U[k].value.toFixed(4);
+      return { on:_HFOG_ON, inChain:true, density:r('uDensity'), falloff:r('uFalloff'), baseY:r('uBaseY'),
+               aniso:r('uAniso'), sky:r('uSky'), amt:r('uAmt'), maxDist:r('uMaxDist'), dbg:r('uDbg'),
+               camY:+heightFogPass.uniforms.uCamPos.value.y.toFixed(2) };
+    }catch(e){ return {err:String(e.message||e)}; } },
+  pass(name, on){ try{ const P={ ssao:ssaoPass, godray:godrayPass, bloom:bloomPass, grade:gradePass, motion:motionPass, heightfog:heightFogPass };
       const p=P[name]; if(!p) return {err:'no such pass: '+name+' (have '+Object.keys(P).filter(k=>P[k]).join(',')+')'};
       if(on!=null) p.enabled=!!on;
       const st={}; for(const k of Object.keys(P)) st[k]=P[k]?!!P[k].enabled:null;
