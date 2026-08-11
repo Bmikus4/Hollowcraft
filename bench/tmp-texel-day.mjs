@@ -41,7 +41,10 @@ function stat(file,c){
   const q=f=>+v[Math.min(v.length-1,(v.length*f)|0)].toFixed(1);
   return { med:q(0.5), p10:q(0.10), p90:q(0.90), pureBlack:+(100*pure/n).toFixed(3), isoBlack:+(100*iso/n).toFixed(3) };
 }
-const ROWS=(process.argv[2]||'0.030/0,0.030/0.008').split(',').map(s=>s.split('/').map(Number));
+// Rows are k/disp[/extra js]. The extra term exists because the GRADE is downstream of everything the texel rule does:
+// shipping nordic took this bench's canopy isoBlack from 0.006% to 0.313%, so the curve and the gain have to be
+// sweepable from the same table that sweeps the floor, or the two are tuned against each other blind.
+const ROWS=(process.argv[2]||'0.030/0,0.030/0.008').split(',').map(s=>{ const p=s.split('/'); return [Number(p[0]), Number(p[1]), p.slice(2).join('/')]; });
 (async()=>{
   const port=await freePort();
   const server=spawn(process.execPath,[path.join(ROOT,'server.js')],{cwd:ROOT,env:{...process.env,PORT:String(port),NO_OPEN:'1'},stdio:'ignore'});
@@ -96,11 +99,12 @@ const ROWS=(process.argv[2]||'0.030/0,0.030/0.008').split(',').map(s=>s.split('/
       for(let i=0;i<40;i++){ const f=await page.evaluate(`__hc.fill()`); if(f&&f.meshed>=f.want) break; await sleep(400); }
       await sleep(2500);
       console.log(`  ---- ${name}  (uDay ${await pin()}) ----`);
-      for(const [k,disp] of ROWS){
-        await page.evaluate(`__hc.scot({amt:0.85, floor:0.02}); __hc.texFloor({k:${k}, disp:${disp}})`); await sleep(300); await pin();
-        const f=path.join(OUT,`day-${name}-k${String(k).replace('.','_')}-d${String(disp).replace('.','_')}.png`); await page.screenshot({path:f});
+      for(const [k,disp,extra] of ROWS){
+        await page.evaluate(`__hc.scot({amt:0.85, floor:0.02}); __hc.grade('nordic'); __hc.texFloor({k:${k}, disp:${disp}}); ${extra||''}`); await sleep(300); await pin();
+        const tag=`k${String(k).replace('.','_')}-d${String(disp).replace('.','_')}${extra?'-'+extra.replace(/[^a-z0-9]+/gi,'_').slice(0,24):''}`;
+        const f=path.join(OUT,`day-${name}-${tag}.png`); await page.screenshot({path:f});
         const r=stat(f,CROP);
-        console.log(`    k ${String(k).padEnd(6)} disp ${String(disp).padEnd(7)} med ${String(r.med).padEnd(6)} p10 ${String(r.p10).padEnd(6)} p90 ${String(r.p90).padEnd(6)} pureBlack ${String(r.pureBlack).padEnd(7)}% isoBlack ${r.isoBlack}%`);
+        console.log(`    k ${String(k).padEnd(6)} disp ${String(disp).padEnd(7)} med ${String(r.med).padEnd(6)} p10 ${String(r.p10).padEnd(6)} p90 ${String(r.p90).padEnd(6)} pureBlack ${String(r.pureBlack).padEnd(7)}% isoBlack ${String(r.isoBlack).padEnd(7)}% ${extra||''}`);
       }
     }
   } finally { try{ if(browser) await browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }
