@@ -24,7 +24,16 @@ function freePort(){ return new Promise((res,rej)=>{ const s=createServer(); s.l
 function waitHttp(url,t=20000){ return new Promise((res,rej)=>{ const t0=Date.now();
   (function poll(){ const rq=http.get(url,r=>{r.resume();res();}); rq.on('error',()=>{ if(Date.now()-t0>t)rej(new Error('down')); else setTimeout(poll,250); }); })(); }); }
 function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Google/Chrome/Application/chrome.exe']) if(fs.existsSync(p)) return p; throw new Error('no browser'); }
-const MARGIN=0.09;   // the code keeps 0.10; assert just under it so float noise cannot flake a correct build
+// TWO BANDS, BECAUSE THE CODE KEEPS TWO. VIEW_NEAR_CLEAR is 0.10 at the hip and HALVED at the shoulder — Ben asked for the
+// holosight guns and the scoped rifle to sit closer when aimed, and the band is the only lever that moves an aimed gun (the
+// distance is set off the REARMOST corner, a foot behind the glass, so moving optic.z does nothing). This file asserted one
+// flat 0.09 against both states, so all 16 variants "failed" at a 0.05 aimed clearance that is the shipped intent.
+//   AND IT MEASURES THE ITEM, NOT THE ARM. adsClearance reports both: `clearance` excludes the _noBB subtrees the guard
+// excludes — the forearm attachGunHand parents to the gun, which runs back to your shoulder and is behind the lens by
+// design — while `armClearance` includes them. Asserting the arm is what produced 16 red rows naming every gun in the game
+// at hip AND aimed, where adsT is 0 and the aimed band cannot even reach. Measured: rear-most vertex was the arm in 5/5
+// guns sampled, item clearance 0.05-0.37 and never clipped.
+const HIP_MARGIN=0.09, ADS_MARGIN=0.045;   // just under the 0.10 / 0.05 the code keeps, so float noise cannot flake a correct build
 
 (async()=>{
   const port=await freePort();
@@ -54,20 +63,28 @@ const MARGIN=0.09;   // the code keeps 0.10; assert just under it so float noise
       let ok=false; for(let i=0;i<30;i++){ if((await page.evaluate('__hc.adsClearance()')).adsT>=0.999){ ok=true; break; } await sleep(150); }
       const ads=await page.evaluate('__hc.adsClearance()');
       await page.evaluate('__hc.aim(false)'); await sleep(150);
-      rows.push({g, reachedAds:ok, hip:hip.clearance, ads:ads.clearance, hipClip:hip.clipped, adsClip:ads.clipped, near:ads.near});
+      rows.push({g, reachedAds:ok, hip:hip.clearance, ads:ads.clearance, hipClip:hip.clipped, adsClip:ads.clipped, near:ads.near,
+                 armHip:hip.armClearance, armAds:ads.armClearance, rear:ads.rearName, rearArm:ads.rearIsArm});
     }
     for(const r of rows) console.log('     '+r.g.padEnd(30)+'hip '+String(r.hip).padStart(8)+'   ads '+String(r.ads).padStart(8)+(r.adsClip||r.hipClip?'   CLIPPED':''));
 
     check('every gun reached a full aim', rows.every(r=>r.reachedAds), rows.filter(r=>!r.reachedAds).map(r=>r.g).join(' ')||'all');
     const clipped=rows.filter(r=>r.adsClip||r.hipClip);
     check('NO gun is cut by the near plane, hip or aimed', clipped.length===0, clipped.map(r=>r.g).join(' ')||`${rows.length} variants clear`);
-    // The guard band, not merely "not clipped": a gun 1mm in front of the near plane is still a stock in your eye.
-    const tight=rows.filter(r=>r.ads<MARGIN||r.hip<MARGIN);
-    check(`and every gun keeps at least ${MARGIN} of clearance`, tight.length===0,
-      tight.length?tight.map(r=>`${r.g} hip ${r.hip} ads ${r.ads}`).join('; '):`worst ads ${Math.min(...rows.map(r=>r.ads))}`);
+    // The guard band, not merely "not clipped": a gun 1mm in front of the near plane is still a stock in your eye. Each
+    // state against its own band — see the note at the top for why one number could not cover both.
+    const tight=rows.filter(r=>r.ads<ADS_MARGIN||r.hip<HIP_MARGIN);
+    check(`every gun keeps its band (hip ${HIP_MARGIN} / aimed ${ADS_MARGIN})`, tight.length===0,
+      tight.length?tight.map(r=>`${r.g} hip ${r.hip} ads ${r.ads}`).join('; ')
+                  :`worst hip ${Math.min(...rows.map(r=>r.hip))}, worst ads ${Math.min(...rows.map(r=>r.ads))}`);
     // The bolt rifle is named because it was the worst: camera-space z +0.08, the stock BEHIND the eye.
     const bolt=rows.find(r=>r.g==='hunting_rifle');
-    check('the bolt rifle in particular no longer has its stock behind the eye', bolt && bolt.ads>=MARGIN, bolt?`ads clearance ${bolt.ads}`:'not found');
+    check('the bolt rifle in particular no longer has its stock behind the eye', bolt && bolt.ads>=ADS_MARGIN, bolt?`ads clearance ${bolt.ads}`:'not found');
+    // THE ARM IS REPORTED, NEVER ASSERTED. It is behind the lens on purpose, and a row here is information about the pose,
+    // not a failure — but it is printed, because an arm that suddenly reaches 0.5 back means a hand rig has come loose.
+    const arms=rows.filter(r=>r.armAds!=null&&r.armAds<-0.45);
+    console.log('     arm behind the lens (by design): worst '+Math.min(...rows.map(r=>r.armAds==null?0:r.armAds)).toFixed(3)+
+      (arms.length?('   UNUSUAL: '+arms.map(r=>r.g).join(' ')):''));
     check('no page errors', errs.length===0, errs.slice(0,2).join(' | '));
 
     console.log(`\n${checks-fails}/${checks} checks pass`);

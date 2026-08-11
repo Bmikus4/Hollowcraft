@@ -19523,6 +19523,12 @@ function updateView(dt){ updateRecoil(dt);                                      
     // on the next. One frame of lag and a full correction, which converges immediately: moving the group by dy moves the glass by
     // dy. Scaled by the raise, so the hip pose is exactly what it was, and bounded, so a model with no sensible glass cannot throw
     // the gun off screen.
+    // THE GLASS IS FOUND ONCE PER MODEL, HERE, BEFORE ANYTHING READS IT. This lookup used to live inside the reticle's own
+    // `if(on)` block, which requires adsT>0.28 — so on the first frame the ring turned on, _holoHs was still null for both
+    // earlier readers: this correction did not run, and the reticle fell back to the bore and appeared at screen centre.
+    // Measured as a 226 px flash on the frame the dot lit, on a sight whose window is nowhere near the middle of the screen.
+    if(view._holoFor!==view.mesh){ view._holoFor=view.mesh; view._holoHs=null;
+      if(view.mesh) view.mesh.traverse(ch=>{ if(ch.userData&&ch.userData.rearGlass) view._holoHs=ch; }); }
     if(isDotG && e>0.02 && view._holoHs){
       const _gw=view._hgW||(view._hgW=new THREE.Vector3());
       // THE MEASUREMENT HAS TO BE OF THIS FRAME'S POSE (Ben 08-04: "the top of holosights are still cut off" / "not all
@@ -19535,8 +19541,14 @@ function updateView(dt){ updateRecoil(dt);                                      
       view.group.updateMatrix(); view.group.updateMatrixWorld(true);
       view._holoHs.updateWorldMatrix(true,false); _gw.setFromMatrixPosition(view._holoHs.matrixWorld);
       camera.worldToLocal(_gw);
-      view.group.position.x -= clamp(_gw.x,-0.06,0.06)*e;
-      view.group.position.y -= clamp(_gw.y,-0.06,0.06)*e; }
+      // IT CONVERGES BY 0.9 OF THE RAISE, NOT AT 1.0. Scaled by a bare `e` this correction still had 2% of the glass's
+      // offset left at adsT 0.98 — and 2% of that offset is 9 SCREEN PIXELS, which is what the reticle inherits the moment
+      // it hands over from the glass to the bore (see the ring below). Any curve with f(0)=0 keeps the hip carry bit-exact,
+      // which is the only property `e` was chosen for; a smoothstep that finishes at 0.9 keeps that AND leaves the last
+      // tenth of the raise with the window already on the axis, so the handover lands on a pose that has stopped moving.
+      const _ct=clamp(e/0.9,0,1), _ce=_ct*_ct*(3-2*_ct);
+      view.group.position.x -= clamp(_gw.x,-0.06,0.06)*_ce;
+      view.group.position.y -= clamp(_gw.y,-0.06,0.06)*_ce; }
     captureAim(view);   // the pose IS the aim (see captureAim) — read before the buck, the reload dip and the block-out below
     if(view.gunKick){ view.group.position.z+=view.gunKick*0.09; view.group.rotation.x-=view.gunKick*0.5; }   // viewmodel bucks: rearward shove + muzzle rise, springs back independent of the camera (the glass climbing off the camera-locked reticle is what carries the dot out of the glass — the reticle is now clipped to the aperture so it VANISHES at the rim, see holoRet below)
     // ---- RELOAD ANIMATION (minimal realism): gun drops toward the chest + tilts inward while the hands work the action ----
@@ -19659,9 +19671,12 @@ function updateView(dt){ updateRecoil(dt);                                      
     if(view.aimCam){
       view.holoRet.position.copy(view.aimCam).multiplyScalar(D);
       if(haveGlass){
-        // w: 0 for the first half of the raise, easing to 1 by the time the sight is at the cheek. Smoothstepped, so the
-        // handover has no velocity step at either end and cannot be seen as the dot "settling" into place.
-        const t=clamp(((view.adsT||0)-0.55)/0.45,0,1), w=t*t*(3-2*t);
+        // w: 0 until the sight is nearly at the cheek, then eased to 1 over the last fifth of the raise. Smoothstepped, so
+        // the handover has no velocity step at either end and cannot be read as the dot "settling" into place.
+        // IT HAS TO HAPPEN LATE, because the glass-centring correction above is also scaled by the raise and only converges
+        // at the end: handing over at 0.55 put the ring on a bore the window had not caught up with yet, and the residual
+        // measured 10 px. Over the last fifth it is 3.
+        const t=clamp(((view.adsT||0)-0.82)/0.18,0,1), w=t*t*(3-2*t);
         view.holoRet.position.lerp(gv, 1-w); } }
     else if(haveGlass) view.holoRet.position.copy(gv);
     else view.holoRet.position.set(0,0,-D); }
@@ -19681,8 +19696,7 @@ function updateView(dt){ updateRecoil(dt);                                      
       // 0.5 m and the aperture is a ~3 cm window at 0.3 m, so what masks one against the other is the pyramid from the eye
       // through the four edges of the window. Each plane is built from the camera position and one aperture edge, oriented so the
       // window's centre is on the kept side. Clipping is per fragment, so the ring is sliced where the frame crosses it.
-      if(view._holoFor!==view.mesh){ view._holoFor=view.mesh; view._holoHs=null; if(view.mesh)view.mesh.traverse(ch=>{ if(ch.userData&&ch.userData.rearGlass)view._holoHs=ch; }); }
-      const hs=view._holoHs, ap=hs&&hs.userData.rearGlass;
+      const hs=view._holoHs, ap=hs&&hs.userData.rearGlass;   // found up in the gun pose, before the correction and the ring both read it
       let vis=1;
       if(ap && hs.userData.apHalf){
         const P=view._holoPl||(view._holoPl=[new THREE.Plane(),new THREE.Plane(),new THREE.Plane(),new THREE.Plane()]);
@@ -30813,6 +30827,10 @@ window.__hc={
                holoVsGlass:mag(d(holo,glass)), boreVsGlass:mag(d(bore,glass)), holoVsBore:mag(d(holo,bore)),
                glassOff:mag(glass), holoOff:mag(holo), boreOff:mag(bore),
                offAxisDeg:view.aimCam?+(Math.acos(Math.max(-1,Math.min(1,-view.aimCam.z)))*57.29578).toFixed(3):null,
+               // bend is here because a gun being stood up off a wall is NOT a misaligned sight: blockOutHand swings the
+               // whole model, glass included, while the ring stays on the camera axis — by design. A frame with bend on it
+               // has to be excluded from an alignment measurement or the block-out reads as the bug.
+               bend:+(view.gunBend||0).toFixed(3),
                vw:W, vh:H, fov:+camera.fov.toFixed(2) }; }catch(e){ return {err:String(e.message||e)}; } },
   adsClearance(){ try{ if(!view.mesh) return {err:'nothing held'};
       camera.updateMatrixWorld(true); view.group.updateMatrixWorld(true);

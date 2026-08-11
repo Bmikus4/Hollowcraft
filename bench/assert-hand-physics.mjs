@@ -129,14 +129,19 @@ const SAMPLER = (cfg)=>new Promise(res=>{
       const steps=[]; for(let i=1;i<ads.length;i++){ const dv=ads[i][1]-ads[i-1][1], dtm=(ads[i][0]-ads[i-1][0])/1000;
         if(dv>0 && dtm>0 && ads[i-1][1]<0.99) steps.push(dv/dtm); }
       const full=ads.findIndex(r=>r[1]>=0.995);
-      const mean=steps.reduce((a,b)=>a+b,0)/Math.max(1,steps.length), peak=Math.max.apply(null,steps);
+      // THE 90th PERCENTILE, NOT THE MAXIMUM. The rate is dv/dt off two rAF timestamps, and one hitchy frame — a GC pause,
+      // a chunk build — puts a single sample well above the curve however correct the curve is: measured 1.80 on one run and
+      // 2.28 on the next from the same code. A percentile keeps the discrimination this test exists for (smoothstep peaks at
+      // 1.5x its mean, the exponential approach it replaced peaked near 5x) without being decided by one frame.
+      const sorted=steps.slice().sort((a,b)=>a-b);
+      const mean=steps.reduce((a,b)=>a+b,0)/Math.max(1,steps.length), peak=sorted[Math.floor(sorted.length*0.9)]||0;
       const secs=full<0?null:+((ads[full][0]-ads[0][0])/1000).toFixed(2);
       console.log('  ads    '+JSON.stringify({secs, frames:full, fps:Math.round(1000*ads.length/(ads[ads.length-1][0]||1)),
         meanRate:+mean.toFixed(3), peakRate:+peak.toFixed(3), firstRate:+(steps[0]||0).toFixed(3),
         head:ads.slice(0,8).map(r=>+r[1].toFixed(3))}));
       ok('ADS takes longer than it did (>0.33 s)', secs!=null && secs>0.33, {secs});
       ok('...but is not sluggish (<0.60 s)',       secs!=null && secs<0.60, {secs});
-      ok('the ramp has no snap: peak step < 2x mean', peak < mean*2.0, {peak, mean, ratio:+(peak/mean).toFixed(2)});
+      ok("the ramp has no snap: p90 step < 1.9x mean", peak < mean*1.9, {peak, mean, ratio:+(peak/mean).toFixed(2)});
       ok('and it eases IN, not from a standing jolt', (steps[0]||1) < mean*0.6, {first:steps[0], mean});
     } else ok('the ADS ramp was sampled', false, {ads:Array.isArray(ads)?ads.length:ads});
 
