@@ -19637,13 +19637,33 @@ function updateView(dt){ updateRecoil(dt);                                      
   // subtends its true 68 MOA. Everything forward of the glass is then forward of the hologram and cannot cover it; the hood and the
   // rear casing around the window still can, which is exactly "only on the plane of the sight". It stays camera-parented and on the
   // bore, so it is still parallax-free and still points where the round goes.
+  // THE HOLOGRAM IS PART OF THE SIGHT, AND ONLY THE SETTLED SIGHT IS A CLAIM ABOUT IMPACT (Ben 08-11: "holosights arent
+  // aligned, fix them once and for all"). Pinning the ring to the BORE at every stage of the raise is what broke it: the
+  // bore sits within a tenth of a degree of screen centre, while the window is still out where the hip carry left it, and
+  // the glass-centring correction above only removes its offset in proportion to the raise. MEASURED across the ramp
+  // (bench/tmp-holo-dyn.mjs): the ring was 217 px from the middle of its own window at adsT 0.31 on the AR and 182 px on
+  // the rifle, closing to ~2 px only once fully aimed — a lit dot floating in open screen with the sight nowhere near it,
+  // for the whole of the raise. Slowing ADS to 0.42 s did not cause that; it doubled how long you look at it.
+  //   SO THE RING RIDES THE GLASS AND HANDS OVER TO THE BORE AS THE EYE ARRIVES. The two agree to about two pixels when
+  // settled, which is what makes the handover invisible — and at full aim the position is EXACTLY the bore, so "the dot is
+  // the point of impact" is still true in the only state where a sight picture exists to shoot from. Below that the dot is
+  // where a hologram physically is: on its own glass.
   if(view.holoRet && view.holoD){
     let D=view.holoD;
-    if(view._holoHs){ const gv=view._holoDV||(view._holoDV=new THREE.Vector3());
+    const gv=view._holoDV||(view._holoDV=new THREE.Vector3());
+    let haveGlass=false;
+    if(view._holoHs){
       view._holoHs.updateWorldMatrix(true,false); gv.setFromMatrixPosition(view._holoHs.matrixWorld); camera.worldToLocal(gv);
-      const dd=-gv.z; if(dd>0.12 && dd<1.2) D=dd; }                       // a sane sight depth; anything else means the pose is mid-swing
+      const dd=-gv.z; if(dd>0.12 && dd<1.2){ D=dd; haveGlass=true; } }   // a sane sight depth; anything else means the pose is mid-swing
     const k=D/view.holoD; view.holoRet.scale.set(k,k,1);                  // same angle, new distance
-    if(view.aimCam) view.holoRet.position.copy(view.aimCam).multiplyScalar(D);
+    if(view.aimCam){
+      view.holoRet.position.copy(view.aimCam).multiplyScalar(D);
+      if(haveGlass){
+        // w: 0 for the first half of the raise, easing to 1 by the time the sight is at the cheek. Smoothstepped, so the
+        // handover has no velocity step at either end and cannot be seen as the dot "settling" into place.
+        const t=clamp(((view.adsT||0)-0.55)/0.45,0,1), w=t*t*(3-2*t);
+        view.holoRet.position.lerp(gv, 1-w); } }
+    else if(haveGlass) view.holoRet.position.copy(gv);
     else view.holoRet.position.set(0,0,-D); }
   // NOT IN THIRD PERSON (Ben 08-04: "holosights still show in the center of the screen when in 3rd person"). The reticle is
   // parented to the CAMERA on the aim axis, which is the whole point of it in first person — and exactly why it survived third
@@ -30766,18 +30786,58 @@ window.__hc={
   // when it is ads." Seeing the INSIDE of a mesh means the near plane has cut through it, so the test is the rearmost
   // vertex of the viewmodel in CAMERA space against camera.near — a number, for every gun, where a screenshot only ever
   // tells you about the one gun you photographed. The same clipped stock is what buries the muzzle flash in ADS.
+  // IS THE HOLOSIGHT ALIGNED? (Ben 08-11: "holosights arent aligned, fix them once and for all.") Three things claim to be
+  // the same point and each is authored by different code, so the only honest measurement is all three on one ruler —
+  // SCREEN PIXELS, because that is the unit the complaint is in:
+  //   glass  — the centre of the sight's rear window, the hole you look through (userData.rearGlass)
+  //   holo   — where the reticle mesh actually is
+  //   bore   — where the round goes (view.aimCam, the axis fireGun uses)
+  // Deltas are signed pixel offsets from screen centre; `holoVsGlass` is the one Ben can see, since a dot that is not in the
+  // middle of its own window is a sight that is not aligned however correct its axis is.
+  holoAlign(){ try{ if(!view.mesh) return {err:'nothing held'};
+      camera.updateMatrixWorld(true); view.group.updateMatrixWorld(true);
+      const W=innerWidth, H=innerHeight, v=new THREE.Vector3();
+      const px=(p)=>{ v.copy(p).project(camera); return [ +(v.x*W/2).toFixed(2), +(v.y*H/2).toFixed(2) ]; };   // pixels from centre, +y up
+      let hs=null; view.mesh.traverse(ch=>{ if(ch.userData&&ch.userData.rearGlass) hs=ch; });
+      let glass=null;
+      if(hs){ hs.updateWorldMatrix(true,false); glass=px(new THREE.Vector3().setFromMatrixPosition(hs.matrixWorld)); }
+      let holo=null;
+      if(view.holoRet&&view.holoRet.visible!==false){ view.holoRet.updateWorldMatrix(true,false);
+        holo=px(new THREE.Vector3().setFromMatrixPosition(view.holoRet.matrixWorld)); }
+      let bore=null;
+      if(view.aimCam){ const w=view.aimCam.clone().multiplyScalar(0.5); camera.localToWorld(w); bore=px(w); }
+      const d=(a,b)=>(a&&b)?[+(a[0]-b[0]).toFixed(2), +(a[1]-b[1]).toFixed(2)]:null;
+      const mag=(p)=>p?+Math.hypot(p[0],p[1]).toFixed(2):null;
+      return { id:view.id, adsT:+(view.adsT||0).toFixed(3), dot:!!(ITEMS[view.id]&&ITEMS[view.id].dot),
+               glass, holo, bore, hasGlass:!!hs, retVisible:!!(view.holoRet&&view.holoRet.visible),
+               holoVsGlass:mag(d(holo,glass)), boreVsGlass:mag(d(bore,glass)), holoVsBore:mag(d(holo,bore)),
+               glassOff:mag(glass), holoOff:mag(holo), boreOff:mag(bore),
+               offAxisDeg:view.aimCam?+(Math.acos(Math.max(-1,Math.min(1,-view.aimCam.z)))*57.29578).toFixed(3):null,
+               vw:W, vh:H, fov:+camera.fov.toFixed(2) }; }catch(e){ return {err:String(e.message||e)}; } },
   adsClearance(){ try{ if(!view.mesh) return {err:'nothing held'};
       camera.updateMatrixWorld(true); view.group.updateMatrixWorld(true);
       const inv=camera.matrixWorldInverse, v=new THREE.Vector3();
       let maxZ=-1e9, minZ=1e9, n=0;                    // camera space: z is NEGATIVE in front, so the REAREST point is the greatest z
+      // THE ARM IS NOT THE ITEM. attachGunHand parents a forearm to the gun and marks it _noBB, and the near-plane guard
+      // excludes those subtrees on purpose — your own arm runs back to your shoulder, and pushing a rifle forward until the
+      // elbow clears the lens would put the gun at arm's length. So the guard's number and this probe's number have to be
+      // measured over the same set or they disagree by exactly the length of a forearm: `clearance` is the ITEM (what the
+      // guard controls and what Ben can see the inside of), `armClearance` is everything including the arm, and rearName
+      // says which mesh is actually rearmost so a failure names its own cause.
+      const skip=o=>{ for(let p=o;p;p=p.parent){ if(p.userData&&p.userData._noBB) return true; if(p===view.mesh) break; } return false; };
+      let allMaxZ=-1e9, rearName='', rearArm=false;
       view.mesh.traverse(o=>{ if(!o.isMesh||!o.geometry||!o.geometry.attributes||!o.geometry.attributes.position) return;
-        const p=o.geometry.attributes.position; o.updateMatrixWorld(true);
+        const p=o.geometry.attributes.position; o.updateMatrixWorld(true); const isArm=skip(o);
         for(let i=0;i<p.count;i++){ v.fromBufferAttribute(p,i).applyMatrix4(o.matrixWorld).applyMatrix4(inv);
+          if(v.z>allMaxZ){ allMaxZ=v.z; rearName=o.name||o.type; rearArm=isArm; }
+          if(isArm) continue;
           if(v.z>maxZ)maxZ=v.z; if(v.z<minZ)minZ=v.z; n++; } });
       return { id:view.id, ads:!!view.ads, adsT:+(view.adsT||0).toFixed(3), near:camera.near, verts:n,
         rearZ:+maxZ.toFixed(4), frontZ:+minZ.toFixed(4),
-        clearance:+(-maxZ-camera.near).toFixed(4),      // positive = the whole gun sits beyond the near plane
-        clipped:(-maxZ)<=camera.near }; }catch(e){ return {err:String(e.message||e)}; } },
+        clearance:+(-maxZ-camera.near).toFixed(4),      // positive = the whole ITEM sits beyond the near plane
+        clipped:(-maxZ)<=camera.near,
+        armClearance:+(-allMaxZ-camera.near).toFixed(4), rearName, rearIsArm:rearArm,
+        push:+(view._nearPush||0).toFixed(4) }; }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: the dread ramp and what it is doing to the soundtrack. Read rather than heard — "does the music stop" is not
   // something a headless run can listen to, but the gain it is multiplied by is a number.
   dread(){ try{ const d=(typeof _dread!=='undefined')?_dread:null;
