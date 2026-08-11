@@ -2359,6 +2359,14 @@ const LEAF_ANY=new Set([BID.leaves, BID.leaves_core, BID.birch_leaves, BID.birch
 const LOG_ANY =new Set([BID.log, BID.birch_log, BID.oak_log]);
 const isLeafId=(id)=>LEAF_ANY.has(id);
 const isLogId =(id)=>LOG_ANY.has(id);
+// CANOPY OPTICAL DEPTH — the mask occludesSky deliberately does NOT have (Ben 08-10: "there needs to be real daytime
+// darkness ... intensely covered forested areas should still be dark during the day"). occludesSky is BINARY and feeds a
+// per-column TOP, so putting leaves back into it is the 07-23 bug verbatim: one leaf overhead stamps the whole column
+// dark six blocks down. This mask is counted instead of topped — how many leaf blocks a shaft of sky has to cross — so
+// one layer costs almost nothing and thirteen layers cost nearly everything, with no step anywhere between. Logs are NOT
+// in it: a trunk is one cell wide and the neighbouring column carries the sky past it, which is the whole reason the
+// column test failed in the first place.
+const occludesCanopy=new Uint8Array(isOpaque.length); for(const id of LEAF_ANY) occludesCanopy[id]=1;
 // THE MIRROR OF THE TWO LINES ABOVE, and the reason this mask is separate from isOpaque at all. A sandbag had to give up
 // isOpaque to stop double-drawing (see its block def), but it is a packed cell of earth: it must still cap its column or
 // every bunker, revetment and gun pit built out of them bakes as open sky and leaks daylight through its own roof.
@@ -3385,13 +3393,14 @@ function packFace(id,tile,sky,back){ return 1 + (back?1:0) + (tile<<1) + (sky<<1
 // JS arrays and reconverting them every chunk. That per-chunk allocate-and-discard was the main GC-churn source
 // behind the random streaming micro-stutters. Grows on demand for a pathological chunk; otherwise never allocates.
 let _mCap=1<<17;                       // vertex capacity (131072) — plenty for a dense chunk
-let _mP=new Float32Array(_mCap*3), _mN=new Float32Array(_mCap*3), _mU=new Float32Array(_mCap*2), _mT=new Float32Array(_mCap), _mK=new Float32Array(_mCap);
+let _mP=new Float32Array(_mCap*3), _mN=new Float32Array(_mCap*3), _mU=new Float32Array(_mCap*2), _mT=new Float32Array(_mCap), _mK=new Float32Array(_mCap), _mC=new Float32Array(_mCap);
 function _growMesh(){ _mCap*=2;
   const P=new Float32Array(_mCap*3); P.set(_mP); _mP=P;
   const N=new Float32Array(_mCap*3); N.set(_mN); _mN=N;
   const U=new Float32Array(_mCap*2); U.set(_mU); _mU=U;
   const T=new Float32Array(_mCap);   T.set(_mT); _mT=T;
   const K=new Float32Array(_mCap);   K.set(_mK); _mK=K;
+  const C=new Float32Array(_mCap);   C.set(_mC); _mC=C;
 }
 
 // PADDED CHUNK SNAPSHOT — one linear copy per rebuild, then every mesher pass reads flat typed arrays.
@@ -3401,6 +3410,12 @@ function _growMesh(){ _mCap*=2;
 const _SW=CK+2;                                    // 18
 const _snapB=new Uint8Array(_SW*_SW*WH);           // block ids; index (lx+1) + (lz+1)*_SW + ly*_SW*_SW
 const _snapT=new Int16Array(_SW*_SW);              // per-column opaque-top for the window (skylight source)
+// PER-COLUMN CANOPY PROFILE (see occludesCanopy). Three numbers per column and nothing else: how many leaf blocks the
+// column holds, and the y band they occupy, so a cell can be given the count that is actually ABOVE it without walking
+// the column per face. A canopy is a thin band in practice, so a linear ramp through the band is indistinguishable from
+// the true count and costs three array reads instead of thirty.
+const _snapC=new Uint8Array(_SW*_SW), _snapCT=new Int16Array(_SW*_SW), _snapCB=new Int16Array(_SW*_SW);
+const CANOPY_SCAN=48;                              // blocks above the opaque top that can hold canopy — a tree is ~30, and an unbounded scan is WH reads per column per rebuild
 function snapshotChunk(c){
   const N=_snapN; for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++){ const nc=getChunk(c.cx+dx,c.cz+dz); N[(dx+1)+(dz+1)*3]=(nc&&nc.generated)?nc:null; }
   const B=c.blocks, XM=N[3],XP=N[5],ZM=N[1],ZP=N[7];
@@ -3418,8 +3433,31 @@ function snapshotChunk(c){
   for(let pz=0;pz<_SW;pz++)for(let px=0;px<_SW;px++){ const wx=px-1, wz=pz-1;
     const ch=N[((wx>>4)+1)+((wz>>4)+1)*3];                    // wx>>4 maps -1→-1, 0..15→0, 16→1
     let t=0; if(ch){ t=ch.htop[(wx&15)+(wz&15)*CK]; if(t<0)t=0; }   // MISSING neighbor → assume OPEN SKY (t=0 = fully lit), NOT sea level: the old CFG.SEA default baked border faces DARK against not-yet-generated chunks and they were never re-lit → the black seams / dark chunks at the streaming edge (Ben 07-21)
-    _snapT[px+pz*_SW]=t; }
+    _snapT[px+pz*_SW]=t;
+    // The canopy scan starts at the OPAQUE top, not at the ground and not at WH: everything below t is buried and
+    // everything above t+CANOPY_SCAN is sky. On a forest column that is ~48 reads against ~190 for the full height.
+    let cn=0, ct=-1, cb=32767; const yTop=Math.min(WH-1, t+CANOPY_SCAN), base=px+pz*_SW;
+    for(let y=t;y<=yTop;y++){ if(occludesCanopy[_snapB[base + y*_SW*_SW]]){ cn++; if(y>ct)ct=y; if(y<cb)cb=y; } }
+    _snapC[base]=cn>255?255:cn; _snapCT[base]=ct; _snapCB[base]=cn?cb:0; }
 }
+// LEAF LAYERS ABOVE A CELL, in this column. Above the band there are none; below it there are all of them; inside it the
+// count ramps. Returns layers, not a multiplier — the transmittance per layer is a live uniform (globalU.uCanopy) so it
+// can be tuned without remeshing the world, which every mesher-baked dial in this file has cost an afternoon to learn.
+function _canCol(px,pz,ly){ const i=px+pz*_SW, n=_snapC[i]; if(!n) return 0;
+  const tp=_snapCT[i], bt=_snapCB[i];
+  if(ly>=tp) return 0; if(ly<=bt) return n;
+  return n*(tp-ly)/(tp-bt); }
+// SAMPLED PER VERTEX AND BILINEARLY, which is what keeps this off the mesher's packed face word. A greedy quad can span
+// a forest edge, so a per-FACE canopy value would have to enter the merge key — and there are two spare bits in that
+// word, not four. Per vertex the quad interpolates its own corners for free, the gradient across a forest edge is smooth
+// rather than quantised, and nothing about greedy merging changes. Vertex coords are cell CORNERS, so the -0.5 puts the
+// sample at the centre of the four columns the corner touches; fx lands in [0.5,16.5] and x0+1 in [1,17], both inside
+// the pad, so no clamp is needed or wanted (a clamp here would silently flatten the seam column).
+function _canAt(vx,vy,vz){
+  const fx=vx+0.5, fz=vz+0.5;                       // +1 for the pad, -0.5 for the corner→column-centre offset
+  const x0=fx|0, z0=fz|0, tx=fx-x0, tz=fz-z0, y=vy|0;
+  const a=_canCol(x0,z0,y), b=_canCol(x0+1,z0,y), c=_canCol(x0,z0+1,y), d=_canCol(x0+1,z0+1,y);
+  return (a+(b-a)*tx)*(1-tz) + (c+(d-c)*tx)*tz; }
 const _snapN=new Array(9);
 function _sg(lx,ly,lz){ return (ly<0||ly>=WH) ? 0 : _snapB[(lx+1) + (lz+1)*_SW + ly*_SW*_SW]; }   // 0 === BID.air
 // A BLOCK IS NOT DARK BECAUSE SOMETHING IS ABOVE IT. Ben found this himself, 08-05: "certain blocks are dark at night
@@ -3466,6 +3504,7 @@ function _sskyFace(lx,ly,lz){ const s=_skyCol(lx,ly,lz), n=_skyNbr(lx,ly,lz);
 function _ssky(lx,ly,lz){ return _sskyFace(lx,ly,lz); }
 const _sskyTop=_sskyFace, _sskyOpen=_sskyFace;
 
+let _CANOPY_BAKE = true;    // __hc.canopy({bake:false}) + a world remesh is the A/B for the canopy depth bake itself — the shader dial can only reach what the mesher wrote
 let _SPRIGS_ON = true;      // __hc.sprigs(false) + a remesh drops the canopy fringe entirely: the pixels that change ARE the sprigs, which is the only way to measure them against the canopy they cover
 let _SPRIG_FACE_N = true;   // __hc.sprigNormals(false) + a remesh is the A/B for the canopy sprig's own face normal
 let _LEAF_UV_MIRROR = true;   // __hc.leafUV(false) + a world remesh is the A/B for the per-layer tile mirror below
@@ -3554,7 +3593,7 @@ function greedyMesh(c, pass){
             const p3=_vn*3, u2=_vn*2;
             _mP[p3]=vv[0]; _mP[p3+1]=vv[1]; _mP[p3+2]=vv[2];
             _mN[p3]=nrm[0]; _mN[p3+1]=nrm[1]; _mN[p3+2]=nrm[2];
-            _mU[u2]=uu0; _mU[u2+1]=uu1; _mT[_vn]=tile; _mK[_vn]=skf; _vn++;
+            _mU[u2]=uu0; _mU[u2+1]=uu1; _mT[_vn]=tile; _mK[_vn]=skf; _mC[_vn]=_CANOPY_BAKE?_canAt(vv[0],vv[1],vv[2]):0; _vn++;
           }
           for (let l=0;l<h;l++) for (let k=0;k<w;k++) mask[n+k+l*dU]=0;
           i+=w; n+=w;
@@ -3569,6 +3608,7 @@ function greedyMesh(c, pass){
   geo.setAttribute('aBlockUV', new THREE.BufferAttribute(_mU.slice(0,_vn*2),2));
   geo.setAttribute('aTile', new THREE.BufferAttribute(_mT.slice(0,_vn),1));
   geo.setAttribute('aSky', new THREE.BufferAttribute(_mK.slice(0,_vn),1));
+  geo.setAttribute('aCan', new THREE.BufferAttribute(_mC.slice(0,_vn),1));
   return geo;
 }
 
@@ -3731,7 +3771,7 @@ const KELP_DENSITY=0.68, KELP_SWAY=1.35;   // 0.45 is now the density INSIDE a b
 //     first covers it, and the squared ramp is what keeps it from being common there.
 const KELP_PATCH_F=0.085, KELP_PATCH_LO=-0.12, KELP_PATCH_HI=0.14, KELP_DEPTH_FULL=5;
 function foliageMesh(c){
-  const P=[], NM=[], UVB=[], TL=[], SK=[], WIND=[];
+  const P=[], NM=[], UVB=[], TL=[], SK=[], WIND=[], CAN=[];
   const cx0=c.cx*CK, cz0=c.cz*CK;
   const g=(lx,ly,lz)=>c.blocks[idx(lx,ly,lz)];
   const quad=(x,y,z,ax,az,tile,sky,wind,hh,nrm)=>{
@@ -3742,7 +3782,7 @@ function foliageMesh(c){
     const o=[0,1,2,0,2,3];
     const nx=az,nz=-ax;
     for(let t=0;t<6;t++){ const vi=o[t],vv=corners[vi],uu=uvs[vi];
-      P.push(vv[0],vv[1],vv[2]); if(nrm) NM.push(nrm[0],nrm[1],nrm[2]); else NM.push(nx*0.3,1.0,nz*0.3); UVB.push(uu[0],uu[1]); TL.push(tile); SK.push(sky);   // mostly-up normal so flowers/grass/bushes catch overhead sun (were reading dark) — a caller that knows which way its quad FACES passes its own (the canopy sprigs do)
+      P.push(vv[0],vv[1],vv[2]); CAN.push(_CANOPY_BAKE?_canAt(vv[0],vv[1],vv[2]):0); if(nrm) NM.push(nrm[0],nrm[1],nrm[2]); else NM.push(nx*0.3,1.0,nz*0.3); UVB.push(uu[0],uu[1]); TL.push(tile); SK.push(sky);   // mostly-up normal so flowers/grass/bushes catch overhead sun (were reading dark) — a caller that knows which way its quad FACES passes its own (the canopy sprigs do)
       WIND.push(uu[1]*wind); }
   };
   // A FLAT quad, lying in the XZ plane at y. quad() above only builds vertical billboards, which is right for grass and
@@ -3752,7 +3792,7 @@ function foliageMesh(c){
     const c=[[x-half,y,z-half],[x+half,y,z-half],[x+half,y,z+half],[x-half,y,z+half]];
     const uvs=[[0,0],[1,0],[1,1],[0,1]], o=[0,1,2,0,2,3];
     for(let t=0;t<6;t++){ const vi=o[t], vv=c[vi], uu=uvs[vi];
-      P.push(vv[0],vv[1],vv[2]); if(nrm) NM.push(nrm[0],nrm[1],nrm[2]); else NM.push(0,1,0); UVB.push(uu[0],uu[1]); TL.push(tile); SK.push(sky);
+      P.push(vv[0],vv[1],vv[2]); CAN.push(_CANOPY_BAKE?_canAt(vv[0],vv[1],vv[2]):0); if(nrm) NM.push(nrm[0],nrm[1],nrm[2]); else NM.push(0,1,0); UVB.push(uu[0],uu[1]); TL.push(tile); SK.push(sky);
       WIND.push(uu[1]*wind); }
   };
   // Gated per source, not once for the function: a chunk that is all sea has no cross blocks and must not pay for the
@@ -3924,6 +3964,7 @@ function foliageMesh(c){
   geo.setAttribute('aBlockUV',new THREE.Float32BufferAttribute(UVB,2));
   geo.setAttribute('aTile',new THREE.Float32BufferAttribute(TL,1));
   geo.setAttribute('aSky',new THREE.Float32BufferAttribute(SK,1));
+  geo.setAttribute('aCan',new THREE.Float32BufferAttribute(CAN,1));
   geo.setAttribute('aWind',new THREE.Float32BufferAttribute(WIND,1));
   return geo;
 }
@@ -4120,6 +4161,29 @@ const globalU = {
   // ground is unmoved at every setting (iso 0.02-0.03% throughout, median 88.9 -> 88.1), which is the other thing that
   // had to stay true.
   uDayShade: { value:new THREE.Vector2(0.65, 6.0) },
+  // ---- CANOPY DEPTH (Ben 08-10: "intensely covered forested areas should still be dark during the day") ----
+  // x is the fraction of skylight that survives ONE leaf block overhead, y the floor no amount of canopy can go below.
+  // WHY THIS IS NOT uDayShade TURNED FURTHER. uDayShade is a global "the sun did not reach here" dial: it cannot tell a
+  // wood from the north side of a rock, so buying darkness under thirteen layers of leaf also buys it on every shaded
+  // face in the world, and the isolated-black ceiling stops it at 0.65 (0.5 measures 0.122% against a 0.05% ceiling).
+  // This term is the one thing that separates the two — it is zero everywhere except under leaves — so the wood can go
+  // as dark as Ben asked without moving a single pixel of the open ground he has signed off four times.
+  // AND IT IS NOT THE SKY CURVE EITHER, for the reason written above it: leaves are not sky occluders, vSky is ~1 under
+  // a canopy, and every value of that curve is 1 there (measured inert, 26.42 -> 26.41 across the whole sweep).
+  // Beer-Lambert, per layer: 0.97 puts one leaf at 0.97 — invisible, which is right, a single leaf overhead is not shade
+  // — four at 0.885, thirteen at 0.673, and a genuinely dense stand at the 0.55 floor. The floor is what keeps this off the
+  // black-pixel bug: a multiplier that can never reach zero cannot crush anything that was lit, and the value is baked
+  // PER VERTEX, so what a face gets is a smooth gradient rather than the per-face step that made "dark random blocks in
+  // the woods" the reported symptom every previous time skylight was taken away from a canopy.
+  // MEASURED at a 27-leaf stand, noon, bench/tmp-canopy-sweep.mjs — canopy crop median, then the OPEN sunlit vantage
+  // that must not move at all:
+  //   t/floor   1.00/0.00   0.98/0.60   0.97/0.55   0.95/0.45   0.90/0.35
+  //   canopy    3.56        2.63        2.35        1.85        1.43
+  //   open      79.35       79.23       79.35       79.48       79.14      <- unmoved at every setting, which is the point
+  // 0.97/0.55 is the conservative end of the range that reads as a dark wood with its form intact; 0.95/0.45 is visibly
+  // stronger and 0.80/0.20 is where the near ground becomes a black void with no texture in it. Ben has not seen any of
+  // it yet, and `__hc.canopy({t,floor})` moves it live with no remesh, so this is a starting point and not a verdict.
+  uCanopy: { value:new THREE.Vector2(0.97, 0.55) },
   // THE SCOTOPIC DIALS ARE NOT HERE. They live in _scotG / _scotH at the top of this file, as Float32Arrays, because a globalU
   // entry can only be shared by materials this file injects by hand and Ben asked for the pass on every material in the game.
   // Why each value is what it is:
@@ -4188,6 +4252,7 @@ function injectAtlas(mat, opts={}){
     sh.uniforms.uCloudScroll = globalU.uCloudScroll; sh.uniforms.uSunDirC = globalU.uSunDir;
     sh.uniforms.uChunkTint = { value:new THREE.Color(LIGHT_PAL[0][0],LIGHT_PAL[0][1],LIGHT_PAL[0][2]) };   // PER CLONE, deliberately: _chunkMat overwrites it with that chunk's own dominant light colour
     sh.uniforms.uSkyDirAmt = globalU.uSkyDirAmt; sh.uniforms.uSkyDirUp = globalU.uSkyDirUp; sh.uniforms.uSkyDirDn = globalU.uSkyDirDn;
+    sh.uniforms.uCanopy = globalU.uCanopy;
     sh.uniforms.uSkyCurve = globalU.uSkyCurve; sh.uniforms.uDayShade = globalU.uDayShade; sh.uniforms.uDayS = globalU.uDay;   // SHARED refs, same reason as the pair above: every chunk clone must move together or half the world keeps the old curve
     sh.uniforms.uCut = globalU.uCut;
     sh.uniforms.uHeld = globalU.uHeld; sh.uniforms.uHeldC = globalU.uHeldC;
@@ -4195,13 +4260,13 @@ function injectAtlas(mat, opts={}){
     sh.uniforms.uWhiteTile = globalU.uWhiteTile;   // SHARED ref → the vantawhite glow survives every material clone / recompile / composer rebuild / VFX toggle (was a fresh per-material uniform that a pre-tile-index recompile could latch at -1)
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>',
-        '#include <common>\nattribute float aTile;\nattribute float aSky;\nattribute vec2 aBlockUV;'+
+        '#include <common>\nattribute float aTile;\nattribute float aSky;\nattribute float aCan;\nattribute vec2 aBlockUV;'+
         (opts.wind?'\nattribute float aWind;':'')+
-        '\nuniform float uTime;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;')
+        '\nuniform float uTime;\nvarying float vTile;\nvarying float vSky;\nvarying float vCan;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;')
       .replace('#include <begin_vertex>',
         // vWPos = WORLD position. vLP is chunk-local, so it cannot address a world-scale cloud field: every chunk would sample
         // the same patch and the shadows would tile visibly at the chunk grid. modelMatrix carries the chunk group's offset.
-        '#include <begin_vertex>\nvTile=aTile; vSky=aSky; vBUV=aBlockUV; vLP=position; vObjN=normal; vWPos=(modelMatrix*vec4(transformed,1.0)).xyz;'+   // vLP = chunk-local position; vObjN = object-space face normal (for the block-light air-cell offset)
+        '#include <begin_vertex>\nvTile=aTile; vSky=aSky; vCan=aCan; vBUV=aBlockUV; vLP=position; vObjN=normal; vWPos=(modelMatrix*vec4(transformed,1.0)).xyz;'+   // vLP = chunk-local position; vObjN = object-space face normal (for the block-light air-cell offset)
         // TWO WIND MODES ON ONE ATTRIBUTE. A NEGATIVE aWind means kelp (#67): water moves a plant further and much
         // slower than air does, so the frequencies drop and the amplitudes rise. The land numbers below are the
         // originals to the digit — 1.6/1.3/0.10/0.07 — so nothing that grew on dry land moves differently for this.
@@ -4230,7 +4295,7 @@ function injectAtlas(mat, opts={}){
         // HC_SCOT_ATLAS routes the GLOBAL scotopic pass (patched into three's own lights/dithering chunks at the top of this
         // file) down the atlas branch, where `_bl` and `vSky` exist. Without it the wash still runs here, on the non-atlas
         // branch, and the cave descent would never fire on the one material that can tell a cave from a field.
-        '#include <common>\n#define HC_SCOT_ATLAS 1\n'+(opts.leafTrans?'uniform float uFolTrans;\n':'')+'precision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform vec3 uChunkTint;\nuniform float uSkyDirAmt;\nuniform float uSkyDirUp;\nuniform float uSkyDirDn;\nuniform vec2 uSkyCurve;\nuniform vec2 uDayShade;\nuniform float uDayS;\nuniform float uCut;\nuniform vec4 uHeld;\nuniform vec3 uHeldC;\nuniform vec4 uFlash;\nuniform vec4 uFlashD;\nuniform vec3 uFlashC;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
+        '#include <common>\n#define HC_SCOT_ATLAS 1\n'+(opts.leafTrans?'uniform float uFolTrans;\n':'')+'precision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform vec3 uChunkTint;\nuniform float uSkyDirAmt;\nuniform float uSkyDirUp;\nuniform float uSkyDirDn;\nuniform vec2 uSkyCurve;\nuniform vec2 uDayShade;\nuniform vec2 uCanopy;\nuniform float uDayS;\nuniform float uCut;\nuniform vec4 uHeld;\nuniform vec3 uHeldC;\nuniform vec4 uFlash;\nuniform vec4 uFlashD;\nuniform vec3 uFlashC;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying float vCan;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
       // ---- NIGHT VOLUMETRIC DARKNESS ON REAL FOLIAGE (Ben 07-29) ----
       // "volumetric darkness at night is applied to horizon pines, but not to forest trees." Correct, and the two fade to
       // different targets. The horizon backdrop fades to _uPineFog, which is scene.fog.color pulled toward storm blue and
@@ -4322,6 +4387,12 @@ function injectAtlas(mat, opts={}){
         // texture. DAY ONLY, scaled by uDayS, so the whole term collapses to 1 at night and Ben's signed-off night is untouched.
         'float _sunlit=clamp(dot(reflectedLight.directDiffuse, vec3(0.2126,0.7152,0.0722))*uDayShade.y, 0.0, 1.0);\n'+
         'irradiance *= mix(1.0, mix(uDayShade.x, 1.0, _sunlit), clamp(uDayS,0.0,1.0));\n'+
+        // ---- THE CANOPY ITSELF, as an optical depth (see globalU.uCanopy) ----
+        // vCan is leaf LAYERS between this fragment and the sky, baked per vertex and interpolated across the quad.
+        // Beer-Lambert on the AMBIENT ONLY: the sun through a gap is the shadow map's job and it already does it, and
+        // taking the direct term here as well would put out the dappled light that is the best thing about a wood.
+        // Day-gated by uDayS for the same reason uDayShade is — a wood at night is already dark and Ben has signed it off.
+        'irradiance *= mix(1.0, max(uCanopy.y, pow(uCanopy.x, vCan)), clamp(uDayS,0.0,1.0));\n'+
         'irradiance *= (uSkyCurve.x + (1.0-uSkyCurve.x)*pow(vSky,uSkyCurve.y));\n'+   // skylight CONTRAST curve, now globalU.uSkyCurve (floor, exponent) — see it, and __hc.skyCurve(). Was the literal (0.26 + 0.74*pow(vSky,1.15)): — floor 0.035→0.16 (Ben 07-20) →0.26 with a softer exponent (Ben 07-27, "black pixels everywhere"): under a canopy vSky≈0, and 16% of a 0.6 hemi is indistinguishable from black, so the forest floor and any dappled shade read as solid black holes. Caves/interiors still go dark (they also lose the direct term below) and torches still dominate.
         'vec3 _lpc = vLP + normalize(vObjN)*0.5;\n'+   // FACE→AIR offset (Ben 07-21): a face sits on the solid/air boundary; sampling there blended the solid cell (light 0) with the air cell → half-lit AND a per-cell checkerboard on lit surfaces. Push half a cell along the normal so we sample the LIT air cell at its texel centre.
         // RADIANCE, three channels: the volume carries each light's own colour premultiplied by its level (see LIGHT_PAL and
@@ -4406,6 +4477,7 @@ function injectAtlas(mat, opts={}){
       'if(uWhiteTile>=0.0 && abs(vTile-uWhiteTile)<0.5){ gl_FragColor=vec4(1.0,1.0,1.0,gl_FragColor.a); }');   // VANTAWHITE: overwrite the FINAL pixel to pure white AFTER lighting/tonemap/fog → genuinely unlit, no shadow/AO/surface-detail, a hole of pure white (Ben 07-21)
     if(Q.get('albedo')) sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\ngl_FragColor=vec4(_tex.rgb,1.0);');   // DIAGNOSTIC ?albedo: flat raw texture, NO lighting
     if(Q.get('dbg')==='sky') sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\ngl_FragColor=vec4(vSky,vSky,vSky,1.0);');   // DBG: per-face baked skylight (black=0 sky-occluded, white=1 open)
+    if(Q.get('dbg')==='can') sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\ngl_FragColor=vec4(vec3(vCan/12.0),1.0);');   // DBG: baked canopy depth in leaf layers, white at 12 (black=open sky). Answers "did the mesher see this canopy" before any dial is touched.
     if(Q.get('dbg')==='nrm') sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\ngl_FragColor=vec4(abs(normalize(vObjN)),1.0);');   // DBG: face normal (black pixel = zero/degenerate normal → normalize NaN)
     if(Q.get('dbg')==='sdir') sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\ngl_FragColor=vec4(vec3(clamp(_sdir,0.0,2.0)*0.5),1.0);');   // DBG: the directional-skylight factor itself, 0.5 grey = 1.0 (a face taking the sky unchanged)
     if(Q.get('dbg')==='bl') sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\ngl_FragColor=vec4(clamp(_bl,0.0,1.0),clamp(_bl,0.0,1.0),clamp(_bl,0.0,1.0),1.0);');   // DBG: sampled block-light
@@ -32560,6 +32632,25 @@ window.__hc={
   dayShade(o){ try{ if(o&&o.dark!=null) globalU.uDayShade.value.x=+o.dark; if(o&&o.k!=null) globalU.uDayShade.value.y=+o.k;
       if(o&&o.on!=null&&!o.on) globalU.uDayShade.value.x=1;
       return { dark:+globalU.uDayShade.value.x.toFixed(4), k:+globalU.uDayShade.value.y.toFixed(3), day:+globalU.uDay.value.toFixed(3) };
+    }catch(e){ return {err:String(e.message||e)}; } },
+  // Ben's dial for "intensely covered forested areas should still be dark during the day": `t` is what one leaf block
+  // overhead lets through and `floor` is the darkest a canopy can ever make a fragment. `on:false` sets t to 1, which is
+  // the A/B for the whole term WITHOUT a remesh; `bake:false` + a remesh is the separate A/B for the mesher's depth
+  // count, and the two answer different questions — the shader dial cannot reach what the mesher never wrote.
+  // `layers` reports what the term is worth at 1 / 4 / 13 leaves, 13 being the cover at assert-daylight-black's vantage.
+  canopy(o){ try{ if(o&&o.t!=null) globalU.uCanopy.value.x=+o.t; if(o&&o.floor!=null) globalU.uCanopy.value.y=+o.floor;
+      if(o&&o.on!=null&&!o.on) globalU.uCanopy.value.x=1;
+      if(o&&o.bake!=null){ _CANOPY_BAKE=!!o.bake; }
+      const v=globalU.uCanopy.value, at=n=>+Math.max(v.y,Math.pow(v.x,n)).toFixed(4);
+      return { t:+v.x.toFixed(4), floor:+v.y.toFixed(4), bake:_CANOPY_BAKE, at1:at(1), at4:at(4), at13:at(13) };
+    }catch(e){ return {err:String(e.message||e)}; } },
+  // The canopy depth the BAKE actually wrote at a world cell, in leaf layers — the readout that separates "the dial does
+  // nothing" from "the mesher measured nothing here". Reads the live world, not the snapshot, so it is valid any time.
+  canAt(x,y,z){ try{ const c=getChunk(x>>4,z>>4); if(!c||!c.generated) return {err:'chunk not loaded'};
+      let n=0,tp=-1,bt=32767; const lx=x&15, lz=z&15;
+      for(let yy=0;yy<WH;yy++){ if(occludesCanopy[c.blocks[idx(lx,yy,lz)]]){ n++; if(yy>tp)tp=yy; if(yy<bt)bt=yy; } }
+      const above = !n?0 : (y>=tp?0 : (y<=bt?n : n*(tp-y)/(tp-bt)));
+      return { layers:+above.toFixed(2), count:n, top:tp, bottom:n?bt:0 };
     }catch(e){ return {err:String(e.message||e)}; } },
   skyDir(o){ try{ if(o&&o.amt!=null) globalU.uSkyDirAmt.value=+o.amt; if(o&&o.on!=null) globalU.uSkyDirAmt.value=o.on?1:0;
       if(o&&o.up!=null) globalU.uSkyDirUp.value=+o.up; if(o&&o.dn!=null) globalU.uSkyDirDn.value=+o.dn;

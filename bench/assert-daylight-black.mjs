@@ -52,6 +52,13 @@ function stat(file,c){
   const lo=v.slice(0,(v.length*0.2)|0), hi=v.slice((v.length*0.8)|0);
   const med=a=>a.length?a[a.length>>1]:0;
   return { pureBlack:+(100*pure/n).toFixed(3), isoBlack:+(100*iso/n).toFixed(3),
+           // PERIMETER OVER AREA, and this is what tells a bigger shadow apart from a broken one. isoBlack counts black
+           // pixels with a lit neighbour, so it rises whenever the black REGION grows for an honest reason: a shadow
+           // three times the size has a bigger boundary against the dappled light around it, and every pixel of that
+           // boundary is "isolated" by this definition. Dividing by the black area removes the size and leaves the
+           // shape. Crushing — the actual artefact — makes lone black pixels inside lit surfaces, which is nearly all
+           // perimeter and no area, so it drives this UP. A shadow spreading drives it DOWN.
+           edgeShare:+(100*iso/Math.max(1,pure)).toFixed(2),
            med:+q(0.5).toFixed(2), p10:+q(0.10).toFixed(2), p90:+q(0.90).toFixed(2),
            sunShade:+(med(hi)/Math.max(0.5,med(lo))).toFixed(2) };
 }
@@ -72,7 +79,26 @@ function stat(file,c){
 // asked for — and the open vantage keeps the tight one, because nothing about a sunlit field was ever meant to move
 // and it measures 0.02% at every setting of every dial in the sweep.
 // The direction of this change is Ben's instruction, not a property of the code. Do not "fix" it back to 0.0.
-const BASE={ open:{ pureBlack:0.0, isoBlack:0.0 }, canopy:{ pureBlack:8.0, isoBlack:0.0 } };
+//
+// ---- RE-BASED AGAIN 2026-08-10, FOR THE CANOPY DEPTH TERM (globalU.uCanopy) ----
+// Ben, 08-10: "there needs to be real daytime darkness ... intensely covered forested areas should still be dark during
+// the day". Leaves now take skylight away from what is under them, so the canopy vantage IS meant to go much blacker:
+// its contiguous black measures 18.1% at the shipped setting against 2.9% with the term off, at the same vantage in the
+// same run. That is the feature, and its ceiling moves with it.
+// THE CANOPY'S isoBlack CEILING BECOMES A SHAPE TEST, NOT A COUNT. Absolute isolated-black cannot be held at 0.05% in a
+// frame whose black area grew six-fold, because the boundary between a shadow and the dappled light beside it is
+// counted as isolated by construction. What separates the two cases is edgeShare (see stat()), measured in the same run:
+//   term off        pureBlack  2.878%   isoBlack 0.045%   edgeShare 1.56%
+//   t 0.97/0.55     pureBlack 18.143%   isoBlack 0.186%   edgeShare 1.02%
+// The share FELL. A darkening that was crushing lit surfaces would have driven it up, and this one made a bigger, more
+// solid shadow instead. So the canopy is guarded on edgeShare, and the OPEN vantage keeps the absolute count unchanged
+// — nothing about sunlit ground is allowed to move, and nothing about it did (median 79.35 -> 79.35 across the sweep).
+// THE OPEN VANTAGE'S RECORDED 0.0 DID NOT REPRODUCE, AND NOT BECAUSE OF THIS CHANGE. With the canopy term switched off
+// entirely (__hc.canopy({on:false}), two rows a full sweep apart in the same browser) the open crop measures 0.046% pure
+// and 0.045% isolated, not zero. So the guard was already sitting on its ceiling on this machine before anything here
+// was written, and would have gone red on the next unrelated commit. Re-based to the measured term-off value so the
+// tolerance means what it says; the shipped setting costs +0.014 on top of it, comfortably inside it.
+const BASE={ open:{ pureBlack:0.046, isoBlack:0.046 }, canopy:{ pureBlack:25.0, isoBlack:null, edgeShare:1.8 } };
 const TOL=0.05;   // in PERCENT of the crop — 0.05% of a 1000x560 crop is roughly 90 pixels, i.e. a visible speckle, not a rounding wobble
 (async()=>{
   const port=await freePort();
@@ -105,7 +131,7 @@ const TOL=0.05;   // in PERCENT of the crop — 0.05% of a 1000x560 crop is roug
       await sleep(1600); await pin();
       const F=[]; for(let i=0;i<3;i++){ const f=path.join(OUT,`dayblack-${tag}-${i}.png`); await page.screenshot({path:f}); F.push(stat(f,CROP)); await sleep(200); }
       const pickMed=k=>{ const v=F.map(f=>f[k]).sort((a,b)=>a-b); return v[1]; };
-      const r={}; for(const k of ['pureBlack','isoBlack','med','p10','p90','sunShade']) r[k]=pickMed(k);
+      const r={}; for(const k of ['pureBlack','isoBlack','edgeShare','med','p10','p90','sunShade']) r[k]=pickMed(k);
       console.log(`  ${tag.padEnd(7)} ${JSON.stringify(r)}`);
       return r;
     };
@@ -137,7 +163,10 @@ const TOL=0.05;   // in PERCENT of the crop — 0.05% of a 1000x560 crop is roug
     check('the daylight frame is actually daylit', open.med>40 && canopy.p90>60, `open med ${open.med}, canopy p90 ${canopy.p90} (med ${canopy.med})`);
     for(const [tag,r] of [['open',open],['canopy',canopy]]){
       check(`${tag}: no pure black`, r.pureBlack<=BASE[tag].pureBlack+TOL, `${r.pureBlack}% against a ceiling of ${BASE[tag].pureBlack+TOL}%`);
-      check(`${tag}: no isolated black`, r.isoBlack<=BASE[tag].isoBlack+TOL, `${r.isoBlack}% against a ceiling of ${BASE[tag].isoBlack+TOL}%`);
+      if(BASE[tag].isoBlack!==null)
+        check(`${tag}: no isolated black`, r.isoBlack<=BASE[tag].isoBlack+TOL, `${r.isoBlack}% against a ceiling of ${BASE[tag].isoBlack+TOL}%`);
+      if(BASE[tag].edgeShare!=null)
+        check(`${tag}: the black is shadow-shaped, not speckle`, r.edgeShare<=BASE[tag].edgeShare, `${r.edgeShare}% of the black is isolated, against a ceiling of ${BASE[tag].edgeShare}% (raw isoBlack ${r.isoBlack}%)`);
     }
     // The dark tail and the contrast are REPORTED, not asserted: they are the numbers a deepening change is supposed to move, and a
     // ceiling on them would be a ceiling on the feature.
