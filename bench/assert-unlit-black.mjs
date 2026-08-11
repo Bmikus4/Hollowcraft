@@ -146,8 +146,14 @@ async function carveRoom(P, CX, CZ){
     // leaf reaching zero; it does not brighten the canopy. Over a night crop that is a 3x difference in the share of
     // PURE BLACK pixels (17.2% against 55.1%) and only 0.40 of 255 in the mean, so a mean-based threshold is reading
     // the wrong end of the effect and would have to be set so fine it could not survive a frame's noise.
-    check('foliage still has its unlit floor', foliage[1].blackPct > foliage[0].blackPct*1.8,
-          `pure black ${foliage[0].blackPct}% with it against ${foliage[1].blackPct}% without`);
+    // ---- INVERTED 2026-08-11 ON BEN'S INSTRUCTION: "foliage doesnt listen to darkness properly" ----
+    // FOL_UNLIT_FLOOR is off. It was `max(colour, albedo*0.20)` with no reference to light, so an unlit leaf could not
+    // render below a fifth of its own colour at any hour - which is the report. The job it was doing is now done by the
+    // lit-face texel floor (_scotK[2]), which is proportional to the light and therefore CAN tell shade from darkness.
+    // So the assertion flips: foliage in the dark must now reach black like everything else, and what would be the
+    // regression is the old floor coming back. `?folfloor=0.2` is still the A/B.
+    check('foliage goes dark like everything else', Math.abs(foliage[1].blackPct - foliage[0].blackPct) < 6,
+          `pure black ${foliage[0].blackPct}% shipped against ${foliage[1].blackPct}% with the old floor forced off`);
   } else console.log('  (no canopy site — foliage check skipped)');
 
   process.exit(report() ? 0 : 1);
