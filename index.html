@@ -6783,43 +6783,59 @@ const SSAOShader={
 // the composer, the same way the motion-blur toggle does), so it costs exactly nothing until someone asks for it. It is
 // a look change on a build where Ben has not yet reviewed eight of them; the honest form is a candidate, not a default.
 const HeightFogShader={
-  uniforms:{ tDiffuse:{value:null}, tDepth:{value:null}, uInvVP:{value:new THREE.Matrix4()}, uCamPos:{value:new THREE.Vector3()},
-    uDensity:{value:0.030}, uFalloff:{value:0.055}, uBaseY:{value:62.0}, uMaxDist:{value:900.0},
+  uniforms:{ tDiffuse:{value:null}, tDepth:{value:null}, uCamRot:{value:new THREE.Matrix3()}, uCamPos:{value:new THREE.Vector3()},
+    uNear:{value:0.1}, uFar:{value:400.0}, uTanHalf:{value:0.75}, uAspect:{value:1.777},
+    uDensity:{value:0.0035}, uFalloff:{value:0.045}, uBaseY:{value:62.0},
     uColor:{value:new THREE.Color(0.62,0.68,0.76)}, uSunCol:{value:new THREE.Color(1.0,0.86,0.66)}, uSunDir:{value:new THREE.Vector3(0,1,0)},
     uAniso:{value:0.55}, uSky:{value:0.0}, uAmt:{value:1.0}, uDbg:{value:0} },
   vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
-  fragmentShader:`varying vec2 vUv; uniform sampler2D tDiffuse, tDepth; uniform mat4 uInvVP; uniform vec3 uCamPos, uColor, uSunCol, uSunDir;
-    uniform float uDensity, uFalloff, uBaseY, uMaxDist, uAniso, uSky, uAmt, uDbg;
+  fragmentShader:`varying vec2 vUv; uniform sampler2D tDiffuse, tDepth; uniform mat3 uCamRot; uniform vec3 uCamPos, uColor, uSunCol, uSunDir;
+    uniform float uNear, uFar, uTanHalf, uAspect, uDensity, uFalloff, uBaseY, uAniso, uSky, uAmt, uDbg;
     void main(){
       vec3 src=texture2D(tDiffuse,vUv).rgb;
       float depth=texture2D(tDepth,vUv).x;
       bool sky = depth>=0.9999;
-      if(sky && uSky<0.001){ gl_FragColor=vec4(src,1.0); return; }
-      vec4 wp=uInvVP*vec4(vUv*2.0-1.0, depth*2.0-1.0, 1.0); wp/=wp.w;
-      vec3 d=wp.xyz-uCamPos; float t=length(d);
-      // A SKY PIXEL HAS NO WORLD POSITION worth reading - the unprojection at depth 1 lands on the far plane, which moves
-      // with the render-distance slider - so its ray is taken from the direction alone and its length is uMaxDist.
-      vec3 V = sky ? normalize(uInvVP*vec4(vUv*2.0-1.0, 0.0, 1.0)).xyz : d/max(t,1e-4);
-      if(sky){ V=normalize((uInvVP*vec4(vUv*2.0-1.0, 0.5, 1.0)).xyz-uCamPos); t=uMaxDist; }
-      t=min(t,uMaxDist);
+      if(sky && uSky<0.001 && uDbg<0.5){ gl_FragColor=vec4(src,1.0); return; }
+      // NO INVERSE VIEW-PROJECTION. The first version of this pass reconstructed the world position with
+      // matrixWorld * projectionMatrixInverse, exactly as the god-ray pass does, and its ray length came out SATURATED
+      // at the far plane on every ground pixel - a beach fifty blocks away reading as distant as the horizon - so the
+      // fog was a uniform wall and density was the only dial that appeared to do anything. Rather than keep debugging
+      // one opaque matrix, the same two quantities are built from pieces that can each be checked on their own: the
+      // view ray from the field of view, and the distance from the depth buffer's own linearisation. Nothing here needs
+      // a matrix inverse, and every uniform in it is a number with an obvious right answer.
+      vec2 ndc=vUv*2.0-1.0;
+      vec3 vray=vec3(ndc.x*uTanHalf*uAspect, ndc.y*uTanHalf, -1.0);   // view-space ray through this pixel, z=-1 at the near plane
+      vec3 V=normalize(uCamRot*vray);                                  // ...rotated into world space; uCamRot is the camera's basis
+      // three.js's own perspectiveDepthToViewZ. viewZ is NEGATIVE in front of the camera, and multiplying the
+      // (unnormalised) view ray by -viewZ gives the point, so its length is the distance along the ray.
+      float viewZ=(uNear*uFar)/((uFar-uNear)*depth-uFar);
+      float t = sky ? uFar : length(vray)*(-viewZ);
+      t=min(t,uFar);
+      // ANALYTIC EXPONENTIAL HEIGHT FOG (Quilez). With density a, falloff b and a ray from C in direction V for
+      // distance t, the integral of a*exp(-(y-baseY)*b) along the ray has the closed form below. The V.y -> 0 case is a
+      // horizontal ray, where density does not change along the path and the integral collapses to a*t*exp(...); it is
+      // branched rather than clamped because it is a division by zero and not a singularity.
       float b=max(uFalloff,1e-4);
       float head=(uDensity/b)*exp(-(uCamPos.y-uBaseY)*b);
       float f = abs(V.y)<1e-4 ? uDensity*t*exp(-(uCamPos.y-uBaseY)*b)
                               : head*(1.0-exp(-t*V.y*b))/V.y;
       f=1.0-exp(-max(f,0.0));
       f*=uAmt*(sky?uSky:1.0);
-      // FORWARD SCATTER: the air glows toward the sun. pow on a saturated dot, so it is a tight lobe around the disc
-      // rather than a warm cast over the whole frame.
+      // FORWARD SCATTER: air lit from behind glows along the line to the sun, which is the whole reason mist is
+      // beautiful rather than grey. A tight lobe, so it warms the air around the disc and not the whole frame.
       float s=pow(max(dot(V,normalize(uSunDir)),0.0), 8.0)*uAniso;
       vec3 col=mix(uColor, uSunCol, s);
-      // uDbg: 1 = the fog fraction itself, 2 = ray length over uMaxDist, 3 = V.y remapped to 0..1, 4 = reconstructed
-      // world height over 128. A term that disagrees with its own arithmetic is found by looking at the terms, and every
-      // one of these is a single line that costs nothing when uDbg is 0.
+      // uDbg: 1 = the fog fraction, 2 = t over uFar, 3 = V.y remapped to 0..1, 4 = the ray's world height over 128.
+      // READ THESE KNOWING THEY ARE STILL TONE-MAPPED AND GRADED - this pass runs before OutputPass, so a flat linear
+      // 0.35 arrives on screen as a warm 200 and not as a mid grey. Reading one of these as a raw number cost an hour.
       if(uDbg>0.5){
         if(uDbg<1.5) gl_FragColor=vec4(vec3(clamp(f,0.0,1.0)),1.0);
-        else if(uDbg<2.5) gl_FragColor=vec4(vec3(t/uMaxDist),1.0);
+        else if(uDbg<2.5) gl_FragColor=vec4(vec3(t/uFar),1.0);
         else if(uDbg<3.5) gl_FragColor=vec4(vec3(V.y*0.5+0.5),1.0);
-        else gl_FragColor=vec4(vec3(wp.y/128.0),1.0);
+        else if(uDbg<4.5) gl_FragColor=vec4(vec3((uCamPos.y+V.y*t)/128.0),1.0);
+        else if(uDbg<5.5) gl_FragColor=vec4(vec3(depth),1.0);                          // the raw depth sample
+        else if(uDbg<6.5) gl_FragColor=vec4(vec3((depth-0.99)*100.0),1.0);             // ...and its top percent, where a perspective buffer puts everything far
+        else gl_FragColor=vec4(sky?vec3(1.0,0.0,0.0):vec3(0.0,1.0,0.0),1.0);           // red = taken as sky, green = taken as geometry
         return; }
       gl_FragColor=vec4(mix(src, col, clamp(f,0.0,1.0)), 1.0);
     }`
@@ -13661,8 +13677,11 @@ function loop(){ try{
   if(heightFogPass){
     camera.updateMatrixWorld();
     const U=heightFogPass.uniforms;
-    U.uInvVP.value.multiplyMatrices(camera.matrixWorld, camera.projectionMatrixInverse);
+    U.uCamRot.value.setFromMatrix4(camera.matrixWorld);   // the camera's basis; the position is carried separately
     U.uCamPos.value.copy(camera.position);
+    U.uNear.value=camera.near; U.uFar.value=camera.far;
+    U.uTanHalf.value=Math.tan(camera.fov*Math.PI/360);    // fov is the VERTICAL angle in degrees, so half of it in radians is fov*PI/360
+    U.uAspect.value=camera.aspect;
     U.uSunDir.value.copy(globalU.uSunDir.value);
     // THE FOG TAKES THE SCENE'S OWN COLOURS rather than carrying constants of its own, which is the whole of "cohesion":
     // the distance fog, the horizon layers and this pass then agree at every hour and in every weather without three
@@ -13670,7 +13689,6 @@ function loop(){ try{
     // everything else, and the fog colour off scene.fog, which the weather system already drives.
     if(scene.fog) U.uColor.value.copy(scene.fog.color);
     U.uSunCol.value.copy(sunLight.color);
-    U.uMaxDist.value=camera.far;
   }
   if(_rtPath && motionPass){                                                           // depth-reprojection motion blur uniforms (uEnabled 0 = bridge only, blur off)
     camera.updateMatrixWorld();
@@ -32301,8 +32319,9 @@ window.__hc={
       if(!heightFogPass) return { on:_HFOG_ON, inChain:false, note:_HFOG_ON?'needs the depth path: motion blur on, quality above Low':'off' };
       const U=heightFogPass.uniforms, r=k=>+U[k].value.toFixed(4);
       return { on:_HFOG_ON, inChain:true, density:r('uDensity'), falloff:r('uFalloff'), baseY:r('uBaseY'),
-               aniso:r('uAniso'), sky:r('uSky'), amt:r('uAmt'), maxDist:r('uMaxDist'), dbg:r('uDbg'),
-               camY:+heightFogPass.uniforms.uCamPos.value.y.toFixed(2) };
+               aniso:r('uAniso'), sky:r('uSky'), amt:r('uAmt'), dbg:r('uDbg'),
+               near:r('uNear'), far:r('uFar'), tanHalf:r('uTanHalf'), aspect:r('uAspect'),
+               camY:+U.uCamPos.value.y.toFixed(2) };
     }catch(e){ return {err:String(e.message||e)}; } },
   pass(name, on){ try{ const P={ ssao:ssaoPass, godray:godrayPass, bloom:bloomPass, grade:gradePass, motion:motionPass, heightfog:heightFogPass };
       const p=P[name]; if(!p) return {err:'no such pass: '+name+' (have '+Object.keys(P).filter(k=>P[k]).join(',')+')'};

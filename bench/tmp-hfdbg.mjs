@@ -25,7 +25,7 @@ try{
   await sleep(3000);
   console.log('  state', JSON.stringify(await page.evaluate(`__hc.heightFog({})`)));
   console.log('  pos  ', JSON.stringify(await page.evaluate(`__hc.pos()`)));
-  for(const [d,name] of [[1,'f'],[2,'t'],[3,'Vy'],[4,'worldY']]){
+  for(const [d,name] of [[2,'t'],[6,'depthTop'],[1,'f']]){
     console.log('  set dbg', d, JSON.stringify(await page.evaluate(`__hc.heightFog({dbg:${d}})`)));
     console.log('  uniform now', await page.evaluate(`__hc.heightFog({}).dbg`)); await sleep(400);
     await page.screenshot({path:OUT+`/hfdbg-${name}.png`});
