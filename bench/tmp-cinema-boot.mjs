@@ -1,0 +1,18 @@
+import { spawn } from 'node:child_process';
+import http from 'node:http'; import fs from 'node:fs';
+import { chromium } from 'playwright-core';
+const ROOT='D:/code/Minecraft'; const PORT=8132;
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const srv=spawn(process.execPath,[ROOT+'/server.js'],{cwd:ROOT,env:{...process.env,PORT:String(PORT),NO_OPEN:'1'},stdio:'ignore'});
+await new Promise((res,rej)=>{const t0=Date.now();(function p(){const r=http.get(`http://127.0.0.1:${PORT}/index.html`,x=>{x.resume();res()});r.on('error',()=>Date.now()-t0>20000?rej(new Error('down')):setTimeout(p,250))})()});
+const exe=['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Google/Chrome/Application/chrome.exe'].find(fs.existsSync);
+const b=await chromium.launch({executablePath:exe,headless:true,args:['--enable-gpu','--ignore-gpu-blocklist','--use-angle=d3d11','--mute-audio']});
+const pg=await (await b.newContext({viewport:{width:1280,height:720}})).newPage();
+pg.on('pageerror',e=>console.log('PAGEERROR:',String(e.message||e).slice(0,300)));
+pg.on('console',m=>{ if(m.type()==='error') console.log('CONSOLE:',m.text().slice(0,300)); });
+await pg.goto(`http://127.0.0.1:${PORT}/index.html?cinema=1&perf=1&debug=1`,{waitUntil:'load',timeout:120000});
+await sleep(8000);
+console.log('has __hc:', await pg.evaluate('!!window.__hc'));
+console.log('has setCinema:', await pg.evaluate('typeof setCinema'));
+console.log('body class:', await pg.evaluate('document.body.className'));
+await b.close(); srv.kill();
