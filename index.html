@@ -3340,6 +3340,71 @@ function bakeLight(c){
   }
   return true;
 }
+// =====================================================================
+//  SKYLIGHT FLOOD — the half of "smooth cave lighting" that a column test cannot do
+// =====================================================================
+// A SOFFIT UNDER A BUILT ROOF READ 2 OF 255 (bench/assert-directional-sky, "nothing in the box is crushed"). _sskyFace
+// asks how open a cell's 3x3 NEIGHBOURHOOD of columns is, and under a 9x9 roof all nine are capped, so the answer is
+// zero however wide open the doorway is. That is right for a cave and wrong for a shelter, and no tuning of the 3x3 can
+// tell them apart: the difference is not local, it is whether air CONNECTS to the sky.
+// SO THIS FLOODS. Same breadth-first walk bakeLight uses for torches, seeded from every sky-open cell instead of from
+// emitters, decrementing one per step and stopped by occludesSky (so leaves and glass pass it, exactly as they pass the
+// column test). A soffit one cell in from the eave lands at 14, four cells into a hall at 11, and fifteen cells down an
+// unlit tunnel at 0 — which is the "if no light reaches an area at all, it should be completely dark" Ben asked for on
+// 08-06, arrived at by the light not reaching rather than by a floor being clamped.
+// IT ONLY EVER ADDS. The result is max(column rule, flood), so nothing that is lit today can get darker, and every
+// vantage anyone has signed off is either already 1 (a forest floor, open ground) or genuinely unreachable (a carved
+// room sixteen blocks down, which is outside the band below).
+// IN THE PADDED FRAME, NOT THE MESHER'S. The mesher's snapshot has ONE column of border, so a hall spanning two chunks
+// would light from its doorway in one chunk and stay black in the other, with the seam falling exactly on the chunk
+// boundary. LPAD is 15 for precisely this reason on the torch side; the sky flood borrows the same frame.
+// AND ONLY NEAR THE SURFACE. The band is [lowest surface in the frame - SKY_DEPTH, highest + 1], which is about 26 of
+// the 128 layers: deep caves cannot be reached by skylight anyway, and walking the whole 46x46x128 volume to prove it
+// would be a quarter of a million cells per chunk build on the one path that is already over its frame budget.
+const _sv = new Uint8Array(LPW*LPW*WH);      // padded skylight flood scratch, same shape and index as _lv
+const _skN = new Array(9);
+const _svTop = new Int16Array(LPW*LPW);      // per-padded-column opaque top, over the WHOLE padded frame (not _snapT, which is 18x18)
+const SKY_DEPTH = 24;
+let _SKYFLOOD_AMT = 0.85, _SKYFLOOD_ON = true;
+let _svLo=0, _svHi=0, _svCx=1e9, _svCz=1e9, _svValid=false;
+function bakeSkyFlood(c){
+  _svCx=1e9; _svCz=1e9;
+  if(!_SKYFLOOD_ON) return;
+  for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++){ const nc=getChunk(c.cx+dx,c.cz+dz); _skN[(dx+1)+(dz+1)*3]=(nc&&nc.generated)?nc:null; }
+  let lo=WH-1, hi=0;
+  for(let pz=0;pz<LPW;pz++)for(let px=0;px<LPW;px++){
+    const wx=px-LPAD, wz=pz-LPAD;
+    const ch=_skN[((wx>>4)+1)+((wz>>4)+1)*3];                 // wx>>4 maps -15..-1 -> -1, 0..15 -> 0, 16..30 -> 1
+    let t=0; if(ch){ t=ch.htop[(wx&15)+(wz&15)*CK]; if(t<0)t=0; }   // MISSING neighbour == open sky, matching _snapT: the alternative bakes a dark seam against a chunk that has not streamed in yet
+    _svTop[px+pz*LPW]=t; if(t<lo)lo=t; if(t>hi)hi=t; }
+  const yLo=Math.max(0, lo-SKY_DEPTH), yHi=Math.min(WH-1, hi+1);
+  _svLo=yLo; _svHi=yHi;
+  _sv.fill(0, yLo*LPW*LPW, (yHi+1)*LPW*LPW);
+  const Q=_bfsQ; let qn=0;
+  // SEEDED FROM EACH COLUMN'S OWN TOP, which is what keeps the seeding cheap: on flat ground a column's first open cell
+  // IS the top of the band, so it writes one cell, not twenty-six. Only a column standing in a hollow writes many.
+  // QUEUED ONLY WHERE IT TOUCHES SOMETHING CAPPED. An open cell with four open neighbours has nothing to give away, and
+  // queueing every open cell in the frame would put a quarter of a million entries through the breadth-first walk.
+  for(let pz=0;pz<LPW;pz++)for(let px=0;px<LPW;px++){
+    const ci=px+pz*LPW, t=_svTop[ci];
+    const tw=px>0?_svTop[ci-1]:0, te=px<LPW-1?_svTop[ci+1]:0, tn=pz>0?_svTop[ci-LPW]:0, ts=pz<LPW-1?_svTop[ci+LPW]:0;
+    const tmax=Math.max(Math.max(tw,te),Math.max(tn,ts));
+    for(let y=Math.max(yLo,t+1); y<=yHi; y++){ const i=_lpi(px,y,pz); _sv[i]=15; if(y<=tmax && qn<Q.length) Q[qn++]=i; } }
+  let head=0;
+  while(head<qn){
+    const pi=Q[head++]; const l=_sv[pi]; if(l<=1) continue;
+    const py=(pi/(LPW*LPW))|0, r=pi-py*(LPW*LPW), pz=(r/LPW)|0, px=r-pz*LPW; const nl=l-1;
+    for(let f=0;f<6;f++){
+      let nx=px,ny=py,nz=pz;
+      if(f===0)nx--; else if(f===1)nx++; else if(f===2)nz--; else if(f===3)nz++; else if(f===4)ny--; else ny++;
+      if(nx<0||nx>=LPW||nz<0||nz>=LPW||ny<yLo||ny>yHi) continue;
+      const ni=_lpi(nx,ny,nz); if(_sv[ni]>=nl) continue;
+      const wx=nx-LPAD, wz=nz-LPAD;
+      const ch=_skN[((wx>>4)+1)+((wz>>4)+1)*3];
+      if(ch){ const b=ch.blocks[(wx&15)+(wz&15)*CK+ny*CK*CK]; if(b!==AIR && occludesSky[b]) continue; }   // occludesSky, NOT isOpaque: a canopy and a glass roof must pass this exactly as they pass the column test, or 07-23 comes straight back
+      _sv[ni]=nl; if(nl>1 && qn<Q.length) Q[qn++]=ni; } }
+  _svCx=c.cx; _svCz=c.cz;
+}
 // Build (or clear) the chunk's 3D light texture from the flood scratch. Texture is 16×WH×16, R8, trilinear.
 function buildLightTexture(c){
   const lit=bakeLight(c);
@@ -3417,6 +3482,10 @@ const _snapT=new Int16Array(_SW*_SW);              // per-column opaque-top for 
 const _snapC=new Uint8Array(_SW*_SW), _snapCT=new Int16Array(_SW*_SW), _snapCB=new Int16Array(_SW*_SW);
 const CANOPY_SCAN=48;                              // blocks above the opaque top that can hold canopy — a tree is ~30, and an unbounded scan is WH reads per column per rebuild
 function snapshotChunk(c){
+  // The sky flood is a MODULE-LEVEL scratch shared with whatever built last, exactly as _snapB is, so it is only valid
+  // for the chunk it was baked for. This is the one hook every mesh path runs through immediately before meshing, which
+  // makes it the honest place to decide whether the flood in the buffer belongs to this chunk or to the previous one.
+  _svValid = (_svCx===c.cx && _svCz===c.cz);
   const N=_snapN; for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++){ const nc=getChunk(c.cx+dx,c.cz+dz); N[(dx+1)+(dz+1)*3]=(nc&&nc.generated)?nc:null; }
   const B=c.blocks, XM=N[3],XP=N[5],ZM=N[1],ZP=N[7];
   for(let y=0;y<WH;y++){ const yb=y*CK*CK, ys=y*_SW*_SW;
@@ -3497,8 +3566,16 @@ function _skyNbr(lx,ly,lz){   // the eight columns around this one, each scored 
   return m; }
 // THE ONE FACE RULE. Every orientation uses it: the y faces too, which is the other half of Ben's report — a floor with
 // anything above it was the darkest thing in the game and _ssky was all a y face ever got.
+// SKYLIGHT REACHED HERE (see bakeSkyFlood), 0..1, or 0 if the flood in the buffer is another chunk's.
+function _svAt(lx,ly,lz){ if(!_svValid || ly<_svLo || ly>_svHi) return 0;
+  const px=lx+LPAD, pz=lz+LPAD; if(px<0||px>=LPW||pz<0||pz>=LPW) return 0;
+  return _sv[_lpi(px,ly,pz)]*(1/15); }
 function _sskyFace(lx,ly,lz){ const s=_skyCol(lx,ly,lz), n=_skyNbr(lx,ly,lz);
-  return s>=1 ? n : (s>n?s:n); }
+  const base = s>=1 ? n : (s>n?s:n);
+  // MAX, never a blend: the flood can only ADD. Everything already lit is at 1 by the column rule and stays there, and
+  // the only faces this can move are the ones the column rule gave up on — which is the whole of the defect it is for.
+  const f=_svAt(lx,ly,lz)*_SKYFLOOD_AMT;
+  return f>base?f:base; }
 // The derived passes (grass, kelp, sprigs) ask about a CELL rather than a face, and they take the same rule: a tuft of
 // grass one step inside the drip line of a tree was black for the same reason a floor was, and it is the same fix.
 function _ssky(lx,ly,lz){ return _sskyFace(lx,ly,lz); }
@@ -8621,6 +8698,7 @@ function buildChunkStaged(c){
     _stagedC=c;
     c._oldL=c.light3D; c.light3D=null;                 // stash the old light volume: the OLD group's materials still sample it until the swap — bake must not dispose or mutate it
     buildLightTexture(c);
+    bakeSkyFlood(c);                                   // must precede snapshotChunk: that is where the flood is claimed for this chunk, and both mesh stages read it
     snapshotChunk(c);                                  // one linear copy; all passes read the flat snapshot, not the world Map
     _stagedG=new THREE.Group(); _stagedG.position.set(c.cx*CK,0,c.cz*CK);
     const L=c.light3D, _om=L? _chunkMat(opaqueMat,L) : opaqueMat;
@@ -31317,6 +31395,27 @@ window.__hc={
   sprigNormals(on){ try{ _SPRIG_FACE_N = (on==null? true : !!on); let n=0;
       world.forEach(c=>{ if(c.meshed){ c.dirty=true; buildChunkMeshes(c); n++; } });
       return { faceNormals:_SPRIG_FACE_N, remeshed:n }; }catch(e){ return {err:String(e.message||e)}; } },
+  // The skylight flood (see bakeSkyFlood). BAKED AT MESH TIME, so both dials remesh the loaded world — there is no live
+  // uniform to turn, and a dial that silently did nothing until the player walked away and back would be worse than no
+  // dial. `amt` scales what the flood is worth against the column rule; `on:false` is the A/B for the whole feature.
+  skyFlood(o){ try{ let re=false;
+      if(o){ if(o.amt!=null){ _SKYFLOOD_AMT=+o.amt; re=true; } if(o.on!=null){ _SKYFLOOD_ON=!!o.on; re=true; } }
+      let n=0; if(re) world.forEach(c=>{ if(c.meshed){ c.dirty=true; buildChunkMeshes(c); n++; } });
+      return { amt:+_SKYFLOOD_AMT.toFixed(3), on:_SKYFLOOD_ON, band:[_svLo,_svHi], remeshed:n };
+    }catch(e){ return {err:String(e.message||e)}; } },
+  // What the flood delivers at a world cell, 0..15, plus what the column rule would have given the same cell — the two
+  // numbers that separate "the dial does nothing" from "no light reaches here" from "the column rule already had it".
+  // RE-BAKES for the asked-for chunk rather than reading whatever the last mesh left, because the scratch is shared and
+  // "the last chunk meshed" is never the one being investigated. That clobbers the buffer, which is safe: snapshotChunk
+  // re-claims it and any chunk whose flood this invalidated re-bakes on its next mesh.
+  skyAt(x,y,z){ try{ const c=getChunk(x>>4,z>>4); if(!c||!c.generated) return {err:'chunk not loaded'};
+      bakeSkyFlood(c); snapshotChunk(c);   // _sskyFace reads _snapT, so the snapshot has to be this chunk's too
+      const lx=x&15, lz=z&15;
+      const lvl=(y<_svLo||y>_svHi)?0:_sv[_lpi(lx+LPAD, y, lz+LPAD)];
+      _svValid=false; const rule=_sskyFace(lx,y,lz); _svValid=true;
+      return { level:lvl, asSky:+(lvl*(1/15)*_SKYFLOOD_AMT).toFixed(3), faceRule:+rule.toFixed(3),
+               htop:c.htop[lx+lz*CK], band:[_svLo,_svHi], on:_SKYFLOOD_ON, amt:_SKYFLOOD_AMT };
+    }catch(e){ return {err:String(e.message||e)}; } },
   foliageMeshes(){ const out=[]; try{ chunkRoot.traverse(o=>{ if(o.userData&&o.userData.foliage&&o.userData.foliage.geometry) out.push(o.userData.foliage); }); }catch(e){} return out; },
   leafMeshes(){ const out=[]; try{ chunkRoot.traverse(o=>{ if(o.userData&&o.userData.leaf&&o.userData.leaf.geometry) out.push(o.userData.leaf); }); }catch(e){} return out; },
   // ONE UNIFORM, NOT A WALK OVER EVERY CLONE. This used to set leafMat.alphaTest and then the alphaTest of every
