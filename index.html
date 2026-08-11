@@ -5583,416 +5583,36 @@ const _uWaterBody={ value:new THREE.Color(0.004,0.034,0.052) };
 const _uSeaNight={ value:new THREE.Color(0.0015,0.0030,0.0045) };
 const _seaHorizon=new THREE.Color(0.0206,0.0422,0.0624);
 const _deepSea=new THREE.Color(0.010,0.075,0.205), _horizCamDir=new THREE.Vector3();   // the DEEP BLUE below the horizon — a DARKER, deeper deep-ocean navy (Ben 07-21): low R/G, still blue-dominant but lower value so the under-horizon band reads as deep ocean at ALL hours
-// PINE TREELINE — a distant forest silhouette on the horizon, shown ONLY toward azimuths where REAL land continues
-// past the fog wall. A per-azimuth mask samples the actual terrain heightfield (surfaceH, pure noise — no chunks needed)
-// in the band just beyond the render edge; sea/shore/thin spits in that band → no pines. Recomputed only on movement.
-const _PN=128, _pineMaskData=new Uint8Array(_PN*4);
-const _pineMask=new THREE.DataTexture(_pineMaskData,_PN,1,THREE.RGBAFormat); _pineMask.wrapS=THREE.RepeatWrapping; _pineMask.minFilter=THREE.LinearFilter; _pineMask.magFilter=THREE.LinearFilter; _pineMask.needsUpdate=true;
-const _uPine={value:new THREE.Color(0.078,0.157,0.071)};   // = the DARKEST textured pixel in the leaf tile, rgb(20,40,18)
-// THE HORIZON PINES' PALETTE, one place for both halves of it. The canopy green and the woody band beneath it are two separate
-// uniforms updated in two separate places (updateSky, ~250 lines apart) and Ben has now asked three times for the pair to be
-// darker — 07-20 vibrancy, 08-04 "slightly darker at source", 08-05 "MUCH too light". Every one of those was a scale on these
-// same six numbers, so they live here as the palette, and _pineTone is the scale that moves.
-const PINE_GREEN=[0.034,0.090,0.029];   // approved 07-20 rev3 / 08-04
-const PINE_BAND =[0.050,0.040,0.030];   // dark woody brown — trunks and the shadowed forest floor, not foliage
-const _pineTone={ g:0.60, b:0.60 };     // 08-05: a 40% cut on both, hue held. __hc.pineTone({green,band}) moves it live.
-// THE SILHOUETTE'S SHAPE, as four shared numbers (Ben 08-04: "the peaks of the pines are still too volatile", after the same
-// note on 07-20 and 07-27). The canopy height was 24 + treeline*18 + spike + crown — a 24-to-55-block envelope, so adjacent
-// columns could differ by more than the trees are tall, and the crown terms ride at 235 cycles per turn on top of that.
-// Base up and swing down keeps the treeline standing as tall on average while cutting how far it jumps: measured as the
-// standard deviation of the per-column silhouette top, in pixels, by bench/assert-treeline-look.mjs.
-// SHARED BY REFERENCE with pineUnderMat, and that is not tidiness: the woody band reproduces this canopy term for term to
-// clip itself against, so an amplitude that lived in one shader and not the other would tear the join between them.
-// SHORTER (Ben 08-04: "skybox pines became extremely tall im not sure why"). The honest finding first, because it is not what it
-// looks like: measured by differencing the layer in and out of the frame, the silhouette is 37.1 px per column against 42.3 with
-// the pre-08-04 constants — 12% SHORTER, at the same vantage, and the skirt below it is occluded either way. What changed is
-// context. The phantom coast was pulled in this morning, and that phantom is the part that TAPERS down into the horizon, so
-// cutting it back left more of the view as full-height real forest (columns covered went 79% -> 72%). At the same time the dark
-// ocean band behind their base was removed and their colour went to 81%, so the same trees stand in much more contrast.
-// So the base comes down: 29 -> 25, which puts the mean canopy near 34 blocks against the 39.6 it was before any of today.
-const _uTreeBase={value:25.0}, _uTreeAmp={value:10.0}, _uSpikeAmp={value:0.6}, _uCrownAmp={value:0.55};
-// THE SKIRT IS NOT A LEVER, measured: 0.22, 0.12 and 0.06 all give a silhouette 37 px per column with a p90 of 64. It hangs
-// below the treeline's own ground line, which is exactly where real terrain stands in front of it — the same wall the woody
-// band's downward extent ran into. Left at its shipped 0.22 and kept as a uniform only so the next person can re-price it in
-// one call instead of four edits: __hc.treeShape({skirt}).
-const _uSkirt={value:0.22};
 const _uPineFog=new THREE.Color(0.1,0.13,0.2), _stormBlue=new THREE.Color(0.09,0.12,0.19), _fogShellCol=new THREE.Color(0xbfc4cc);
 // =====================================================================
-//  BACKGROUND MOUNTAINS (Ben 08-10: "I want to add depth ... I also want background mountains", "all hyperrealistic")
+//  WHY THERE WERE SKYBOX PINES, AND WHY THE PROBLEM THEY SOLVED IS STILL HERE
+//  (scrapped 2026-08-11 — Ben: "the mountains and skybox pines need scrapped, only save the foundational logic of
+//  why we included the skybox pines")
 // =====================================================================
-// The horizon had two layers and no mass behind either of them: past the treeline the frame was bare sky, which is why
-// an elevated shore vista reads flat however well the near ground is lit (bench/results/vista-morning-0.png).
+// THE ISLAND ENDS AT THE RENDER WALL, AND THE WALL IS A CLIFF OF NOTHING. Terrain is meshed out to CFG.RENDER_DIST
+// chunks and no further, so a forest that runs to the horizon in the heightfield stops dead on a ragged chunk
+// boundary with sky behind it. From anywhere with a view out, that edge reads as the world running out rather than
+// as distance, and no amount of fog hides it: fog makes the ending softer, not further away.
 //
-// TWO RANGES, AND THE DEPTH IS IN THE HAZE, NOT THE GEOMETRY. A single ridge silhouette reads as a cut-out whatever
-// shape it is given. What makes a real mountain vista deep is aerial perspective: each range further back is paler,
-// bluer and lower in contrast than the one in front, because there is more atmosphere in the way. So the near range is
-// drawn at uDist and the far one at 1.9x that, and the far one is mixed much harder toward the sky colour. That single
-// relationship does more for depth than any amount of ridge detail.
+// THE TREELINE PAINTED THE WORLD'S OWN CONTINUATION. A 128-step per-azimuth mask sampled surfaceH in the band just
+// BEYOND the wall — pure noise, so it needed no chunks and cost nothing — and wherever that band held tree-capable
+// ground it drew a silhouette at the wall's own distance. So the forest appeared to carry on past the last streamed
+// chunk instead of ending on a cliff.
 //
-// RIDGED noise, not plain noise: 1-|2n-1| creases at its maxima, which is what gives a skyline sharp peaks and rounded
-// valleys instead of the rolling dune profile plain fBm produces. Same hash/nz pair the treeline uses, so the two
-// silhouettes are cut from the same grain and cannot drift into different visual languages.
+// TWO THINGS MADE IT WORK, and they are what to carry into whatever answers this next. It was anchored to the WALL
+// DISTANCE — not to the camera, which makes the backdrop follow you, and not to the island, which buries it behind
+// the real edge canopy. And its haze was the TERRAIN'S OWN fog term evaluated at that distance (exp2 at the wall,
+// weather and hour included), never a colour chosen by eye; every version that picked its own colour read as a
+// sticker on the sky.
 //
-// THE ROCK COLOUR IS DERIVED FROM THE SKY, never authored flat. uSky is the same uniform the ocean band and the pines
-// read, so the range warms at dawn, greys under overcast and goes blue at dusk along with everything else in the frame.
-// A fixed grey would be correct at exactly one hour and wrong at the other twenty-three, and cohesion is the whole point.
-// DEFAULT OFF, and that is a statement about the LOOK, not the wiring. The layer renders (paired on/off moves 8.1% of
-// the frame) and the architecture is right, but at the shore vantage it reads as a pale fog bank rather than as rock,
-// and shipping that on by default would put a white band across every horizon in the game. Turn it on with
-// __hc.mountains({on:true}). What is NOT yet known, and is the next thing to establish: where in the frame it is
-// actually drawing. A band-crop A/B read 152.7 with it on and 152.66 with it off -- identical -- while a whole-frame
-// A/B moved 8.1%, so the visible pale band and the layer are in different places and every colour number taken off
-// that crop was measuring sky. Find the layer's real extent first (dump the frame with uOn as the only variable and
-// difference it per row), then tune rock/haze/snow against a crop that is genuinely on it.
-const _uMtn={ h:{value:620.0}, d:{value:1700.0}, haze:{value:0.10}, snow:{value:0.72}, on:{value:1}, dark:{value:0.85} };
-const mountainMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, side:THREE.BackSide, fog:false,
-  uniforms:{ uSky:_uSky, uFogCol:{value:_uPineFog}, uDay:globalU.uDay, uCamY:{value:CFG.SEA+2}, uWx:{value:0},
-    uSunAz:{value:0}, uHeight:_uMtn.h, uDist:_uMtn.d, uHaze:_uMtn.haze, uSnow:_uMtn.snow, uOn:_uMtn.on, uDark:_uMtn.dark },
-  vertexShader:_horizVert, fragmentShader:[
-  'precision highp float; varying vec3 vPos;',
-  'uniform vec3 uSky, uFogCol; uniform float uDay, uCamY, uWx, uSunAz, uHeight, uDist, uHaze, uSnow, uOn, uDark;',
-  'float hash(float n){ return fract(sin(n)*43758.5453); }',
-  'float nz(float x){ float i=floor(x),f=fract(x); return mix(hash(i),hash(i+1.0),f*f*(3.0-2.0*f)); }',
-  'float ridge(float x){ return 1.0-abs(2.0*nz(x)-1.0); }',
-  // Four octaves, ridged on the first three and plain on the last: the plain term is scree and tree texture on the
-  // flanks, and ridging it as well put creases at that scale too, which read as noise rather than as rock.
-  'float range(float az, float sd, float f){ return ridge(az*f+sd)*0.60 + ridge(az*f*2.13+sd*1.7)*0.27 + ridge(az*f*4.70+sd*2.3)*0.10 + nz(az*f*9.10+sd)*0.03; }',
-  'void main(){',
-  '  if(uOn<0.5) discard;',
-  '  vec3 d=normalize(vPos); float elev=d.y; float az=atan(vPos.z,vPos.x);',
-  // The base sits a touch BELOW the true horizon so the range never floats: the sea band and the treeline both draw
-  // over its foot, and a gap there is the one artefact that instantly reads as a pasted-on backdrop.
-  '  float horiz=-0.010;',
-  '  if(elev<horiz) discard;',
-  // A LOW-FREQUENCY ENVELOPE OVER THE RIDGE NOISE. Without it every bearing carries the same amplitude and the skyline
-  // reads as one repeating profile dragged round the horizon. The envelope is what gives a range massifs in some
-  // directions and low saddles in others, which is the difference between a mountain range and a texture.
-  // Two envelope octaves, and a deep one: a single 0.30+0.70 term still held the skyline at a near-constant height
-  // right across the frame, which reads as a wall rather than as a range. This lets whole bearings drop to a quarter
-  // height while others carry the massifs.
-  '  float envN=(0.16+0.84*nz(az*1.15+3.1))*(0.55+0.45*nz(az*2.7+18.3));',
-  '  float envF=(0.14+0.86*nz(az*0.85+9.7))*(0.55+0.45*nz(az*2.1+27.4));',
-  '  float hN=uHeight*envN*(0.34+0.66*range(az, 11.3, 6.0));',
-  '  float hF=uHeight*1.55*envF*(0.28+0.72*range(az, 51.7, 3.7));',
-  '  float dN=uDist, dF=uDist*1.9;',
-  '  float topN=hN/sqrt(dN*dN+hN*hN), topF=hF/sqrt(dF*dF+hF*hF);',
-  '  float isNear; float top; float sd;',
-  '  if(elev<topN){ isNear=1.0; top=topN; sd=11.3; }',
-  '  else if(elev<topF){ isNear=0.0; top=topF; sd=51.7; }',
-  '  else discard;',
-  '  float t=clamp((elev-horiz)/max(top-horiz,1e-4),0.0,1.0);',   // 0 at the foot of the range, 1 at its skyline
-  // FORM FROM THE REAL SUN. The slope's facing is approximated by the derivative of the ridge across azimuth, so a
-  // flank turned toward the sun's bearing lifts and the one away from it falls. Without this the range is a flat
-  // stencil: the ridge line is interesting and everything under it is one value.
-  '  float dAz=az-uSunAz; float face=cos(dAz);',
-  '  float slope=(range(az+0.004,sd,6.0)-range(az-0.004,sd,6.0))*26.0;',
-  '  float lit=clamp(0.5+0.5*face+slope*0.55,0.0,1.0);',
-  '  float sun=mix(0.62,1.28,lit)*mix(0.45,1.0,uDay);',
-  // Rock, snow and the atmosphere between. The snowline is noisy so it does not read as a contour drawn round the peak.
-  // ROCK STAYS ROCK. Mixing 0.42 toward the sky put the range within a few levels of the sky it stands against, and a
-  // silhouette that shares its background's value has no shape at all. 0.18 is enough to keep it tied to the hour.
-  // THE TONE CURVE IS WHY EVERY EARLIER VALUE WAS TOO BRIGHT. AgX at exposure 1.05 maps linear 0.25 to about 150 of
-  // 255, so a rock colour that looks dark as a linear triple lands mid-grey on screen -- measured, the range read
-  // [145,148,152] against a sky of [147,164,175], the same luminance with the colour taken out, which is the exact
-  // recipe for fog. Working backwards from the wanted result instead: a near ridge at roughly 95 of 255 needs about
-  // 0.09 linear AFTER haze, so the rock underneath it has to sit near 0.05.
-  '  vec3 rock=mix(vec3(0.014,0.017,0.026), uSky, 0.04)*sun;',
-  // SNOW ONLY ON WHAT IS ACTUALLY HIGH, and only near the summit. The gate here was smoothstep(0.15,0.55,top*7.0),
-  // which for a range subtending 0.097 rad evaluates to exactly 1 -- so every peak was snow-capped over its top 45%,
-  // and with a near-white cap that turned the whole band into what read as a fog bank. Two changes: the cap starts
-  // much further up the slope, and the gate is on the range's own angular height against a threshold it can fail.
-  '  float snowT=uSnow+0.07*nz(az*54.0+sd);',
-  '  float snow=smoothstep(snowT, snowT+0.13, t)*smoothstep(0.055,0.115,top);',
-  // Snow seen across fifteen hundred blocks of air is not white. It is the brightest thing on the range and still
-  // lands well under the sky, or the peak punches a hole in the horizon.
-  '  vec3 col=mix(rock, mix(vec3(0.16,0.18,0.23), uSky, 0.22)*mix(0.55,1.10,uDay), snow*0.80);',
-  // AERIAL PERSPECTIVE. Haze rises with range and falls with height up the slope, because the air column you look
-  // through is deepest at the foot of a mountain and shallowest at its summit. This is the term that carries the depth.
-  // MEASURED, not assumed: uSky is (0.60,0.68,0.78) and uFogCol (0.77,0.77,0.80) in daylight, so the haze TARGET is
-  // very nearly white and a little of it goes a long way. The first build mixed the far range 0.71 of the way there,
-  // which put the whole thing within a few levels of the sky it stands against. Arithmetic for the values below, with
-  // a haze colour near 0.68 linear: near 0.94*0.056 + 0.06*0.68 = 0.09 (about 100 of 255), far 0.80*0.056 + 0.20*0.68
-  // = 0.18 (about 133). That separation between the two ranges IS the depth.
-  // THE FOOT DISSOLVES, THE PEAKS DO NOT. This is what removes the ruled horizontal line the range was standing on.
-  // A silhouette clipped at a constant elevation ends on a hard edge across the whole frame, which reads as a pasted
-  // backdrop however well the skyline above it is shaped -- and it is also wrong: the base of a distant range is the
-  // part you look through the most air to see, so it is the FIRST thing haze takes, not the last. Ramping haze from
-  // near-total at the foot to uHaze by mid-slope makes the range settle into the horizon instead of sitting on it,
-  // and no alpha trick is needed because at the foot the colour simply equals the sky.
-  '  float haze=mix(0.88, uHaze, smoothstep(0.0,0.22,t));',
-  '  haze=mix(haze, min(0.94, haze*1.45+0.16), 1.0-isNear);',
-  '  col=mix(col, uSky*0.78, haze);',
-  // NO desaturation toward grey. That term is what finished the job of turning this into fog: real distance does not
-  // drain colour toward neutral, it replaces it with the BLUE of the air in between, and the haze mix above already
-  // does exactly that. Pulling toward luma on top of it removed the one cue that says "far away" rather than "washed out".
-  // A FINAL VALUE MULTIPLIER, and it exists because the shader's own arithmetic does not predict the screen. Cutting
-  // the rock colour by 40% moved the rendered range by four levels of 255, not the thirty the linear maths says, so
-  // something downstream -- the bloom pass lifting off a bright adjacent sky is the likeliest -- sets the final value
-  // more than this material does. Until that is isolated, one honest dial beats another round of guessing at rock.
-  '  col*=uDark;',
-  '  float a=(1.0-smoothstep(0.0,0.030,elev-top+0.030))*0.35+0.65;',   // a soft two-pixel skyline edge, so the ridge is not aliased against the sky
-  '  a*=clamp(1.0-uWx*1.25,0.0,1.0);',                                  // weather fog owns the horizon, exactly as it does for the pines
-  '  gl_FragColor=vec4(col, a);',
-  '}'].join('\n') });
-const mountainLayer=new THREE.Mesh(_horizGeo, mountainMat); mountainLayer.frustumCulled=false; mountainLayer.renderOrder=-7; scene.add(mountainLayer);   // -7: behind the ocean band (-6) and the treeline (-5), which both draw over its foot
-
-const pineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, side:THREE.BackSide, fog:false,
-  uniforms:{ uMask:{value:_pineMask}, uPine:_uPine, uFogCol:{value:_uPineFog}, uSky:_uSky, uDrownSky:{value:1}, uHazeSky:{value:0}, uFogAmt:{value:0}, uWx:{value:0}, uCamY:{value:CFG.SEA+2}, uVisD:{value:CFG.RENDER_DIST*CK},
-    uTreeBase:_uTreeBase, uTreeAmp:_uTreeAmp, uSpikeAmp:_uSpikeAmp, uCrownAmp:_uCrownAmp, uSkirt:_uSkirt,
-    // ANCHORED TO THE ISLAND (Ben, option b). uPushD multiplies the projection range so the backdrop RECEDES as you sail
-    // away instead of following the camera, and uHide fades it out when the player is deep inland. Both are exactly 1.0
-    // from the shore outward to the coast, so the view Ben signed off is untouched. Set per frame in updateHorizon.
-    uPushD:{value:1}, uHide:{value:1}, uFogMul:{value:0.25}, uSolid:{value:0}, uGain:{value:0.35}, uSat:{value:1.7},
-    uEntAz:{value:0}, uEntW:{value:0.115}, uEntOn:{value:1} },   // the entranceway: bearing set per-frame in updateHorizon, half-width ~6.6 degrees (a mouth you could walk into, not a valley)   // uFogCol = scene fog pulled toward DARK STORMY BLUE (Ben 07-20), set per-frame in updateHorizon with uFogAmt/uCamY/uVisD; uWx = weather fog
-  vertexShader:_horizVert, fragmentShader:[
-  'precision highp float; varying vec3 vPos; uniform sampler2D uMask; uniform vec3 uPine, uFogCol, uSky; uniform float uFogAmt, uWx, uCamY, uVisD, uPushD, uHide, uFogMul, uSolid, uGain, uSat, uDrownSky, uHazeSky;',
-  'uniform float uTreeBase, uTreeAmp, uSpikeAmp, uCrownAmp, uSkirt;',
-  'uniform float uEntAz, uEntW, uEntOn;',   // THE DARK FOREST ENTRANCEWAY — world azimuth of the opening, its half-width in radians, and 0/1 for whether it is on this frame
-  'float hash(float n){ return fract(sin(n)*43758.5453); }',
-  'float nz(float x){ float i=floor(x),f=fract(x); return mix(hash(i),hash(i+1.0),f*f*(3.0-2.0*f)); }',
-  'float treeline(float az){ return nz(az*46.0)*0.72+nz(az*88.0)*0.22+nz(az*150.0)*0.06; }',     // canopy-height noise 0..1. WEIGHTED HARD TO THE LOW FREQUENCY (Ben 08-04, third time: "the peaks of the pines are still too volatile"). Cutting the amplitude alone moved the column-to-column jitter by 12% because the jitter is not the amplitude, it is the 88 and 150 terms: 0.55/0.30/0.15 -> 0.72/0.22/0.06 keeps the broad rounded skyline and takes out the needle teeth. MUST match pineUnderMat's copy term for term (the band clips against it)
-  'void main(){ vec3 d=normalize(vPos); float elev=d.y; float az=atan(vPos.z,vPos.x);',
-  '  vec4 msk=texture2D(uMask, vec2((az+3.14159265)/6.2831853, 0.5));',
-  '  float m=msk.r; if(m<0.2) discard;',   // this azimuth has no FOREST running on past the wall (sea/beach/bare rock) → no pines; cutoff trims faint fringe so the treeline ends cleanly
-  '  float dist=uVisD*uPushD;',                                                                  // project AT the wall: pushing the anchor to its true range made the backdrop angularly SMALLER than the rendered edge canopy in front of it → buried behind the real trees, invisible on flat forest. uPushD is 1.0 everywhere on and inside the coast — it only grows once you are out at sea, where there IS no edge canopy to be buried behind and the island is supposed to be shrinking
-  '  float hT=msk.g*'+WH.toFixed(1)+'-uCamY;',                                                   // forest terrain top at/past the fog wall, relative to the eye (per-azimuth, sampled alongside the mask)
-  '  float spike=pow(abs(sin(az*170.0)),2.0)*4.0*uSpikeAmp;',                                    // gentle wide crowns standing proud — the old ^6 needles read as spikes (Ben 07-20)
-  '  float crown=(pow(abs(sin(az*95.0)),5.0)*6.0 + pow(abs(sin(az*235.0)),9.0)*3.2)*uCrownAmp;',  // individual pointed conifer tips riding the broad treeline → more detail, SAME height envelope (Ben 07-27)
-  '  float hs=msk.b; float hTree=(uTreeBase+treeline(az)*uTreeAmp+spike+crown)*hs;',                      // canopy BLOCKS above that terrain, scaled by the per-azimuth B channel: 1 over real forest (clears the real 18..31-block pines at the edge), tapering to 0 down the phantom coastline → the treeline DESCENDS into the horizon instead of ending as a wall
-  // ---- THE DARK FOREST ENTRANCEWAY ---- a mouth in the treeline at one fixed bearing: the trees part, the canopy drops to a
-  // low lintel, and what is behind them is black. Cut from the SAME treeline math as everything else (it scales hTree and
-  // tints the pine colour) rather than pasted on as a separate object, so it tracks the horizon, the taper and the haze.
-  '  float dA=az-uEntAz; dA=atan(sin(dA),cos(dA));',                                             // shortest signed angle to the opening — atan(sin,cos) so it wraps correctly across the +-PI seam instead of tearing there
-  '  float e=clamp(1.0-abs(dA)/max(uEntW,1e-4),0.0,1.0);',                                       // 1 at the centre of the mouth → 0 at its jambs
-  '  float ment=uEntOn*smoothstep(0.10,0.58,e)*smoothstep(0.35,0.80,hs);',                       // FLAT-TOPPED core with defined jambs → an opening with sides, not a soft dent. Gated on hs so it can only appear where the treeline stands at full canopy, never on the phantom coast taper where it would read as a hole in the horizon.
-  // A DARK OPENING, NOT A NOTCH OF SKY. The first version cut hTree to 0.30 over the mouth, and that read wrong for a reason
-  // worth writing down: cutting the canopy away exposes whatever is BEHIND the pine layer, which is the sky and the ocean
-  // ring — both brighter than the trees. So the "dark entranceway" came out as the lightest patch on the treeline, which is
-  // the exact inversion of the thing. The silhouette now only DIPS (a lintel of branches across the top, the trees visibly
-  // parting) and the darkness carries the read: the band stays filled, and what fills it is nearly black.
-  '  hTree*=mix(1.0,0.78,ment);',
-  '  float jamb=smoothstep(0.02,0.22,e)*(1.0-smoothstep(0.22,0.48,e))*uEntOn*smoothstep(0.35,0.80,hs);',   // a narrow ring at the mouth's SIDES — the trunks flanking the opening, which catch light and frame the void. An opening reads as an opening because of its jambs.
-  '  if(hTree<1.2) discard;',
-  '  float tip=hT+hTree;',
-  '  float base=hT/sqrt(dist*dist+hT*hT), top=tip/sqrt(dist*dist+tip*tip), bottom=base-0.22*max(hs,0.35);',   // WORLD-anchored elevations; generous under-skirt
-  '  float sink=(1.0-smoothstep(0.05,0.5,hs))*0.06; base-=sink; top-=sink; bottom-=sink;',        // the taper SINKS below the horizon line as it ends — the last trees slip under the water/ground edge, so the run never ends with a floating gap (Ben 07-20: whatever is down there cannot be seen)
-  '  if(elev>top || elev<bottom) discard;',                                                      // jagged silhouette band; green skirt extends below the terrain join (terrain in front occludes it)
-  '  float t=clamp(((elev-bottom)/max(top-bottom,1e-4))-0.03,0.0,1.0);',                         // 0 at the fog-bound base → 1 at the tips; the -0.03 lifts the fade-off boundary 3% higher up the silhouette (Ben 07-20)
-  '  float under=(1.0-smoothstep(0.0,0.11,t))*smoothstep(0.05,0.35,hs);',                        // THE UNDERTREE SEAM (Ben 07-28): the bottom of the silhouette is the forest FLOOR under the canopy, the darkest thing on the horizon. Gated on hs so the taper past the shore still drowns in haze instead of ending on a dark line. It tints the pine COLOUR only — an earlier version also suppressed the fog wash here so the seam could not be washed out, and that read as the fog disappearing from the skybox pines altogether (Ben 07-28). The haze stays; the seam lives under it.
-  '  float col=nz(az*130.0);',                                                                    // per-tree column id → each tree its own brightness (depth between trees)
-  '  float shade=0.58+col*0.30+nz(az*540.0)*0.12;',                                              // per-tree brightness + fine needle/bark grain
-  '  vec3 pine=uPine*shade*(0.66+0.46*t);',                                                       // darker shaded base → brighter tips = depth up each tree
-  '  pine+=uPine*0.55*smoothstep(0.72,1.0,t)*col;',                                              // sunlit catch-light on the upper crowns of some trees
-  '  pine*=mix(1.0,0.28,under);',                                                              // …and a BLACK SEAM along the base: the band of shadow under the trees, which is what makes a treeline read as a forest with depth rather than a cut-out ridge
-  '  float mdark=ment*(1.0-0.42*smoothstep(0.58,1.0,t));',                                       // darkest at the FLOOR of the opening, easing off toward the lintel — the gradient is what makes it read as depth receding into the wood rather than as a flat black rectangle
-  '  pine*=mix(1.0,0.045,mdark);',                                                               // INSIDE THE MOUTH: near-black. This is the point of the feature — an opening in a treeline is the darkest thing on the horizon, because you are looking down an unlit corridor of trunks.
-  '  pine*=1.0+0.40*jamb;',                                                                      // …and the flanking trunks lift, so the void has edges
-  '  pine*=uGain;',
-  '  pine=max(vec3(0.0), mix(vec3(dot(pine,vec3(0.2126,0.7152,0.0722))), pine, uSat));',
-  '  float fog=clamp(uFogAmt*uFogMul*(1.0-0.18*t),0.0,1.0);',                                            // fade the whole silhouette into the fog the terrain fades to (density-driven → matches weather/day)
-  '  fog*=mix(1.0,0.12,mdark);',                                                                // …and the haze is held OFF the mouth, or by day the white fog wash would fill the opening and it would read as a bright notch — the exact inversion of the thing. Local to the entranceway only: the tree fog itself is untouched (Ben 07-28 said the horizon pines were explicitly NOT the tree-fog complaint).
-  // WHAT THE TAPER DROWNS TOWARD, which is a different question from whether it drowns. It has to drown — that is Ben's,
-  // 07-20, so the last trees slip under the horizon rather than ending on a wall — but it was drowning toward uFogCol,
-  // which is ~0.77 linear, a near-white. Wherever this term reached 1 the band was uFogCol EXACTLY, and no dial above it
-  // could be seen at all: dropping uGain 1.0 -> 0.25 only moved the band from lum 89 to 64, because most of it was not
-  // pine at any gain. The mountains had the identical fault and it is fixed there the same way (uSky*0.78, see
-  // mountainMat): distance should carry the BLUE of the air, not drain toward white.
-  // GATED ON THE DROWN ITSELF, so this is bit-identical over real forest. Where hs is over 0.22 the drown is 0, the
-  // target is still uFogCol to the last digit, and the treeline sits in exactly the air the terrain in front of it fades
-  // to. Only the phantom coastline past the real forest — the part that was pinned white — moves.
-  '  float drown=1.0-smoothstep(0.0,0.22,hs);',
-  // THE TAPER IS NOT WHY THE TREELINE READS PALE, and the resume file said it was. Measured with this exact dial at
-  // the shore vantage at noon, against a frame-to-frame noise floor taken with the dial held still: switching the
-  // taper's target from uFogCol to the sky moves 0.31% of the frame, and those pixels go 93.0 -> 57.2. Real, and the
-  // right thing, but the band the resume file measures (rows 336-385) sits over REAL forest, where hs is over 0.22 and
-  // the drown never fires at all. What holds that band at 66 against the real canopy's 27 is the ORDINARY haze on the
-  // line below, which mixes toward uFogCol - the same fault, in the term next door. uHazeSky is the dial for it and it
-  // ships at 0 AND IT SHOULD: swept 0 / 0.5 / 1 it moves the band 72.35 / 72.15 / 72.03, which is a fifth of the noise
-  // between two screenshots of the same frame. THE HAZE IS NOT THERE TO BE RETARGETED. At this vantage uFogAmt is 0.072
-  // and uFogMul 0.25, so `fog` is 0.018 - under two per cent - and the band is the PINE COLOUR almost undiluted.
-  // SO THE TREELINE IS PALE BECAUSE OF THE TONE CURVE, not because of anything it is mixed with. uPine is (0.02,0.054,
-  // 0.017) linear and uGain 0.35 takes it to about 0.006, and AgX at exposure 1.05 renders that at 72 of 255. That is
-  // also why last session's gain sweep 1.0 -> 0.25 - a fourfold cut - only moved the band 89 -> 64: on this curve the
-  // toe is nearly flat, so a multiplier costs a quarter of what its arithmetic says. Anything that wants this band at
-  // the real canopy's 27 has to be chosen by working backwards from the 8-bit value, not forwards from the shader.
-  '  vec3 airCol=uSky*0.78;',
-  '  vec3 hazeCol=mix(uFogCol, airCol, max(uHazeSky, drown*uDrownSky));',
-  '  fog=max(fog, drown);',                                              // …and past the shore the taper drowns COMPLETELY in fog — but only at the very end, so the concave ease-out (the treeline landing tangent to the ground, curving gently up) stays VISIBLE before the haze takes it (Ben 07-20)
-  '  gl_FragColor=vec4(mix(pine,hazeCol,fog), mix(smoothstep(0.2,0.45,m),smoothstep(0.10,0.22,m),uSolid)*clamp(1.0-uWx*1.25,0.0,1.0)*uHide); }'].join('\n') });   // SOLID silhouette with a quick edge fade; WEATHER FOG fades the whole layer OUT (Ben 07-20: at night the color-wash was invisible — near-black washing to near-black — so the pines punched dark holes through the fog bank; in fog the shell owns the horizon)
-const pineLayer=new THREE.Mesh(_horizGeo, pineMat); pineLayer.frustumCulled=false; pineLayer.renderOrder=-5; scene.add(pineLayer);   // over the ocean seam
-// =====================================================================
-//  THE DARK WOODY BAND UNDER THE TREELINE (Ben 07-29: "horizon pines do NOT have a dark edge underneath them, just copy
-//  them, turn them into a dark/woody band with the same behavior")
-// =====================================================================
-// pineMat already has an "undertree seam": it darkens the lowest 11% of the silhouette to 28% brightness. It does not
-// read. Two reasons, and they compound. It is a MULTIPLY on a colour that is already nearly black at the bottom of its
-// own tip-gradient (pine = uPine*shade*(0.66+0.46*t), so t=0 is 66% before the seam touches it), and then the fog wash
-// is applied AFTER it — at full strength by day — so whatever darkness survives is immediately washed back toward the
-// haze. Darkening it further inside the same layer just fights the same two terms.
+// The dark forest ENTRANCEWAY — the mouth in the treeline, Ben's own feature — lived inside that shader and goes
+// with it. It was a bearing resolved once to the most densely forested direction and handed to the shader as a live
+// azimuth every frame, which is what kept it a PLACE on the horizon rather than a screen-space effect.
 //
-// So this is a SECOND LAYER, exactly as asked: the same cylinder, the same mask, the same per-azimuth ground height and
-// hs taper, the same sink, the same fog and weather behaviour, the same entranceway. The only difference is what it
-// draws — a solid dark woody band from the under-skirt up through the first few blocks of trunk, in its own colour,
-// with its own reduced fog exposure so the haze cannot erase it.
-//
-// IN FRONT OF THE PINES, AND BOUND INSIDE THEM (Ben's follow-up). renderOrder -4.9 puts it over the treeline rather
-// than behind it, so it is a band ON the wood and not a shape glimpsed through it. And it is CLIPPED to the pine
-// silhouette: this shader recomputes the pines' own canopy height from the identical treeline/spike/crown noise and
-// clamps the band's top to it, discarding wherever the pines themselves would discard. So the band can never poke
-// above the crowns or spill past the ends of the treeline — its extent is a strict subset of the pines' extent.
-// Ben: "not dark enough, and also too tall". 0.050/0.040/0.030 -> 0.020/0.016/0.012. The fragment multiplies this by up to
-// 1.10 (0.55+0.55*col) before the fog mix, so the base has to sit lower than the colour you want to see.
-// The hue as well as the blend (Ben: "the pines still contrast"). 0.020/0.016/0.012 is red-dominant, which is what clashes
-// against foliage at EVERY height rather than only at the join. 0.017/0.017/0.013 is the same darkness with the red pulled
-// level with the green: shadowed forest floor rather than orange bark, and it still reads as wood, not leaves.
-// Darker again, and red back on top, after Ben looked: 0.017/0.017/0.013 -> 0.012/0.0105/0.008. Level red and green made it
-// read olive rather than wood, and the whole point of this band is that it is BROWN and dark.
-// Deeper and more saturated (Ben: "a little bit more vibrant/deeper"). 0.012/0.0105/0.008 is nearly neutral, which reads as
-// grey-brown mud; pulling blue down and red up gives the same darkness with real wood in it.
-const _uPineBand=new THREE.Color(0.0145,0.0100,0.0055);   // dark woody brown — trunks and the shadowed forest floor, not foliage
-const pineUnderMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, side:THREE.BackSide, fog:false,
-  uniforms:{ uMask:{value:_pineMask}, uBand:{value:_uPineBand}, uFogCol:{value:_uPineFog}, uFogAmt:{value:0}, uWx:{value:0},
-    uTreeBase:_uTreeBase, uTreeAmp:_uTreeAmp, uSpikeAmp:_uSpikeAmp, uCrownAmp:_uCrownAmp,
-    uCamY:{value:CFG.SEA+2}, uVisD:{value:CFG.RENDER_DIST*CK}, uBandH:{value:6.0},   // band height in blocks. 9 was "too tall" with the whole of it solid brown, 5 put the wood 20 rows BELOW the canopy ("it is too low"), and 8 fixed nothing while running the brown 95 rows DOWN -- because the gap under the foliage is set by the FADE's extent, not by this. 6 with a short fade: the wood meets the leaves and does not become the horizon
-    // THE PINES' OWN COLOUR, shared by reference from _uPine — the same uniform pineMat draws the treeline with, so the band
-    // fades into whatever the wood is at this hour instead of into a guess at it.
-    uPineCol:_uPine,
-    // The SAME anchoring the treeline gets, and it has to be the same to the term: the band is clipped against a
-    // reproduction of the canopy above it, so a projection range that differed by any amount would tear the join.
-    uPushD:{value:1}, uHide:{value:1}, uFogMul:{value:0.25}, uSolid:{value:0}, uGain:{value:0.35}, uSat:{value:1.7},
-    // HOW MUCH OF THE ATMOSPHERE THIS BAND IS ALLOWED TO BREATHE — the dial behind Ben's "the bottom of skybox pines are NOT
-    // affected by volumetric fog still". The pines run at uFogAmt (0.93 at the wall); the band ran at a hard-coded 0.26 of it
-    // capped at 0.42, three times less, which is exactly a strip that ignores the haze. Uniforms so the two numbers can be
-    // bracketed against a frame instead of guessed at (__hc.bandFog).
-    // 0.93/0.97 is not a taste: it is EXACTLY the expression the canopy's own uFogAmt is clamped to one screenful above
-    // (clamp(_ef*0.93,0,0.97)). Same distance, same air, same exposure — measured in clear daylight the band's base went from
-    // 24 luminance below the haze it should be dissolving into to 8, while still reading 10% darker than the canopy above it,
-    // so it is wood receding rather than a strip pasted over the horizon.
-    uFogMul:{value:0.93},     // THE SKIRT, DOUBLED, because Ben asked for the wood further down and this is the term that puts it there. 0.22 was "the same
-    // generous under-skirt the pines use"; 0.45 takes the wood about twice as far below the treeline base, and it is a uniform so
-    // his eye can settle it in one round rather than in four: __hc.bandFog(null,null,skirt).
-    uFogCap:{value:0.97}, uBandSkirt:{value:0.45},
-    uEntAz:{value:0}, uEntW:{value:0.115}, uEntOn:{value:1} },
-  vertexShader:_horizVert, fragmentShader:[
-  'precision highp float; varying vec3 vPos; uniform sampler2D uMask; uniform vec3 uBand, uFogCol, uPineCol; uniform float uFogAmt, uWx, uCamY, uVisD, uBandH, uPushD, uHide, uFogMul, uFogCap, uBandSkirt;',
-  'uniform float uTreeBase, uTreeAmp, uSpikeAmp, uCrownAmp;',
-  'uniform float uEntAz, uEntW, uEntOn;',
-  'float hash(float n){ return fract(sin(n)*43758.5453); }',
-  'float nz(float x){ float i=floor(x),f=fract(x); return mix(hash(i),hash(i+1.0),f*f*(3.0-2.0*f)); }',
-  'float treeline(float az){ return nz(az*46.0)*0.72+nz(az*88.0)*0.22+nz(az*150.0)*0.06; }',     // IDENTICAL to pineMat — the clip depends on reproducing the canopy exactly, so this noise must match term for term
-  'void main(){ vec3 d=normalize(vPos); float elev=d.y; float az=atan(vPos.z,vPos.x);',
-  '  vec4 msk=texture2D(uMask, vec2((az+3.14159265)/6.2831853, 0.5));',
-  '  float m=msk.r; if(m<0.2) discard;',                                                         // identical gate to the pines, so the band exists exactly where the treeline does
-  '  float dist=uVisD*uPushD;',
-  '  float hT=msk.g*'+WH.toFixed(1)+'-uCamY;',                                                   // the same forest floor the pines stand on
-  '  float hs=msk.b;',
-  // --- reproduce the PINES' canopy so the band can be clipped to it ---
-  '  float dA0=az-uEntAz; dA0=atan(sin(dA0),cos(dA0));',
-  '  float e0=clamp(1.0-abs(dA0)/max(uEntW,1e-4),0.0,1.0);',
-  '  float ment=uEntOn*smoothstep(0.10,0.58,e0)*smoothstep(0.35,0.80,hs);',
-  '  float spike=pow(abs(sin(az*170.0)),2.0)*4.0*uSpikeAmp;',
-  '  float crown=(pow(abs(sin(az*95.0)),5.0)*6.0 + pow(abs(sin(az*235.0)),9.0)*3.2)*uCrownAmp;',
-  '  float hTree=(uTreeBase+treeline(az)*uTreeAmp+spike+crown)*hs; hTree*=mix(1.0,0.78,ment);',            // including the entranceway dip, so the band follows the mouth's lintel down
-  '  if(hTree<1.2) discard;',                                                                    // wherever the pines vanish, so does the band
-  '  float tip=hT+hTree;',
-  '  float bandTop=min(hT+uBandH*hs, tip);',                                                     // BOUND INSIDE: the band can never be taller than the canopy standing on the same column
-  '  float base=hT/sqrt(dist*dist+hT*hT), topE=bandTop/sqrt(dist*dist+bandTop*bandTop);',
-  '  float pineTop=tip/sqrt(dist*dist+tip*tip);',
-  // HOW FAR DOWN THE WOOD REACHES (Ben, asked which of three readings of "extend farther out" he meant: "further down, taller
-  // band"). The extra height goes DOWNWARD, toward the water, not upward: the band's top is the seam blend with the canopy and
-  // that is locked (bb96697), and uBandH raises exactly that top. So the under-skirt is the dial, and there are two bottoms --
-  // bottom0 is the skirt the seam was tuned against and t stays keyed to it, so the blend at the top is bit-identical however
-  // far the wood is extended; bottom is where it actually stops. Below bottom0, t clamps to 0, which is the darkest wood in
-  // the ramp, so the extension reads as the trunks continuing down rather than as a second gradient.
-  '  float bottom0=base-0.22*max(hs,0.35);',
-  '  float bottom=base-uBandSkirt*max(hs,0.35);',
-  '  float sink=(1.0-smoothstep(0.05,0.5,hs))*0.06; base-=sink; topE-=sink; bottom-=sink; bottom0-=sink; pineTop-=sink;',   // the same sink, so the band slips under the waterline where the treeline does
-  '  topE=min(topE,pineTop);',                                                                   // clipped in ELEVATION as well as in blocks — belt and braces, since the two conversions are non-linear
-  '  if(elev>topE || elev<bottom) discard;',
-  '  float t=clamp((elev-bottom0)/max(topE-bottom0,1e-4),0.0,1.0);',                             // 0 at the ORIGINAL skirt, 1 at the top of the band — see bottom0
-  '  float col=nz(az*130.0);',                                                                   // the SAME per-tree column id as the pines, so trunks line up with the crowns above them
-  '  vec3 band=uBand*(0.55+0.55*col)*(1.0-0.35*t);',                                             // darkest at the floor, easing up toward where the canopy takes over; per-column variation gives it depth instead of a flat stripe
-  '  band*=mix(1.0,0.05,ment);',                                                                 // the entranceway runs through this layer too, or the mouth would have a lit floor across it
-  // AND THE HAZE STOPS BLEACHING IT. 0.45 with a 0.72 ceiling meant that by day this band was mixed up to seventy-two per cent
-  // into the fog colour, which is why it "wasnt darkened" -- the darkness was being erased downstream of the colour. 0.26 with
-  // a 0.42 ceiling keeps it a dark strip in daylight while still letting it drown past the shore on the line below.
-  // FIFTH PASS (Ben: "the bottom of skybox pines are NOT affected by volumetric fog STILL"). The fix before this one routed only
-  // the weather amount uWx into the mix, so a fog BANK took the band, and ordinary atmospheric haze -- the volumetric fog that
-  // is present every hour of every day -- still could not, because these two constants choked it to a third of what the canopy
-  // above it breathes. That is the whole bug: at the wall the pines sit at uFogAmt 0.93 and this band sat at 0.42, so however
-  // far the treeline dissolved, the wood under it stayed a hard dark strip at a fixed strength. Same distance, same air, so it
-  // gets the same exposure; the reserve that keeps it reading as wood rather than vanishing is uFogMul/uFogCap, which are now
-  // uniforms because the level Ben's eye accepts is a number only a frame can settle.
-  '  float fog=clamp(uFogAmt*uFogMul*(1.0-0.25*t),0.0,uFogCap);',
-  // Past the shore the band drowns completely, like everything else on this horizon. This looked like the dial behind Ben's "the
-  // wooden part of the horizon pines should extend farther out" -- hs is the mask's land strength, so the bound is where the wood
-  // gives up -- and it is not: taken to 0.15, 0.10 and 0.05 from the shore view it moved the brown extent by 12 columns of 1280
-  // and 126 pixels of 12,682, i.e. nothing. Whatever "farther out" is, it is not this term, so do not spend another pass here.
-  '  fog=max(fog, 1.0-smoothstep(0.0,0.22,hs));',
-  // WEATHER FOG REACHES THE BAND (Ben: "the bottom (brown) of horizon pines is not affected by fog"). Cutting the daylight
-  // haze exposure to 0.26/0.42 to stop the band being bleached also left it ignoring a fog BANK, so in weather that washed the
-  // whole treeline pale the wood underneath stayed a hard dark strip. uWx is the live weather-fog amount the pines already use;
-  // it now drives a floor on this mix, so a fog bank takes the band with everything else while clear-air haze still cannot.
-  '  fog=max(fog, clamp(uWx*1.15,0.0,0.95));',
-  // THE JOIN FADES (Ben: "the contrast from the skybox horizon pines to the brown part below it should fade together").
-  // The band drew at full strength right up to its clipped top and the pines began at full strength immediately above it, so
-  // two saturated fields met on a hard line. Two terms, both keyed on t, which is already 0 at the skirt and 1 at the top:
-  //   * the colour eases toward the PINES' own colour over the upper third, so the wood becomes foliage rather than meeting it;
-  //   * the alpha tapers to nothing over the upper quarter, and because this layer draws IN FRONT (renderOrder -4.9) that
-  //     reveals the real pine silhouette behind it progressively instead of covering it up to a cut edge.
-  // Together they are a gradient across about a third of the band's height rather than an edge.
-  // SECOND PASS, after Ben looked: "the pines still contrast". Measured at the join, luminance was already smooth -- the
-  // biggest row-to-row step was 1.92 -- so what reads as contrast is the HUE: green canopy (84,104,78) sitting on brown
-  // (71,71,59). The first attempt only began blending at 62% of the band's height and only reached 85% pine, which left most
-  // of the band frankly brown right up to the foliage. Now the colour starts easing at 30% and arrives fully at the pines'
-  // own colour, and the alpha tapers across the whole upper half, so the band is wood at the very base and foliage by the
-  // time it meets the canopy.
-  // THIRD PASS. Ben: "the pines are missing that brown part, and it wasnt darkened either, day or night". Measured, he is
-  // exactly right: blending from 0.30 of the band's height turned most of it pine-coloured, so by day the band read
-  // rgb(75,84,64) -- greener than brown -- and only 20% darker than the canopy above it. The fade is now confined to the top
-  // third and stops at 0.75, so two thirds of the band is frankly brown wood and only its meeting line dissolves; the alpha
-  // holds solid until the last fifth. The join stays soft because the fade still spans about 12 rows on screen, which was
-  // enough to kill the step in the v1 measurement; what it no longer does is eat the band.
-  // FOURTH PASS. The gap between the foliage and the wood is this fade's LENGTH, which is what "it is too low" was measuring:
-  // with the fade over the top third the brown began 20 rows under the canopy, and raising the band to 8 left that gap exactly
-  // where it was while running the brown 95 rows downward instead. So the fade is short now -- the top fifth for colour, the
-  // top tenth for alpha -- and the wood reaches the leaves. It is still a dozen-odd rows of gradient on screen, which is what
-  // keeps it from being the hard line Ben rejected in v1.
-  '  band=mix(band, uPineCol, smoothstep(0.80,1.0,t)*0.7);',
-  '  float aTop=1.0-smoothstep(0.90,1.0,t);',
-  '  gl_FragColor=vec4(mix(band,uFogCol,fog), smoothstep(0.2,0.45,m)*clamp(1.0-uWx*1.25,0.0,1.0)*aTop*uHide); }'].join('\n') });
-// renderOrder -4.9 = IN FRONT of the pines (-5), not behind: a band ON the wood, not a shape seen through it.
-// PARENTED TO pineLayer, not added to the scene. pineLayer.visible is toggled from twelve places — the Backrooms
-// atmosphere, its restore, the boss's stage-2 whiteout and its restore, the void, and three QA hooks — and a sibling
-// layer would have had to be added to every one of them, with the next new toggle silently leaving a dark band hanging
-// in the Backrooms. As a child it inherits visibility and the per-frame camera position for free, and renderOrder is
-// independent of the hierarchy so it still draws in front.
-const pineUnderLayer=new THREE.Mesh(_horizGeo, pineUnderMat); pineUnderLayer.frustumCulled=false; pineUnderLayer.renderOrder=-4.9; pineLayer.add(pineUnderLayer);
-// WHERE THE ENTRANCEWAY IS. It has to be a PLACE, not a screen-space effect: a bearing that stays put as you walk, so the
-// opening is always the same gap in the same wood. So it resolves once to a world POINT far past the island in the most
-// densely forested direction, and the shader is handed the live azimuth from the camera to that point every frame.
-// Chosen from the actual heightfield rather than a hard-coded compass bearing — a literal angle lands on open sea for half
-// of all islands, and the mask would then discard the pines there and the feature would silently not exist.
-let _ENT_PT=null;
-// QA OVERRIDE for the mouth's strength. The only confound-free way to measure what the entranceway contributes to a frame is
-// to toggle it with everything else held — the treeline's own column-to-column variation is ~20 levels, the same order as the
-// mouth, so a crop statistic cannot separate them (it reported the mouth as still present after it had been faded to zero).
-let _entOnForce=null, _entMouthOn=false;   // the dark forest entranceway is off by default — see the note at uEntOn
-function entrancePoint(){ if(_ENT_PT) return _ENT_PT;
-  const IC=islandStats(); let bestA=0, bestS=-1;
-  for(let a=0;a<64;a++){ const th=a/64*6.2831853, dx=Math.cos(th), dz=Math.sin(th); let s=0;
-    for(let r=IC.R*0.45; r<=IC.R*1.05; r+=IC.R*0.06){ const h=surfaceH(Math.round(IC.x+dx*r), Math.round(IC.z+dz*r));
-      if(h>CFG.SEA+4 && h<=CFG.SEA+44) s++; }                                    // the tree-capable band — the same test the pine mask uses, so a bearing that scores here is a bearing that will actually draw pines
-    if(s>bestS){ bestS=s; bestA=th; } }
-  _ENT_PT={ x:IC.x+Math.cos(bestA)*IC.R*6.0, z:IC.z+Math.sin(bestA)*IC.R*6.0, a:bestA, score:bestS };   // 6 island-radii out: far enough that walking the island barely swings the bearing, so the mouth holds still on the horizon
-  return _ENT_PT; }
-let _pineLastX=1e9, _pineLastZ=1e9, _pineLastRD=0;
-function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.position.copy(camera.position); const day=globalU.uDay.value;
-  // The range follows the camera like the other two horizon layers but never rotates, so it stays world-anchored: the
-  // peaks hold their bearings as the player turns, which is the whole difference between a mountain and a wallpaper.
-  mountainLayer.position.copy(camera.position);
-  mountainMat.uniforms.uCamY.value=camera.position.y;
-  { const sd=globalU.uSunDir.value; mountainMat.uniforms.uSunAz.value=Math.atan2(sd.z, sd.x); }   // slope shading reads the REAL sun bearing, so the lit flank turns with the day
+// The BACKGROUND MOUNTAINS behind it are scrapped in the same breath and leave nothing behind but one finding: two
+// ridged ranges at different distances, the far one mixed much harder toward the sky. The depth was in the aerial
+// perspective and not in the geometry — a single ridge silhouette reads as a cut-out whatever shape it is given.
+function updateHorizon(){ oceanLayer.position.copy(camera.position); const day=globalU.uDay.value;
   // The far sea sits at sea level in WORLD terms while its parent follows the camera, so its local y is the difference.
   // Scaled from the live render wall outward, so it begins exactly where chunk water stops and never leaves a gap or
   // double-draws over real water -- and it moves with the render-distance slider instead of being pinned to one setting.
@@ -6066,103 +5686,15 @@ function updateHorizon(){ oceanLayer.position.copy(camera.position); pineLayer.p
     { const cd=_horizCamDir; camera.getWorldDirection(cd); const yw=Math.atan2(cd.z,cd.x);
       oceanMat.uniforms.uCamYaw.value=yw; skyMat.uniforms.uCamYaw.value=yw; } }   // view azimuth for the horizon bow — the sky's band now curves with the ocean's, so the whole horizon reads as a globe edge
   _uSky.value.setRGB(lerp(0.12,0.60,day), lerp(0.15,0.68,day), lerp(0.20,0.78,day));            // horizon-band air (legacy uniform)
-  // 0.050/0.102/0.046 -> 0.042/0.112/0.036 (Ben: the horizon pines should be a little more vibrant and deeper). Same luminance
-  // band, green pushed up and the red/blue flanks pulled down, so the treeline reads as forest rather than as grey-green haze.
-  // SLIGHTLY DARKER AT SOURCE (Ben 08-04: "the actual colors they use need to be slightly darker, not some pass over them").
-  // 0.042/0.112/0.036 -> 0.034/0.090/0.029, the same colour at 81%: the green stays where he approved it and only the value
-  // moves. Deliberately this constant and not a multiply further down the shader — a darkening pass over the top would also
-  // take the fog wash, the tip gradient and the undertree seam with it, and those are all tuned against each other.
-  // AND DARKER AGAIN, 08-05 (Ben: "skybox pines... thier color pallets both the green and brown is MUCH too light, it needs to be
-  // made darker"). 0.034/0.090/0.029 at 60%, and the woody band with it — see PINE_BAND below, because he named both and the two
-  // have to move together or the trunks read as lit ground under a dark canopy. HUE HELD EXACTLY: all three channels take the same
-  // factor, so this is the value moving and nothing else, which is the form of the change he accepted twice before.
-  // __hc.pineTone({green,band}) is the live A/B — this is a palette, and a palette is settled by his eye, not by a statistic.
-  { const dim=0.10+0.90*day, base=PINE_GREEN; _uPine.value.setRGB(base[0]*_pineTone.g*dim, base[1]*_pineTone.g*dim, base[2]*_pineTone.g*dim);   // DARK forest green matching the real edge trees (Ben 07-20 rev3); at NIGHT it goes near-BLACK silhouette
-    { const _ef=1-Math.exp(-Math.pow(CFG.RENDER_DIST*CK*scene.fog.density,2)); pineMat.uniforms.uFogAmt.value=clamp(_ef*0.93,0,0.97);   // MATCH the farthest rendered chunks' fog wash exactly (exp2 at the wall distance — includes weather + day/night via density), held a hair under so the tip-gradient still reads
-      // FOG IN THE TREES: BLACK AT NIGHT, WHITE BY DAY (Ben 07-27 fix-list #7, finished 07-28). The first pass took only the
-      // "fade to black" half of that and applied it at every hour — a flat 10% of the fog colour — so by day the horizon
-      // treeline read as a black cutout pasted on a bright sky instead of a wood dissolving into white haze. The fade target
-      // is now the live fog colour scaled BY THE HOUR: full strength by day, so the pines melt into white air, and a tenth of
-      // it pulled toward storm blue at night, so distance into the forest reads as depth going dark.
-      _uPineFog.copy(scene.fog.color).lerp(_stormBlue, 0.55*(1-day)).multiplyScalar(0.10+0.90*day);
-      // REAL FOLIAGE FADES TO THE SAME PLACE THE BACKDROP DOES. Copied from _uPineFog rather than recomputed, because the
-      // whole complaint was that the treeline and the wood in front of it were darkening at two different rates — deriving
-      // both from one expression is the only way that cannot drift again.
-      _uFolNight.value.copy(_uPineFog);
-      const _wf2=(typeof weather!=='undefined'?(weather.fog||0):0); if(_wf2>0.01) _uPineFog.lerp(scene.fog.color, Math.min(1,_wf2*0.95)); pineMat.uniforms.uWx.value=_wf2; oceanMat.uniforms.uWx.value=_wf2; }   // WEATHER FOG overrides the hour's tint AND fades the layer's alpha out (see pineMat fragment). Toward the LIVE fog colour, not the pale constant _fogShellCol: that constant is a daylight grey (0xbfc4cc), so in night rain the treeline was washed pale while everything around it was black
-    pineMat.uniforms.uCamY.value=camera.position.y; pineMat.uniforms.uVisD.value=CFG.RENDER_DIST*CK;   // per-frame (jumps/climbs shift the eye between mask recomputes; RD slider moves the wall)
-    // ---- ANCHORED TO THE ISLAND (Ben, option b: "do (b)") ----
-    // The backdrop is a cylinder centred on the CAMERA, so it went everywhere the player went: from 510 blocks out at sea
-    // the treeline stood at the same apparent distance and height as from the beach — sail away and the trees follow you —
-    // and from an inland lake it appeared as detached slabs of pine-and-band hanging over open water, nearer than the real
-    // coast. The geometry cannot simply be moved to the island: its angular size at the shore IS the view that was signed
-    // off. So the ANCHORING is done in the projection instead, and only outside the coast, where it cannot touch that view.
-    //   uPushD: past the coast the projection range grows with how far out you are, so the island shrinks and sinks as a
-    //           real one would. Exactly 1.0 everywhere on and inside the coast.
-    //   uHide:  deep inland the layer fades out, which is what removes the floating slabs over inland water. The threshold
-    //           is well inside the coast so that the shore keeps it at full strength with margin.
-    { const IS=islandStats(), dx=camera.position.x-IS.x, dz=camera.position.z-IS.z, d=Math.hypot(dx,dz), R=Math.max(1,IS.R);
-      // ONLY OVER WATER (Ben: "horizon pines get smaller as you run around, and change size, they should just stay the
-      // same"). R is the MEAN coast radius, so on a bay the player is already past it while still running on the beach --
-      // and the recession then grew and shrank with every step along the shore, which is the size change he is watching.
-      // Standing on land pins it at 1.0 whatever the distance says, so running around the island cannot alter the treeline
-      // at all; it only recedes once you are actually out on the sea, which is the case it was built for.
-      const _sh=(typeof surfaceH==='function')?surfaceH(Math.round(camera.position.x),Math.round(camera.position.z)):0;
-      const overWater=_sh<=CFG.SEA;
-      const outward=overWater?Math.max(0, d-R):0;                                                       // 0 anywhere inside the coast, and 0 anywhere on land
-      pineMat.uniforms.uPushD.value = 1 + outward/Math.max(1, CFG.RENDER_DIST*CK);                      // at the shore exactly 1.0; one wall-distance out at sea, twice the range → half the angular height
-      pineMat.uniforms.uHide.value  = clamp((d-R*0.45)/(R*0.40), 0, 1);                                 // 0 by 0.45R (deep inland), full by 0.85R, so the shore and everything seaward is untouched
-      // THE MOUTH CLOSES AS IT STOPS BEING RESOLVABLE. An opening reads as an opening because of its jambs and its lintel;
-      // those are a fixed number of DEGREES of the band, and uPushD halves the band's angular height every wall-distance out
-      // to sea. So from far enough offshore the structure goes sub-pixel and all that survives is the near-black fill with the
-      // haze held off it — a soft dark smear pinned to one bearing, which is the "dark blob on the treeline" Ben photographed
-      // from 900 blocks out in three separate frames. Derived from uPushD rather than given its own distance constant, because
-      // uPushD IS the thing that makes the mouth unresolvable: full at the shore, gone by 1.5 wall-distances out.
-      // OFF BY DEFAULT (Ben 08-04: "there is this weird black thing on them", circled in his screenshot from out at sea). That
-      // black thing is this feature working exactly as written — the dark forest entranceway drives the pines to 4.5% of their
-      // brightness at one fixed bearing, and from the water, with no scale around it, it reads as a smudge on the treeline
-      // rather than as a mouth you could walk into. The whole mechanism is intact and one call brings it back:
-      // __hc.entMouth(1). _entMouthOn is what decides whether the distance fade runs at all.
-      pineMat.uniforms.uEntOn.value = _entOnForce!=null ? _entOnForce
-                                    : (_entMouthOn ? clamp((2.5 - pineMat.uniforms.uPushD.value)/1.5, 0, 1) : 0); }
-    { const EP=entrancePoint();   // the mouth's live bearing — atan2(z,x) to match the shader's atan(vPos.z,vPos.x) exactly
-      pineMat.uniforms.uEntAz.value=Math.atan2(EP.z-camera.position.z, EP.x-camera.position.x); }
-    // THE DARK WOODY BAND rides on exactly the same per-frame state as the pines — same fog amount, same weather, same
-    // eye height, same wall distance, same entranceway bearing. Copied deliberately rather than shared: the moment these
-    // two drift the band stops being clipped to the treeline and starts poking out of it.
-    { const pu=pineUnderMat.uniforms, pm=pineMat.uniforms;
-      pu.uFogAmt.value=pm.uFogAmt.value; pu.uWx.value=pm.uWx.value;
-      pu.uCamY.value=pm.uCamY.value; pu.uVisD.value=pm.uVisD.value;
-      pu.uPushD.value=pm.uPushD.value; pu.uHide.value=pm.uHide.value;   // the anchoring too, or the band projects at a different range than the canopy clipping it and the join tears
-      pu.uEntAz.value=pm.uEntAz.value; pu.uEntW.value=pm.uEntW.value; pu.uEntOn.value=pm.uEntOn.value;
-      const dimB=(0.10+0.90*day)*_pineTone.b; _uPineBand.setRGB(PINE_BAND[0]*dimB, PINE_BAND[1]*dimB, PINE_BAND[2]*dimB); }   // goes near-black at night with the canopy above it; the tone factor is Ben's 08-05 "MUCH too light" on the brown, and it moves with the green above
-    // the pine-visibility mask depends only on player position + render distance, so recompute the 128 rays +
-    // re-upload the DataTexture only when the player has actually moved (or RD changed). <2 blocks of parallax
-    // is sub-pixel at the horizon → gating this is exact, not approximate. Cost: 128×8 surfaceH calls, occasional.
-    if(Math.abs(player.pos.x-_pineLastX)+Math.abs(player.pos.z-_pineLastZ) > 2 || CFG.RENDER_DIST!==_pineLastRD){ _pineLastX=player.pos.x; _pineLastZ=player.pos.z; _pineLastRD=CFG.RENDER_DIST;
-      const visD=CFG.RENDER_DIST*CK;   // the fog wall — where rendered terrain ends and the backdrop stands in
-      const IC=islandStats(), vx=player.pos.x-IC.x, vz=player.pos.z-IC.z, vd=Math.hypot(vx,vz)||1;
-      const cf=clamp((vd-IC.R*0.30)/(IC.R*0.35),0,1);   // how COASTAL you are (0 deep inland → 1 at/near the shore): only near the coast does the forever-coast illusion engage
-      for(let i=0;i<_PN;i++){ const az=(i/_PN)*6.2831853-3.14159265, dx=Math.cos(az), dz=Math.sin(az);
-        let forest=0, hMax=0;   // forest = tree-capable samples (the band real pines grow in, with tolerance); hMax = the tallest forest floor — the ground the silhouette stands on
-        for(let s=0;s<8;s++){ const r=visD-12+s*16; const h=surfaceH(Math.round(player.pos.x+dx*r),Math.round(player.pos.z+dz*r));   // band starts just INSIDE the wall so the anchor covers the last rendered trees' own ground
-          if(h>CFG.SEA+4 && h<=CFG.SEA+44){ forest++; if(h>hMax) hMax=h; } }   // beach/shore/deep-sea past the wall → no pines hovering where no tree could grow
-        let vis=clamp((forest/8-0.45)/0.4,0,1);   // mostly forest beyond the horizon → pines; open sea straight out → none
-        // THE COAST CONTINUES FOREVER (Ben 07-20): standing near the shore looking seaward, the treeline must run on
-        // along your LEFT and RIGHT periphery — and TAPER down the receding coastline into the horizon waterline
-        // (Ben's sketch), not stand as a full-height wall across the beach. k: 1 landward/tangent → 0 at the
-        // seaward cone edge; it scales BOTH the phantom forest's ground height and (via B) its canopy height.
-        // PULLED IN (Ben 08-04: "skybox pines extend too far off of shore"). This term is the phantom coast — an INVENTED
-        // treeline along the periphery, which is what "the coast continues forever" (07-20) asked for, and it is why pines
-        // stand over open water in his screenshot. Two numbers widen the clear seaward cone and steepen the ramp into it:
-        // 0.62 -> 0.35 takes the dead-ahead clear arc from about +-52 degrees to +-70, and 0.15/0.6 -> 0.30/0.80 means the
-        // phantom only reaches full strength close to tangent. The real forest arcs are untouched — those come from `vis`,
-        // sampled off the actual heightfield, and this only ever raises vis where cont exceeds it.
-        const cosA=(dx*vx+dz*vz)/vd, k=clamp((0.35-cosA)/0.35,0,1), cont=cf*smooth(0.30,0.80,k);
-        let hs=vis>0?1:0;   // real forest arcs keep full canopy
-        if(cont>vis){ vis=cont; hMax=Math.max(hMax, CFG.SEA+1+Math.round(7*k*k)); hs=Math.min(1,0.05+0.95*k*k); }   // QUADRATIC taper — the treeline dives hard into the horizon at its seaward end instead of easing out
-        _pineMaskData[i*4]=Math.round(vis*255); _pineMaskData[i*4+1]=Math.round(clamp(hMax/WH,0,1)*255); _pineMaskData[i*4+2]=Math.round(hs*255); }   // G = ground height, B = canopy-height scale → the silhouette descends the coast to the horizon
-      _pineMask.needsUpdate=true; } } }
+  // THE FOLIAGE'S NIGHT FADE TARGET, and all that survives of the horizon backdrop. _uPineFog was the colour the
+  // treeline dissolved into, and real leaves fade to the same place (_uFolNight) — deriving both from one expression
+  // is the only reason they ever stopped darkening at two different rates. The name stays: it is what the underwater
+  // fog override and the QA readouts call it.
+  { _uPineFog.copy(scene.fog.color).lerp(_stormBlue, 0.55*(1-day)).multiplyScalar(0.10+0.90*day);
+    _uFolNight.value.copy(_uPineFog);
+    const _wf2=(typeof weather!=='undefined'?(weather.fog||0):0);
+    if(_wf2>0.01) _uPineFog.lerp(scene.fog.color, Math.min(1,_wf2*0.95));
+    oceanMat.uniforms.uWx.value=_wf2; } }
 function bakeSky(){ if(!USE_SKYCUBE) return; try{ const prevTone=renderer.toneMapping; renderer.toneMapping=THREE.NoToneMapping;   // bake LINEAR (background render tonemaps once, like the old dome)
   skyCubeCam.position.set(0,0,0); skyCubeCam.update(renderer, skyScene); renderer.toneMapping=prevTone; }catch(e){} }
 
@@ -9965,17 +9497,13 @@ function applyWaterFog(){
   if(sub){ const fc=scene.fog.color; fc.setRGB(0.03,0.13,0.16); scene.background=_uwBG.copy(fc);   // murky teal — the volumetric near-limit colour
     scene.fog.density=0.34;                                                                    // VOLUMETRIC: visibility closes to ~8-9 blocks in every direction
     if(waterMat&&waterMat.uniforms&&waterMat.uniforms.uFogDensity)waterMat.uniforms.uFogDensity.value=0.34;
-    // THE HORIZON BACKDROP IS UNDERWATER TOO. updateSky -> updateHorizon has already run this frame and set the treeline's fog
-    // from the SURFACE density, so with visibility closed to nine blocks the distant forest and the woody band under it were
-    // still being drawn at 0.07 fog: a crisp pine horizon hanging in murk you cannot see your own hands through. Their materials
-    // declare fog:false and mix by hand, so three's fog cannot reach them -- this is the same "which of the three fog systems
-    // does this material actually read" bug as the band's haze path, in its third place. Set here rather than in updateHorizon
-    // because submersion is only known after it has run, and it recomputes both from the real density the moment you surface.
-    _uPineFog.copy(fc);
-    // 1.0, not the 0.97 the surface clamp holds them under: that ceiling exists so the treeline's tip gradient still reads
-    // against the sky, and at 0.34 density there is nothing at the render wall left to read -- it is all water.
-    pineMat.uniforms.uFogAmt.value=1.0; pineUnderMat.uniforms.uFogAmt.value=1.0; }
-  // above water: updateSky already set the normal horizon fog this frame
+    // FOLIAGE IS UNDERWATER TOO. updateSky -> updateHorizon has already run this frame and set _uPineFog from the
+    // SURFACE density, and the leaf materials fade to it — so with visibility closed to nine blocks the trees around
+    // you were still fading toward the air's colour. They declare fog:false and mix by hand, so three's fog cannot
+    // reach them. Set here rather than in updateHorizon because submersion is only known after it has run, and it is
+    // recomputed from the real density the moment you surface.
+    _uPineFog.copy(fc); }
+  // above water: updateSky already set the normal fade colour this frame
 }
 
 // =====================================================================
@@ -19455,7 +18983,22 @@ const OFFHAND_SWAY=1.20;   // gun sway multiplier while the offhand slot holds a
 const HAND_ADS_KEEP=0.18;                          // Q2: an aimed weapon keeps 15-20% of hip amplitude
 const HAND_KICK=0.30, HAND_K=140, HAND_D=13;       // footfall impulse, then omega 11.8 rad/s at damping 0.55 — rings down over about half a second, so a sprint stride never fully settles and a walk almost does
 const HAND_IDLE_Y=0.0045, HAND_IDLE_X=0.0035;      // breathing, deliberately subtle: about a fifth of a footfall
-const _hand={ y:0, vy:0, x:0, vx:0, t:0, left:false };
+// ---- THE HANDS LAG THE BODY (Ben 08-11: "when jumping around hands and items have no physics, jumping should bounce
+//      the hand, strafing should do the same") ----
+// ONE RULE FOR BOTH, AND NO NEW CALL SITES: a held object lags any CHANGE in the body's velocity, so the impulse is
+// -Δv on each axis. That single line is the jump (velocity goes up, hands lag down), the landing (velocity goes to zero
+// from below, hands carry on down), the free fall between them (arms float up under gravity), and the strafe — instead
+// of a hook in the jump code, a hook in the landing code and a third thing for strafing, each with its own feel to
+// tune and its own way of disagreeing with the other two. It reuses the footfall spring, so a jump landing mid-stride
+// rings down through the same one and cannot fight it.
+// THE LATERAL SHARE IS ITS OWN SPRING because it is NOT mirrored. The walk's sideways term splays the hands (right hand
+// +x, left hand -x); inertia moves both the same way, so mixing it into _hand.x would have you spread your arms when you
+// strafe instead of leaning your load. See the two separate reads in updateView.
+// GAINS ARE SET AGAINST HAND_KICK, which is the walk everyone has already signed off: a jump (Δv≈8) lands ~0.44, half
+// again a footfall's 0.30, and a strafe up to speed (Δv≈4.6) sums ~0.25, just under one. The clamp is for teleports and
+// respawns, which zero the velocity in one frame — a 16 m/s fall arrested by a respawn is not a wrist flick.
+const HAND_LAG_Y=0.070, HAND_LAG_X=0.090, HAND_LAG_MAX=0.9;
+const _hand={ y:0, vy:0, x:0, vx:0, t:0, left:false, sx:0, svx:0, pvy:0, plat:0 };
 // Called FROM the footstep, never on a timer of its own. power carries the weight of the step (a sprint lands harder).
 function handFootfall(power){ power=power||1;
   _hand.vy -= HAND_KICK*power;                                    // the body drops onto the planted foot: hands go DOWN first
@@ -19464,13 +19007,24 @@ function handFootfall(power){ power=power||1;
 function handMotion(dt){
   dt=Math.min(dt,0.05);                                           // a long frame integrates the spring into a spasm
   _hand.t+=dt;
+  // INERTIA FIRST, so this frame's impulse is integrated by this frame's spring step rather than sitting one frame stale.
+  // Lateral is measured along the body's RIGHT vector, so it is a strafe whichever way you are facing — and turning on the
+  // spot cannot register as one, because a rotation does not change the velocity's component along its own right vector by
+  // anything except what the legs actually did.
+  { const v=player.vel, rx=Math.cos(player.yaw), rz=-Math.sin(player.yaw);   // right = (-fz, fx) for forward (-sin,-cos) — the same pair every other site here derives
+    const lat=v.x*rx+v.z*rz;
+    const dvy=v.y-_hand.pvy, dlat=lat-_hand.plat;
+    _hand.pvy=v.y; _hand.plat=lat;
+    _hand.vy  -= clamp(dvy *HAND_LAG_Y, -HAND_LAG_MAX, HAND_LAG_MAX);
+    _hand.svx -= clamp(dlat*HAND_LAG_X, -HAND_LAG_MAX, HAND_LAG_MAX); }
   _hand.vy+=(-HAND_K*_hand.y - HAND_D*_hand.vy)*dt; _hand.y+=_hand.vy*dt;
   _hand.vx+=(-HAND_K*_hand.x - HAND_D*_hand.vx)*dt; _hand.x+=_hand.vx*dt;
+  _hand.svx+=(-HAND_K*_hand.sx - HAND_D*_hand.svx)*dt; _hand.sx+=_hand.svx*dt;   // the un-mirrored lateral: same spring, own state
   const t=_hand.t;
   const idleY=HAND_IDLE_Y*Math.sin(t*2.0), idleX=HAND_IDLE_X*Math.sin(t*1.3+1.1);
   // ADS scales the WHOLE thing, breath included: a sight that stops moving entirely reads as a HUD sprite pasted on the screen.
   const k = 1 - (1-HAND_ADS_KEEP)*clamp(view.adsT||0,0,1);
-  return { y:(_hand.y+idleY)*k, x:(_hand.x+idleX)*k }; }
+  return { y:(_hand.y+idleY)*k, x:(_hand.x+idleX)*k, lx:_hand.sx*k }; }
 let _swayPin=null;         // QA only (__hc.swayPin) — see the pin site in updateView
 // HOW HARD AN AIMED POSE ANSWERS THE SWAY (Ben 08-04: "the left/right sway of the scoped hunting rifle we added for
 // realism needs added to all guns all sights"). ONE set of numbers for EVERY sight. They used to live inline in each
@@ -19478,6 +19032,10 @@ let _swayPin=null;         // QA only (__hc.swayPin) — see the pin site in upd
 // were all written at 0.4, so the same breath moved the hunting rifle two and a half times as far and only the rifle
 // read as a held object. Tune here and every sight moves together; put a number back inline and they diverge again.
 const SWAY_POS=1.00, SWAY_ROT=0.60;
+// HOW LONG BRINGING A GUN TO THE EYE TAKES, in seconds, and it is a DURATION now rather than an exponential rate — see the
+// ramp in updateView. Lowering is quicker than raising because dropping a rifle off the cheek is gravity plus letting go,
+// while raising it is muscle: the same asymmetry the old rates had (13 up / 11 down), kept where it can be read.
+const ADS_RAISE=0.42, ADS_LOWER=0.34;
 // The direction a third-person shot actually goes: the look, plus the hand behind it. Returns the shared _tpsAimV, so callers
 // must consume it before calling again.
 const _tpsAimV=new THREE.Vector3();
@@ -19720,9 +19278,11 @@ function updateView(dt){ updateRecoil(dt);                                      
   // Written from a BASE every frame, never added to the current value: an offset that accumulates would walk the
   // hands off the side of the screen in a minute. The arm bases are the literals their groups are built with
   // (mainArm 0.32, offArm -0.32); offView carries its own baseX because its rest pose is per-item.
-  mainArm.group.position.x= 0.32+HM.x;
-  offArm.group.position.x =-0.32-HM.x;
-  if(offView.baseX==null) offView.group.position.x=-0.22-HM.x;   // no pose has laid a base down yet; when one has, the last writer near the end of updateView owns it
+  // HM.lx is ADDED, not mirrored, to every one of these (Ben 08-11: strafing moves the hands). HM.x splays the pair because
+  // that is what a stride does; inertia moves a carried load one way, so the two terms cannot share a sign convention.
+  mainArm.group.position.x= 0.32+HM.x+HM.lx;
+  offArm.group.position.x =-0.32-HM.x+HM.lx;
+  if(offView.baseX==null) offView.group.position.x=-0.22-HM.x+HM.lx;   // no pose has laid a base down yet; when one has, the last writer near the end of updateView owns it
   // THE HAND THAT IS RELOADING IS THE HAND THAT MOVES. The reload animation lives on the main viewmodel, so reloading the
   // offhand's gun waggled whatever the RIGHT hand happened to be holding. Only position.y is touched here, and only because
   // it is the one component rewritten from a base every frame — dipping the group's rotation would accumulate, since
@@ -19759,7 +19319,12 @@ function updateView(dt){ updateRecoil(dt);                                      
   // THE SWAY IS THE MAIN HAND'S, AND IT MUST NOT OUTLIVE THE GUN. view.swayX/swayY are written only inside the isGun branch below,
   // and tpsAimDir bends the over-the-shoulder aim axis by them — so holstering a rifle left its last wobble frozen in those two
   // numbers, and a gun carried in the LEFT hand then aimed down a stale axis belonging to a weapon no longer in your hands.
-  if(!isGun){ view.swayX=0; view.swayY=0; }
+  if(!isGun){ view.swayX=0; view.swayY=0;
+    // AND THE AIM RAMP HAS TO COME DOWN WITH IT. adsT is only advanced inside the isGun branch, so holstering an aimed
+    // rifle left it frozen at 1 — and adsT damps the hand spring to 18% (HAND_ADS_KEEP), so a pickaxe drawn out of an aim
+    // had visibly stiff hands until the next gun. It rides the same lower duration, so it looks like putting it down.
+    if((view.adsU||0)>0 || (view.adsT||0)>0){ view.adsU=clamp((view.adsU!=null?view.adsU:view.adsT)-dt/ADS_LOWER,0,1);
+      const u=view.adsU; view.adsT=u*u*(3-2*u); view.adsVel=0; } }
   // bolt cycle animation + fire-gating clock
   view.boltT=Math.max(0,(view.boltT||0)-dt); view.gunKick=Math.max(0,(view.gunKick||0)-dt*7);   // viewmodel kick decays (every gun bucks against the shoulder on fire)
   // EITHER HAND'S GUN MAY BE THE ONE RELOADING. This compared the running reload against heldSlot() alone, so with a gun in
@@ -19795,8 +19360,19 @@ function updateView(dt){ updateRecoil(dt);                                      
     const vert=view.gunVert;
     const lat=view.gunLat, bend=view.gunBend;   // the wall-bend signal is probed once above, for both hands
     // ===== SCOPE RAISE-TO-EYE: adsT eases 0..1 toward the aim INTENT; it drives the pose blend, PiP fade, FOV & sensitivity =====
+    // SLOWER, AND SMOOTH AT BOTH ENDS (Ben 08-11: "make ADS slower and smoother"). It was an exponential approach at rate
+    // 13 — which is the shape that reads as "snappy then mushy": the first frame carries the largest step (a fifth of the
+    // whole travel at 60 fps, a visible jolt out of the hip pose) and the last tenth crawls, so the sight both snaps AND
+    // takes forever to look settled. There is no duration in that formula either; "0.23 s" is only where it stops being
+    // visible, which is why it could not be slowed without making the tail worse.
+    //   So the phase is LINEAR IN TIME and the curve is smoothstep. That gives an exact duration to tune, zero velocity at
+    // both ends (no jolt leaving the hip, no crawl arriving at the cheek) and the fastest motion in the middle, where the
+    // eye reads it as weight rather than as lag. Everything downstream — the pose blend, PiP fade, FOV, sensitivity, the
+    // hands' ADS damping, adsVel — reads adsT and inherits the new shape for free.
     const aimGoal=view.ads?1:0, prevAdsT=view.adsT||0;
-    view.adsT = prevAdsT + (aimGoal-prevAdsT)*Math.min(1,dt*(view.ads?13:11));   // raise ~0.23s / lower ~0.27s — framerate-independent ease, never a snap
+    { const u0=(view.adsU!=null)?view.adsU:prevAdsT;
+      view.adsU=clamp(u0 + (aimGoal? dt/ADS_RAISE : -dt/ADS_LOWER), 0, 1);
+      const u=view.adsU; view.adsT=u*u*(3-2*u); }
     view.adsVel = (view.adsT-prevAdsT)/Math.max(dt,1e-4);                        // signed raise(+)/lower(-) speed, per second → feeds transition sway
     if(prevAdsT<0.85 && view.adsT>=0.85) view.settleT=0.28;                      // crossing into the cheek-weld kicks a brief settle oscillation
     view.settleT=Math.max(0,(view.settleT||0)-dt);
@@ -20021,7 +19597,7 @@ function updateView(dt){ updateRecoil(dt);                                      
   // THE RIGHT HAND'S SIDEWAYS SHARE OF THE HAND MOTION (#66c), added AFTER every pose branch because each of them
   // assigns view.group.position outright — set before them and it is simply overwritten. The vertical does not need
   // this: it is the b those branches already read.
-  view.group.position.x+=HM.x;
+  view.group.position.x+=HM.x+HM.lx;
   updateCrosshair(dt, isGun);   // the ring's size and its fade under a raised sight — one owner (see below)
   // ---- HOLOGRAPHIC RETICLE — parented to the CAMERA on the true aim axis (parallax-free, exactly the point of impact;
   //      the gun/window wobble AROUND it, and recoil moves reticle+aim together). Fades in as the eye comes on-axis. ----
@@ -22312,10 +21888,10 @@ function endPeel(){ if(!PEEL.on){ if(PEEL.patch){ for(let i=0;i<PEEL.PATCH_CAP;i
 function enterVoid(){ if(VOID.on)return; VOID.on=true; VOID.fshow=false; VOID.center.copy(player.pos); VOID.floor=Math.round(player.pos.y); VOID.floored=true;   // the flat clear surface engages IMMEDIATELY (Ben 07-21): the world is hidden the instant we enter, so the player stands on the flat white nothing right away — was gated on the (now-disabled) gold fractal morph completing, which left no floor
   if(typeof PEEL!=='undefined'){ if(PEEL.patch)PEEL.patch.visible=false; if(PEEL.flakes)for(const f of PEEL.flakes){ const o=f&&(f.g||f.m); if(o)o.visible=false; } }   // the world is fully STOLEN in the void → the peel WHITE decals + flakes vanish with it (chunkRoot is already hidden; these live on `scene` so they persisted = the white tiles still seen) (Ben 07-21)
   VOID.prev={ bg:scene.background, fogCol:scene.fog.color.clone(), fogD:scene.fog.density,
-    chunks:chunkRoot.visible, sky:(typeof skyDome!=='undefined')?skyDome.visible:null, pine:(typeof pineLayer!=='undefined')?pineLayer.visible:null,
+    chunks:chunkRoot.visible, sky:(typeof skyDome!=='undefined')?skyDome.visible:null,
     ocean:(typeof oceanLayer!=='undefined')?oceanLayer.visible:null, fogShell:(typeof fogShell!=='undefined')?fogShell.visible:null,
     rain:(typeof rainMesh!=='undefined')?rainMesh.visible:null, sun:sunLight.intensity, hemi:hemi.intensity, amb:(typeof ambient!=='undefined')?ambient.intensity:null };
-  chunkRoot.visible=false; if(typeof skyDome!=='undefined')skyDome.visible=false; if(typeof pineLayer!=='undefined')pineLayer.visible=false;
+  chunkRoot.visible=false; if(typeof skyDome!=='undefined')skyDome.visible=false;
   if(typeof oceanLayer!=='undefined')oceanLayer.visible=false; if(typeof fogShell!=='undefined')fogShell.visible=false; if(typeof rainMesh!=='undefined')rainMesh.visible=false;
   // PURE WHITE VOID (Ben 07-21): nothing visible at all — no trees, no sky, no ground plane, no clouds. Just
   // total heavenly white in every direction. The player still WALKS: the real terrain is invisible but remains
@@ -22366,7 +21942,7 @@ function _voidFractalStart(){ _voidFractalEnsure().then(()=>{ VOID.fshow=true; i
 function exitVoid(){ if(!VOID.on)return; VOID.on=false; VOID.floored=false; VOID.floor=null; const p=VOID.prev; VOID.prev=null;   // the world (and its real tile collision) returns
   if(typeof _notes!=='undefined')for(const n of _notes){ if(n.mesh)n.mesh.visible=true; }   // notes return with the world
   if(typeof PEEL!=='undefined' && PEEL.patch)PEEL.patch.visible=true;   // peel decals return with the world (Ben 07-21)
-  chunkRoot.visible=p.chunks; if(typeof skyDome!=='undefined'&&p.sky!=null)skyDome.visible=p.sky; if(typeof pineLayer!=='undefined'&&p.pine!=null)pineLayer.visible=p.pine;
+  chunkRoot.visible=p.chunks; if(typeof skyDome!=='undefined'&&p.sky!=null)skyDome.visible=p.sky;
   if(typeof oceanLayer!=='undefined'&&p.ocean!=null)oceanLayer.visible=p.ocean; if(typeof fogShell!=='undefined'&&p.fogShell!=null)fogShell.visible=p.fogShell;
   if(typeof rainMesh!=='undefined'&&p.rain!=null)rainMesh.visible=p.rain;
   scene.background=p.bg; scene.fog.color.copy(p.fogCol); scene.fog.density=p.fogD; sunLight.intensity=p.sun; hemi.intensity=p.hemi; if(typeof ambient!=='undefined'&&p.amb!=null)ambient.intensity=p.amb;
@@ -22757,20 +22333,20 @@ function brSetAtmo(zone){ scene.fog.density=0;                                  
   sunLight.castShadow=false;                                                                             // the sun is off in here — don't pay for its shadow pass; the troffer PointLights do the casting (see brxUpdateLights)
   if(typeof hemi!=='undefined'){ hemi.color.copy(_brWarmSky); if(hemi.groundColor)hemi.groundColor.copy(_brWarmGnd); } if(typeof ambient!=='undefined')ambient.color.copy(_brWarmAmb);   // WARM fill → dim ceilings/shadows stay yellow, never go cool-blue under the grade
   chunkRoot.visible=false;                                                                              // HIDE the voxel Backrooms (collision still reads the blocks) — the smooth PBR env renders instead
-  if(typeof skyDome!=='undefined')skyDome.visible=false; if(typeof pineLayer!=='undefined')pineLayer.visible=false;
+  if(typeof skyDome!=='undefined')skyDome.visible=false;
   if(typeof oceanLayer!=='undefined')oceanLayer.visible=false; if(typeof fogShell!=='undefined')fogShell.visible=false; if(typeof rainMesh!=='undefined')rainMesh.visible=false;
   if(typeof motionPass!=='undefined'&&motionPass)motionPass.uniforms.uEnabled.value=0;                   // kill the depth-reprojection smear inside — it was muddying every wall
   if(typeof gradePass!=='undefined'&&gradePass)gradePass.uniforms.uGrain.value=0.0;                       // NO FILM GRAIN inside (Ben 07-27). It was only set once on entry, so anything that touched the grade after that (the Settings slider, a quality change) brought it back — and against the new dark pooled lighting the grain was the loudest thing on screen. Re-asserted every frame here, restored by brRestoreAtmo.
   if(typeof _pixelScale!=='undefined'&&_pixelScale<1.0){ _pixelScale=1.0; if(typeof applyResolution==='function')applyResolution(); } }   // hold FULL internal resolution — no adaptive downscale blur
 function brApplyAtmo(zone){ if(!BR.prev)BR.prev={ bg:scene.background, fc:scene.fog.color.clone(), fd:scene.fog.density, sun:sunLight.intensity, hemi:hemi.intensity,
-    amb:(typeof ambient!=='undefined')?ambient.intensity:null, chunks:chunkRoot.visible, sky:(typeof skyDome!=='undefined')?skyDome.visible:null, pine:(typeof pineLayer!=='undefined')?pineLayer.visible:null,
+    amb:(typeof ambient!=='undefined')?ambient.intensity:null, chunks:chunkRoot.visible, sky:(typeof skyDome!=='undefined')?skyDome.visible:null,
     ocean:(typeof oceanLayer!=='undefined')?oceanLayer.visible:null, fog:(typeof fogShell!=='undefined')?fogShell.visible:null, rain:(typeof rainMesh!=='undefined')?rainMesh.visible:null,
     bloom:(typeof bloomPass!=='undefined'&&bloomPass)?bloomPass.strength:null, grain:(typeof gradePass!=='undefined'&&gradePass)?gradePass.uniforms.uGrain.value:null,
     hemiC:hemi.color.clone(), hemiG:hemi.groundColor?hemi.groundColor.clone():null, ambC:(typeof ambient!=='undefined')?ambient.color.clone():null }; brSetAtmo(zone);
   if(typeof bloomPass!=='undefined'&&bloomPass)bloomPass.strength=0.22;                                  // trim the fluorescent bloom-wash → textures stay crisp (Ben 07-27)
 }
 function brRestoreAtmo(){ const p=BR.prev; if(!p)return; scene.background=p.bg; scene.fog.color.copy(p.fc); scene.fog.density=p.fd; sunLight.intensity=p.sun; hemi.intensity=p.hemi; sunLight.castShadow=true;
-  if(typeof ambient!=='undefined'&&p.amb!=null)ambient.intensity=p.amb; chunkRoot.visible=(p.chunks!=null?p.chunks:true); if(typeof skyDome!=='undefined'&&p.sky!=null)skyDome.visible=p.sky; if(typeof pineLayer!=='undefined'&&p.pine!=null)pineLayer.visible=p.pine;
+  if(typeof ambient!=='undefined'&&p.amb!=null)ambient.intensity=p.amb; chunkRoot.visible=(p.chunks!=null?p.chunks:true); if(typeof skyDome!=='undefined'&&p.sky!=null)skyDome.visible=p.sky;
   if(typeof oceanLayer!=='undefined'&&p.ocean!=null)oceanLayer.visible=p.ocean; if(typeof fogShell!=='undefined'&&p.fog!=null)fogShell.visible=p.fog; if(typeof rainMesh!=='undefined'&&p.rain!=null)rainMesh.visible=p.rain;
   if(typeof bloomPass!=='undefined'&&bloomPass&&p.bloom!=null)bloomPass.strength=p.bloom; if(typeof gradePass!=='undefined'&&gradePass&&p.grain!=null)gradePass.uniforms.uGrain.value=p.grain;
   if(p.hemiC)hemi.color.copy(p.hemiC); if(p.hemiG&&hemi.groundColor)hemi.groundColor.copy(p.hemiG); if(typeof ambient!=='undefined'&&p.ambC)ambient.color.copy(p.ambC);   // restore light tints
@@ -25158,7 +24734,7 @@ function s2Flash(){ _s2FlashT=_S2_FLASH;                                        
   _surgeFlash.style.transition='opacity .05s'; _surgeFlash.style.opacity='1';
   setTimeout(()=>{ _surgeFlash.style.transition='opacity 1.5s'; _surgeFlash.style.opacity='0'; },110); }
 function _s2Restore(){ if(!_s2On)return; _s2On=false; const p=_s2Prev; _s2Prev=null; if(!p)return;   // MUST run before enterVoid() — otherwise the void snapshots our hidden layers and restores them hidden forever
-  if(typeof skyDome!=='undefined')skyDome.visible=p.sky; if(typeof pineLayer!=='undefined')pineLayer.visible=p.pine;
+  if(typeof skyDome!=='undefined')skyDome.visible=p.sky;
   if(typeof oceanLayer!=='undefined')oceanLayer.visible=p.ocean; if(typeof fogShell!=='undefined')fogShell.visible=p.shell;
   hemi.intensity=p.hemi; if(typeof ambient!=='undefined'&&p.amb!=null)ambient.intensity=p.amb; }
 function _stage2Sky(dt){
@@ -25167,11 +24743,11 @@ function _stage2Sky(dt){
   if(want && !_s2Fired){ _s2Fired=true; s2Flash(); }                                            // fires ONCE per stage-II entry, on every client that sees the turn (guests included)
   if(_s2FlashT>0)_s2FlashT=Math.max(0,_s2FlashT-(dt||0));
   if(want){
-    if(!_s2On){ _s2On=true; _s2Prev={ sky:(typeof skyDome!=='undefined')?skyDome.visible:null, pine:(typeof pineLayer!=='undefined')?pineLayer.visible:null,
+    if(!_s2On){ _s2On=true; _s2Prev={ sky:(typeof skyDome!=='undefined')?skyDome.visible:null,
       ocean:(typeof oceanLayer!=='undefined')?oceanLayer.visible:null, shell:(typeof fogShell!=='undefined')?fogShell.visible:null,
       hemi:hemi.intensity, amb:(typeof ambient!=='undefined')?ambient.intensity:null }; }
     const P=_s2Prev, f=_s2FlashT>0?Math.pow(_s2FlashT/_S2_FLASH,1.5):0;                         // 1 at the snap → 0 as it drains (all of it derived from the SAVED baseline, so re-asserting every frame never compounds)
-    if(typeof skyDome!=='undefined')skyDome.visible=false; if(typeof pineLayer!=='undefined')pineLayer.visible=false;
+    if(typeof skyDome!=='undefined')skyDome.visible=false;
     if(typeof oceanLayer!=='undefined')oceanLayer.visible=false; if(typeof fogShell!=='undefined')fogShell.visible=false;
     scene.background=_S2WHITE; _S2WHITE.setRGB(1,1,1);                                          // re-assert: updateSky copies the fog colour into any Color background
     scene.fog.color.setRGB(0.96+0.04*f, 0.96+0.04*f, 0.98+0.02*f);
@@ -26599,7 +26175,7 @@ const skyBirdGroup=new THREE.Group(); scene.add(skyBirdGroup); const skyBirds=[]
 // thing in the frame, which is what makes a distant bird read as an ink stroke instead of a silhouette (Ben 08-04, "these
 // weird black lines in the sky"). By DAY that is right: a bird against a bright sky is a dark shape. At night it has to sit
 // just under the air behind it, so it is mixed toward the horizon-air colour the sky and the pines already share — the same
-// treatment _uPine and _uFolNight get, for the same reason. It was also a new material per bird, five meshes deep.
+// treatment _uFolNight gets, for the same reason. It was also a new material per bird, five meshes deep.
 const _BIRD_DARK=new THREE.Color(0x191920), _birdMat=new THREE.MeshBasicMaterial({color:0x191920});
 // ONE MESH FOR THE BODY, HEAD AND TAIL, merged at build time. They were three separate meshes, which added two draw calls per
 // bird and up to sixteen with a flock in the air — and §0 of the light-and-beauty plan is explicit that this frame is
@@ -30365,61 +29941,9 @@ window.__hc={
   chime(x,z){ try{ const bx=Math.floor(x), bz=Math.floor(z), by=surfaceH(bx,bz)+2; setBlockWorld(bx,by,bz,BID.chime,true); chimes.push({x:bx+0.5,y:by+0.5,z:bz+0.5}); return {bx,by,bz}; }catch(e){ return {err:e.message}; } },   // QA: hang a chime at (x,z)
   place2(x,z,id,dy){ try{ const bx=Math.floor(x),bz=Math.floor(z),by=surfaceH(bx,bz)+1+(dy|0); setBlockWorld(bx,by,bz,BID[id]||BID.torch,true); return {bx,by,bz,id:id||'torch'}; }catch(e){ return {err:e.message}; } },   // QA: place any block at surface(x,z)+1+dy
   chimeState(){ try{ const out=[]; for(const k in _chimeFx2){ const f=_chimeFx2[k]; out.push({k,ax:+f.ax.toFixed(3),az:+f.az.toFixed(3),vx:+f.vx.toFixed(3),vz:+f.vz.toFixed(3),out:f.out,rang:+f.ring.toFixed(1)}); } return out; }catch(e){ return {err:e.message}; } },   // QA: live pendulum state per chime
-  // QA/bench: the island the backdrop is anchored to, and the two anchoring values for where the camera stands now.
-  // Both are needed as numbers: "identical from the shore" is a claim about uPushD and uHide being exactly 1.0 there,
-  // which a screenshot can only suggest.
+  // QA/bench: the island the world is generated around. Kept after the horizon backdrop was scrapped because the
+  // island centre and mean coast radius are what the village, the cathedral and the peak search all resolve against.
   isleStats(){ try{ const s=islandStats(); return { x:Math.round(s.x), z:Math.round(s.z), R:Math.round(s.R) }; }catch(e){ return {err:String(e.message||e)}; } },
-  treelineAnchor(){ try{ const s=islandStats(), d=Math.hypot(camera.position.x-s.x, camera.position.z-s.z);
-      return { d:Math.round(d), R:Math.round(s.R), pastCoast:Math.round(d-s.R),
-               push:+pineMat.uniforms.uPushD.value.toFixed(4), hide:+pineMat.uniforms.uHide.value.toFixed(4),
-               bandPush:+pineUnderMat.uniforms.uPushD.value.toFixed(4), bandHide:+pineUnderMat.uniforms.uHide.value.toFixed(4),
-               entAz:+pineMat.uniforms.uEntAz.value.toFixed(4), entOn:+pineMat.uniforms.uEntOn.value.toFixed(4),
-               entPt:(()=>{ const p=entrancePoint(); return {x:Math.round(p.x), z:Math.round(p.z)}; })() };   // the mouth's live bearing + strength: a harness has to be able to AIM at it, and it moves with the camera (the point is 6R out)
-    }catch(e){ return {err:String(e.message||e)}; } },
-  entMouth(v){ try{ _entOnForce = (v==null?null:Math.max(0,Math.min(1,+v))); return {force:_entOnForce, live:+pineMat.uniforms.uEntOn.value.toFixed(4)};   // QA: pin the entranceway's strength (null = back to the distance fade)
-    }catch(e){ return {err:String(e.message||e)}; } },
-  // QA: the woody band's fog exposure against the canopy's, and the dial that sets it. pineFog is what the pines breathe at this
-  // instant, bandFog what the band actually resolves to at its base — the pair of numbers Ben's "not affected by fog" is about.
-  // QA/bench: THE TREELINE'S SHAPE. Shared by both pine materials by reference, so setting it here cannot desynchronise the
-  // woody band's clip from the canopy it clips against. Pass nothing to read the live values; base/amp/spike/crown to set.
-  // The pre-08-04 silhouette was base 24, amp 18, spike 1, crown 1 — that is the A/B for "the peaks are too volatile".
-  treeShape(o){ try{
-      if(o){ if(o.base!=null)_uTreeBase.value=+o.base; if(o.amp!=null)_uTreeAmp.value=+o.amp;
-             if(o.spike!=null)_uSpikeAmp.value=+o.spike; if(o.crown!=null)_uCrownAmp.value=+o.crown;
-             if(o.skirt!=null)_uSkirt.value=+o.skirt; }
-      const b=_uTreeBase.value, a=_uTreeAmp.value, sp=_uSpikeAmp.value, cr=_uCrownAmp.value;
-      return { base:b, amp:a, spike:sp, crown:cr, skirt:_uSkirt.value,
-               // the canopy's height envelope in BLOCKS, which is what the eye reads as volatility: floor at treeline noise 0
-               // with no spike or crown, ceiling at noise 1 with both at full.
-               minH:+b.toFixed(1), maxH:+(b+a+4*sp+9.2*cr).toFixed(1), swing:+(a+4*sp+9.2*cr).toFixed(1),
-               shared:(pineMat.uniforms.uTreeAmp===pineUnderMat.uniforms.uTreeAmp) };
-    }catch(e){ return {err:String(e.message||e)}; } },
-  // QA/Ben's eye: the horizon pines' PALETTE, both halves at once — green is the canopy, band is the woody brown under it.
-  // Each is a scale on the approved constants (PINE_GREEN / PINE_BAND) with the hue held, which is the only form of this change
-  // Ben has ever accepted; 1.0 is the pre-08-05 palette he called "MUCH too light". Reads back the LIVE colour as well as the
-  // dial, because both are also multiplied by the hour (0.10 + 0.90*day) and a dial alone says nothing about what is on screen.
-  pineTone(o){ try{ if(o){ if(o.green!=null)_pineTone.g=+o.green; if(o.band!=null)_pineTone.b=+o.band;
-        if(o.amt!=null){ _pineTone.g=+o.amt; _pineTone.b=+o.amt; } }
-      const P=_uPine.value, B=_uPineBand;
-      return { green:+_pineTone.g.toFixed(3), band:+_pineTone.b.toFixed(3),
-               liveGreen:[+P.r.toFixed(4),+P.g.toFixed(4),+P.b.toFixed(4)],
-               liveBand:[+B.r.toFixed(4),+B.g.toFixed(4),+B.b.toFixed(4)],
-               greenLum:+(0.2126*P.r+0.7152*P.g+0.0722*P.b).toFixed(5),
-               bandLum:+(0.2126*B.r+0.7152*B.g+0.0722*B.b).toFixed(5),
-               shared:(pineUnderMat.uniforms.uPineCol.value===_uPine.value) };
-    }catch(e){ return {err:String(e.message||e)}; } },
-  bandFog(mul,cap,skirt){ try{ const u=pineUnderMat.uniforms;
-      if(mul!=null) u.uFogMul.value=+mul; if(cap!=null) u.uFogCap.value=+cap; if(skirt!=null) u.uBandSkirt.value=+skirt;
-      return { mul:+u.uFogMul.value.toFixed(3), cap:+u.uFogCap.value.toFixed(3), skirt:+u.uBandSkirt.value.toFixed(3),
-               pineFog:+pineMat.uniforms.uFogAmt.value.toFixed(3),
-               bandFog:+Math.min(u.uFogCap.value, u.uFogAmt.value*u.uFogMul.value).toFixed(3),
-               // the weather-bank floor the fragment applies under the haze term, and the two resolved together — the three fog
-               // systems this band has to answer to are uFogAmt, uWx and (through scene.fog.density) the volumetric pass, and
-               // reporting only the first is how the last fix passed while two of the three were still being ignored.
-               wxFloor:+Math.min(0.95, u.uWx.value*1.15).toFixed(3),
-               effective:+Math.max(Math.min(u.uFogCap.value, u.uFogAmt.value*u.uFogMul.value), Math.min(0.95, u.uWx.value*1.15)).toFixed(3),
-               wx:+u.uWx.value.toFixed(3), vis:pineLayer.visible, fogCol:_uPineFog.getHexString() };
-    }catch(e){ return {err:String(e.message||e)}; } },
   // QA: the industrial pack, from the inside. "Reachable" is a claim about three separate tables -- RECIPES, ITEMS and the block
   // list -- and none of them can be read from a harness, so the game answers for itself.
   // ---- PASTEL PACK. PASTELS is module-scoped, so a harness cannot even learn the names without this. ----
@@ -31599,12 +31123,11 @@ window.__hc={
         && o.material.emissive && (o.material.emissive.r+o.material.emissive.g+o.material.emissive.b)>0.001) sharedHot++; });
       return { heat:+(view._miniHeat||0).toFixed(3), collar:lum(ud.hotMat), barrels:lum(ud.barMat), chamber:lum(ud.chamMat), sharedHot };
     }catch(e){ return {err:String(e.message||e)}; } },
-  // The third argument is the WOODY BAND on its own. It is a child of pineLayer, so hiding the treeline hid both and there
-  // was no way to difference two frames for the band alone — which is the only measurement that can say where the band is,
-  // how thick it is, and whether it takes the haze at the same rate the canopy does.
-  horizonDbg(o,p,u){ try{ oceanLayer.visible=o!==false; pineLayer.visible=p!==false;
-      if(typeof pineUnderLayer!=='undefined') pineUnderLayer.visible=u!==false;
-      return {ocean:oceanLayer.visible,pine:pineLayer.visible,wood:(typeof pineUnderLayer!=='undefined')?pineUnderLayer.visible:null, fogShellVis:fogShell.visible, fogShellOp:+fogShell.material.opacity.toFixed(2), wfog:(typeof weather!=='undefined'?+(weather.fog||0).toFixed(2):null), fogCol:scene.fog.color.getHexString(), dens:+(scene.fog.density*1000).toFixed(3)}; }catch(e){ return {err:e.message}; } },   // QA: bisect the horizon layers + atmosphere state
+  // QA: bisect the horizon + read the atmosphere state. The treeline and the woody band that used to be its second and
+  // third arguments are gone (see WHY THERE WERE SKYBOX PINES); the ocean ring and the fog shell are not, and four
+  // harnesses take the fog colour and density off this call rather than from a screenshot.
+  horizonDbg(o){ try{ oceanLayer.visible=o!==false;
+      return {ocean:oceanLayer.visible, fogShellVis:fogShell.visible, fogShellOp:+fogShell.material.opacity.toFixed(2), wfog:(typeof weather!=='undefined'?+(weather.fog||0).toFixed(2):null), fogCol:scene.fog.color.getHexString(), dens:+(scene.fog.density*1000).toFixed(3)}; }catch(e){ return {err:e.message}; } },
   // QA/bench + Ben's eye: THIN-LEAF TRANSMISSION. 0 is the A/B off — the pre-08-05 behaviour where a face turned away from a lamp
   // kept only ambient and a bush read half-dead. 1 would make a leaf as bright from behind as from in front, which is not what a
   // leaf does; 0.45 is a leaf. The lit side is identical at every value (the term is saturate(-N·L)), so this dial can only ever
@@ -32151,20 +31674,12 @@ window.__hc={
   chest(x,z){ try{ const bx=Math.floor(x), bz=Math.floor(z), by=surfaceH(bx,bz)+1; setBlockWorld(bx,by,bz,BID.chest,true); openChest(bx,by,bz); return {bx,by,bz}; }catch(e){ return {err:e.message}; } },   // QA: place + OPEN a chest at (x,z) — lid-animation visual checks
   chestClose(){ try{ closeUI(); return true; }catch(e){ return {err:e.message}; } },
   island(){ try{ const IC=islandStats(); return {cx:+IC.x.toFixed(1), cz:+IC.z.toFixed(1), R:+IC.R.toFixed(1), px:+player.pos.x.toFixed(1), pz:+player.pos.z.toFixed(1),
-    sea:CFG.SEA, treeBand:[CFG.SEA+4, CFG.SEA+44] }; }catch(e){ return {err:e.message}; } },   // QA: island centroid/radius driving the forever-coast treeline wrap, plus SEA and the tree-capable height band — a vantage-finding harness needs heights RELATIVE to sea level, and picking them absolute is how one ended up underwater
+    sea:CFG.SEA, treeBand:[CFG.SEA+4, CFG.SEA+44] }; }catch(e){ return {err:e.message}; } },   // QA: island centroid/radius, plus SEA and the tree-capable height band — a vantage-finding harness needs heights RELATIVE to sea level, and picking them absolute is how one ended up underwater
   // QA/bench: the terrain height at (x,z) straight from the noise — NO chunk required. blockAt only sees loaded chunks, so a
   // harness hunting for a camera vantage anywhere but the spawn ring reads air everywhere and concludes the island is empty.
   // Batched form (surfH([[x,z],...])) so scanning a few thousand samples is one round trip instead of a few thousand.
   surfH(x,z){ try{ if(Array.isArray(x)) return x.map(p=>surfaceH(Math.round(p[0]),Math.round(p[1])));
     return surfaceH(Math.round(x),Math.round(z)); }catch(e){ return {err:e.message}; } },
-  // QA: the dark forest entranceway — where it resolved to, its live bearing, and the player YAW that centres it in frame.
-  // yaw is handed back solved (az = -PI/2 - yaw for this projection) so a harness never has to re-derive the mapping and
-  // photograph the arc 180 degrees away, which is exactly what the first pine harness did.
-  entrance(){ try{ const EP=entrancePoint(), az=pineMat.uniforms.uEntAz.value;
-    return { x:+EP.x.toFixed(1), z:+EP.z.toFixed(1), bearing:+EP.a.toFixed(4), forestScore:EP.score,
-             az:+az.toFixed(4), yawToFace:+(-Math.PI/2-az).toFixed(4), halfWidthDeg:+(pineMat.uniforms.uEntW.value*57.2958).toFixed(2),
-             on:pineMat.uniforms.uEntOn.value }; }catch(e){ return {err:e.message}; } },
-  entranceOn(v){ try{ _entMouthOn=!!v; pineMat.uniforms.uEntOn.value=v?1:0; return { on:_entMouthOn, live:pineMat.uniforms.uEntOn.value }; }catch(e){ return {err:e.message}; } },   // QA: A/B the mouth against the same frame with it off
   gun(id){ try{ invAdd(id,1); invAdd('rifle_ammo',64); for(let i=0;i<9;i++){ if(inv[i]&&inv[i].id===id){ selSlot=i; break; } } refreshHotbar(); return 'armed '+id; }catch(e){ return e.message; } },   // QA: give + select a gun with reserve ammo
   aim(on){ try{ locked=true; rmbHeld=!!on; return rmbHeld; }catch(e){ return e.message; } },   // QA: hold/release the aim intent (forces the locked flag for headless runs)
   // QA: HOLD A MOUSE BUTTON DOWN. Pointer lock does not engage headless, so the real mousedown handler returns at its !locked
@@ -32656,10 +32171,6 @@ window.__hc={
     return { conf:+((wretch.sneakConf||0)).toFixed(2), sneaking:!!wretch.sneaking, blend:+((wretch._snB||0)).toFixed(2), state:wretch.state, crawl:+((wretch.crawl||0)).toFixed(2),
       arm:+(((wretch.P&&wretch.P.arms&&wretch.P.arms[0]&&wretch.P.arms[0][1])?wretch.P.arms[0][1].rotation.x:0)).toFixed(2) }; }catch(e){ return {err:e.message}; } },
   turnPage(){ try{ locked=true; doPlace(); return _bookPage; }catch(e){ return e.message; } },        // QA: the real right-click page-turn path
-  pines(){ try{ const m=[], truth=[], visD=CFG.RENDER_DIST*CK;
-    for(let i=0;i<_PN;i++){ m.push(_pineMaskData[i*4]); const az=(i/_PN)*6.2831853-3.14159265, dx=Math.cos(az), dz=Math.sin(az);
-      let land=0; for(let s=0;s<8;s++){ const r=visD+6+s*16; const h=surfaceH(Math.round(player.pos.x+dx*r),Math.round(player.pos.z+dz*r)); if(h>CFG.SEA+4 && h<=CFG.SEA+38) land++; } truth.push(land); }
-    return {mask:m, truth, px:+player.pos.x.toFixed(1), pz:+player.pos.z.toFixed(1), visD}; }catch(e){ return {err:e.message}; } },   // QA: horizon-treeline azimuth mask (0=no forest beyond the fog wall, 255=deep forest) + live ground truth per azimuth (mirrors the mask's tree-capable grass band)
   // ---- COGNITION QA (V3) ----
   mind(){ try{ return { plan:reason.plan.map(s=>({i:s.intent,p:s.phase||null})), step:reason.step, journal:reason.journal.length, seq:(typeof CTXD!=='undefined')?CTXD.seq:null, thought:reason.liveThought||null, orch:reason.orchTrigger, divertT:+((reason.divertT||0)).toFixed(1), nav:{active:nav.active,beh:nav.behavior,label:nav.label,divert:nav.divert}, lastMutual:+((WILL.lastMutual||0)).toFixed(1), willLog:WILL.log.slice(-6) }; }catch(e){ return {err:e.message}; } },
   stim(k,extra){ try{ reasonEvent(k,extra||{x:Math.round(player.pos.x),z:Math.round(player.pos.z)}); return 'fired '+k; }catch(e){ return e.message; } },
@@ -33651,17 +33162,6 @@ window.__hc={
                distFromIsle:+Math.hypot(player.pos.x-ISLE_X, player.pos.z-ISLE_Z).toFixed(1),
                inland:Math.hypot(player.pos.x-ISLE_X, player.pos.z-ISLE_Z) < ISLE_CORE };
     }catch(e){ return {err:String(e.message||e)}; } },
-  // THE TREELINE'S OWN VALUES. There was no way to read or move them, so "the horizon pines are pale and see-through"
-  // could only ever be answered with a screenshot and an opinion. fogMul scales the haze wash this layer applies to
-  // itself; solid raises the silhouette's alpha toward opaque; col is the base pine colour, shared with the band under it.
-  pines(o){ try{ const U=pineMat.uniforms;
-      if(o){ if(o.fogMul!=null) U.uFogMul.value=+o.fogMul; if(o.solid!=null) U.uSolid.value=+o.solid;
-             if(o.gain!=null) U.uGain.value=+o.gain; if(o.sat!=null) U.uSat.value=+o.sat;
-             if(o.drownSky!=null) U.uDrownSky.value=+o.drownSky; if(o.hazeSky!=null) U.uHazeSky.value=+o.hazeSky; }
-      const c=x=>[+x.r.toFixed(3),+x.g.toFixed(3),+x.b.toFixed(3)];
-      return { fogMul:U.uFogMul.value, solid:U.uSolid.value, gain:U.uGain.value, sat:U.uSat.value, drownSky:U.uDrownSky.value, hazeSky:U.uHazeSky.value, col:c(_uPine.value),
-               fogAmt:+U.uFogAmt.value.toFixed(3), fogCol:c(U.uFogCol.value), wx:+U.uWx.value.toFixed(3), hide:+U.uHide.value.toFixed(3) };
-    }catch(e){ return {err:String(e.message||e)}; } },
   horizonBand(o){ try{ if(o&&o.on!=null) oceanMat.visible=!!o.on;
       return { band:oceanMat.visible, layerVisible:oceanLayer.visible, farSea:!!(farSea&&farSea.visible),
                seaBow:+_uSeaBow.value.toFixed(3), skyToSea:skyMat.uniforms.uSkyToSea.value,
@@ -33677,18 +33177,6 @@ window.__hc={
                rain:+weather.rain.toFixed(3), rainColor:'#'+rainMesh.material.color.getHexString(), fogColor:'#'+scene.fog.color.getHexString() };
     }catch(e){ return {err:String(e.message||e)}; } },
   skyToSea(v){ try{ if(v!=null) skyMat.uniforms.uSkyToSea.value=+v; return skyMat.uniforms.uSkyToSea.value; }catch(e){ return {err:String(e.message||e)}; } },
-  // The background range. height/dist are the SHAPE (how tall, how far, and therefore how much of the frame it fills),
-  // haze is the aerial-perspective gain that carries the depth, snow is the snowline as a fraction up the slope.
-  mountains(o){ try{ if(o){ if(o.on!=null) _uMtn.on.value=o.on?1:0; if(o.height!=null) _uMtn.h.value=+o.height;
-        if(o.dist!=null) _uMtn.d.value=+o.dist; if(o.haze!=null) _uMtn.haze.value=+o.haze; if(o.snow!=null) _uMtn.snow.value=+o.snow; if(o.dark!=null) _uMtn.dark.value=+o.dark; }
-      // The colours it is HANDED, not just the dials it is set with. This layer derives its rock from uSky and its haze
-      // target from uFogCol, both shared by reference from the sky system, so "the range is too pale" is usually a
-      // question about what those two are at that hour rather than about anything in this shader.
-      const c=x=>[+x.r.toFixed(3),+x.g.toFixed(3),+x.b.toFixed(3)], u=mountainMat.uniforms;
-      return { on:!!_uMtn.on.value, height:_uMtn.h.value, dist:_uMtn.d.value, haze:_uMtn.haze.value, snow:_uMtn.snow.value, dark:_uMtn.dark.value,
-               sunAz:+u.uSunAz.value.toFixed(3), uSky:c(u.uSky.value), uFogCol:c(u.uFogCol.value),
-               uDay:+u.uDay.value.toFixed(3), exposure:+renderer.toneMappingExposure.toFixed(3) };
-    }catch(e){ return {err:String(e.message||e)}; } },
   // The sea's fake world curve, and the clamp that stops it sinking under the terrain. clamp:0 is the pre-fix behaviour.
   // clamp:0 restores the WHOLE pre-fix behaviour, cap included — a 58-block fall with no seabed clamp. Toggling only the
   // per-column clamp measured nothing, because the cap is what the far sea actually hits.
@@ -34013,7 +33501,7 @@ window.__hc={
     bg:(scene.background&&scene.background.isColor)?[+scene.background.r.toFixed(2),+scene.background.g.toFixed(2),+scene.background.b.toFixed(2)]:'tex',
     fog:[+scene.fog.color.r.toFixed(2),+scene.fog.color.g.toFixed(2),+scene.fog.color.b.toFixed(2)], fogD:+scene.fog.density.toFixed(4),
     hemi:+hemi.intensity.toFixed(2), amb:(typeof ambient!=='undefined')?+ambient.intensity.toFixed(2):null,
-    sky:(typeof skyDome!=='undefined')?skyDome.visible:null, pine:(typeof pineLayer!=='undefined')?pineLayer.visible:null,
+    sky:(typeof skyDome!=='undefined')?skyDome.visible:null,
     ocean:(typeof oceanLayer!=='undefined')?oceanLayer.visible:null, shell:(typeof fogShell!=='undefined')?fogShell.visible:null,
     overlay:+(_surgeFlash.style.opacity||0) }; }catch(e){ return {err:e.message}; } },
   bossHp(){ try{ return { phase:wretch._bossPhase||1, hp:wretch.hp, hpMax:wretch.hpMax, regenT:+((wretch._regenT||0)).toFixed(2), boss:!!wretch.boss, active:!!wretch.active }; }catch(e){ return {err:e.message}; } },   // QA: 3-phase healthbar state
@@ -34279,12 +33767,10 @@ window.__hc={
   layers(o){ o=o||{}; const set=(m,v)=>{ if(typeof m!=='undefined' && m && v!=null) m.visible=!!v; };
     set(typeof skyDome!=='undefined'?skyDome:null, o.sky);
     set(typeof oceanLayer!=='undefined'?oceanLayer:null, o.ocean);
-    set(typeof pineLayer!=='undefined'?pineLayer:null, o.pines);
     set(typeof fogShell!=='undefined'?fogShell:null, o.shell);
     set(typeof waterGroup!=='undefined'?waterGroup:null, o.water);
     return { sky:(typeof skyDome!=='undefined'&&skyDome)?skyDome.visible:null,
              ocean:(typeof oceanLayer!=='undefined'&&oceanLayer)?oceanLayer.visible:null,
-             pines:(typeof pineLayer!=='undefined'&&pineLayer)?pineLayer.visible:null,
              shell:(typeof fogShell!=='undefined'&&fogShell)?fogShell.visible:null }; },
   // QA/bench: put the QA light AT a world point. qa() only sets its intensity — it is positioned by frame(), so any harness
   // shooting something that is not the Wretch was lighting the world origin and photographing a black room.
@@ -34401,12 +33887,12 @@ window.__hc={
   // theory was wrong; the only thing that has ever worked on it is hiding one layer and seeing whether the artefact goes.
   // Names: sky (the dome), ocean (the far ring), fogShell, pine (treeline + its woody band), chunks (the real world).
   hideLayer(name,on){ try{ const t={ sky:(typeof skyDome!=='undefined')?skyDome:null, ocean:(typeof oceanLayer!=='undefined')?oceanLayer:null,
-        fogShell:(typeof fogShell!=='undefined')?fogShell:null, pine:(typeof pineLayer!=='undefined')?pineLayer:null,
+        fogShell:(typeof fogShell!=='undefined')?fogShell:null,
         chunks:(typeof chunkRoot!=='undefined')?chunkRoot:null }[name];
       if(!t) return {err:'no layer '+name};
       t.visible=(on!==false);   // second arg is VISIBILITY: hideLayer(x,false) hides. The first version had this inverted and reported the layer still visible while claiming to hide it
       const st={}; for(const k of ['sky','ocean','fogShell','pine','chunks']){ const o={ sky:(typeof skyDome!=='undefined')?skyDome:null, ocean:(typeof oceanLayer!=='undefined')?oceanLayer:null,
-        fogShell:(typeof fogShell!=='undefined')?fogShell:null, pine:(typeof pineLayer!=='undefined')?pineLayer:null, chunks:(typeof chunkRoot!=='undefined')?chunkRoot:null }[k]; st[k]=o?!!o.visible:null; }
+        fogShell:(typeof fogShell!=='undefined')?fogShell:null, chunks:(typeof chunkRoot!=='undefined')?chunkRoot:null }[k]; st[k]=o?!!o.visible:null; }
       return st; }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: FOLIAGE IN A PIT. Sweeps every loaded chunk for cross blocks and classifies each one by how enclosed it is,
   // reading neighbours through getBlock so a plant on a CHUNK BOUNDARY is judged against the real world rather than
@@ -34483,6 +33969,15 @@ window.__hc={
       mag:+Math.hypot(view.swayX||0,view.swayY||0).toFixed(6) }; }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: pin the sway to a fixed value (null clears). Pass two numbers to hold the drift still while the pose is read.
   swayPin(x,y){ try{ _swayPin=(x==null)?null:{x:+x||0,y:+y||0}; return _swayPin; }catch(e){ return {err:String(e.message||e)}; } },
+  // THE HAND SPRING'S OWN STATE, so "jumping bounces the hand" is a number and not a feeling. y/x are the walk spring
+  // (x splays the pair), sx the un-mirrored inertia lag, and armX/viewX the offsets those actually land on this frame —
+  // both, because a spring that moves while nothing downstream reads it is exactly the way this silently does nothing.
+  handProbe(){ try{ return { y:+_hand.y.toFixed(4), vy:+_hand.vy.toFixed(4), x:+_hand.x.toFixed(4),
+        sx:+_hand.sx.toFixed(4), svx:+_hand.svx.toFixed(4), lat:+_hand.plat.toFixed(3), pvy:+_hand.pvy.toFixed(3),
+        armX:+mainArm.group.position.x.toFixed(4), armY:+mainArm.group.position.y.toFixed(4),
+        viewX:+view.group.position.x.toFixed(4), onGround:!!player.onGround,
+        ads:+(view.adsT||0).toFixed(5), adsU:+(view.adsU||0).toFixed(5) }; }   // 5dp: the ADS ramp is judged by its per-FRAME steps, and 2dp quantises them into a staircase
+    catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: the viewmodel's ACTUAL pose. Sway parity has to be measured here and not from swayMag: every gun is fed the
   // same drift, and the fault was each sight branch applying its own fraction of it, which only the pose can show.
   viewPose(){ try{ const p=view.group.position, r=view.group.rotation, it=ITEMS[view.id]||{};
