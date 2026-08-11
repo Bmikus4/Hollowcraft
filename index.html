@@ -4052,11 +4052,25 @@ const _sskyTop=_sskyFace, _sskyOpen=_sskyFace;
 // average to 0. Only boundaries move, which is the whole of the defect.
 //   OFF-QUAD SAMPLES ARE SAFE AND CORRECT: _skyCol clamps lx/lz into -1..16 and its own comment records
 // why the pad column is the right answer at a seam — it is the neighbouring chunk's htop.
-let _SKY_SMOOTH = true;   // __hc.skySmooth(false) + a world remesh is the A/B; it changes ONE thing (§4 rule 4)
+//   MEAN CAN DARKEN, AND DARKENING COSTS PURE BLACK. Averaging four cells at a corner pulls quad EDGES down
+// wherever a neighbour sees less sky, and measured on a night canopy that took pure black from 0.889% to 3.145%
+// (assert-unlit-black). The reason is in the texel rule's own design: _scotK[3] is a minimum rendered luminance
+// applied as a SCALE, deliberately, because a scale cannot desaturate and cannot lift black — and a fragment
+// that per-corner sky has pushed to exactly zero is past saving by it.
+//   MAX CANNOT DARKEN — and it was tried for exactly that reason, and it is WORSE. It cannot darken because of
+// the merge key: faces merge only when their 4-bit sky is EQUAL, so every cell of a quad carries the same value
+// and each corner's four cells include at least one cell of its own quad, making max >= the old face value
+// everywhere. But the same property makes it overshoot upward. A shaded quad with one corner next to open sky
+// takes 1.0 at that corner, so within-quad spread reaches the full 0..1 range (measured spreadMax 1.0 against
+// mean's 0.75) and the biggest adjacent step at the worst quad went UP, 13.77 -> 16.30, where mean held it at
+// 14.08 against a noise floor of 0.00. Avoiding the darkening cost more picture than the darkening did, so the
+// bar picks mean. Mode 2 is kept because that comparison is the reason mode 1 is shipped.
+let _SKY_SMOOTH = 1;   // 0 = off (face-flat), 1 = corner mean (shipped), 2 = corner max. __hc.skySmooth(n) + a world remesh is the A/B
 function _skyCorner(d,u,v,ad,cu,cv){
-  const c=[0,0,0]; let s=0;
-  for(let a=-1;a<=0;a++) for(let b=-1;b<=0;b++){ c[d]=ad; c[u]=cu+a; c[v]=cv+b; s+=_sskyFace(c[0],c[1],c[2]); }
-  return s*0.25; }
+  const c=[0,0,0]; let s=0, m=0;
+  for(let a=-1;a<=0;a++) for(let b=-1;b<=0;b++){ c[d]=ad; c[u]=cu+a; c[v]=cv+b;
+    const f=_sskyFace(c[0],c[1],c[2]); s+=f; if(f>m)m=f; }
+  return _SKY_SMOOTH===1 ? s*0.25 : m; }
 
 let _CANOPY_BAKE = true;    // __hc.canopy({bake:false}) + a world remesh is the A/B for the canopy depth bake itself — the shader dial can only reach what the mesher wrote
 let _SPRIGS_ON = true;      // __hc.sprigs(false) + a remesh drops the canopy fringe entirely: the pixels that change ARE the sprigs, which is the only way to measure them against the canopy they cover
@@ -19218,7 +19232,7 @@ const GLB_ITEMS={
   apple:        {id:'misc/apple',   fit:0.20,tint:{PaleGreen:0x8e2028}},
   green_apple:  {id:'misc/apple',   fit:0.20},
   bread:        {id:'misc/bread',   fit:0.26},
-  raw_meat:     {id:'misc/steak',   fit:0.24},
+  raw_meat:     {id:'misc/steak',   fit:0.24,rot:[0.62,0.30,0]},   // a steak is a flat slab: held level it is a line on screen, so it tips its face toward the eye
   cooked_meat:  {id:'misc/chicken-leg',fit:0.24},
   glass_bottle: {id:'misc/bottle',  fit:0.26,tint:{DarkGreen:0xbcd8e0},alpha:{DarkGreen:0.45}},
   bottle_water: {id:'misc/bottle',  fit:0.26,tint:{DarkGreen:0x3a8ec0},alpha:{DarkGreen:0.8}},
@@ -19229,8 +19243,10 @@ const GLB_ITEMS={
   // procedural flashlight's lens says so). The pack's torch stands upright on +Y, so pointing it forward is a quarter
   // turn about x and not a matter of taste — unrotated, switching it on lights the sky.
   flashlight:   {id:'tools/flashlight',fit:0.26,rot:[-Math.PI/2,0,0]},
-  leather_chestplate:{id:'misc/armor-leather',fit:0.30},
-  iron_chestplate:{id:'misc/armor-metal',fit:0.34},
+  // The armour models face -X (their measured facing, see placement-data), and a torso held edge-on reads as a lump.
+  // A quarter turn puts the chest toward the eye, which is the one view that says "this is a cuirass".
+  leather_chestplate:{id:'misc/armor-leather',fit:0.30,rot:[-0.85,-Math.PI/2,0]},
+  iron_chestplate:{id:'misc/armor-metal',fit:0.34,rot:[-0.85,-Math.PI/2,0]},
   alice_pack:   {id:'misc/alice-pack',fit:0.42},
 };
 function buildGlbItem(id){
@@ -30438,7 +30454,7 @@ window.__hc={
       for(const c of m.children) if(c.name==='scope' && !c.visible) scopeHidden=true;
       guns.push({ id, glb:body?body.userData.glb:null, gripAt:UD.gripAt?UD.gripAt.map(v=>+v.toFixed(3)):null,
         dotY:UD.dotY!=null?+UD.dotY.toFixed(4):null, adsZ:UD.adsZ!=null?UD.adsZ:null, pump:!!UD.pump,
-        flash:!!fl, flashX:fl?+fl.position.x.toFixed(3):null, flashZ:fl?+fl.position.z.toFixed(3):null, boreZ:+bore.toFixed(3),
+        flash:!!fl, flashX:fl?+fl.position.x.toFixed(3):null, flashY:fl?+fl.position.y.toFixed(3):null, flashZ:fl?+fl.position.z.toFixed(3):null, boreZ:+bore.toFixed(3),
         irons:!!sp, sightSpan:sp?+Math.abs(sp.front[2]-sp.rear[2]).toFixed(3):null, sightDy:sp?+(sp.front[1]-sp.rear[1]).toFixed(6):null,
         scopeLens:lens, scopeHidden });
     }
@@ -32435,9 +32451,13 @@ window.__hc={
       return { sprigs:_SPRIGS_ON, remeshed:n }; }catch(e){ return {err:String(e.message||e)}; } },
   // Per-corner sky against the old face-flat sky, world remeshed either way. Baked at mesh time like every dial
   // here, so there is no live uniform: off = the same 4-bit value on all six vertices, which is the stepping.
-  skySmooth(on){ try{ _SKY_SMOOTH = (on==null? true : !!on); let n=0;
+  // The ms is the POINT, not a courtesy: per-corner sky costs 16 _sskyFace calls a quad where face-flat cost one,
+  // and this remesh of the whole loaded world is the honest price of it. Read it off both sides of the A/B.
+  // 0/false = face-flat, 1/true = corner mean (shipped), 2 = corner max.
+  skySmooth(on){ try{ _SKY_SMOOTH = (on==null? 1 : (on===true?1:(on===false?0:+on))); let n=0; const t0=performance.now();
       world.forEach(c=>{ if(c.meshed){ c.dirty=true; buildChunkMeshes(c); n++; } });
-      return { skySmooth:_SKY_SMOOTH, remeshed:n }; }catch(e){ return {err:String(e.message||e)}; } },
+      const ms=performance.now()-t0;
+      return { skySmooth:_SKY_SMOOTH, remeshed:n, ms:+ms.toFixed(0), msPerChunk:+(ms/Math.max(1,n)).toFixed(2) }; }catch(e){ return {err:String(e.message||e)}; } },
   sprigNormals(on){ try{ _SPRIG_FACE_N = (on==null? true : !!on); let n=0;
       world.forEach(c=>{ if(c.meshed){ c.dirty=true; buildChunkMeshes(c); n++; } });
       return { faceNormals:_SPRIG_FACE_N, remeshed:n }; }catch(e){ return {err:String(e.message||e)}; } },
@@ -32469,7 +32489,7 @@ window.__hc={
   //   flat  = quads whose four corners are all equal (the old behaviour, 100% of them)
   //   lattice = values that are an exact multiple of 1/15, i.e. still on the 4-bit quantum
   skyQuads(){ try{
-      let quads=0, flat=0, spreadSum=0, spreadMax=0, onLattice=0, verts=0; const steps=[]; const worst=[];
+      let quads=0, flat=0, spreadSum=0, spreadMax=0, onLattice=0, verts=0, knee=0; const steps=[]; const worst=[];
       chunkRoot.traverse(o=>{ const m=o.material; if(!m||!m.userData||!m.userData.atlas) return;
         const g=o.geometry; if(!g||!g.attributes||!g.attributes.aSky) return;
         const k=g.attributes.aSky.array; verts+=k.length;
@@ -32485,7 +32505,13 @@ window.__hc={
           // WHERE THE STEPPING IS, in world coords, so a harness can AIM at it instead of guessing a vantage.
           // Three crops in this bench's history measured something the frame did not contain; the geometry
           // knows where the fault lives, so the vantage is a lookup rather than a search.
-          if(P && sp>0.2){
+          // STRADDLING THE _open KNEE is the specific defect, not spread in general. _open is
+          // smoothstep(0.0,0.05,vSky) and the 4-bit quantum is 0.0667, so under face-flat sky ONE step takes a
+          // face from fully descended (_open 0) to not descended at all (_open 1) — a whole block washed while
+          // its neighbour is not, which is Ben's report verbatim. Per-corner values land between those and
+          // interpolate through the knee instead of jumping it.
+          if(lo<0.05 && hi>0.05) knee++;
+          if(P && sp>0.05){
             let ax=0,ay=0,az=0; for(const q of [i,i+1,i+2,i+5]){ ax+=P[q*3]; ay+=P[q*3+1]; az+=P[q*3+2]; }
             const wp=o.localToWorld(new THREE.Vector3(ax*0.25,ay*0.25,az*0.25));
             // THE NORMAL, or the vantage is guesswork. A quad centre alone does not say which way the face points,
@@ -32497,6 +32523,7 @@ window.__hc={
             for(const q of [i,i+1,i+2,i+5]){ const X=P[q*3],Y=P[q*3+1],Z=P[q*3+2];
               if(X<mnx)mnx=X; if(X>mxx)mxx=X; if(Y<mny)mny=Y; if(Y>mxy)mxy=Y; if(Z<mnz)mnz=Z; if(Z>mxz)mxz=Z; }
             worst.push({x:+wp.x.toFixed(1),y:+wp.y.toFixed(1),z:+wp.z.toFixed(1),sp:+sp.toFixed(3),
+                        lo:+lo.toFixed(4), hi:+hi.toFixed(4), knee:(lo<0.05&&hi>0.05)?1:0,
                         n:[nx,ny,nz], ext:[+(mxx-mnx).toFixed(1),+(mxy-mny).toFixed(1),+(mxz-mnz).toFixed(1)]});
           }
         } });
@@ -32507,7 +32534,7 @@ window.__hc={
                spreadP50:+(steps.length?steps[steps.length>>1]:0).toFixed(4),
                spreadP90:+(steps.length?steps[Math.floor(steps.length*0.9)]:0).toFixed(4),
                onLatticePct:+(100*onLattice/Math.max(1,quads*4)).toFixed(2), smooth:_SKY_SMOOTH,
-               steppy:worst.length, worst:worst.slice(0,40) };
+               steppy:worst.length, kneeQuads:knee, worst:worst.slice(0,60) };
     }catch(e){ return {err:String(e.message||e)}; } },
   foliageMeshes(){ const out=[]; try{ chunkRoot.traverse(o=>{ if(o.userData&&o.userData.foliage&&o.userData.foliage.geometry) out.push(o.userData.foliage); }); }catch(e){} return out; },
   leafMeshes(){ const out=[]; try{ chunkRoot.traverse(o=>{ if(o.userData&&o.userData.leaf&&o.userData.leaf.geometry) out.push(o.userData.leaf); }); }catch(e){} return out; },

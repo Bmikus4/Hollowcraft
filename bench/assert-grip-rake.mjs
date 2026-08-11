@@ -1,5 +1,13 @@
 // Grip rake, measured: for every angled box in a gun model, where does its BOTTOM end sit in z?
 // Muzzle is -z and the eye is +z, so a pistol grip's bottom end must have z GREATER than its top end.
+//
+// REWRITTEN 08-11, because the thing it used to measure no longer exists. Four of the five guns are now the model
+// pack's (assets/models/guns, see buildGlbGun) and a pack gun has no authored grip BOX to read a rake off — its grip
+// is a measured point on one welded mesh, declared as userData.gripAt. The claim underneath has not changed and is
+// the one that matters: the hand must be told to hold the gun BEHIND the bore and BELOW it, because a grip point
+// forward of the bore is what "the grips face backwards" looked like. So the box check still runs for whatever is
+// still built from boxes (it would catch a regression in the procedural fallbacks and the minigun), and the point
+// check runs for every gun in the game, pack or procedural.
 import { spawn } from 'node:child_process'; import { createServer } from 'node:net';
 import http from 'node:http'; import fs from 'node:fs'; import path from 'node:path';
 import { chromium } from 'playwright-core';
@@ -28,14 +36,28 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     // Every grip and stock WRIST, on all four guns. The shotgun's buttstock and recoil pad are excluded on purpose: their
     // +0.10 is comb drop (positive rx lowers the REAR end of a lengthwise box), not a rake, and flipping it would raise the butt.
     let bad=0;
-    for(const want of [{gun:'revolver',size:'0.03x0.11x0.06'},{gun:'revolver',size:'0.026x0.07x0.03'},{gun:'ar15',size:'0.032x0.088x0.04'},
-                       {gun:'bolt',size:'0.05x0.11x0.05'},{gun:'shotgun',size:'0.042x0.058x0.075'}]){
-      const r=rows.find(x=>x.gun===want.gun&&x.size===want.size);
-      if(!r){ console.log('FAIL missing '+want.gun+' '+want.size); bad++; continue; }
-      if(r.rake!=='REARWARD'){ console.log('FAIL '+want.gun+' '+want.size+' rakes '+r.rake+' (topZ '+r.topZ+' botZ '+r.botZ+')'); bad++; }
-      else console.log('ok   '+want.gun+' '+want.size+' rearward');
+    // (1) ANY angled box that is a grip still has to rake rearward. Nothing is required to exist here: this half of
+    // the bench is a guard on box-built models, and it passes vacuously on a build where every gun is a pack model.
+    for(const r of rows){
+      if(r.rake==='FORWARD'){ console.log('FAIL '+r.gun+' '+r.size+' rakes FORWARD (topZ '+r.topZ+' botZ '+r.botZ+')'); bad++; }
     }
-    console.log(bad?('FAILED '+bad):'PASS all grips and stock wrists rake rearward');
+    console.log('  '+rows.length+' angled boxes measured, '+rows.filter(r=>r.rake==='REARWARD').length+' rearward');
+    // (2) EVERY GUN'S DECLARED GRIP is behind the bore and below it. This is what attachGunHand solves the arm onto,
+    // so it is the number that decides whether the hand looks like it is holding the weapon or pushing it away.
+    const P=await page.evaluate(`__hc.modelPack()`);
+    if(P.err){ console.log('FAIL modelPack probe: '+P.err); bad++; }
+    else for(const g of P.guns){
+      if(!g.gripAt){ console.log('FAIL '+g.id+' declares no gripAt'); bad++; continue; }
+      const [gx,gy,gz]=g.gripAt;
+      // BELOW THE BORE, not below zero. The scoped rifle hangs from its optic rather than its bore (see GLB_GUNS'
+      // opticY), so its bore is not at y=0 and neither is anything measured from it; the flash sprite sits ON the
+      // bore by construction, which makes it the honest reference for "below".
+      const bore=(g.flashY!=null)?g.flashY:0;
+      const okZ=gz>0.0, okY=gy<bore;
+      console.log((okZ&&okY?'ok   ':'FAIL ')+g.id.padEnd(30)+' grip ['+gx+','+gy+','+gz+'] bore y '+bore+(g.glb?'  '+g.glb:'  procedural'));
+      if(!(okZ&&okY)) bad++;
+    }
+    console.log(bad?('FAILED '+bad):'PASS every grip rakes rearward and every gun grips behind and below the bore');
     if(bad) process.exitCode=1;
   } finally { try{ if(browser) await browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }
 })().catch(e=>{ console.error(e); process.exit(1); });
