@@ -1,20 +1,32 @@
-// Real syntax check for index.html. The main script is type="module", so `new Function(body)` cannot parse it (import/export
-// are illegal there) and a checker that skips module scripts reports "0 errors" for a file that will not boot at all.
-// Writes the module body out and lets node's own parser judge it.
-import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
-import os from 'node:os';
-import path from 'node:path';
-const file=process.argv[2]||'index.html';
-const s=fs.readFileSync(file,'utf8');
-const re=/<script([^>]*)>([\s\S]*?)<\/script>/g; let m,n=0,bad=0;
-while((m=re.exec(s))){ n++; const attrs=m[1]||'', body=m[2];
-  if(/\bsrc=/.test(attrs)) continue;
-  if(/type\s*=\s*["']importmap["']/.test(attrs)){ try{ JSON.parse(body); }catch(e){ bad++; console.log('script #'+n+' importmap JSON: '+e.message); } continue; }
-  const tmp=path.join(os.tmpdir(),'hc-syncheck-'+n+'.mjs');
-  fs.writeFileSync(tmp, body);
-  try{ execFileSync(process.execPath,['--check',tmp],{stdio:'pipe'}); }
-  catch(e){ bad++; console.log('script #'+n+' SYNTAX:\n'+String(e.stderr||e.stdout||e.message).split('\n').slice(0,6).join('\n')); }
-  finally{ try{ fs.unlinkSync(tmp); }catch(_){} } }
-console.log(file+': '+n+' scripts, '+bad+' with syntax errors');
+// Syntax-check index.html's type="module" script WITHOUT running it or resolving its imports.
+// The shared-checkout rule says commit index.html whole; this is how you find out the whole file parses
+// before you do. bench/_syntax_extract.mjs is a stale EXTRACTED COPY of an old index.html, not a tool —
+// it tries to import three and dies on module resolution.
+import fs from 'node:fs'; import path from 'node:path'; import vm from 'node:vm';
+const ROOT=path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/,'$1')),'..');
+const html=fs.readFileSync(path.join(ROOT,'index.html'),'utf8');
+const re=/<script\b([^>]*)>([\s\S]*?)<\/script>/gi;
+let m, n=0, bad=0;
+while((m=re.exec(html))){
+  const attrs=m[1]||'', body=m[2];
+  if(/\bsrc\s*=/.test(attrs)) continue;              // external, nothing inline to parse
+  const ty=(/type\s*=\s*["']?([^"'\s>]+)/i.exec(attrs)||[,''])[1].toLowerCase();
+  if(ty && !/^(module|text\/javascript|application\/javascript)$/.test(ty)) continue;   // importmap/json are not JS
+  const isModule = ty==='module';
+  const line=html.slice(0,m.index).split('\n').length;
+  n++;
+  try{
+    // SourceTextModule parses ES syntax (import/export) without resolving or evaluating anything.
+    if(isModule) new vm.SourceTextModule(body);
+    else new vm.Script(body);
+    console.log(`  ok    script #${n} at line ${line} (${isModule?'module':'classic'}, ${body.split('\n').length} lines)`);
+  }catch(e){
+    bad++;
+    console.log(`  FAIL  script #${n} at line ${line}: ${e.message}`);
+    // Report the offending line in the FILE's numbering, not the script's, or it is useless on a 34k-line file.
+    const mm=/<anonymous>:(\d+)/.exec(e.stack||'')||/:(\d+):\d+/.exec(e.stack||'');
+    if(mm) console.log(`        index.html line ~${line + (+mm[1]) - 1}`);
+  }
+}
+console.log(bad? `  ${bad} of ${n} inline scripts FAILED to parse` : `  ${n} inline scripts parse`);
 process.exit(bad?1:0);
