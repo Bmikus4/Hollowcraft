@@ -9293,6 +9293,10 @@ hlMesh.visible=false; scene.add(hlMesh);
 let worldTime = CFG.DAY_LEN*0.30, _dayCount=0;   // start morning; _dayCount = how many full cycles have passed (see updateSky)
 if(Q.get('t')) worldTime=+Q.get('t');
 const _sunDir=new THREE.Vector3(), _keyDir=new THREE.Vector3(), _tmp=new THREE.Vector3();
+// floor = the key light's minimum height above the player as a fraction of its distance, i.e. how low it may rake (0.45
+// was the shipped value and it is why every shadow in the game was steep); nb = the noon normalBias, unchanged from what
+// the light was built with; nbMax = how far that bias may be multiplied as the light grazes. sinE is a readout.
+const _sunArc={ floor:0.16, nb:0.45, nbMax:3.0, sinE:1 };
 const _fogGrey=new THREE.Color();   // scratch tint for the fog-weather event (weather.fog is driven in the existing updateWeather)
 // How enclosed the player is, EASED (see fogEnclosure and its use below). Starts at 0 = open sky, which is where every spawn is.
 let _fogEncl=0;
@@ -9317,9 +9321,28 @@ function updateSky(dt){
   _keyDir.copy(_sunDir); if(elev<-0.1) _keyDir.multiplyScalar(-1);   // moon takes the key only AFTER the sun has clearly set (dimmer) → the shadow flip isn't a mid-twilight snap
   const kd=CFG.RENDER_DIST*CK*0.5;
   sunLight.position.copy(player.pos).addScaledVector(_keyDir, kd);
-  // keep the shadow light off the horizon (steeper angle) so dusk/dawn don't stripe with acne
-  if(sunLight.position.y - player.pos.y < kd*0.45) sunLight.position.y = player.pos.y + kd*0.45;
+  // ---- HOW LOW THE KEY LIGHT MAY RAKE (Ben 08-06: "hyperrealistic daytime shadows") ----
+  // THE SUN SETS AND THE SHADOWS DO NOT, and this floor is the whole of it. The sun's own direction swings the full arc
+  // — uSunDir.y crosses zero at dawn and dusk, and the sky, the colour temperature and the god rays all follow it — but
+  // the light that CASTS is pinned here to a minimum height above the player, so its elevation never went under about
+  // 27 degrees. Every shadow in the game was therefore short and steep at every hour, which is what reads as "daytime
+  // shadows don't work" even though they demonstrably do.
+  // THE FLOOR EXISTS FOR A REAL REASON and it is not deleted, only lowered: at a grazing angle a depth comparison across
+  // one shadow texel spans a huge slope in world space, and the surface shadows itself in stripes. The cure is the bias,
+  // not the angle, so the floor drops to 0.16 (about 9 degrees) and normalBias is scaled by 1/sin(elevation) over the
+  // same range — acne grows exactly as that ratio does, so one term tracks the other instead of a second constant that
+  // has to be re-tuned whenever the floor moves.
+  // WHAT THIS CANNOT DO is cast a shadow from a tree that is outside the shadow camera's 46-block box. A low sun makes
+  // shadows longer than the box, so they are truncated at its edge; widening R is a shadow-map resolution and fill cost
+  // and belongs to the perf pass, not here. `__hc.sunArc({floor,nb})` and its `elevDeg` readout are the dial and the
+  // measurement.
+  const yMin = kd*_sunArc.floor;
+  if(sunLight.position.y - player.pos.y < yMin) sunLight.position.y = player.pos.y + yMin;
   sunLight.target.position.copy(player.pos); sunLight.target.updateMatrixWorld();
+  { const dy=sunLight.position.y-player.pos.y, dh=Math.hypot(sunLight.position.x-player.pos.x, sunLight.position.z-player.pos.z);
+    const sinE=dy/Math.max(1e-4, Math.hypot(dy,dh));
+    _sunArc.sinE=sinE;
+    sunLight.shadow.normalBias = _sunArc.nb * Math.min(_sunArc.nbMax, 1/Math.max(sinE,0.10)); }
   // texel snap to kill shimmer
   const sc=sunLight.shadow.camera, R=46;   // tight radius → shadows focus near the player (sharper, more visible) and the shadow pass covers far less canopy (big forest-FPS win)
   sc.left=-R; sc.right=R; sc.top=R; sc.bottom=-R; sc.near=1; sc.far=kd*2.2;
@@ -32677,6 +32700,16 @@ window.__hc={
       for(let yy=0;yy<WH;yy++){ if(occludesCanopy[c.blocks[idx(lx,yy,lz)]]){ n++; if(yy>tp)tp=yy; if(yy<bt)bt=yy; } }
       const above = !n?0 : (y>=tp?0 : (y<=bt?n : n*(tp-y)/(tp-bt)));
       return { layers:+above.toFixed(2), count:n, top:tp, bottom:n?bt:0 };
+    }catch(e){ return {err:String(e.message||e)}; } },
+  // How low the SHADOW-CASTING light may rake, which is a different thing from where the sun is (uSunDir swings the full
+  // arc either way). `floor` is its minimum height as a fraction of its distance from the player; `elevDeg` is what that
+  // works out to on the frame you ask. Lower it and shadows lengthen at dawn and dusk; too low and grazing surfaces
+  // stripe with self-shadow acne, which `nb`/`nbMax` are there to hold off.
+  sunArc(o){ try{ if(o){ if(o.floor!=null) _sunArc.floor=+o.floor; if(o.nb!=null) _sunArc.nb=+o.nb; if(o.nbMax!=null) _sunArc.nbMax=+o.nbMax; }
+      return { floor:+_sunArc.floor.toFixed(3), nb:+_sunArc.nb.toFixed(3), nbMax:+_sunArc.nbMax.toFixed(2),
+               elevDeg:+(Math.asin(Math.max(-1,Math.min(1,_sunArc.sinE)))*57.29578).toFixed(2),
+               normalBias:+sunLight.shadow.normalBias.toFixed(3),
+               sunElevDeg:+(Math.asin(Math.max(-1,Math.min(1,globalU.uSunDir.value.y)))*57.29578).toFixed(2) };
     }catch(e){ return {err:String(e.message||e)}; } },
   skyDir(o){ try{ if(o&&o.amt!=null) globalU.uSkyDirAmt.value=+o.amt; if(o&&o.on!=null) globalU.uSkyDirAmt.value=o.on?1:0;
       if(o&&o.up!=null) globalU.uSkyDirUp.value=+o.up; if(o&&o.dn!=null) globalU.uSkyDirDn.value=+o.dn;
