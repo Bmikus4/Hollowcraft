@@ -119,8 +119,23 @@ function parse(buf){
 // them samples texel (0,0) — one flat colour, i.e. exactly the "lost its texture" complaint. Planar UVs
 // projected off the two widest axes give the grain something to run along, which is all these maps are:
 // woodTex is a grain and metalTex is a brushed noise, neither is a decal that has to land anywhere.
-function planarUV(geo, repeat){
-  const p = geo.attributes.position, b = geo.boundingBox || (geo.computeBoundingBox(), geo.boundingBox);
+// ownBounds PROJECTS OVER THE TRIANGLES THAT ARE ACTUALLY DRAWN, and the distinction matters because splitTris
+// hands every carve the WHOLE material's position buffer and only a narrower index. So geo.boundingBox is the
+// extent of the material, not of this piece.
+//
+// For a tiling MAP that is what you want: the shotgun's forend and its receiver are one wood material cut in two,
+// and projecting each over its own bounds would step the grain at the cut. For a LENS it is fatal. The scope's
+// eyepiece is a small disc; projected over a rifle-length bbox its UVs came out around u 0.37-0.99, v 0.79-0.98,
+// and the lens shader reads vUv-0.5 as circle-local coordinates — so r ran past 1.0 everywhere on the glass, the
+// shader's rim term (smoothstep 0.82 to 1.0, tube shadow) evaluated to 1, and it painted the entire disc black.
+// A live render target, a correct uActive, and a black hole where the sight picture goes.
+function planarUV(geo, repeat, ownBounds){
+  const p = geo.attributes.position;
+  let b = geo.boundingBox || (geo.computeBoundingBox(), geo.boundingBox);
+  if (ownBounds && geo.index){
+    b = new THREE.Box3(); const v = new THREE.Vector3();
+    for (let i = 0; i < geo.index.count; i++) b.expandByPoint(v.fromBufferAttribute(p, geo.index.getX(i)));
+  }
   const sz = new THREE.Vector3(); b.getSize(sz);
   const ax = [0, 1, 2].sort((a, c) => sz.getComponent(c) - sz.getComponent(a)), u = ax[0], v = ax[1];
   const su = repeat / Math.max(1e-4, sz.getComponent(u)), sv = repeat / Math.max(1e-4, sz.getComponent(v));
@@ -163,7 +178,13 @@ export function modelBox(id){ const t = TEMPLATES.get(id); return t ? t.box.clon
 // whose centroid is inside a named box are lifted into a child Group of that name, which the caller can
 // then move, hide or re-material. It is a slice by region because region is the only thing the geometry
 // carries: there are no part names in these files, only material names.
-function splitTris(geo, boxes){
+// `mats` NARROWS A BOX TO ONE KIND OF SURFACE, and it was accepted and then never read — the loop below tested
+// only containsPoint. Two callers rely on it and both were silently wrong: the scope's eyepiece box asks for
+// mats:/glass|lens/i and instead took every triangle whose centroid fell inside it, so 104 triangles of the bolt
+// rifle's receiver and rear tube were drawn with the render-target lens shader. On screen that is a black hole
+// where the back of the scope should be, which is Ben 08-12 "the rifle's scope is broken, the back part of it is
+// invisible". The shotgun's forend carve asks for mats:/wood/i and had the same hole in it.
+function splitTris(geo, boxes, matName){
   const p = geo.attributes.position, idx = geo.index;
   const n = idx ? idx.count : p.count, get = i => (idx ? idx.getX(i) : i);
   const bins = new Map(); bins.set('', []);
@@ -175,7 +196,7 @@ function splitTris(geo, boxes){
     for (const k of [a, b2, c2]) c.add(v.fromBufferAttribute(p, k));
     c.multiplyScalar(1 / 3);
     let hit = '';
-    for (const bx of boxes) if (bx.box.containsPoint(c)) { hit = bx.name; break; }
+    for (const bx of boxes) if ((!bx.mats || bx.mats.test(matName || '')) && bx.box.containsPoint(c)) { hit = bx.name; break; }
     bins.get(hit).push(a, b2, c2);
   }
   const out = {};
@@ -206,7 +227,7 @@ export function build(id, opts){
   for (const part of t.parts){
     const s = (opts.style && opts.style(part.mat.name, part.mat)) || {};
     if (opts.parts){
-      const cut = splitTris(part.geometry, opts.parts);
+      const cut = splitTris(part.geometry, opts.parts, part.mat.name);
       for (const name in cut){
         if (name === '') continue;
         // The style is asked again WITH the part name: a scope lens and a scope tube are the same GLB
@@ -233,7 +254,7 @@ function mkMesh(geo, s, part){
   // atlas is used only when no style map was asked for and the geometry really does carry the UVs to read it with
   // — planarUV would otherwise overwrite the very coordinates the atlas is indexed by.
   const ownMap = (!s.map && !s.uv && part.mat.map && geo.attributes.uv) ? part.mat.map : null;
-  if (s.map || s.uv) planarUV(geo, s.map ? (s.repeat || 3) : (s.uv === true ? 1 : s.uv));
+  if (s.map || s.uv) planarUV(geo, s.map ? (s.repeat || 3) : (s.uv === true ? 1 : s.uv), !s.map);
   const md = { color: s.color != null ? new THREE.Color(s.color) : part.mat.color.clone() };
   if (s.map) md.map = s.map; else if (ownMap) md.map = ownMap;
   // A normal map needs the same planar UVs the albedo just got, so it only rides along with a map — never alone.

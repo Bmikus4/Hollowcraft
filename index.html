@@ -5003,7 +5003,12 @@ function foliageMesh(c){
   const P=[], NM=[], UVB=[], TL=[], SK=[], WIND=[], CAN=[];
   const cx0=c.cx*CK, cz0=c.cz*CK;
   const g=(lx,ly,lz)=>c.blocks[idx(lx,ly,lz)];
-  const quad=(x,y,z,ax,az,tile,sky,wind,hh,nrm)=>{
+  // skyTop is OPTIONAL and defaults to sky, so every caller that does not pass it is bit-identical. It exists for kelp:
+  // a strand is up to five blocks tall and took ONE sky sample, at its holdfast, which is the darkest cell in the
+  // column. The tip then renders as if it were on the seabed while sitting just under the surface — and the tip is the
+  // only part of a strand you can see, because the water's own absorption hides everything deeper. That is Ben 08-12,
+  // "kelp is still showing black through the water", "its just the top tips".
+  const quad=(x,y,z,ax,az,tile,sky,wind,hh,nrm,skyTop)=>{
     // one billboard quad from (x,z) along (ax,az) diagonal, height hh (1 for normal cross blocks, 2 for tall2 grass)
     const hw=0.5, H=hh||1;
     const corners=[[x-ax*hw,y,z-az*hw],[x+ax*hw,y,z+az*hw],[x+ax*hw,y+H,z+az*hw],[x-ax*hw,y+H,z-az*hw]];
@@ -13709,9 +13714,17 @@ function _cmpBand(){ const un=uiArt('underlay_line'); if(!un) return null;
 function playerBearing(){ let b=(-(player.yaw)*180/Math.PI)%360; if(b<0)b+=360; return b; }
 // WHERE THE COMPASS ITEM WILL GATE THIS. Ben's inventory rebuild gives the player a compass SLOT; when it lands, the
 // ribbon becomes conditional on something being in it — one test here, and nothing else in the file has to know.
+// One test, so nothing else in the file has to know what a compass is. Cheap enough to call per frame: it walks 43
+// slots and the grid's stack list, both of which every other HUD tick already touches.
+function hasCompass(){ try{ return invCount('compass_item')>0; }catch(e){ return false; } }
 function updateCompass(dt){ if(!_cmp) buildCompass();
   const W=_cmp.wrap;
   if(!started || (typeof intro!=='undefined' && intro.active)){ W.style.opacity='0'; return; }
+  // NO COMPASS, NO RIBBON (Ben 2026-08-12: "disable the nav bar by default, when its equipped you see the navigation
+  // compass in the HUD"). The gate is CARRYING the Brass Compass — `compass_item`, and invCount already counts the bar
+  // and the bag together — not holding it in hand: a compass you have to select is a compass you cannot read while a
+  // rifle is up, which is the one moment a bearing matters. The cabin chest has it, so the first objective hands it over.
+  if(!hasCompass()){ W.style.opacity='0'; return; }
   W.style.opacity=(player.grabbed||player.tied)?'0':'0.92';
   const b=playerBearing();
   // A tenth of a degree is a third of a pixel at this scale. Redrawing below that is a repaint nobody can see —
@@ -20894,7 +20907,14 @@ function buildGlbGun(key,dot,suppressed){
     parts.push({name:'lens',mats:/glass|lens/i,box:_glbBox(g0-0.10,P.railTop,-99,g0+0.30*(g1-g0),99,99)});   // the EYEPIECE only: the magnified pass renders into this one disc, and the objective at the far end must stay glass
     parts.push({name:'scope',box:_glbBox(g0-0.14,P.railTop,-99,g1+0.14,99,99)});
   }
-  const m=glbBuild(spec.id,{parts,style:(nm,mat,part)=>part==='lens'?{material:scopeLensMat,uv:1}:_glbGunStyle(nm,mat,spec.metalLift)});
+  // THE MOULDED GLASS IS NOT THE LENS. It is whatever polygons the artist put in the tube — on guns/sniper-rifle a
+  // six-triangle hexagon — and the lens shader reads vUv-0.5 as circle-local coordinates, so a hexagon with planar
+  // UVs gives it a hexagonal sight picture with corners past the rim cutoff. It is painted as plain dark glass now
+  // and the real lens is the disc built below: the SAME CircleGeometry(r,40) the procedural rifle has always used,
+  // which is what Ben asked for — "in its viewport get the scope we created for the hunting rifle added exactly in
+  // place". Exactly in place means measured off this model's own eyepiece rather than positioned by hand, so it
+  // lands correctly on all four scoped rifles without four sets of numbers.
+  const m=glbBuild(spec.id,{parts,style:(nm,mat,part)=>_glbGunStyle(nm,mat,spec.metalLift)});
   if(!m) return null;
   m.rotation.y=Math.PI/2; m.scale.setScalar(s); m.position.set(0,posY,posZ);
   const g=new THREE.Group(); g.add(m);
@@ -20919,7 +20939,28 @@ function buildGlbGun(key,dot,suppressed){
   // the eye. The boxes can, and that is the difference between a number that agrees and a gun that aims.
   const tag=(o,t)=>{ o.userData.sightPart=t; g.add(o); return o; };
   if(spec.scope){
-    if(sub.lens){ sub.lens.traverse(o=>{ if(o.isMesh) o.userData.scopeLens=true; }); }   // what __hc.sight() and the PiP pass look for
+    // The eyepiece's own centre and radius, off the triangles the lens carve actually kept. The carve's geometry
+    // carries the whole material's vertex buffer with a narrow index (see splitTris), so its boundingBox is the
+    // rifle — the index is the only thing that says where the glass is.
+    if(sub.lens){
+      const bb=new THREE.Box3(), _v=new THREE.Vector3();
+      sub.lens.traverse(o=>{ if(!o.isMesh||!o.geometry.index) return; const pa=o.geometry.attributes.position;
+        for(let i=0;i<o.geometry.index.count;i++) bb.expandByPoint(_v.fromBufferAttribute(pa,o.geometry.index.getX(i))); });
+      if(!bb.isEmpty()){
+        const c=bb.getCenter(new THREE.Vector3()), sz=bb.getSize(new THREE.Vector3());
+        const rad=Math.max(sz.y,sz.z)/2*s*0.98;            // just inside the tube, so the rim is metal and not glass
+        const disc=new THREE.Mesh(new THREE.CircleGeometry(rad,40),scopeLensMat);
+        // CircleGeometry lies in XY facing +z, and in game space the gun points -z with the eye at the origin — so
+        // a disc left unrotated already faces the shooter. Nudged 0.002 toward the eye to clear the moulded glass.
+        disc.position.set(0, gy(c.y), gz(c.x)+0.002);
+        // rearGlass as well as scopeLens: __hc.holoAlign() has always measured "is the hole you look through on the
+        // crosshair" through that flag, and the GLB rifles carried no such mesh, so the one probe that answers the
+        // question was blind to the four guns that most need it.
+        disc.userData.scopeLens=true; disc.userData.rearGlass=true; disc.userData.lensR=rad;
+        disc.renderOrder=6; g.add(disc); UD.lensDisc=disc;
+      }
+      sub.lens.traverse(o=>{ if(o.isMesh) o.userData.scopeLens=true; });   // what __hc.sight() and the PiP pass look for
+    }
     if(dot){ if(sub.scope)sub.scope.visible=false; if(sub.lens)sub.lens.visible=false; }
     else UD.dotY=gy(P.opticAxisY!=null?P.opticAxisY:P.railTop+0.1);                       // the scope's own optical axis, measured off the glass
   }
@@ -30552,7 +30593,10 @@ function buildCabin(){ if(_cabinDone)return; const cx=spawnX+22, cz=spawnZ-14;
   setBlockWorld(cx-5,gy+1,cz-2,BID.birdhouse,true);                                                                                          // birdhouse — 1 further from the cabin, on its own 2-block pole from the ground
   setBlockWorld(cx,gy+1,cz+3,BID.door,true); setBlockWorld(cx,gy+2,cz+3,BID.door_top,true);                                                  // DOOR in the front doorway (right-click to open)
   addNote(cx-1.4, gy+1.04, cz+1.4, "Day 9 — it stopped taking the meat I leave out. Now it just stands past the treeline while I sleep. Do NOT light the lamps after dark; it goes where the light goes. If you found this, you are already in its wood. — H.");
-  lootChest(cx-2,gy+1,cz-2,[['iron_ingot',3],['bread',4],['green_apple',3],['flint',2],['string',5],['coal',6]]);         // ground-floor loot
+  // THE BRASS COMPASS IS IN HERE, and it is the only one in the world: the nav ribbon is gated on carrying it
+  // (see hasCompass), and "find the cabin in the wood" is the first objective — so the first thing the player is
+  // sent to do is what turns the HUD's bearing on. The item existed in the pack with no way to obtain it.
+  lootChest(cx-2,gy+1,cz-2,[['compass_item',1],['iron_ingot',3],['bread',4],['green_apple',3],['flint',2],['string',5],['coal',6]]);   // ground-floor loot
   // creepy BASEMENT: shaft down through the floor into a mossy room with a chest + torch
   const by=gy-7;
   for(let y=by;y<by+4;y++)for(let dx=-3;dx<=3;dx++)for(let dz=-3;dz<=3;dz++){ const wall=Math.abs(dx)===3||Math.abs(dz)===3||y===by||y===by+3; setBlockWorld(cx+dx,y,cz+dz, wall?BID.mossy:AIR, true); }
@@ -33985,6 +34029,10 @@ window.__hc={
                glass, holo, bore, hasGlass:!!hs, retVisible:!!(view.holoRet&&view.holoRet.visible),
                holoVsGlass:mag(d(holo,glass)), boreVsGlass:mag(d(bore,glass)), holoVsBore:mag(d(holo,bore)),
                glassOff:mag(glass), holoOff:mag(holo), boreOff:mag(bore),
+               // how much of the frame the window fills, which is the other half of "can you use this scope"
+               glassRadPx:(()=>{ if(!hs||!hs.userData.lensR) return null; const c=new THREE.Vector3().setFromMatrixPosition(hs.matrixWorld);
+                 const e=c.clone().add(new THREE.Vector3(hs.userData.lensR*(hs.parent?hs.parent.scale.x:1),0,0));
+                 const a=px(c), b=px(e); return +Math.hypot(a[0]-b[0],a[1]-b[1]).toFixed(1); })(),
                offAxisDeg:view.aimCam?+(Math.acos(Math.max(-1,Math.min(1,-view.aimCam.z)))*57.29578).toFixed(3):null,
                // bend is here because a gun being stood up off a wall is NOT a misaligned sight: blockOutHand swings the
                // whole model, glass included, while the ring stays on the camera axis — by design. A frame with bend on it
