@@ -40,9 +40,18 @@ def key_blood(rgb):
     redness = np.clip((a[..., 0] - np.maximum(a[..., 1], a[..., 2])) / 255.0, 0, 1)
     alpha = np.clip(np.clip(sat * 1.9, 0, 1) * np.clip(redness * 3.4, 0, 1) ** 0.6, 0, 1)
     alpha[alpha < 0.06] = 0.0                       # hard floor, so a cell is not a 2% film
-    # Colour is the source's own red, darkened toward blood: stock blood renders bright for a preview.
-    col = a.copy()
-    col[..., 0] *= 0.82; col[..., 1] *= 0.42; col[..., 2] *= 0.42
+    # COLOUR FROM A RAMP, NOT FROM THE SOURCE PIXEL. Multiplying the source down turned every dim red pixel into a
+    # near-BLACK one carrying real alpha, and at decal scale those read as black splotches around the blood rather
+    # than as blood - visible the moment a mark was drawn two blocks wide on the giantess. A ramp keyed on density
+    # cannot produce black: thin edges dry rusty brown, thick centres go dark maroon, and that is what blood does.
+    d = alpha[..., None]
+    # AND IT IS LIT, so the palette has to survive being multiplied by the light. These decals are Lambert - blood on a
+    # wall at midnight should be as dark as the wall - and a maroon of luminance 34 times a dusk light of a third is
+    # luminance 11, which is black. Measured over the baked sheets before this: min 23, mean 34. Roughly doubled, so
+    # the blood still reads RED in the shade instead of as a hole in the world.
+    thin = np.array([0xba, 0x42, 0x2c], np.float32)
+    thick = np.array([0x78, 0x16, 0x12], np.float32)
+    col = thin * (1.0 - d) + thick * d
     return np.dstack([np.clip(col, 0, 255), alpha * 255]).astype(np.uint8)
 
 def frames_of(src):

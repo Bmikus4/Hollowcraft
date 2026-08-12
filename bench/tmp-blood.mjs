@@ -41,6 +41,25 @@ for (const d of st.decals) console.log('  ', JSON.stringify(d));
 // THE TEST THAT MATTERS runs inside the page: `animals` is closed over by the game body and unreachable here.
 const ride = await page.evaluate(() => __hc.bloodRide(3,2));
 console.log('ride ', JSON.stringify(ride));
+// THE GIANTESS is skinned, so her wound hangs on a BONE. Two things to prove: that a shot on her makes blood at all,
+// and that it rides the bone rather than staying where she was standing.
+const girl = await page.evaluate(async () => {
+  __hc.girl(12);                                                     // spawn her ahead of the player
+  for (let i = 0; i < 120 && !(__hc.girlState && __hc.girlState().loaded); i++) await new Promise(r => setTimeout(r, 250));
+  const before = __hc.bloodState().live;
+  const shot = __hc.girlShoot('spine.003', 2);
+  const after = __hc.bloodState().live;
+  const mine = __hc.bloodState().decals.filter(d => d.kind !== 'splatter');
+  return { shot, before, after, wounds: mine.length, depth: mine.map(d => d.parentDepth), onScene: mine.map(d => d.onScene) };
+});
+console.log('girl  ', JSON.stringify(girl));
+// Her picture BEFORE the bone-ride test: that test turns all 115 of her bones a third of a radian, so anything shot
+// after it is a photograph of a pretzel. Aim the camera at her chest, where the rounds went.
+// NO TELEPORT. __hc.girl(12) spawns her twelve blocks along the player's own look direction, so the camera is
+// already pointed at her - and placing it from the wound's world point put it inside a hillside twice.
+await page.waitForTimeout(500);
+await page.screenshot({ path: path.join(OUT, 'girl-blood.png') });
+console.log('gride ', JSON.stringify(await page.evaluate(() => __hc.bloodBoneRide())));
 await page.screenshot({ path: path.join(OUT, 'after-shot.png') });
 console.log('pageerrors:', errs.length ? errs : 'none');
 await b.close(); server.kill();
