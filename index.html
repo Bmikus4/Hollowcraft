@@ -6815,7 +6815,11 @@ function _ensureOcean3(){
         ['uniform sampler2D uLandTex; uniform vec2 uLandOrigin; uniform float uLandSpan, uSeaY, uLandBias;',
          'uniform vec3 uHorizonC, uZenithC, uSunColU, uSunDirW;',
          'uniform float uDayF, uSkyDim, uReflSharp, uMirror, uBroad, uSpecExp, uSpecGain, uWideExp, uWideGain;',
-         'uniform vec4 uScotG, uScotH;',
+         // uScotG/uScotH are NOT declared here and must not be: line ~1202 appends them to
+         // THREE.ShaderChunk.lights_pars_begin, this material is lights:true and includes that chunk, and a second
+         // declaration is a redefinition error that fails the whole program. That is what took the sea AND the sky out
+         // of Ben's build on 08-12 — a fragment shader that will not compile draws nothing, and the throw takes
+         // updateSky's tail with it. The chunk declares them; only their VALUES have to be handed in (see mu).
          // The old water shader's own sky, term for term, so the two seas cannot reflect two different skies. Scaled by
          // uSkyDim: uHorizonC and uZenithC are the sky's COLOURS and stay near their daylight values after dark (the
          // dome darkens them downstream), and fed in raw they filled the night sea with a daylight sky.
@@ -6828,12 +6832,28 @@ function _ensureOcean3(){
          '  c+=uSunColU*(pow(sd,7.0)*0.22 + pow(sd,mix(90.0,260.0,uReflSharp))*1.9)*uDayF*above;',
          '  return c*uSkyDim;',
          '}',
+         // ---- AND THE SAME TEXEL GIVES THE WATER ITS DEPTH, WHICH IS WHAT THE EXAMPLE HAS NO IDEA ABOUT ----
+         // The vendored material is an infinite plane with one alpha for every fragment: 0.86 over a metre of sand and
+         // 0.86 over sixty metres of ocean. Over this island's shelf that reads as a pale mud flat — the seabed showing
+         // through everywhere at equal strength, which is the grey-brown "sea" in bench/results/o3fix-noon.png and the
+         // reason the accepted-gap list said "shoreline has no shallows". The mask is already being sampled a line
+         // above, and sea level minus the ground it reports IS the depth of water over that fragment. So the shallows
+         // come free: absorption sinks the colour toward the deep body with depth, and the alpha climbs with it, so a
+         // shelf reads as sand under clear water and open ocean reads as opaque dark blue.
+         // 0.42 per block is the OLD water shader's own absorption curve, kept to the digit — the two seas are visible
+         // in the same frame at a river mouth and a different curve would show as a line where they meet.
+         'float _o3Depth(){',
+         '  vec2 _luv=(worldPosition.xz - uLandOrigin)/uLandSpan;',
+         '  if(_luv.x<=0.0 || _luv.x>=1.0 || _luv.y<=0.0 || _luv.y>=1.0) return 12.0;',   // outside the window is open ocean: deep, which is also what the far sea used to declare
+         '  return max(0.0, uSeaY - (texture2D(uLandTex,_luv).r*31.875 + (uSeaY-16.0)));',
+         '}',
          'void main() {',
          '  vec2 _luv=(worldPosition.xz - uLandOrigin)/uLandSpan;',
          '  if(_luv.x>0.0 && _luv.x<1.0 && _luv.y>0.0 && _luv.y<1.0){',
          '    float _lh=texture2D(uLandTex,_luv).r*31.875 + (uSeaY-16.0);',   // raw/255 -> blocks: 255 units = 31.875 blocks over a window starting 16 under the sea
          '    if(_lh > uSeaY + uLandBias) discard;',
-         '  }'].join('\n'))
+         '  }',
+         '  float _o3Ab = 1.0 - exp(-_o3Depth()*0.42);'].join('\n'))
       // The lobe's shape becomes a pair of dials instead of two literals baked into a vendored file.
       .replace('sunLight( surfaceNormal, eyeDirection, 100.0, 2.0, 0.5, diffuseLight, specularLight );',
         ['sunLight( surfaceNormal, eyeDirection, uSpecExp, uSpecGain, 0.5, diffuseLight, specularLight );',
@@ -6848,13 +6868,20 @@ function _ensureOcean3(){
          // the two instead would halve the reflected land and lay a flat wash over the synthesised sky.
          'float _o3Key = step(0.0025, dot(reflectionSample, vec3(0.2126,0.7152,0.0722))) * uMirror;',
          'vec3 _o3Refl = mix(_o3Sky, reflectionSample, _o3Key);',
-         'vec3 albedo = mix( ( uBroad * diffuseLight + scatter ) * getShadowMask(), _o3Refl, reflectance );',
+         // The body the water sinks toward with depth is waterColor, which is already the hour's own sea colour; over a
+         // shelf the scatter term keeps most of its brightness and the seabed shows through the alpha below.
+         'vec3 _o3Body = mix( uBroad * diffuseLight + scatter, waterColor * (0.35 + 0.65 * uSkyDim), _o3Ab * 0.85 );',
+         'vec3 albedo = mix( _o3Body * getShadowMask(), _o3Refl, reflectance );',
          'albedo += (specularLight + _o3Wide) * (0.35 + 0.65 * reflectance);'].join('\n'))
       .replace('gl_FragColor = vec4( outgoingLight, alpha );',
         ['{ float _nw=1.0-smoothstep(uScotG.y,uScotG.z,uScotG.w);',
          '  float _nl=dot(outgoingLight, vec3(0.2126,0.7152,0.0722));',
          '  outgoingLight=mix(outgoingLight, vec3(_nl), uScotG.x*_nw); }',
-         'gl_FragColor = vec4( outgoingLight, alpha );'].join('\n'));
+         // OPACITY IS DEPTH. 0.86 everywhere is what made a shelf look like mud; a film of water over sand is nearly
+         // clear and six blocks of it is nearly opaque. The submerged case (alpha driven to 1.0 in updateOcean3, so the
+         // surface reads as a ceiling from below) is kept exactly opaque rather than scaled.
+         'float _o3A = alpha >= 0.999 ? 1.0 : min(1.0, alpha * (0.34 + 0.78 * _o3Ab));',
+         'gl_FragColor = vec4( outgoingLight, _o3A );'].join('\n'));
   };
   _ocean3.material.needsUpdate=true;
   // ---- THE REFLECTION PASS MUST NOT TOUCH THE SKY (Ben 08-12: sky on load, then grey, and pure black at night) ----
@@ -21645,26 +21672,21 @@ function buildGlbGun(key,dot,suppressed){
     const R=(spec.cyl.bolt!=null?spec.cyl.bolt:spec.cyl.wall*0.58)*s;
     const cr=Math.max(0.003,(spec.cyl.chamber!=null?spec.cyl.chamber:spec.cyl.wall*0.17)*s);
     const zR=gz(spec.cyl.rear);
-    // SIX RIMS AT THE REAR FACE AND NOTHING ELSE. Full-length cases were tried and drew straight THROUGH the frame: the
-    // pack's cylinder is two low-poly end rings with a thin skin between them, so a case sitting properly inside the
-    // chamber is not occluded by anything and reads as a brass rod laid along the gun (bench/results/tile-rev-zoom.png).
-    // A rim standing 7mm off the rear face has nothing to intersect, and it is the part of a loaded cartridge a closed
-    // revolver actually shows — the brass scallops between the cylinder and the frame.
-    // AND AT THE FRONT FACE TOO (Ben 2026-08-12: "i dont see brass bullets in revolver holes"). Rims at the REAR are what
-    // a real closed revolver shows, and on this model that face is half-hidden by the frame — so the chamber MOUTHS get
-    // filled as well: a brass disc proud of the front face in each chamber, which is the "hole with a round in it" the
-    // eye is looking for from every angle the gun is ever seen at. Not a nose cone: a flat face reads as brass at 30px,
-    // where a cone reads as a grey pip.
-    const rimG=new THREE.CylinderGeometry(cr*1.22,cr*1.22,0.007,10);      // a rim overhangs its case a little, not by half again
-    const mouthG=new THREE.CylinderGeometry(cr*0.98,cr*0.98,0.006,10);   // and the mouth plug is the chamber's own bore, filling the hole
-    const zF=gz(spec.cyl.front);
+    // THE CHAMBERS ARE BORES, SO THEY ARE FILLED ALONG THEIR LENGTH (Ben 2026-08-12, third time: "i dont see revolvers
+    // chambers filled"). Rims at the rear and plugs at the front face were not enough, because what is see-through is the
+    // BORE — you look into a chamber and out the other side of the drum. A full case sitting in each chamber is what stops
+    // that, and it can only be done now that the bolt circle and the bore came off the mesh: the first attempt used a
+    // guessed 0.079/0.023 and the cases stood outside the drum's own holes, drawing over the frame as brass rods.
+    const zF=gz(spec.cyl.front), span=Math.abs(zR-zF);
+    const caseG=new THREE.CylinderGeometry(cr,cr,span*0.98,10);
+    const rimG=new THREE.CylinderGeometry(cr*1.22,cr*1.22,0.007,10);   // a rim overhangs its case a little
+    const mid=(zR+zF)/2;
     for(let i=0;i<6;i++){
       // Half a step off top-dead-centre so no chamber hides behind the frame's top strap, and none sits under the rib.
       const a=Math.PI/6+i*Math.PI/3, px=Math.cos(a)*R, py=boreG+Math.sin(a)*R;
-      const rim=new THREE.Mesh(rimG,_shellMat); rim.rotation.x=Math.PI/2;
-      rim.position.set(px, py, zR+0.0045); g.add(rim);   // +z is toward the shooter
-      const mouth=new THREE.Mesh(mouthG,_shellMat); mouth.rotation.x=Math.PI/2;
-      mouth.position.set(px, py, zF-0.004); g.add(mouth);
+      const put=(geo,z)=>{ const o=new THREE.Mesh(geo,_shellMat); o.rotation.x=Math.PI/2; o.position.set(px,py,z); g.add(o); };
+      put(caseG,mid);          // the case body, filling the bore end to end
+      put(rimG,zR+0.0045);     // and its rim, standing proud of the rear face where a closed revolver shows brass
     }
   }
   const blk=new THREE.MeshLambertMaterial({map:metalTex(),color:0x1e2024});
@@ -23701,7 +23723,7 @@ function _traceBullet(o,d,bolt,rev,sup,sg,vo){
       spawnParticles(px,py,pz,blockColor(b),9,1.7,0.5); addBulletHole(fx,fy,fz,nx,ny,nz);
       shotFixture(qx,qy,qz,b,d);   // a lantern goes out, a hanging lamp or a chime is knocked swinging (see below)
       return true; }
-    if(_wretchRayHit(px,py,pz,d,bolt,rev,sup,sg)){ bloodImpact(px,py,pz,d,wretch.group||null,2.4*((wretch.group&&wretch.group.scale.y)||1)); hitMarker(); return true; }   // eyes, wings, then body — resolved against whichever LIVE creature this point is inside, primary or Horrific (see _wretchRayHit)
+    if(_wretchRayHit(px,py,pz,d,bolt,rev,sup,sg,_vel(t))){ bloodImpact(px,py,pz,d,wretch.group||null,2.4*((wretch.group&&wretch.group.scale.y)||1)); hitMarker(); return true; }   // eyes, wings, then body — resolved against whichever LIVE creature this point is inside, primary or Horrific (see _wretchRayHit)
     for(let bi=0;bi<skyBirds.length;bi++){ const b=skyBirds[bi]; if(b.dead)continue; const bp=b.m.position, br=0.9*b.m.scale.x;   // SKY BIRDS die to gunfire (Ben 07-20) — generous sphere, they're small and far
       const dxb=px-bp.x, dyb=py-bp.y, dzb=pz-bp.z; if(dxb*dxb+dyb*dyb+dzb*dzb < br*br){ b.dead=true; b.vy=1.5; b.spin=(Math.random()-0.5)*7; hitMarker();
         spawnParticles(bp.x,bp.y,bp.z,0x191920,14,2.2,0.9); flashName('bird down'); return true; } }
@@ -23727,8 +23749,13 @@ function _traceBullet(o,d,bolt,rev,sup,sg,vo){
 // Args ride on a scratch object because this runs ~600 times per bullet (×9 for a shell) and a closure per step is garbage
 // the frame budget does not have.
 let _wrp={x:0,y:0,z:0,d:null,bolt:false,rev:false,sup:false,sg:false};
-function _wretchRayHit(px,py,pz,d,bolt,rev,sup,sg){
+function _wretchRayHit(px,py,pz,d,bolt,rev,sup,sg,vf){
+  // vf IS THE VELOCITY FACTOR, and it has to travel in the stash because this pair of functions is split: the march owns
+  // the distance and the per-gun falloff, and _wretchRayHit1 is re-run once per extra creature by the binder, so it can
+  // see neither. Referencing the march's `t` and `_at` from in there was a ReferenceError on every shot that reached the
+  // creature — the trace aborted before the hit could land, which is exactly Ben 08-12: "wretchs hitbox is gone".
   _wrp.x=px; _wrp.y=py; _wrp.z=pz; _wrp.d=d; _wrp.bolt=bolt; _wrp.rev=rev; _wrp.sup=sup; _wrp.sg=sg;
+  _wrp.vf=(vf==null?1:vf);
   // THE GIANTESS IS TESTED HERE, in the outer wrapper, not inside _wretchRayHit1: that one is re-run once per
   // extra Wretch by the binder, so a hit on her would be counted and damaged twice over whenever a second
   // creature existed. Cheap either way — girlBounds rejects on a cylinder before a single bone is read.
@@ -23737,8 +23764,9 @@ function _wretchRayHit(px,py,pz,d,bolt,rev,sup,sg){
 }
 function _wretchRayHit1(){
   const px=_wrp.x, py=_wrp.y, pz=_wrp.z, bolt=_wrp.bolt, rev=_wrp.rev, sup=_wrp.sup, sg=_wrp.sg;
+  const _vf=(_wrp.vf==null?1:_wrp.vf), _fall=x=>Math.max(1,Math.round(x*_vf));   // the round's remaining energy, from the march
   if(wretch.active && wretch.boss){ for(const e of seraphEyeSpheres()){ const ex=px-e.x, ey=py-e.y, ez=pz-e.z;   // THE CERAPHIM: every eye = 100% damage (central = weak point); checked BEFORE wings so eyes set into wings still pay full
-    if(ex*ex+ey*ey+ez*ez < e.r*e.r){ const _wd=_at(((sg?PELLET_DMG:bolt?100:rev?68:65) - (sup?(sg?PELLET_SUP:20):0)) * (e.central?1.5:1), t);
+    if(ex*ex+ey*ey+ez*ez < e.r*e.r){ const _wd=_fall(((sg?PELLET_DMG:bolt?100:rev?68:65) - (sup?(sg?PELLET_SUP:20):0)) * (e.central?1.5:1));
       if(!NET.on||wretchOwner()===NET.id){ wretch._gunHit=true; hurtWretch(_wd); } else netSend({t:'hw',v:_wd,h:wretch._hid||0});
       spawnParticles(px,py,pz,0xf1e7d9,16,2.4,0.7); spawnParticles(px,py,pz,0x8a1010,10,1.8,0.6);
       if(!e.central && !e.closed && typeof seraphEyeClose==='function'){ seraphEyeClose(e.i,90); flashName('eye SEALED — 90s'); if(NET.on)netSend({t:'eyeSeal',i:e.i}); }   // shoot a side eye → it clamps shut 90s (in stage 3 a sealed eye can't fire its burst laser) (Ben 07-21)
@@ -23746,7 +23774,7 @@ function _wretchRayHit1(){
       if(typeof seraphSay==='function'&&Math.random()<0.4)seraphSay(e.central?'hitCentral':(Math.random()<0.5?'hit1':'hit2')); return true; } }
     for(const wsp of seraphWingSpheres()){ const wx2=px-wsp.x, wy2=py-wsp.y, wz2=pz-wsp.z;                       // WINGS: big tempting targets — 10% chance a shot wounds (user spec 07-20); feathers soak the rest
       if(wx2*wx2+wy2*wy2+wz2*wz2 < wsp.r*wsp.r){
-        if(Math.random()<0.10){ const _wd=_at((sg?PELLET_DMG:bolt?100:rev?68:65) - (sup?(sg?PELLET_SUP:20):0), t);
+        if(Math.random()<0.10){ const _wd=_fall((sg?PELLET_DMG:bolt?100:rev?68:65) - (sup?(sg?PELLET_SUP:20):0));
           if(!NET.on||wretchOwner()===NET.id){ wretch._gunHit=true; hurtWretch(_wd); } else netSend({t:'hw',v:_wd,h:wretch._hid||0});
           spawnParticles(px,py,pz,0x8a1010,12,2,0.6); flashName('through the wing'); }
         else { spawnParticles(px,py,pz,0xb03030,10,1.8,0.8); spawnParticles(px,py,pz,0xf1e7d9,4,1.2,0.5); }      // feather burst — the shot is EATEN
@@ -23756,7 +23784,7 @@ function _wretchRayHit1(){
     // A PELLET IS WORTH 12, so a whole shell is 108 on the body and 144 through the head — two shells rout even the
     // Horrific one. The suppressor's flat -20 must never drive a pellet NEGATIVE (bullets that heal shipped once
     // already, on animals): 3 is the same share of 12 that 20 is of 70.
-    if(head||body){ const _wd=_at((sg?(head?Math.round(PELLET_DMG*PELLET_HEAD):PELLET_DMG):bolt?(head?100:70):rev?(head?68:45):(head?65:50)) - (sup?(sg?PELLET_SUP:20):0), t);
+    if(head||body){ const _wd=_fall((sg?(head?Math.round(PELLET_DMG*PELLET_HEAD):PELLET_DMG):bolt?(head?100:70):rev?(head?68:45):(head?65:50)) - (sup?(sg?PELLET_SUP:20):0));
       if(!NET.on||wretchOwner()===NET.id){ wretch._gunHit=true; hurtWretch(_wd); } else netSend({t:'hw',v:_wd,h:wretch._hid||0});   // AR 50 / Python 45 body (Ben 07-20), heads scaled; co-op: only the owner mutates HP; guests request the hit
       spawnParticles(px,py,pz,head?0xff3020:0x3a0608,head?16:12,2,0.6); if(head)flashName('headshot'); return true; } }   // blood burst only — no lingering wound decal (Ben 07-21)
   return false;
@@ -29663,7 +29691,7 @@ function bloodAssetTex(){
 const BLOOD_LIFE=180;                          // seconds a wound stays on a creature - Ben's three minutes, exactly
 const BLOOD_FADE=3;                            // ...and the last three of them fade it out, so it does not pop
 const BLOOD_MAX=64;                            // live decals, oldest first out. The cap IS the budget.
-const _bloodFX={ tex:{}, mat:{}, meta:null, live:[], ready:false, dead:false, lastSnap:null };
+const _bloodFX={ tex:{}, mat:{}, meta:null, live:[], skin:[], ready:false, dead:false, lastSnap:null };
 function bloodFxInit(){
   if(_bloodFX.ready || _bloodFX.dead) return _bloodFX.ready;
   const TL=new THREE.TextureLoader();
@@ -29736,6 +29764,12 @@ function _bloodTrack(mesh,dur){
 // minutes. Frames are only rewritten when the index actually changes, so a decal holding its finished stain costs one
 // comparison a frame.
 function updateBloodFx(dt){
+  // The skin-bound wounds first, so a decal is where the skin is before it is drawn. A group whose decals have all
+  // expired is dropped here rather than tracked forever.
+  const K=_bloodFX.skin;
+  for(let i=K.length-1;i>=0;i--){ const r=K[i];
+    if(!r.g.parent || !r.g.children.length){ if(r.g.parent)r.g.parent.remove(r.g); K.splice(i,1); continue; }
+    _bloodSkinPose(r); }
   const L=_bloodFX.live;
   for(let i=L.length-1;i>=0;i--){ const d=L[i]; d.t+=dt;
     const M=d.m.userData._bl;
@@ -29744,6 +29778,44 @@ function updateBloodFx(dt){
       const a=Math.max(0,(BLOOD_LIFE-d.t)/BLOOD_FADE), c=d.m.geometry.attributes.color;
       for(let v=0;v<4;v++) c.setW(v,a); c.needsUpdate=true; }
     if(d.t>=BLOOD_LIFE){ if(d.m.parent)d.m.parent.remove(d.m); d.m.geometry.dispose(); L.splice(i,1); } }
+}
+// A WOUND NAILED TO A TRIANGLE OF SKIN, RE-SOLVED EVERY FRAME. Parenting to a bone was the first answer and it is
+// only half of one: a bone is a rigid frame and skin is not, so a decal on a hip stayed where the hip BONE went while
+// the surface under it stretched away — Ben 08-12, "some of them arent particularly bound to her body ... some jump
+// around as she moves", and the same cause sank others half a block inside her once she started walking.
+//
+// The binding is the struck triangle plus barycentric coordinates on it, which is the one description of a spot on a
+// body that survives any pose. applyBoneTransform gives each of the three vertices where the skinning shader puts it
+// this frame, so the point and the surface normal are recovered exactly, and the decal is written into its parent's
+// space from there. Three vertex transforms per decal per frame, capped by BLOOD_MAX at 64 - it does not show up in a
+// profile, and nothing cheaper can follow a deforming surface.
+const _wdA=new THREE.Vector3(), _wdB=new THREE.Vector3(), _wdC=new THREE.Vector3(), _wdP=new THREE.Vector3(),
+      _wdN=new THREE.Vector3(), _wdU=new THREE.Vector3(), _wdR=new THREE.Vector3(), _wdQ=new THREE.Quaternion(),
+      _wdS=new THREE.Vector3(), _wdM=new THREE.Matrix4();
+function _bloodSkinPose(rec){
+  const b=rec.bind, m=b.m, g=rec.g, P=g.parent;
+  if(!P || !m.parent || !m.skeleton) return false;
+  const pos=m.geometry.attributes.position;
+  m.applyBoneTransform(b.a,_wdA.fromBufferAttribute(pos,b.a)); m.localToWorld(_wdA);
+  m.applyBoneTransform(b.b,_wdB.fromBufferAttribute(pos,b.b)); m.localToWorld(_wdB);
+  m.applyBoneTransform(b.c,_wdC.fromBufferAttribute(pos,b.c)); m.localToWorld(_wdC);
+  _wdP.copy(_wdA).multiplyScalar(b.bary[0]).addScaledVector(_wdB,b.bary[1]).addScaledVector(_wdC,b.bary[2]);
+  _wdN.subVectors(_wdC,_wdA).cross(_wdU.subVectors(_wdB,_wdA)).normalize();
+  if(b.flip) _wdN.negate();
+  if(!isFinite(_wdP.x)||!isFinite(_wdN.x)) return false;
+  _wdU.set(0,1,0).addScaledVector(_wdN,-_wdN.y);                       // world up, flattened onto the surface
+  if(_wdU.lengthSq()<1e-6) _wdU.set(1,0,0); else _wdU.normalize();
+  _wdR.crossVectors(_wdU,_wdN).normalize();
+  _wdQ.setFromRotationMatrix(_wdM.makeBasis(_wdR,_wdU,_wdN));
+  P.updateWorldMatrix(true,false);
+  P.getWorldQuaternion(rec._q||(rec._q=new THREE.Quaternion()));
+  g.quaternion.copy(rec._q.invert().multiply(_wdQ));
+  P.matrixWorld.decompose(_wdR,rec._q,_wdS);                           // _wdR reused as a throwaway position
+  const S=Math.max(1e-6,(Math.abs(_wdS.x)+Math.abs(_wdS.y)+Math.abs(_wdS.z))/3);
+  g.scale.setScalar(1/S);                                              // children are authored in blocks, always
+  g.position.copy(P.worldToLocal(_wdP.addScaledVector(_wdN,rec.off)));
+  rec.S=S;
+  return true;
 }
 // HOW FAR OFF THE SKIN IS THIS POINT? Step out along the surface normal and cast back in: a point lying on the skin
 // is met at exactly the distance stepped out. Positive means it floats clear of the body, negative that it is sunk
@@ -29754,9 +29826,14 @@ function _bloodGap(ms,p,n,out){
   const O=out||0.6;
   const side=ms.map(o=>(o.material&&!Array.isArray(o.material))?o.material.side:undefined);
   for(const o of ms) if(o.material&&!Array.isArray(o.material)) o.material.side=THREE.DoubleSide;
-  const hit=new THREE.Raycaster(p.clone().addScaledVector(n,O),n.clone().negate(),0.001,O*3).intersectObjects(ms,false)[0];
+  const all=new THREE.Raycaster(p.clone().addScaledVector(n,O),n.clone().negate(),0.001,O*3).intersectObjects(ms,false);
   for(let i=0;i<ms.length;i++) if(ms[i].material && side[i]!==undefined) ms[i].material.side=side[i];
-  return hit?hit.distance-O:null;
+  // The NEAREST crossing to the point, not the first one the ray meets. On a body that folds over itself — her own
+  // far leg swinging through, a hem in front of a thigh — the first crossing belongs to something else entirely and
+  // reports a wound sitting flat on skin as half a block adrift.
+  let best=null;
+  for(const h of all) if(best===null || Math.abs(h.distance-O)<Math.abs(best)) best=h.distance-O;
+  return best;
 }
 // A BLOCK FACE NEAR THE IMPACT. The world is voxels, so this is a short march rather than a raycast: step until a
 // solid cell is entered, and the face is whichever axis that step crossed.
@@ -29788,6 +29865,7 @@ function bloodImpact(x,y,z,dir,host,size,surf){
   if(!bloodFxInit()||_bloodFX.dead) return;
   let _ms=null;                     // the surface meshes, kept so the drip can be fitted against them further down
   let _skinBone=null;               // ...and the bone the struck triangle actually follows (see the pick below)
+  let _bind=null;                   // ...or, better, the struck TRIANGLE itself (see _bloodSkinPose)
   // SNAP TO THE SKIN. The point handed in is wherever a hit test said the round arrived, and those tests are VOLUMES,
   // not surfaces: giantessHit is eleven spheres centred on bones, and the animal test is a vertical capsule. So the
   // point can sit well inside the body or well outside it, and a normal taken from the body's centre is a sphere's
@@ -29840,7 +29918,13 @@ function bloodImpact(x,y,z,dir,host,size,surf){
                 hit.object.applyBoneTransform(f.c, vc.fromBufferAttribute(g2.attributes.position,f.c));
                 hit.object.localToWorld(va); hit.object.localToWorld(vb); hit.object.localToWorld(vc);
                 n=new THREE.Vector3().subVectors(vc,va).cross(new THREE.Vector3().subVectors(vb,va)).normalize();
-                if(n.dot(dv)>0) n.negate();                      // face the shooter whichever way the winding runs
+                const flip=n.dot(dv)>0;
+                if(flip) n.negate();                             // face the shooter whichever way the winding runs
+                // NAIL THE WOUND TO THIS TRIANGLE. Where on it the round landed, in barycentric coordinates, is the
+                // one description of the spot that survives every pose she will ever take — see _bloodSkinPose.
+                const bc=new THREE.Vector3();
+                new THREE.Triangle(va,vb,vc).getBarycoord(hit.point,bc);
+                if(isFinite(bc.x)) _bind={ m:hit.object, a:f.a, b:f.b, c:f.c, bary:[bc.x,bc.y,bc.z], flip:flip };
               } else if(f){
                 n=f.normal.clone().applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld)).normalize();
               }
@@ -29875,30 +29959,8 @@ function bloodImpact(x,y,z,dir,host,size,surf){
     }
   }catch(e){}
   try{
-    if(host && _skinBone) host=_skinBone;              // ride the skin's own bone, not the one the hit test named
+    if(host && !_bind && _skinBone) host=_skinBone;    // no triangle to nail it to: ride the skin's dominant bone
     if(host){
-      const g=new THREE.Group();
-      const n=new THREE.Vector3(-((dir&&dir.x)||0),-((dir&&dir.y)||0),-((dir&&dir.z)||0));
-      if(n.lengthSq()<1e-8) n.set(0,0,1);
-      n.normalize();
-      host.updateWorldMatrix(true,false);
-      const q=new THREE.Quaternion(); host.getWorldQuaternion(q); q.invert();
-      const ln=n.clone().applyQuaternion(q).normalize();                    // the face normal in the host's own space
-      const lup=new THREE.Vector3(0,1,0).applyQuaternion(q);                // and which way is DOWN, for the drip
-      const up=lup.clone().sub(ln.clone().multiplyScalar(lup.dot(ln)));
-      if(up.lengthSq()<1e-6) up.set(0,1,0); else up.normalize();
-      const right=new THREE.Vector3().crossVectors(up,ln).normalize();
-      g.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right,up,ln));
-      g.position.copy(host.worldToLocal(new THREE.Vector3(x,y,z)));
-      // EVERY NUMBER BELOW IS IN BLOCKS, SO THE HOST'S SCALE IS CANCELLED HERE. This is what made the last two size
-      // corrections look like they did nothing: the giantess's bones carry the rig's ~8x scale, so a "27 cm" quad
-      // parented to one was drawn over two blocks across and pushed 38 cm clear of her skin — Ben 08-12, "wayy too
-      // big" and "not on her actual body" were the SAME bug seen twice. Undo the inherited scale once and the wound
-      // is the size it says it is on a fox, a man and a thirteen-block girl alike.
-      const _ws=new THREE.Vector3(); host.matrixWorld.decompose(new THREE.Vector3(),new THREE.Quaternion(),_ws);
-      const S=Math.max(1e-6,(Math.abs(_ws.x)+Math.abs(_ws.y)+Math.abs(_ws.z))/3);
-      g.scale.setScalar(1/S);
-      host.add(g);
       // A WOUND GROWS WITH THE BODY, BUT NOWHERE NEAR AS FAST AS IT. Linear scaling is what keeps being wrong: 4.5%
       // of height is a 60 cm crater on a thirteen-block giantess and still read as "wayy too big" (Ben 08-12), while
       // the same fraction on a fox is a pixel. The bullet is the SAME SIZE whatever it hits — only the visibility
@@ -29908,8 +29970,45 @@ function bloodImpact(x,y,z,dir,host,size,surf){
       const H=Math.max(0.2,size||1.8), mw=Math.min(0.30,Math.max(0.09,0.10*Math.sqrt(H/1.8)));
       // PROUD OF THE SKIN IN PROPORTION TO ITSELF. A fixed 2 cm was enough for an 11 cm mark and nothing like enough
       // for a 60 cm one on a curved limb, where the quad's corners sink into the body and the decal reads as a hole
-      // punched through her rather than a mark on her. Applied here because mw is not known until now.
-      g.position.add(ln.clone().multiplyScalar((0.02+mw*0.10)/S));           // /S: g.position is still in host units
+      // punched through her rather than a mark on her.
+      const off=0.02+mw*0.10;
+      const g=new THREE.Group();
+      let placed=false, S=1;
+      // THE SKINNED CASE: pinned to the struck triangle and re-solved every frame by _bloodSkinPose. Everything the
+      // rigid path below does once, that does per frame, which is what a surface that deforms requires.
+      if(_bind && _bind.m.parent){
+        const rec={ g:g, bind:_bind, off:off };
+        _bind.m.parent.add(g);
+        if(_bloodSkinPose(rec)){ _bloodFX.skin.push(rec); S=rec.S||1; placed=true; g.userData._bind=_bind; }
+        else g.parent.remove(g);
+      }
+      // THE RIGID CASE — an animal, the Wretch, a peer's avatar: box hierarchies whose parts do not deform, so one
+      // placement in the part's own space holds for as long as the decal lives.
+      if(!placed){
+        const n=new THREE.Vector3(-((dir&&dir.x)||0),-((dir&&dir.y)||0),-((dir&&dir.z)||0));
+        if(n.lengthSq()<1e-8) n.set(0,0,1);
+        n.normalize();
+        host.updateWorldMatrix(true,false);
+        const q=new THREE.Quaternion(); host.getWorldQuaternion(q); q.invert();
+        const ln=n.clone().applyQuaternion(q).normalize();                  // the face normal in the host's own space
+        const lup=new THREE.Vector3(0,1,0).applyQuaternion(q);              // and which way is DOWN, for the drip
+        const up=lup.clone().sub(ln.clone().multiplyScalar(lup.dot(ln)));
+        if(up.lengthSq()<1e-6) up.set(0,1,0); else up.normalize();
+        const right=new THREE.Vector3().crossVectors(up,ln).normalize();
+        g.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right,up,ln));
+        g.position.copy(host.worldToLocal(new THREE.Vector3(x,y,z)));
+        // EVERY NUMBER BELOW IS IN BLOCKS, SO THE HOST'S SCALE IS CANCELLED HERE. This is what made two earlier size
+        // corrections look like they did nothing: the giantess's bones carry the rig's ~8x scale, so a "27 cm" quad
+        // parented to one was drawn over two blocks across and pushed 38 cm clear of her skin — Ben 08-12, "wayy too
+        // big" and "not on her actual body" were the SAME bug seen twice.
+        const _ws=new THREE.Vector3(); host.matrixWorld.decompose(new THREE.Vector3(),new THREE.Quaternion(),_ws);
+        S=Math.max(1e-6,(Math.abs(_ws.x)+Math.abs(_ws.y)+Math.abs(_ws.z))/3);
+        g.scale.setScalar(1/S);
+        g.position.add(ln.clone().multiplyScalar(off/S));                   // /S: g.position is still in host units
+        host.add(g);
+      }
+      g.updateWorldMatrix(true,false);
+      const nW=new THREE.Vector3(0,0,1).applyQuaternion(g.getWorldQuaternion(new THREE.Quaternion())).normalize();
       // THE HOLE ITSELF IS DARK (Ben 08-12: "should have a black background in the bullet hole / deep red"). The
       // impact sheet is ink on transparency, so on pale skin the cut-out middle showed her own texture through and the
       // mark read as a red smear rather than a puncture. A backing disc goes UNDER it: black at the centre, deep
@@ -29928,18 +30027,24 @@ function bloodImpact(x,y,z,dir,host,size,surf){
       // is Ben 08-12 — "there is no drip video positioned on her, they are slightly off of her mesh". So the tail is
       // measured against the skin and the longest length that still lands on it is the one used. Wider than it was,
       // too: at 0.6 of a 27 cm mark the streak was a thread nobody could see at the range she is fought at.
-      const dm=_bloodFX.meta.drip||{cell:[46,192]}, dw=mw*0.9;
-      const full=Math.min(dw*(dm.cell[1]/dm.cell[0]), H*0.10);
-      let dh=full*0.3;
+      const dm=_bloodFX.meta.drip||{cell:[46,192]}, dar=dm.cell[1]/dm.cell[0];
+      const full=Math.min(mw*0.9*dar, H*0.10);
+      let dh=full*0.35;
       if(_ms&&_ms.length){
-        g.updateWorldMatrix(true,false);
-        for(const f of [1,0.8,0.6,0.45,0.3]){
+        for(const f of [1,0.8,0.6,0.45,0.35]){
           const p=g.localToWorld(new THREE.Vector3(0,-full*f,0));
-          const gp=_bloodGap(_ms,p,n,0.5);
-          if(gp!=null && Math.abs(gp)<0.12){ dh=full*f; break; } }
+          const gp=_bloodGap(_ms,p,nW,0.5);
+          // SUNK IS FINE, FLOATING IS NOT. A drip whose tail dips inside the limb is simply hidden by the skin in
+          // front of it, so it reads as a run of blood disappearing round the curve; one whose tail stands off the
+          // limb reads as blood hanging in mid-air beside her, which is what Ben saw. So the test is one-sided.
+          if(gp!=null && gp<0.03){ dh=full*f; break; } }
       } else dh=full;
-      const dr=_bloodQuad('drip',dw,dh);
-      dr.position.set(0,-dh/2,0.002); g.add(dr); _bloodTrack(dr,4.0);
+      const dr=_bloodQuad('drip',dh/dar,dh);                                // shortened in BOTH axes: a squashed
+      // AND IT LEANS BACK INTO HER. The mark can afford to stand proud of the skin because it is a few centimetres
+      // across; the drip is a long plane on a round limb, and the far end of it has to go somewhere. Sunk, it is
+      // hidden by the skin in front of it and reads as blood running round the curve. Proud, it hangs in the air.
+      dr.position.set(0,-dh/2,-off*0.5); dr.rotation.x=0.18;
+      g.add(dr); _bloodTrack(dr,4.0);
     }
     // THE SPATTER, onto whatever block faces are close enough to catch it. Down and outward from the wound, and along
     // the round's flight - never back at the shooter, so it lands where the bullet was going.
@@ -34995,13 +35100,26 @@ window.__hc={
         if(!p) continue;                                                     // a spatter on a wall, not a wound on her
         const wp=d.m.getWorldPosition(new THREE.Vector3());
         const n=new THREE.Vector3(0,0,1).applyQuaternion(d.m.getWorldQuaternion(new THREE.Quaternion())).normalize();
-        const hit=new THREE.Raycaster(wp.clone().addScaledVector(n,OUT),n.clone().negate(),0.001,OUT*3).intersectObjects(ms,false)[0];
-        const gap=hit?+(hit.distance-OUT).toFixed(3):null;                   // + = floating off her, - = sunk into her
+        // AGAINST THE TRIANGLE IT IS BOUND TO, when there is one. A raycast down the normal is the only measure
+        // available for a rigid host, but on a body that folds over itself it reports whatever limb happens to be in
+        // the way — her far leg swinging through read a wound lying flat on a thigh as half a block adrift. The bind
+        // gives the exact surface point under the decal, so this is the truth and the cast is the fallback.
+        const B=d.m.parent&&d.m.parent.userData._bind;
+        let gap=null;
+        if(B){
+          const pos=B.m.geometry.attributes.position, A=new THREE.Vector3(), C=new THREE.Vector3(), D=new THREE.Vector3();
+          B.m.applyBoneTransform(B.a,A.fromBufferAttribute(pos,B.a)); B.m.localToWorld(A);
+          B.m.applyBoneTransform(B.b,C.fromBufferAttribute(pos,B.b)); B.m.localToWorld(C);
+          B.m.applyBoneTransform(B.c,D.fromBufferAttribute(pos,B.c)); B.m.localToWorld(D);
+          const sp=A.clone().multiplyScalar(B.bary[0]).addScaledVector(C,B.bary[1]).addScaledVector(D,B.bary[2]);
+          gap=+wp.sub(sp).dot(n).toFixed(3);
+        } else {
+          const hit=new THREE.Raycaster(wp.clone().addScaledVector(n,OUT),n.clone().negate(),0.001,OUT*3).intersectObjects(ms,false)[0];
+          gap=hit?+(hit.distance-OUT).toFixed(3):null;                       // + = floating off her, - = sunk into her
+        }
         const P=d.m.geometry.parameters||{};
-        // The DRIP is the tall quad and it is meant to hang off the silhouette of a curved limb, so only the square
-        // marks — the hole and its dark backing — are judged for lying flat on the skin.
-        out.push({ kind:(P.height>P.width*1.5)?'drip':'mark', w:+(P.width||0).toFixed(3), gap,
-                   onSkin:hit!=null&&Math.abs(gap)<0.12 }); }
+        out.push({ kind:(P.height>P.width*1.5)?'drip':'mark', w:+(P.width||0).toFixed(3), gap, bound:!!B,
+                   onSkin:gap!=null&&Math.abs(gap)<0.12 }); }
       const marks=out.filter(o=>o.kind==='mark');
       return { n:out.length, marks:marks.length, wounds:out, snap:_bloodFX.lastSnap,
                offSkin:marks.filter(o=>!o.onSkin).length, offSkinAll:out.filter(o=>!o.onSkin).length,
