@@ -874,6 +874,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { Water } from 'three/addons/objects/Water.js';
 import { seraphOn, seraphOff, seraphAnimate, seraphShowBeam, seraphHideBeam, seraphBeamGold, seraphMiniBeam, seraphHideMiniBeam, seraphHideMiniBeams, seraphBloom, seraphEyeSpheres, seraphWingSpheres, seraphFold, seraphWoundEye, seraphHealEyes, seraphFreshEyes, seraphEyeClose, seraphEyesReset, seraphBodyBox, buildSeraphStoneProto, seraphCorpseMode, prewarm as seraphPrewarm } from './src/boss/seraphim/adapter.js';
 import { driftInit, driftAttach, driftDetach, driftStep, driftFlush, driftTune, driftTintLock, driftState, driftHas, driftProbe, driftFraming, driftHostWorld } from './src/entity/drift/index.js';
 import { loadModels as glbLoad, build as glbBuild, hasModel as glbHas, modelBox as glbBox } from './src/models/glb.js';
@@ -6697,6 +6698,53 @@ const _uPineFog=new THREE.Color(0.1,0.13,0.2), _stormBlue=new THREE.Color(0.09,0
 // The BACKGROUND MOUNTAINS behind it are scrapped in the same breath and leave nothing behind but one finding: two
 // ridged ranges at different distances, the far one mixed much harder toward the sky. The depth was in the aerial
 // perspective and not in the geometry — a single ridge silhouette reads as a cut-out whatever shape it is given.
+// =====================================================================
+//  THE THREE.JS OCEAN (webgl_shaders_ocean), Ben 08-12: "redo water shader and texture using the one I showed you"
+// =====================================================================
+// This is the example's own Water: a flat mirror plus a scrolling normal map. What it brings that our shader cannot is
+// a REAL reflection — it re-renders the scene from the mirrored camera into a render target, so the sea finally shows
+// trees, cliffs and the cathedral instead of only the sky that skyAt() can synthesise.
+// WHAT IT DOES NOT BRING, so nobody is surprised when they see it: it is an infinite flat plane. It has no depth
+// absorption, no shallow shelves, no flow advection, no vertical faces and no night in-scatter — every one of which is
+// a shipped answer to a specific report. The plane is therefore laid OVER the existing sea rather than replacing it:
+// voxel water still draws underneath and inland water is untouched, so nothing regresses while this is being judged.
+// IT COSTS A SECOND SCENE RENDER PER FRAME. That is the planar-reflection price the backlog gates on forest perf.
+// 512x512 target and OFF by default: turn it on with __hc.ocean3(1).
+let _ocean3=null, _ocean3Want=false;
+function _ensureOcean3(){
+  if(_ocean3) return _ocean3;
+  const nrm=new THREE.TextureLoader().load('assets/textures/waternormals.jpg', t=>{ t.wrapS=t.wrapT=THREE.RepeatWrapping; });
+  nrm.wrapS=nrm.wrapT=THREE.RepeatWrapping;
+  // Sized off the render wall, like the far-sea disc, so it reaches the horizon at any render distance.
+  const span=Math.max(4096, CFG.RENDER_DIST*CK*8);
+  _ocean3=new Water(new THREE.PlaneGeometry(span, span), {
+    textureWidth:512, textureHeight:512, waterNormals:nrm,
+    sunDirection:new THREE.Vector3(), sunColor:0xffffff, waterColor:0x001e0f,
+    distortionScale:3.7, fog:!!scene.fog
+  });
+  _ocean3.rotation.x=-Math.PI/2;
+  _ocean3.frustumCulled=false;
+  _ocean3.visible=false;
+  // ABOVE the voxel surface by a hair. Same height and the two z-fight across the whole sea; this way the example's
+  // plane simply wins wherever both exist, and no chunk mesh has to be found and hidden as it streams in.
+  _ocean3.position.y=(CFG.SEA + 1 - WATER_SURF_DROP) + 0.02;
+  scene.add(_ocean3);
+  return _ocean3;
+}
+function updateOcean3(dt){
+  if(!_ocean3Want || !_ocean3) return;
+  // The same underground rule the far-sea disc carries: a sea plane seen through a hole you dug is the 08-05 report.
+  const under = _colH > CFG.SEA+2 && camera.position.y < CFG.SEA+0.85;
+  _ocean3.visible = !under;
+  if(!_ocean3.visible) return;
+  _ocean3.position.x=camera.position.x; _ocean3.position.z=camera.position.z;
+  const u=_ocean3.material.uniforms;
+  u.time.value += Math.min(dt||0.016, 0.05);
+  u.sunDirection.value.copy(globalU.uSunDir.value).normalize();
+  // The sun's own colour and the day factor, so the example's specular does not blaze at midnight.
+  const day=globalU.uDay.value;
+  u.sunColor.value.setRGB(day, day*0.96, day*0.88);
+}
 function updateHorizon(){ oceanLayer.position.copy(camera.position); const day=globalU.uDay.value;
   // The far sea sits at sea level in WORLD terms while its parent follows the camera, so its local y is the difference.
   // Scaled from the live render wall outward, so it begins exactly where chunk water stops and never leaves a gap or
@@ -21728,6 +21776,11 @@ function updateRecoil(dt){ if(!(RECOIL.tp||RECOIL.ty))return;
   if(Math.abs(RECOIL.tp)<1e-5)RECOIL.tp=0; if(Math.abs(RECOIL.ty)<1e-5)RECOIL.ty=0; }
 // ---- MAGAZINES + RELOAD — rifle 5 / Python 6 / AR 20; the minigun is belt-fed (no mag, no reload).
 //      Guns come loaded; firing draws from the MAG, reloading transfers rounds from inventory rifle_ammo. R = reload.
+// HOW LONG A PUMP TAKES TO CYCLE, in seconds. This is the 12 gauge's rate of fire and its animation length at once:
+// nothing else limits how fast it can be clicked, so lengthening the stroke slows the gun and shortening it speeds it
+// up. 0.62 is a deliberate, working-the-action pace — fast enough not to feel broken, slow enough that the shotgun
+// pays for nine pellets and the hardest kick in the game with the time it takes to chamber the next shell.
+const PUMP_CYCLE=0.62;
 const GUNMAG={};   // rounds currently in each gun, keyed by a PER-INSTANCE uid — two identical guns keep SEPARATE ammo (Ben 07-23)
 let _gunUid=0;
 function gunKey(s){ if(!s)return null; if(s.uid==null)s.uid=++_gunUid; return 'g'+s.uid; }   // brand each gun slot with a stable per-instance id; the brand rides the object as it moves between inventory slots
@@ -22017,7 +22070,8 @@ function updateView(dt){ updateRecoil(dt);                                      
     if((view.adsU||0)>0 || (view.adsT||0)>0){ view.adsU=clamp((view.adsU!=null?view.adsU:view.adsT)-dt/ADS_LOWER,0,1);
       const u=view.adsU; view.adsT=u*u*(3-2*u); view.adsVel=0; } }
   // bolt cycle animation + fire-gating clock
-  view.boltT=Math.max(0,(view.boltT||0)-dt); view.gunKick=Math.max(0,(view.gunKick||0)-dt*7);   // viewmodel kick decays (every gun bucks against the shoulder on fire)
+  view.boltT=Math.max(0,(view.boltT||0)-dt); view.pumpT=Math.max(0,(view.pumpT||0)-dt);
+  view.gunKick=Math.max(0,(view.gunKick||0)-dt*7);   // viewmodel kick decays (every gun bucks against the shoulder on fire)
   // EITHER HAND'S GUN MAY BE THE ONE RELOADING. This compared the running reload against heldSlot() alone, so with a gun in
   // each hand the offhand's reload was cancelled on its first frame and no cartridge ever transferred. The cancel still has
   // to exist — putting the gun away mid-reload must not feed it — so the test is "is that instance still in a hand".
@@ -22242,6 +22296,22 @@ function updateView(dt){ updateRecoil(dt);                                      
       if(M&&M.pump){ const rack=(u>0.72? Math.sin((u-0.72)/0.28*Math.PI) : 0); M.pump.position.z=(M.pumpZ||0)+rack*0.085; }
       if(M&&M.bolt && isBolt){ const bh=M.bolt, bz=M.boltZ||0.12, open=(u<0.18? u/0.18 : u>0.86? clamp((1-u)/0.14,0,1) : 1);   // rifle: bolt held open, rounds pressed into the internal box
         bh.rotation.z=-open*1.15; bh.position.z=bz+open*0.07 + (open>0.9? Math.abs(Math.sin(u*18))*0.012 : 0); } }
+    // ---- THE PUMP STROKE, after a shot. The rack is a full cycle: back fast, held a moment at the rear where the
+    // spent shell leaves, forward slower to chamber. sin would give a symmetric there-and-back with no dwell, and a
+    // pump gun's stroke is not symmetric — the shooter yanks it and feeds it.
+    // AND THE GUN DROPS TO DO IT. Working a forend takes the support hand forward and rolls the receiver inboard, so
+    // the muzzle dips and the gun comes off the cheek — Ben's "make it low to fire". The dip is what makes the rate
+    // limit legible: you can SEE why the next shot has to wait, rather than clicking into a refusal.
+    if((view.pumpT||0)>0 && view.mesh){
+      const M=view.mesh.userData, u=1-view.pumpT/PUMP_CYCLE;
+      const stroke = u<0.30 ? u/0.30                                  // back
+                   : u<0.46 ? 1                                       // held at the rear, shell out
+                   : clamp(1-(u-0.46)/0.54,0,1);                      // forward, chambering
+      if(M&&M.pump) M.pump.position.z=(M.pumpZ||0)+stroke*0.085;
+      const dip=Math.sin(clamp(u,0,1)*Math.PI);
+      view.group.position.y-=dip*0.045; view.group.position.z+=dip*0.030;
+      view.group.rotation.x+=dip*0.115; view.group.rotation.z+=dip*0.085;
+    }
     // ---- BLOCK-OUT (#62): applied to the FINISHED pose, pivoted at the butt. It runs after gunKick and the reload dip so
     // there is one gun in one place, and before the near-plane guard below so that guard sees where the gun really ended up.
     // The tilt relaxes to 0.58 of full as the sight comes to the eye, exactly as the old pose terms did: a rifle already at
@@ -22428,7 +22498,7 @@ function updateView(dt){ updateRecoil(dt);                                      
   // THE SAME CLOCK AS THE RIGHT HAND (Ben 08-05: "guns in the off hand need proper recoil"). 5.5 against the main hand's 7 made the
   // left hand's buck linger a quarter longer and peak differently under sustained fire — the same gun, recoiling to a different
   // rhythm depending on which hand it is in. There is no reason for the two to differ, and a shared number cannot drift apart.
-  offView.boltT=Math.max(0,(offView.boltT||0)-dt);                               // …and its own bolt cycle, per hand (see fireGun)
+  offView.boltT=Math.max(0,(offView.boltT||0)-dt); offView.pumpT=Math.max(0,(offView.pumpT||0)-dt);   // …and its own bolt/pump cycle, per hand (see fireGun)
   offView.gunKick=Math.max(0,(offView.gunKick||0)-dt*7);
   offView.swing=Math.max(0,(offView.swing||0)-dt*9);                             // …and swings on the same curve the right one does
   { const oswArc=offView.swing?offView.swing*Math.sin(offView.swing*Math.PI):0;
@@ -22624,7 +22694,7 @@ function anyWretch(fn){ const prev=wretch;
 function doSwing(){ return _doSwing(); }
 function _doSwing(){ const h=heldSlot(); if(h&&ITEMS[h.id]&&ITEMS[h.id].gun){ if(fireGun())view.swing=1.4; return; } view.swing=1; meleeAttack(); }
 // hitscan down the look ray → first block/entity/animal hit. Muzzle flash + crack + tracer + recoil. Returns true if a shot was actually fired.
-function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id]:null, bolt = it&&it.gun==='bolt', rev = it&&it.gun==='revolver', sup = !!(it&&it.suppressed);
+function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id]:null, bolt = it&&it.gun==='bolt', rev = it&&it.gun==='revolver', pump = it&&it.gun==='shotgun', sup = !!(it&&it.suppressed);
   if(it&&it.gun)achUnlock('armed');   // sup = the suppressed rifle: 40% quieter (sound + heard-range + emitted-noise) and -20 damage; rev = the .357 revolver (handgun)
   if(view.reloadT>0) return false;                                                                // hands are busy with the reload
   // NOT WHILE IT HAS HOLD OF YOU (Ben 08-04: "you should not be able to fire a gun or an offhand gun when the wretch is dragging
@@ -22640,10 +22710,17 @@ function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id
   const _offFire = !!(slotArg && armor[EQ_OFF] && slotArg===armor[EQ_OFF]);
   const _fv0 = _offFire ? offView : view;
   if(bolt && (_fv0.boltT||0)>0) return false;                                                     // still cycling THIS hand's bolt → can't fire
+  // A PUMP GUN IS CYCLED BETWEEN SHOTS (Ben 08-12: "12ga shotguns lever needs pulled back, or make it an animation,
+  // and make it low to fire"). The 12 gauge fired as fast as the trigger could be clicked, with a forend that only
+  // moved during a reload — so it was the hardest-hitting gun in the game and also the fastest. The rack is the rate
+  // limit: nothing else caps it, and PUMP_CYCLE is therefore a balance number as much as an animation length.
+  // Per hand, for the reason spelled out above the bolt gate — a shotgun in the offhand set the main hand's timer
+  // and locked out whatever was in it.
+  if(pump && (_fv0.pumpT||0)>0) return false;
   const _cap=magCap(it);
   if(isFinite(_cap)){ const _mk=gunKey(held); if(magGet(_mk,it,held)<=0){ if(AC)burst(master,0.4,0.04,340,0.4,80);   // DRY CLICK on an empty mag → auto-reload
       startReload(held); return false; }
-    magSet(_mk, GUNMAG[_mk]-1, held); if(bolt)_fv0.boltT=0.95; }                                                     // fire from THIS gun's MAG (per-instance); inventory ammo is consumed at reload
+    magSet(_mk, GUNMAG[_mk]-1, held); if(bolt)_fv0.boltT=0.95; if(pump)_fv0.pumpT=PUMP_CYCLE; }                                                     // fire from THIS gun's MAG (per-instance); inventory ammo is consumed at reload
   const KP=(bolt?0.056 : rev?0.049 : (it.gun==='auto'?0.006 : it.gun==='shotgun'?0.062 : 0.019))*5;   // the 12 gauge kicks hardest of all — a cylinder-bore pump against the shoulder                            // camera recoil per shot ×5 (Ben 07-20): rifle 16° / Python 14° / AR 5.4° / minigun 1.7° — the gun OWNS your aim
   // THE MINIGUN FIGHTS BACK WHEN YOU AIM IT (Ben 08-05: "the minigun needs more recoil when ADS"). Its per-shot kick is the
   // smallest in the game — 0.006, a thirtieth of the shotgun's — because it fires 38 rounds a second and anything else would put

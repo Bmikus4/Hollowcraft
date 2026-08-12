@@ -65,6 +65,16 @@ function ok(label, cond, got){ checks++; if(!cond)fails++; console.log('  '+(con
     ok('stamina is chromatic',  /^hsl\(/.test(half.rows.stam.col), half.rows.stam.col);
     await page.screenshot({path:path.join(OUT,'hud-vitals.png')});
 
+    console.log('\n[no Brass Compass, no ribbon]');
+    // Ben 2026-08-12: "disable the nav bar by default, when its equipped you see the navigation compass in the HUD".
+    // Order matters — a fresh session carries no compass, so the OFF case has to be read before one is handed over;
+    // there is no probe that takes an item back out of the bag.
+    const cmpOff = await page.evaluate(() => window.__hc.hudCompass(0).why);
+    ok('hidden while the player has none', cmpOff.opacity < 0.02 && cmpOff.carried === false, cmpOff);
+    const cmpOn = await page.evaluate(() => { const n = __hc.giveItem('compass_item', 1);
+      return { n, why: window.__hc.hudCompass(0).why }; });
+    ok('shown once one is carried', cmpOn.why.opacity > 0.5, cmpOn);
+
     console.log('\n[the compass points where you look]');
     // yaw 0 faces north and yaw -90 faces east: the convention the minimap's own label placement used, kept so every
     // other bearing in the game still means the same thing.
