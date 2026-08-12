@@ -876,11 +876,17 @@ const _scotH = new Float32Array([1.0, 0.02, 0.5, 0.009]);
 // for +1.8 levels of median, while turning the descent off costs +14. 0.016 is too much: it lifts the crop's lit share
 // 47% -> 90%, which is the night itself coming up.
 const _scotK = new Float32Array([0.45, 0, 0.030, 0.008]);
-// THE ZEROED-FRAGMENT LIFT, as a dial, and shared BY REFERENCE the way globalU's uniforms are: one object handed to
-// every lit ShaderLib entry, so writing .value here moves all of them at once. It is a dial rather than a constant
-// because it has to be A/B'd INTERLEAVED - blocked runs on this box drift further than most effects here are wide.
-// 1 = the floor can reach a fragment the scale form cannot, 0 = the shipped behaviour to the bit. __hc.texFloor({zero:n}).
-const _zeroLiftU = { value: 1 };
+// _scotK[3], the rendered-luminance floor, IS THE LEVER ON BLACK TEXELS and it is blunt. Swept at the night lantern
+// (bench/tmp-lightpool-speckle.mjs), baseline row repeated last so the reading is not thermal drift:
+//   0.008 shipped  isoBlack 2.31%  crop median 16.6      0.04   isoBlack 0.38%  median 50.6
+//   0.02           isoBlack 1.89%  median 30.1           0.08   isoBlack 0.21%  median 76.7
+// Raising it does kill the speckle, and it buys that by lifting EVERYTHING the lamp reaches - the pool's falloff
+// goes with it, and the night Ben has signed off four times goes with that. Do not raise it without his eye on the
+// frame. The real fix is a floor RELATIVE to the local delivered light rather than an absolute luminance.
+// LIFTING THE ZEROED FRAGMENT IS NOT THE ANSWER, and was tried: the theory that a scale cannot rescue a fragment at
+// exactly zero is true and irrelevant, because these fragments are not at float zero - they are at 8-bit black with
+// a real positive value, so they already take the scale. A branch lifting them along the albedo's chroma measured
+// completely inert at that vantage, 3.864/3.867/3.864/3.865 interleaved, with per-corner sky both off and on.
 // ---- A PROP IN SHADE IS NOT A PROP AT NIGHT (Ben 08-05: the scarecrow near spawn "is completely black") ----
 // (r, g, b, -). The daylight SKY FILL that every non-atlas lit material was missing.
 //
@@ -992,7 +998,7 @@ const HC_LIGHT_GLSL = [
   // which is what makes steps 3 and 4 a call rather than a copy. A material outside three's lit set
   // (water, the viewmodel) prepends HC_LIGHT_GLSL to its own source instead; same text either way.
   /* pre-extraction: HC_LIGHT_GLSL not appended */
-  THREE.ShaderChunk.lights_pars_begin += '\nuniform vec4 uScotG;\nuniform vec4 uScotH;\nuniform vec4 uScotK;\nuniform vec4 uPropFill;\nuniform float uZeroLift;\n';
+  THREE.ShaderChunk.lights_pars_begin += '\nuniform vec4 uScotG;\nuniform vec4 uScotH;\nuniform vec4 uScotK;\nuniform vec4 uPropFill;\n';
   // ATLAS MATERIALS ARE EXCLUDED BY THE SAME DEFINE THE WASH BRANCHES ON, and the exclusion is the whole point: a block
   // already has this term, baked and sky-occluded, so adding a flat one would lift caves and interiors by daylight.
   // diffuseColor-weighted, so a dark prop stays dark and a pale one lifts — a flat add is a fog, not a fill.
@@ -1243,7 +1249,6 @@ const HC_LIGHT_GLSL = [
     //     made a lantern-lit cave wall grey and produced "lit dark caves dont act as they should".
     //   · units agree: _fmin is a rendered luminance and albedo/_albL is dimensionless, so the product is a radiance.
     // A genuinely black TEXTURE is left alone by _albL > 1e-5: black paint under a light is still black.
-    '  else if(uZeroLift > 0.0 && _fmin > 0.0 && _fl <= 1e-7 && _albL > 1e-5) gl_FragColor.rgb = diffuseColor.rgb * (_fmin/_albL) * uZeroLift;\n'+
     '}\n'+
     '#endif\n';
 }
@@ -1251,7 +1256,7 @@ const HC_LIGHT_GLSL = [
 // the 225 call sites; an entry the GLSL never references is dropped by seqWithValue and costs nothing.
 for(const k of ['lambert','phong','standard','physical','toon','dashed','basic','points','sprite']){
   const S=THREE.ShaderLib[k]; if(!S||!S.uniforms) continue;
-  S.uniforms.uScotG={ value:_scotG }; S.uniforms.uScotH={ value:_scotH }; S.uniforms.uScotK={ value:_scotK }; S.uniforms.uPropFill={ value:_propFill }; S.uniforms.uZeroLift=_zeroLiftU;
+  S.uniforms.uScotG={ value:_scotG }; S.uniforms.uScotH={ value:_scotH }; S.uniforms.uScotK={ value:_scotK }; S.uniforms.uPropFill={ value:_propFill };
 }
 
 // =====================================================================
@@ -18155,15 +18160,48 @@ function _wornShellOn(host,parent,id,torso){
 }
 // The torso each shell is fitted to, as built: the paperdoll body's shirt box and the peer avatar's, which are not the same box.
 const WORN_TORSO_BODY={w:0.42,h:0.62,d:0.24,top:1.62}, WORN_TORSO_PEER={w:0.50,h:0.70,d:0.28,top:1.50};
+// THE BAG ON YOUR BACK IS THE BAG IN YOUR HAND. It was one procedural satchel for all three tiers, scaled 1.42 for
+// the ALICE — so the pack you carried was never the pack you were shown, and Ben had two complaints from the one
+// cause: "normal backpack isnt serving its actual 3d model" and "alicepack is too high". The height is the same
+// bug: scaling a mesh about its own origin grows it upward as well as outward, so the big tier climbed over the
+// shoulders. Fitted by ENCLOSURE and anchored by its TOP instead, the way the chestplate shells are, a taller bag
+// hangs LOWER rather than standing taller — which is what a heavier bag does.
+const WORN_PACK={ backpack:{model:'misc/bag',cut:[-1.60,-0.40]}, field_pack:{model:'misc/bag',cut:[0.30,1.60]}, alice_pack:{model:'misc/alice-pack'} };
+// Taken from the procedural pack this replaces, so the three tiers sit exactly where the old one sat: 0.34 across,
+// its top at 1.54 (the shoulder line), its body centred 0.22 behind the spine.
+const PACK_FIT={w:0.34,hMax:0.46,dMax:0.26,top:1.54,z:-0.22};
+function _wornPackMesh(id){
+  const spec=WORN_PACK[id]; if(!spec||typeof glbHas!=='function'||!glbHas(spec.model)) return null;
+  let m=null; try{ m=_glbOneOf(spec.model,spec.cut,(nm,mat)=>({color:_glbLift(mat.color,1.0)})); }catch(e){ return null; }
+  if(!m) return null;
+  const w=new THREE.Group(); w.add(m); w.updateMatrixWorld(true);
+  const bb=new THREE.Box3().setFromObject(w), sz=bb.getSize(new THREE.Vector3()), ctr=bb.getCenter(new THREE.Vector3());
+  // The SMALLEST scale that fits every limit, so a bag is bounded on all three axes and no tier can grow through
+  // the shoulders. Enclosure (the largest) is right for a cuirass, which must contain the torso; a pack hangs off it.
+  const s=Math.min(PACK_FIT.w/(sz.x||1), PACK_FIT.hMax/(sz.y||1), PACK_FIT.dMax/(sz.z||1));
+  w.scale.setScalar(s); w.position.set(-ctr.x*s,-ctr.y*s,-ctr.z*s);
+  const g=new THREE.Group(); g.add(w); g.position.set(0, PACK_FIT.top-sz.y*s/2, PACK_FIT.z);
+  g.traverse(o=>{ o.userData.keepColor=true; if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
+  return g;
+}
+// Same not-caching-a-failure rule as the shells: the models load asynchronously and a pack equipped mid-load must
+// not pin the procedural one for the session.
+function _wornPackOn(host,parent,id){
+  if(!host||!id||!parent) return null; host._packs=host._packs||{};
+  if(host._packs[id]===undefined){ const g=_wornPackMesh(id); if(!g) return null; parent.add(g); host._packs[id]=g; }
+  return host._packs[id];
+}
 function _wornShellShow(host,g){ if(host&&host._shells) for(const k in host._shells) host._shells[k].visible=(host._shells[k]===g); }
 function applyWorn(P){ if(!P) return; const isStraw=!!(armor[0]&&armor[0].id==='straw_hat');
   // WORN, not carried: the bag shows only when it is in the pack slot. Having one in the inventory does not put it on
   // your back, which is the same distinction hasBackpack() draws for whether B opens it.
-  if(P.pack) P.pack.visible = !!(armor[EQ_PACK] && PACK_SLOTS[armor[EQ_PACK].id]!=null);
-  // AN ALICE PACK IS A BIGGER PACK ON YOUR BACK, not a different one: the worn satchel is scaled up rather than
-  // rebuilt, because the paperdoll's pack is seen over the shoulder at arm's length and a second model there buys
-  // nothing. The item you hold and the one on the ground ARE the pack's own mesh (see GLB_ITEMS.alice_pack).
-  if(P.pack && P.pack.visible){ const big=armor[EQ_PACK].id==='alice_pack'; P.pack.scale.setScalar(big?1.42:1); }
+  const packOn = !!(armor[EQ_PACK] && PACK_SLOTS[armor[EQ_PACK].id]!=null);
+  // EACH TIER WEARS ITS OWN MODEL. The procedural satchel stays as the fallback for a pack whose model has not
+  // loaded (or a tier nobody has given a model to), and is hidden the moment the real one is standing there.
+  const wornPack = packOn ? _wornPackOn(P, P.pack&&P.pack.parent, armor[EQ_PACK].id) : null;
+  if(P._packs) for(const k in P._packs) P._packs[k].visible = (P._packs[k]===wornPack);
+  if(P.pack) P.pack.visible = packOn && !wornPack;
+  if(P.pack && P.pack.visible) P.pack.scale.setScalar(1);
   const hz=!!(armor[1]&&ITEMS[armor[1].id]&&ITEMS[armor[1].id].armor&&ITEMS[armor[1].id].armor.hazmat);   // hazmat in the body slot → covers the WHOLE body
   if(P.hazmat){ _wornVis(P.hazmat,hz);
     if(hz){ if(armor[1]._hz==null)armor[1]._hz=[0x2f7fd0,0x47b24a,0xe3c53a][(Math.random()*3)|0]; if(P.hazmat.userData.body)P.hazmat.userData.body.color.setHex(armor[1]._hz); } }   // random blue/green/yellow, locked while worn
@@ -20211,6 +20249,22 @@ const GLB_GUNS={
   shotgun: {id:'guns/shotgun',      len:0.87,muzzleZ:-0.560,boreY:0.030,flash:1.60,flashS:1.50,can:[0.026,0.15],irons:true,pump:true,adsZ:-0.46,cal:'12ga'},
 };
 const _glbBox=(x0,y0,z0,x1,y1,z1)=>new THREE.Box3(new THREE.Vector3(x0,y0,z0),new THREE.Vector3(x1,y1,z1));
+// ONE OBJECT OUT OF A FILE THAT HOLDS SEVERAL. Ben's bag.glb has both survival bags side by side on X, sharing one
+// texture atlas and one material name, so nothing distinguishes them but where they are. `cut` is the x range that
+// belongs to the object wanted, in the model's own units; the region carve is the shotgun forend's, and everything
+// outside it is dropped. Shared by the held item and the worn pack so the bag on your back is carved identically
+// to the one in your hand — two copies of this rule is how they would come to differ.
+function _glbOneOf(modelId,cut,style){
+  const part=cut&&{name:'keep',box:_glbBox(cut[0],-99,-99,cut[1],99,99)};
+  const m=glbBuild(modelId,{parts:part?[part]:undefined,style});
+  if(!m||!cut) return m;
+  // A carved part is a child group of the build and everything NOT carved stays a sibling, so keeping one object
+  // means dropping the siblings. Whatever centres the result then frames the object that is left, not the pair.
+  const keep=m.userData.parts&&m.userData.parts.keep;
+  if(!keep||!keep.children.length) return null;
+  for(const c of [...m.children]) if(c!==keep) m.remove(c);
+  return m;
+}
 function buildGlbGun(key,dot,suppressed){
   const spec=GLB_GUNS[key], P=spec&&GLB_PLACE[spec.id];
   if(!spec||!P||!glbHas(spec.id)) return null;
@@ -20410,23 +20464,13 @@ const GLB_ITEMS={
 for(const [id,s] of Object.entries(PACK_ITEMS)) if(!GLB_ITEMS[id]) GLB_ITEMS[id]={id:s.m,fit:s.fit||0.24,rot:s.rot};
 function buildGlbItem(id){
   const spec=GLB_ITEMS[id]; if(!spec||!glbHas(spec.id)) return null;
-  // TWO OBJECTS IN ONE FILE. Ben's bag.glb holds both survival bags side by side on X, sharing one texture atlas and
-  // one material, so they cannot be told apart by material name the way a stock is told from a receiver. spec.cut is
-  // the x range that belongs to THIS item, in the model's own units, and the rest of the mesh is dropped — the same
-  // region carve the shotgun's forend uses, which is why there is no second mechanism here.
-  const cut=spec.cut&&{name:'keep',box:_glbBox(spec.cut[0],-99,-99,spec.cut[1],99,99)};
-  const m=glbBuild(spec.id,{parts:cut?[cut]:undefined,style:(nm,mat)=>{
+  const m=_glbOneOf(spec.id,spec.cut,(nm,mat)=>{
     const o={};
     if(spec.tint&&spec.tint[nm]!=null) o.color=spec.tint[nm];
     if(spec.alpha&&spec.alpha[nm]!=null){ o.transparent=true; o.opacity=spec.alpha[nm]; }
     if(!o.color) o.color=_glbLift(mat.color,1.0);
-    return o; }});
+    return o; });
   if(!m) return null;
-  // A carved part is a child group of the build; everything NOT carved stays a sibling. Keeping one bag is therefore
-  // dropping the siblings, and the centring below then frames the bag that is left rather than the pair.
-  if(cut){ const keep=m.userData.parts&&m.userData.parts.keep;
-    if(!keep||!keep.children.length) return null;
-    for(const c of [...m.children]) if(c!==keep) m.remove(c); }
   const bb=new THREE.Box3().setFromObject(m), sz=bb.getSize(new THREE.Vector3()), ctr=bb.getCenter(new THREE.Vector3());
   const s=spec.fit/(Math.max(sz.x,sz.y,sz.z)||1);
   const g=new THREE.Group(); g.add(m); m.scale.setScalar(s); m.position.set(-ctr.x*s,-ctr.y*s,-ctr.z*s);   // centred on its own bounds: the icon bake, the drop and both hands all place it by its centre
@@ -35564,8 +35608,8 @@ window.__hc={
   // whatever light arrives), disp is a minimum RENDERED luminance for a fragment a light actually reaches. k fixes a
   // texture whose spread is too wide; disp fixes one the terms downstream have pushed under the 8-bit floor entirely.
   // Sweep it with bench/tmp-lightpool-speckle.mjs, which is the lantern-in-a-night-wood frame it was reported at.
-  texFloor(o){ try{ if(o&&o.k!=null) _scotK[2]=+o.k; if(o&&o.disp!=null) _scotK[3]=+o.disp; if(o&&o.zero!=null) _zeroLiftU.value=+o.zero;
-      return { k:+_scotK[2].toFixed(5), disp:+_scotK[3].toFixed(5), litKnee:+_scotH[3].toFixed(4), zero:_zeroLiftU.value }; }catch(e){ return {err:String(e.message||e)}; } },
+  texFloor(o){ try{ if(o&&o.k!=null) _scotK[2]=+o.k; if(o&&o.disp!=null) _scotK[3]=+o.disp;
+      return { k:+_scotK[2].toFixed(5), disp:+_scotK[3].toFixed(5), litKnee:+_scotH[3].toFixed(4) }; }catch(e){ return {err:String(e.message||e)}; } },
   freezeT(v){ try{ if(v===null) _pinT=null; else if(v!==undefined) _pinT=+v;
       return { pinned:_pinT, uTime:+globalU.uTime.value.toFixed(3) }; }catch(e){ return {err:String(e.message||e)}; } },
   // QA + the A/B for the water rebuild. amt 0 restores the flat-uRing surface exactly, streak 0 the pre-streak normal,
