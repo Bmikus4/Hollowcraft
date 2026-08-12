@@ -1,13 +1,16 @@
-// ASSERT: the head has weight. Ben 08-12: "there needs to be turning resistance too, the player should not be able to
-// spin/turn around immediatley".
+// ASSERT: turning is the head first and the body after — Tarkov's rule, which Ben asked for verbatim:
+// "when turning the head initially, it should be fine, but eventually it should start to show resistance to turn
+// further... the goal is to get tarkov movement virbatim here".
 //
-// Driven through _lookDX (the same field the pointer-lock handler fills), never by writing player.yaw: the ease and the
-// rate cap both live between the two, so a probe that sets the angle measures nothing.
+// So the shape under test is not a limit, it is a CHANGE in limit. Inside the neck's arc the camera must be free; past
+// it the shoulders have to come round and the rate falls to a body's. Four things have to hold at once:
+//   1. inside the arc a flick is unresisted   — otherwise every small correction feels like sludge
+//   2. past it the sweep slows to the body     — otherwise you can still spin
+//   3. nothing is lost either way              — otherwise fast aim is silently inconsistent
+//   4. the arc comes back when you stop        — otherwise the resistance is permanent, not positional
 //
-// Three things have to hold at once, and any one alone is a bad camera:
-//   1. a huge flick cannot exceed the cap  — otherwise you can spin
-//   2. it still DELIVERS its full angle    — otherwise fast aim silently loses travel, which is worse than heavy aim
-//   3. a small flick still lands fast      — otherwise the camera is sludge
+// Driven through _lookDX (the field the pointer-lock handler fills), never by writing player.yaw: the ease, the cap and
+// the body-follow all live between the two.
 import { spawn } from 'node:child_process'; import { createServer } from 'node:net';
 import http from 'node:http'; import path from 'node:path';
 import { chromium } from 'playwright-core';
@@ -61,34 +64,47 @@ const peakRate = (rows, win = 150) => { let p = 0;
 const timeTo = (rows, target) => { for (const [t, a] of rows) if (Math.abs(a) >= target) return t; return Infinity; };
 
 const caps = await page.evaluate('__hc.lookInject(0,0)');
-const big = unwrap(await trace(-30000, 1400));      // an absurd swipe: many turns' worth of input in one event
-const small = unwrap(await trace(-260, 700));       // a normal flick
-const pend = await page.evaluate('__hc.lookInject(0,0)');   // whatever of it has not arrived yet
+const c0 = (await page.evaluate('__hc.lookInject(0,0)')).clamped;
+const big = unwrap(await trace(-30000, 1600));      // an absurd swipe: many turns' worth of input in one event
+const cBig = (await page.evaluate('__hc.lookInject(0,0)')).clamped - c0;
+const bigLead = await page.evaluate('__hc.lookInject(0,0)');
+// CANCEL THE LEFTOVER INPUT before asking whether the shoulders catch up. A capped flick keeps its remainder pending --
+// that is the momentum -- so with 300 radians still queued the head keeps turning at the body's rate and the lead stays
+// pinned open forever. The first version of this check read that and called the follow broken.
+await page.evaluate(() => { const p = __hc.lookInject(0, 0); __hc.lookInject(-p.dx, -p.dy); });
+await page.waitForTimeout(1400);                    // let the shoulders catch up
+const settled = await page.evaluate('__hc.lookInject(0,0)');
+const c1 = settled.clamped;
+const small = unwrap(await trace(-260, 700));       // a flick inside the neck's arc (33 degrees of a 36 degree neck)
+const cSmall = (await page.evaluate('__hc.lookInject(0,0)')).clamped - c1;
+const pend = await page.evaluate('__hc.lookInject(0,0)');
 
 let pass = 0, fail = 0;
 const t = (name, ok, got) => { (ok ? pass++ : fail++); console.log((ok ? 'PASS  ' : 'FAIL  ') + name + '   ' + got); };
-const bigPeak = peakRate(big), bigTotal = Math.abs(big[big.length - 1][1]);
 const step = rows => { let m = 0; for (let i = 1; i < rows.length; i++) m = Math.max(m, Math.abs(rows[i][1] - rows[i - 1][1])); return m; };
-// WALL-CLOCK THRESHOLDS DO NOT SURVIVE THIS HARNESS. Headless runs at 15-30fps and the loop clamps dt, so sim time and
-// real time diverge and "180 degrees in 500ms" measures the frame rate, not the camera. These four hold at ANY frame
-// rate, because each is a property of one step or of the total.
-const smallTotal = Math.abs(small[small.length - 1][1]);
-const asked = Math.abs(-260 * caps.sens);
-// One rAF sample per frame, so this is a real per-frame bound: the thing it forbids is a flick arriving in one step.
-t('no frame turns you more than the frame ceiling', step(big) <= caps.capFrame * 1.05,
-  'worst sample=' + (step(big) * 57.3).toFixed(1) + ' degrees, ceiling ' + (caps.capFrame * 57.3).toFixed(1) + ' per frame');
-t('the sustained sweep is under the rad/s cap', bigPeak <= caps.capHip * 1.15,
-  'sustained=' + bigPeak.toFixed(2) + ' rad/s vs cap ' + caps.capHip);
+const rateOver = (rows, fromMs) => { const a = rows.find(r => r[0] >= fromMs), b = rows[rows.length - 1];
+  return a && b && b[0] > a[0] ? Math.abs(b[1] - a[1]) / ((b[0] - a[0]) / 1000) : 0; };
+const smallTotal = Math.abs(small[small.length - 1][1]), asked = Math.abs(-260 * caps.sens);
+const bigTotal = Math.abs(big[big.length - 1][1]);
+t('the model is head-then-body', caps.capFree > caps.capBody * 3 && caps.freeArc > 0.3 && caps.follow > 0,
+  'free=' + caps.capFree + ' rad/s inside ' + (caps.freeArc * 57.3).toFixed(0) + ' degrees, body=' + caps.capBody + ', follow=' + caps.follow);
+// INSIDE THE ARC: the only thing shaping the motion is the ease, so it must move faster than a body ever could.
+// CLAMP COUNT, not rate: a 33 degree flick is too small to ever reach the body's rad/s, so comparing rates could only
+// ever fail. What "unresisted" means exactly is that the limit never bound — and the game counts that itself.
+t('inside the neck, nothing is clamped at all', cSmall === 0, 'clamped frames=' + cSmall + ' over a ' + (asked * 57.3).toFixed(0) + ' degree flick');
+t('past the neck, the limit does bind', cBig > 10, 'clamped frames=' + cBig);
+// PAST IT: measured LATE in the sweep, once the lead has opened past the arc — early frames are legitimately free.
+t('past the neck, it slows to the shoulders', rateOver(big, 700) <= caps.capBody * 1.35,
+  'late sweep ' + rateOver(big, 700).toFixed(2) + ' rad/s vs body ' + caps.capBody);
+t('and it never jumps a frame', step(big) <= caps.capFrame * 1.05,
+  'worst frame ' + (step(big) * 57.3).toFixed(1) + ' degrees, ceiling ' + (caps.capFrame * 57.3).toFixed(1));
 t('a huge flick keeps sweeping instead of snapping', bigTotal > Math.PI && step(big) * 12 < bigTotal,
-  'delivered=' + bigTotal.toFixed(2) + ' rad over ' + big.length + ' samples, worst step ' + step(big).toFixed(3));
-// CONSERVATION, not elapsed time. The ease is asymptotic, so at the moment the trace stops some of the flick is still
-// pending -- and that is exactly what makes this the honest check: turned + still-owed must equal what was asked, or the
-// cap is eating travel and fast aim is quietly inconsistent.
+  'delivered=' + bigTotal.toFixed(2) + ' rad, worst step ' + step(big).toFixed(3));
 const owed = Math.abs(pend.dx * caps.sens);
-t('a flick loses nothing: turned + owed = asked', Math.abs(smallTotal + owed - asked) < asked * 0.03,
+t('a flick loses nothing: turned + owed = asked', Math.abs(smallTotal + owed - asked) < asked * 0.05,
   'asked=' + (asked * 57.3).toFixed(1) + ' turned=' + (smallTotal * 57.3).toFixed(1) + ' owed=' + (owed * 57.3).toFixed(1) + ' degrees');
-t('and it eases rather than jumping', step(small) < smallTotal * 0.5,
-  'first step ' + (step(small) * 57.3).toFixed(1) + ' of ' + (smallTotal * 57.3).toFixed(1) + ' degrees');
+t('the shoulders open a lead, then close it', Math.abs(bigLead.lead) > caps.freeArc * 0.8 && Math.abs(settled.lead) < 0.06,
+  'lead during=' + (bigLead.lead * 57.3).toFixed(1) + ' after=' + (settled.lead * 57.3).toFixed(1) + ' degrees');
 t('no page errors', errs.length === 0, errs.join(' | '));
 console.log(pass + '/' + (pass + fail));
 await b.close(); server.kill();

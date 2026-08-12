@@ -113,6 +113,7 @@ function ok(l,c,g){ checks++; if(!c)fails++; console.log('  '+(c?'ok  ':'FAIL')+
       const cell=document.querySelector('#gridbed .gcell');
       return { tiles:tiles.length, cells:document.querySelectorAll('#gridbed .gcell').length,
                frame:cs?cs.borderImageSource:'', cellFrame:cell?getComputedStyle(cell).borderImageSource:'',
+               cellPx:cell?Math.round(cell.getBoundingClientRect().width):0,   // the cell the page is drawing, so tile sizes are checked in cells and not in pixels
                tall:tiles.map(t=>[parseFloat(t.style.width),parseFloat(t.style.height)]) }; });
     ok('a tile per stack',      dom.tiles===live.stacks, {tiles:dom.tiles, stacks:live.stacks});
     // EXACTLY capacity cells, not a padded rectangle: the block ends mid-row and the cells that are not there must
@@ -121,7 +122,10 @@ function ok(l,c,g){ checks++; if(!c)fails++; console.log('  '+(c?'ok  ':'FAIL')+
     ok('tiles wear the pack',   /assets\/ui\//.test(dom.frame), dom.frame.slice(-28));
     ok('cells wear the pack',   /assets\/ui\/hcell/.test(dom.cellFrame), dom.cellFrame.slice(-28));
     // A 2x4 rifle must be 2 cells wide and 4 tall ON SCREEN: the sizes above are a table, this is the geometry.
-    ok('a rifle is drawn 2x4',  dom.tall.some(([w,h])=>Math.round(w/44)===2 && Math.round(h/44)===4), dom.tall);
+    // MEASURED AGAINST THE CELL THE PAGE IS USING, not against 44: the cell size is a constant in index.html and it has
+    // already changed once (to 50, matching a hotbar slot), which failed this check while the tile was exactly right.
+    const CELLPX = dom.cellPx || 50;
+    ok('a rifle is drawn 2x4',  dom.tall.some(([w,h])=>Math.round(w/CELLPX)===2 && Math.round(h/CELLPX)===4), {tiles:dom.tall, cell:CELLPX});
     await page.screenshot({path:path.join(OUT,'grid-inv.png')});
 
     ok('no page errors', errs.length===0, errs.slice(0,3));
