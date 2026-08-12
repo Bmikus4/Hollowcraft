@@ -174,9 +174,19 @@ export function giantessBuild(scale){
   const rest = new Map();
   for (const b of bones) rest.set(b, b.quaternion.clone());
 
-  return { group, skeleton, bones, bone, rest, meshes: built, scale: s,
-           height: 1.67 * s,                 // bind-pose head top; measured from the file, not guessed
-           _q: new THREE.Quaternion(), _e: new THREE.Euler() };
+  const rig = { group, skeleton, bones, bone, rest, meshes: built, scale: s,
+                height: 1.67 * s,            // bind-pose head top; measured from the file, not guessed
+                ankle: 0, _step: 0,
+                _q: new THREE.Quaternion(), _e: new THREE.Euler() };
+  // THE LEG, MEASURED. The IK needs the two segment lengths and the hip's height above her feet plane, and
+  // all three are properties of this file's skeleton at this scale — the sole is not at the ankle joint and
+  // the thigh is not half the leg, so none of them can be taken from the model's overall height.
+  const a = new THREE.Vector3(), h = new THREE.Vector3(), k = new THREE.Vector3();
+  bone['foot.L'].getWorldPosition(a); bone['thigh.L'].getWorldPosition(h); bone['shin.L'].getWorldPosition(k);
+  rig.ankle = a.y - group.position.y;
+  const L1 = h.distanceTo(k), L2 = k.distanceTo(a);
+  rig.leg = { L1, L2, len: L1 + L2, hipY: h.y - group.position.y };
+  return rig;
 }
 
 // A bone set to rest * euler(x,y,z). Blender bones point along their own +Y, so X is the swing axis of
@@ -192,62 +202,144 @@ function rest(rig, name){ const b = rig.bone[name]; if (b) b.quaternion.copy(rig
 // "thigh sign"); she faces +Z, so a forward stride is NEGATIVE X and this constant carries it.
 const FWD = -1;
 
-// ARMS DOWN AT HER SIDES. The file's bind pose is a wide A-pose, and a giant walking with her arms out
-// reads as gliding, not walking — it was the one thing wrong with the first frame of her. -Z on the left
-// upper arm and +Z on the right adduct: measured at 0.7 rad, the hand comes 2.15 blocks IN and 0.6 down
-// (__hc.girlPoke, which exists for exactly this question). 0.62 puts them against her hips.
-const ARM = 0.62;
+// ARMS HELD OUT TO HER SIDES (Ben 08-11). They were tucked against her hips for one pass, which read as an
+// ordinary walk; out is what makes her read as a thing coming for you rather than a person going somewhere.
+// +Z on the left upper arm and -Z on the right abduct — measured, +0.7 rad carries the left hand 1.34
+// blocks OUT and 1.76 up (__hc.girlPoke, which exists for exactly this question), so 0.45 on top of the
+// file's A-pose lifts them to about shoulder height.
+const ARM = -0.45;
 
 const LIMBS = ['thigh.L','shin.L','foot.L','thigh.R','shin.R','foot.R','upper_arm.L','forearm.L','upper_arm.R','forearm.R','spine.003','Neck','Head'];
 
-// ---- poses -----------------------------------------------------------------------------------------
-// A HEAVY walk, not a stroll: long stance, short swing, the torso rocking over the planted leg. She is
-// ~14 blocks tall, and a human cadence at that size reads as a doll being skated along the ground.
-export function giantessWalk(rig, phase, speed){
-  const s = Math.min(1, speed == null ? 1 : speed);
-  const A = 0.55 * s;                                   // hip swing amplitude, radians
-  const sn = Math.sin(phase), cs = Math.cos(phase);
-  set(rig, 'thigh.L', FWD * A * sn, 0, 0);
-  set(rig, 'shin.L', FWD * -Math.max(0, -sn) * 0.9 * s, 0, 0);      // knee only ever bends one way
-  set(rig, 'foot.L', FWD * -0.25 * sn * s, 0, 0);
-  set(rig, 'thigh.R', FWD * A * -sn, 0, 0);
-  set(rig, 'shin.R', FWD * -Math.max(0, sn) * 0.9 * s, 0, 0);
-  set(rig, 'foot.R', FWD * 0.25 * sn * s, 0, 0);
-  set(rig, 'upper_arm.L', FWD * -A * 0.5 * sn, 0, -ARM);
-  set(rig, 'upper_arm.R', FWD * A * 0.5 * sn, 0, ARM);
-  set(rig, 'forearm.L', FWD * -0.3 * s, 0, 0);
-  set(rig, 'forearm.R', FWD * -0.3 * s, 0, 0);
-  set(rig, 'spine.003', FWD * -0.06 * s, cs * 0.05 * s, 0);          // torso rocks side to side over the planted foot
-  set(rig, 'Neck', 0, 0, 0);
+// ---- the walk --------------------------------------------------------------------------------------
+// THE FOOT PATH IS THE ANIMATION, and the joint angles are solved from it (Ben 08-11: "walking animation
+// should be hyperrealistic"). Two earlier versions authored the joints directly — first as sine waves, then
+// from the clinical hip/knee/ankle curves of a real gait cycle — and BOTH slid. The measurement that killed
+// the approach: with the joints driven independently, the planted ankle's fore-aft travel is wildly
+// non-uniform. It covered 2.1 blocks in the first third of stance, then stalled and crept FORWARD (trace at
+// __hc.girlTrace), so against a body moving at a constant speed the sole scraped 0.5-0.65 blocks for every
+// block she walked — at every speed, and at every phase rate swept. That is not a rough animation, it is
+// the wrong architecture: a leg is a two-link chain, and an even, straight path along the ground is a
+// property of the CHAIN, not of any three independent curves.
+//
+// So the sole is given the path it must follow — backward at exactly the body's speed while it is down, an
+// arc through the air while it is not — and the hip and knee are solved to hit it (law of cosines, closed
+// form, no iteration). Zero foot slip is then structural rather than tuned: it cannot drift when a number
+// is retuned, and it holds at every speed. Everything a viewer reads as realism rides on top as a layer —
+// the pelvis dropping toward the swing leg, the trunk counter-rotating against it, the hips rising twice a
+// cycle, heel strike and toe-off roll, the arms in opposition.
+//
+// Stance is 60% of the cycle and swing 40%, so both feet are down for the 20% overlap — real double
+// support. That is also why one sole travels 1.2 step lengths per stance and not one: the body advances 1.2
+// steps in the time a single foot is down. Getting that factor wrong is what left the previous version's
+// phase rate wrong by a constant, and a constant-factor error is invisible in a screenshot.
+const D = Math.PI / 180;
+const STANCE = 0.60;
+
+// A two-link solve for one leg. Every angle is a DELTA from the rest pose, which is standing, so 0 is a
+// straight leg. Forward-positive throughout; FWD carries the file's actual bone direction.
+function legIK(rig, L, footZ, footY, hipZ, hipY, roll){
+  const g = rig.leg, dz = footZ - hipZ, dy = footY - hipY;
+  const reach = Math.min(g.L1 + g.L2 - 0.02, Math.max(Math.abs(g.L1 - g.L2) + 0.02, Math.hypot(dz, dy)));
+  const th = Math.atan2(dz, -dy);                                        // hip-to-ankle line, 0 = straight down
+  const cb = (g.L1 * g.L1 + reach * reach - g.L2 * g.L2) / (2 * g.L1 * reach);
+  const ck = (g.L1 * g.L1 + g.L2 * g.L2 - reach * reach) / (2 * g.L1 * g.L2);
+  const beta = Math.acos(Math.max(-1, Math.min(1, cb)));                 // the thigh sits forward of that line by beta
+  const knee = Math.PI - Math.acos(Math.max(-1, Math.min(1, ck)));       // …and the knee bends backward by this
+  const thigh = th + beta;
+  set(rig, 'thigh.' + L, FWD * thigh, 0, 0);
+  set(rig, 'shin.' + L, FWD * -knee, 0, 0);
+  // The sole stays parallel to the ground unless it is rolling over the heel or the toes: the ankle undoes
+  // whatever the shin is doing in world terms. Without this the foot points wherever the shin left it,
+  // which is the most doll-like thing a walk can do.
+  set(rig, 'foot.' + L, FWD * (-(thigh - knee) + roll), 0, 0);
 }
 
-// The stomp, in one number: t runs 0→1 over the whole action. 0..0.45 brings the knee up, 0.45..0.62
-// drives the sole down and FORWARD, the rest is recovery. The impact is at STOMP_HIT, which index.html
-// reads rather than guessing a frame.
-//
-// THE FOOT MUST FINISH AHEAD OF HER, NOT UNDER HER. The first version brought the leg straight down onto
-// her own hip line: measured, the sole landed 3 blocks short of the player every single time, so she
-// never once killed anybody — she knocked them about with the shock until they died of it (bench: "kills
-// 0" with the health floor at 0, which is the whole reason that counter is reported separately). `plant`
-// is the forward swing that carries the sole out over the target, and index.html aims her by measuring
-// where THIS pose will put the foot rather than by trusting a number here.
+// The sole's path in her own frame as a function of the cycle. z is fore-aft (+ is the way she faces), y is
+// height above her feet plane. The numbers are step lengths and leg lengths, not tuning knobs.
+function footPath(rig, u, S){
+  const half = 0.6 * S;                                     // 1.2 step lengths of travel over one stance
+  if (u < STANCE){
+    const t = u / STANCE;
+    return { z: half - 2 * half * t, y: rig.ankle,
+             // heel strike, flat through mid-stance, then the heel lifts and she rolls over the toes
+             roll: (t < 0.12 ? (1 - t / 0.12) * 10 * D : 0) - (t > 0.72 ? (t - 0.72) / 0.28 * 24 * D : 0) };
+  }
+  const w = (u - STANCE) / (1 - STANCE);
+  const e = w * w * (3 - 2 * w);                            // the swing leg accelerates and settles; never linear
+  return { z: -half + 2 * half * e, y: rig.ankle + Math.sin(Math.PI * w) * rig.leg.len * 0.20,
+           roll: 8 * D * Math.sin(Math.PI * w) };           // toes up through the swing, so she does not stub 13 blocks of leg
+}
+
+export function giantessWalk(rig, phase, speed){
+  const s = Math.min(1, speed == null ? 1 : speed);
+  const S = giantessStep(rig);
+  const u = (phase / (Math.PI * 2)) % 1, v = (u + 0.5) % 1;
+  // The hips rise and fall TWICE per cycle — highest over each planted leg, lowest at double support. It is
+  // the one piece of vertical motion that is authored, and it is small: 2% of leg length.
+  const hipY = rig.leg.hipY - rig.leg.len * 0.02 * (1 - Math.cos(4 * Math.PI * u)) * 0.5 * s;
+  const fl = footPath(rig, u, S), fr = footPath(rig, v, S);
+  legIK(rig, 'L', fl.z * s, fl.y, 0, hipY, fl.roll * s);
+  legIK(rig, 'R', fr.z * s, fr.y, 0, hipY, fr.roll * s);
+  set(rig, 'toe.L', FWD * -Math.max(0, -fl.roll) * 1.4 * s, 0, 0);       // the toes extend as the heel comes off
+  set(rig, 'toe.R', FWD * -Math.max(0, -fr.roll) * 1.4 * s, 0, 0);
+  // THE PELVIS BONE MUST NOT MOVE, and this is not a stylistic choice. Both thighs are children of `spine`
+  // in this rig, so rotating it swings the whole leg chain bodily and every IK target the solve just hit is
+  // displaced — measured, 4 degrees of pelvic rotation plus 5 of drop reintroduced 0.29 blocks of foot slip
+  // per block walked, which was 90% of all the slip left after the IK went in. So the sway lives ABOVE the
+  // legs: the lumbar carries the counter-rotation and the lateral lean, which is what a viewer reads as the
+  // hips working anyway, and the legs keep the ground they were solved against.
+  rest(rig, 'spine');
+  const rot = Math.sin(phase) * 5 * D * s, drop = Math.cos(phase) * 6 * D * s;
+  set(rig, 'spine.001', 0, rot, drop);
+  set(rig, 'spine.003', -2 * D * s, -rot * 1.2, -drop * 0.5);
+  set(rig, 'Neck', 0, -rot * 0.3, 0);                                    // the head stays level, facing where she is going
+  // The arms stay out (Ben) and swing in opposition — left arm forward with the right leg.
+  const sw = Math.sin(phase) * 22 * D * s;
+  set(rig, 'upper_arm.L', FWD * -sw, 0, -ARM);
+  set(rig, 'upper_arm.R', FWD * sw, 0, ARM);
+  set(rig, 'forearm.L', FWD * -(20 + 18 * Math.max(0, -Math.sin(phase))) * D * s, 0, 0);
+  set(rig, 'forearm.R', FWD * -(20 + 18 * Math.max(0, Math.sin(phase))) * D * s, 0, 0);
+}
+
+// STEP LENGTH, FROM THE LEG. It is no longer measured by sampling the animation: with the path solved by
+// IK, any step length walks without slipping, so this is a choice about how she moves rather than a
+// constraint. 0.60 of leg length is the longest step that keeps the sole inside the hip's reach at both
+// ends of stance — past that the IK clamps, and a clamped IK is a foot that slides again. At her size that
+// is 4.1 blocks, so 5.2 blocks/s comes out near one step a second: a giant's cadence, not a human's.
+export function giantessStep(rig){ return rig.leg.len * 0.60; }
+
+// GROUNDED ON THE SUPPORT ANKLE. The IK already puts both soles at the right height in her own frame, so
+// this is a small correction now rather than the thing holding her up: it absorbs the fact that the rest
+// pose is not a perfectly straight leg, and it is what keeps her feet on sloping ground.
+export function giantessGroundY(rig, groundY){
+  rig.group.position.y = groundY;
+  rig.group.updateMatrixWorld(true);
+  const a = new THREE.Vector3(), b = new THREE.Vector3();
+  rig.bone['foot.L'].getWorldPosition(a); rig.bone['foot.R'].getWorldPosition(b);
+  return groundY + (groundY + rig.ankle - Math.min(a.y, b.y));
+}
+
 export const STOMP_HIT = 0.62;
 export function giantessStomp(rig, t, leg){
   const L = leg === 'L' ? 'L' : 'R', O = L === 'L' ? 'R' : 'L';
   const lift = t < 0.45 ? Math.sin(t / 0.45 * Math.PI * 0.5) : (t < STOMP_HIT ? 1 - (t - 0.45) / (STOMP_HIT - 0.45) : 0);
   const settle = t < STOMP_HIT ? 0 : Math.max(0, 1 - (t - STOMP_HIT) / 0.38);
   const plant = t < 0.45 ? 0 : (t < STOMP_HIT ? (t - 0.45) / (STOMP_HIT - 0.45) : 1);
-  set(rig, 'thigh.' + L, FWD * (1.35 * lift + 0.5 * plant), 0, 0);          // knee to the chest, then the sole out and down
-  set(rig, 'shin.' + L, FWD * -1.5 * lift, 0, 0);                           // the shin folds the other way — that is a knee
-  set(rig, 'foot.' + L, FWD * (-0.5 * lift + 0.25 * plant), 0, 0);
+  // THE KNEE COMES UP PAST HER WAIST (Ben 08-11: "leg doesnt raise high enough"). 1.35 rad on the thigh put
+  // the sole about a body's width off the ground on a 13.5-block frame, which at her scale is a step, not a
+  // stomp. 2.15 folds the leg up in front of her; the shin follows it or the shin passes through her chest.
+  set(rig, 'thigh.' + L, FWD * (2.15 * lift + 0.5 * plant), 0, 0);          // knee to the chest, then the sole out and down
+  set(rig, 'shin.' + L, FWD * -2.0 * lift, 0, 0);                           // the shin folds the other way — that is a knee
+  set(rig, 'foot.' + L, FWD * (-0.7 * lift + 0.25 * plant), 0, 0);          // toes pulled up on the lift, so the sole faces the ground
   set(rig, 'thigh.' + O, FWD * (-0.25 * lift - 0.1 * settle), 0, 0);        // the planted leg takes the whole weight and bends for it
   set(rig, 'shin.' + O, FWD * -0.35 * (lift + settle), 0, 0);
   rest(rig, 'foot.' + O);
   set(rig, 'spine.003', FWD * (-0.3 * lift + 0.3 * plant + 0.2 * settle), 0, 0);   // rocks back to lift, folds over the foot on the way down
   set(rig, 'Neck', FWD * (0.3 * lift - 0.35 * settle), 0, 0);               // …and she looks down at what she is standing on
-  // The arms come out for balance as she takes her weight on one leg, from the sides rather than from the A-pose.
-  set(rig, 'upper_arm.L', FWD * 0.4 * lift, 0, -ARM * (1 - 0.7 * lift));
-  set(rig, 'upper_arm.R', FWD * 0.4 * lift, 0, ARM * (1 - 0.7 * lift));
+  // The arms stay out and come out FURTHER as she takes her whole weight on one leg.
+  set(rig, 'upper_arm.L', FWD * 0.4 * lift, 0, -ARM * (1 + 0.5 * lift));
+  set(rig, 'upper_arm.R', FWD * 0.4 * lift, 0, ARM * (1 + 0.5 * lift));
 }
 
 export function giantessIdle(rig, t){

@@ -89,6 +89,21 @@ try {
   for (let i = 0; i < 24; i++){ const s = await sample(); hp0 = Math.min(hp0, s.hp); if (s.kills > kills0){ killed = true; break; } await sleep(400); }
   check('a foot aimed at the player kills him', killed, 'health floor ' + hp0 + ', kills ' + kills0 + ' -> ' + (await sample()).kills);
 
+  // ---- 5b. THE WALK ITSELF, which is what "hyperrealistic" reduces to as a number ------------------
+  // A sole on the ground does not move. Everything else people call realism is a layer on top of that, and
+  // the layers are cheap; this is the one that is structural. Analytic, at four speeds, because the fault
+  // it caught was a CONSTANT factor — sine-driven joints slid 0.52 blocks per block at every speed, so a
+  // single-speed reading could not have told a wrong rate from a rough animation.
+  const gait = [];
+  for (const sp of [2.5, 4.2, 5.2, 6.5]) gait.push(await page.evaluate(`__hc.girlGait(${sp},4)`));
+  console.log('  ' + gait.map(g => g.slipPerBlock).join(' / ') + ' blocks slipped per block walked at 2.5/4.2/5.2/6.5');
+  check('the planted sole does not slide', Math.max(...gait.map(g => g.slipPerBlock)) < 0.10,
+    'worst ' + Math.max(...gait.map(g => g.slipPerBlock)) + ' (was 0.65 with joint-driven curves)');
+  check('the slip does not grow with speed', Math.max(...gait.map(g => g.slipPerBlock)) - Math.min(...gait.map(g => g.slipPerBlock)) < 0.03,
+    'spread ' + (Math.max(...gait.map(g => g.slipPerBlock)) - Math.min(...gait.map(g => g.slipPerBlock))).toFixed(3));
+  check('her hips rise and fall as the loaded leg straightens', gait[2].hipRise > 0.05 && gait[2].hipRise < 1.5, gait[2].hipRise + ' blocks');
+  check('the swing foot clears the stance foot', gait[2].swingClear > 0.5, gait[2].swingClear + ' blocks of clearance');
+
   // ---- 6. THE EGG, which is half of what was asked for and was not covered here at first ------------
   // Ben: "dont see the egg". The item was correct all along; /give stopped putting anything in the five-slot
   // bar when the inventory became a bag-first grid, so nothing an egg-shaped check does through /give proves
@@ -104,6 +119,10 @@ try {
   const cmd = await page.evaluate(`__hc.cmdRun('/gamemode survival'); __hc.cmdRun('/spawn giantess')`);
   check('/spawn knows the creature', /spawned/.test(String(cmd.out)), String(cmd.out).slice(0, 60));
   await page.evaluate(`__hc.girlOff();`);
+  // GIVEN, NOT PLANTED: the egg has to arrive in the five-slot bar, because an egg that lands in the bag is
+  // the bug Ben reported. hold() would put it there by force and prove nothing.
+  const bar = await page.evaluate(`(()=>{ __hc.cmdRun('/give egg_giantess 1'); return __hc.bar(); })()`);
+  check('a given egg lands in the hotbar, not the bag', !!(bar.slots || []).find(s => s && s.id === 'egg_giantess'), JSON.stringify(bar.slots));
   const egg = await page.evaluate(`(()=>{ const h=__hc.hold('egg_giantess'); __hc.useHeld(); return h; })()`);
   await sleep(400);
   const after = await page.evaluate(`__hc.girlState()`);
