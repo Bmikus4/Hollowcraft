@@ -53,8 +53,16 @@ t('prone crawls, and cannot sprint', r.moving.speed > 0.2 && r.moving.speed < 2.
 t('and crawling still does not turn you', r.moving.yaw === r.up.yaw, 'yaw ' + r.up.yaw + ' -> ' + r.moving.yaw);
 t('Space stands you back up', r.backUp.prone === false && (r.backUp.camY - r.backUp.feetY) > 1.4,
   'prone=' + r.backUp.prone + ' eye above feet=' + (r.backUp.camY - r.backUp.feetY).toFixed(2));
-t('guns reach further than 70 blocks', r.ranges && r.ranges.ar >= 140 && r.ranges.bolt >= 300,
-  'ar=' + r.ranges.ar + ' revolver=' + r.ranges.revolver + ' bolt=' + r.ranges.bolt + ' shotgun=' + r.ranges.shotgun);
+// RANGE AND FALLOFF. Ben 08-12: the old maxima are where velocity starts to go, and the round flies well past them.
+// The shape is what matters: flat to full range, then down to a floor, never to zero — a spent round still hurts.
+const g = r.ranges, s2 = g && g.sample;
+t('full power reaches at least 140 blocks', g && g.full.ar >= 140 && g.full.bolt >= 300,
+  'full: ar=' + g.full.ar + ' revolver=' + g.full.revolver + ' bolt=' + g.full.bolt + ' shotgun=' + g.full.shotgun);
+t('and the round flies well past that', g && g.mul >= 2, 'max = full x ' + g.mul + ' (ar ' + Math.round(g.full.ar * g.mul) + ' blocks)');
+t('no loss at all inside full range', s2 && s2[0][1] === 1 && s2[2][1] === 1,
+  s2 ? s2.slice(0, 3).map(x => x[0] + 'b:' + x[1]).join('  ') : '-');
+t('then it falls off, and never to nothing', s2 && s2[3][1] < 1 && s2[3][1] > g.floor && s2[5][1] <= g.floor + 0.001 && g.floor > 0.2,
+  s2 ? s2.slice(3).map(x => x[0] + 'b:' + x[1]).join('  ') + '  floor=' + g.floor : '-');
 t('no page errors', errs.length === 0, errs.join(' | '));
 console.log(pass + '/' + (pass + fail));
 await b.close(); server.kill();

@@ -19219,22 +19219,28 @@ function _wornPackMesh(id){
 // Sized by LENGTH rather than by enclosure: a gun is a long thin object and what has to look right is its length against
 // the torso, not its bounding box. 0.86 of the torso's height puts a rifle's muzzle at the hip and its stock at the
 // shoulder, which is how a sling hangs.
-const WORN_GUN={len:0.86, y:1.14, z:-0.26, packZ:-0.46, roll:-0.62, yaw:0.10};
+const WORN_GUN={len:0.86, y:1.16, z:-0.26, packZ:-0.46, roll:-0.62, yaw:0.10};   // y is the gun's CENTRE, which the nesting below makes true
 function _wornGunMesh(id){
   let m=null; try{ m=itemModel(id); }catch(e){ return null; }
   if(!m) return null;
-  const w=new THREE.Group(); w.add(m); w.updateMatrixWorld(true);
-  const bb=new THREE.Box3().setFromObject(w), sz=bb.getSize(new THREE.Vector3()), ctr=bb.getCenter(new THREE.Vector3());
+  const probe=new THREE.Group(); probe.add(m); probe.updateMatrixWorld(true);
+  const bb=new THREE.Box3().setFromObject(probe), sz=bb.getSize(new THREE.Vector3()), ctr=bb.getCenter(new THREE.Vector3());
   const long=Math.max(sz.x,sz.y,sz.z)||1;
   // THE WHOLE LENGTH, not a fraction of it. At 0.62 the rifle came out 0.48 long against a 1.7 body -- a toy, and mostly
-  // inside the torso, which is what Ben would have called it. A slung long arm runs shoulder to hip: 0.86 is that span.
+  // inside the torso. A slung long arm runs shoulder to hip: 0.86 is that span.
   const s=WORN_GUN.len/long;
-  w.scale.setScalar(s); w.position.set(-ctr.x*s,-ctr.y*s,-ctr.z*s);
+  // THREE NESTED GROUPS, AND THE NESTING IS THE FIX (Ben 2026-08-12: "guns worn on the back need placed properly").
+  // Centring and rotating on the SAME group rotates the centring offset with it: the gun's middle then swings away from
+  // the group's origin, so a y chosen for the middle of the back hung the rifle from mid-back to below the knee (measured
+  // centre 0.85 where 1.15 was asked for). Innermost group carries the scale and the centre-to-origin offset, the middle
+  // one carries the model's own turn, the outer one carries the pose — so each transform acts on a centred object.
+  const c=new THREE.Group(); c.add(m); c.scale.setScalar(s); c.position.set(-ctr.x*s,-ctr.y*s,-ctr.z*s);
+  // The models are authored for the VIEWMODEL: length down -z, sights up +y, width across x. -90 about X sends -z to -y,
+  // so the muzzle points DOWN and the sights face rearward, laying the receiver's flat against the back the way a sling
+  // does. (+90 is the same move upside down: muzzle up, sights into the spine, which is what it looked like.)
+  const w=new THREE.Group(); w.add(c); w.rotation.set(-Math.PI/2, 0, 0);
   const g=new THREE.Group(); g.add(w);
-  // The models are authored for the VIEWMODEL, muzzle down -z. Turned to lie along the body's own up axis and then rolled
-  // off vertical, which is what makes it read as slung rather than bolted on.
-  w.rotation.set(Math.PI/2, 0, 0);
-  g.rotation.set(0, WORN_GUN.yaw, WORN_GUN.roll);
+  g.rotation.set(0, WORN_GUN.yaw, WORN_GUN.roll);   // the diagonal, about the BODY's own axes
   g.traverse(o=>{ o.userData.keepColor=true; if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
   return g;
 }
@@ -23449,13 +23455,23 @@ let _pvpLog=0, _pvpLast=null;   // QA only: peer hits this shot, and the last 'd
 const PELLET_DMG=25, PELLET_HEAD=1.33, PELLET_SUP=6;   // a suppressed 12 gauge keeps the proportional cost it always had (3 of 12 -> 6 of 25)
 function _traceBullet(o,d,bolt,rev,sup,sg,vo){
   const animDmg=Math.max(3,(sg?PELLET_DMG:bolt?40:rev?14:10) - (sup?(sg?2:bolt?20:4):0));   // one pellet is worth 6 on an animal, so a whole shell is 54 — a deer dies to one                               // the hunting rifle hits far harder; suppressor costs the rifle -20 but light guns only -4 (the flat -20 drove AR/Python animal damage NEGATIVE — bullets healed animals)
-  // FURTHER (Ben 2026-08-12: "guns dont shoot far enough away"). The AR's 70 blocks was the binding one — that is about
-  // four chunks, well inside what a player can SEE and shoot at, so a rifle round was stopping in mid-air at a target
-  // plainly in view. Doubled to 150, the revolver to 170, the bolt gun to 340 and the 12 gauge to 48; the ratio between
-  // them is kept, because it is what makes each gun feel like its own weapon. The ceiling on any of this is the render
-  // distance (CFG.RD_MAX 12 chunks = 192 blocks of loaded world), so the bolt rifle now outranges what is meshed and the
-  // trace simply runs out of blocks — which is the honest failure, rather than a round that dies at 70.
-  const _maxR=sg?48:bolt?340:rev?170:150;
+  // RANGE IN TWO PARTS (Ben 2026-08-12: "guns dont shoot far enough away", then "bullets should lose velocity over
+  // distance, but only after a certain distance" and "extend the max distance of those rounds even further and make the
+  // existing ones when the falloff begins").
+  //   _fullR — full power. Inside this the round hits for exactly what it always hit for, so nothing about close and
+  //            mid-range fighting changes. These are the numbers from the first pass, which is what Ben asked for.
+  //   _maxR  — where it is spent. 2.2x further, and the shot keeps travelling and keeps hurting the whole way.
+  // Between them the damage falls to 34%: a round that has lost most of its energy still breaks bone, it just stops
+  // killing. Linear, because the reader can predict it — a real drag curve is not distinguishable at these ranges and
+  // nobody can tune what they cannot picture.
+  //   THE PRACTICAL CEILING IS THE MESHED WORLD (CFG.RD_MAX 12 chunks = 192 blocks), so a bolt rifle now outranges the
+  // blocks that exist and its trace runs out of world rather than out of range — an honest limit rather than a number.
+  const _fullR=sg?48:bolt?340:rev?170:150;
+  const _maxR=Math.round(_fullR*2.2);
+  // ONE function, so every damage site downstream loses velocity the same way. Called with the distance the round has
+  // flown, which the march already has in `t`.
+  const _vel=tt=> tt<=_fullR ? 1 : Math.max(0.34, 1-((tt-_fullR)/(_maxR-_fullR))*0.66);
+  const _at=(dmg,tt)=>Math.max(1,Math.round(dmg*_vel(tt)));
   // RICOCHETS, AND THEY CAN KILL YOU (Ben's backlog item 23: "own ricochets and thrown spears kill you"). The trace was one ray that ended
   // at the first solid block. It is up to three SEGMENTS now: a glancing hit on hard stone reflects and keeps going, and from the second
   // segment onward the shooter's own capsule is in the line of fire.
@@ -23474,7 +23490,7 @@ function _traceBullet(o,d,bolt,rev,sup,sg,vo){
     if(seg>0){ const _nd=Math.hypot(px-player.pos.x, pz-player.pos.z); if(_nd<_ricoNear) _ricoNear=_nd; }   // QA only: how close the return came
     if(seg>0 && !player.dead && !player.creative && Math.abs(px-player.pos.x)<HW+0.2 && Math.abs(pz-player.pos.z)<HW+0.2
        && py>player.pos.y-0.1 && py<player.pos.y+PH+0.1){                                              // your own ricochet, coming back
-      if(typeof damage==='function') damage(animDmg, 'your own ricochet found you', 'bullet');
+      if(typeof damage==='function') damage(_at(animDmg,t), 'your own ricochet found you', 'bullet');
       spawnParticles(px,py,pz,0xcc2018,10,1.8,0.5); return true; }
     // PVP — A ROUND FINDS ANOTHER PLAYER (Ben's item 23, second half). The same capsule as the shooter's own above, tested at every
     // step of the same segmented walk, so a teammate can be hit by a ricochet as well as by a straight shot. It sits BEFORE the
@@ -23486,7 +23502,7 @@ function _traceBullet(o,d,bolt,rev,sup,sg,vo){
     if(PVP && NET.on) for(const _pid in NET.peers){ const _pp=NET.peers[_pid];
       if(!_pp || _pp.dead || _pp.tied) continue;
       if(Math.abs(px-_pp.x)<HW+0.2 && Math.abs(pz-_pp.z)<HW+0.2 && py>_pp.y-0.1 && py<_pp.y+PH+0.1){
-        const _pkt={t:'dmg',to:+_pid,v:animDmg,c:(playerName||'another player')+' shot you',k:'bullet'};
+        const _pkt={t:'dmg',to:+_pid,v:_at(animDmg,t),c:(playerName||'another player')+' shot you',k:'bullet'};
         bloodImpact(px,py,pz,d,(NET.avatars&&NET.avatars[_pid])||null,PH);   // a peer bleeds like anything else — the wound hangs on their avatar, so it rides their walk (Ben 08-12: "players, animals, and creatures")
         _pvpLog++; _pvpLast=_pkt;                                                        // QA only (see __hc.pvpTest): the packet, not a flag
         netSend(_pkt);
@@ -23534,9 +23550,9 @@ function _traceBullet(o,d,bolt,rev,sup,sg,vo){
       const dxb=px-bp.x, dyb=py-bp.y, dzb=pz-bp.z; if(dxb*dxb+dyb*dyb+dzb*dzb < br*br){ b.dead=true; b.vy=1.5; b.spin=(Math.random()-0.5)*7; hitMarker();
         spawnParticles(bp.x,bp.y,bp.z,0x191920,14,2.2,0.9); flashName('bird down'); return true; } }
     let an=null; for(const a of animals){ if(a.dead)continue; const hh=(ANIMALS[a.type]?ANIMALS[a.type].h:1)*1.15, dxa=px-a.x, dza=pz-a.z, dya=py-a.y; const rr=hh>1.3?0.9:0.5; if(dxa*dxa+dza*dza < rr && dya>-0.25 && dya<hh+0.4){ an=a; break; } }   // vertical CAPSULE, radius scaled up for big-bodied animals (deer/sheep bodies reached well past the old 0.65 cylinder — center-mass shots whiffed)
-    if(an){ hurtAnimal(an,animDmg); spawnParticles(px,py,pz,0xcc2018,8,1.6,0.5); bloodImpact(px,py,pz,d,an.mesh,(ANIMALS[an.type]&&ANIMALS[an.type].h)||1); hitMarker(); return true; }   // the wound rides an.mesh for three minutes and throws spatter at the blocks behind it (Ben 08-12, reversing the 07-21 removal)
+    if(an){ hurtAnimal(an,_at(animDmg,t)); spawnParticles(px,py,pz,0xcc2018,8,1.6,0.5); bloodImpact(px,py,pz,d,an.mesh,(ANIMALS[an.type]&&ANIMALS[an.type].h)||1); hitMarker(); return true; }   // the wound rides an.mesh for three minutes and throws spatter at the blocks behind it (Ben 08-12, reversing the 07-21 removal)
     if(NET.on && !NET.host){ for(const _k in _netAnimals){ const _e=_netAnimals[_k]; const _dx=px-_e.x,_dz=pz-_e.z,_dy=py-_e.y;   // GUEST: the real animals[] is empty here → hit the host's mirrored animals and request the damage
-      if(_dx*_dx+_dz*_dz<0.9 && _dy>-0.25 && _dy<2.2){ const _n=+String(_k).replace(/^n/,''); if(_n===_n)netSend({t:'han',n:_n,v:animDmg}); spawnParticles(px,py,pz,0xcc2018,8,1.6,0.5); hitMarker(); return true; } } } }
+      if(_dx*_dx+_dz*_dz<0.9 && _dy>-0.25 && _dy<2.2){ const _n=+String(_k).replace(/^n/,''); if(_n===_n)netSend({t:'han',n:_n,v:_at(animDmg,t)}); spawnParticles(px,py,pz,0xcc2018,8,1.6,0.5); hitMarker(); return true; } } } }
   // Out of range, or a clean miss, or the ray left the world: either way this bullet is finished.
   if(!rico) return true;
   travelled+=rico.t; bounced++; _ricoLog++;
@@ -23566,7 +23582,7 @@ function _wretchRayHit(px,py,pz,d,bolt,rev,sup,sg){
 function _wretchRayHit1(){
   const px=_wrp.x, py=_wrp.y, pz=_wrp.z, bolt=_wrp.bolt, rev=_wrp.rev, sup=_wrp.sup, sg=_wrp.sg;
   if(wretch.active && wretch.boss){ for(const e of seraphEyeSpheres()){ const ex=px-e.x, ey=py-e.y, ez=pz-e.z;   // THE CERAPHIM: every eye = 100% damage (central = weak point); checked BEFORE wings so eyes set into wings still pay full
-    if(ex*ex+ey*ey+ez*ez < e.r*e.r){ const _wd=((sg?PELLET_DMG:bolt?100:rev?68:65) - (sup?(sg?PELLET_SUP:20):0)) * (e.central?1.5:1);
+    if(ex*ex+ey*ey+ez*ez < e.r*e.r){ const _wd=_at(((sg?PELLET_DMG:bolt?100:rev?68:65) - (sup?(sg?PELLET_SUP:20):0)) * (e.central?1.5:1), t);
       if(!NET.on||wretchOwner()===NET.id){ wretch._gunHit=true; hurtWretch(_wd); } else netSend({t:'hw',v:_wd,h:wretch._hid||0});
       spawnParticles(px,py,pz,0xf1e7d9,16,2.4,0.7); spawnParticles(px,py,pz,0x8a1010,10,1.8,0.6);
       if(!e.central && !e.closed && typeof seraphEyeClose==='function'){ seraphEyeClose(e.i,90); flashName('eye SEALED — 90s'); if(NET.on)netSend({t:'eyeSeal',i:e.i}); }   // shoot a side eye → it clamps shut 90s (in stage 3 a sealed eye can't fire its burst laser) (Ben 07-21)
@@ -23574,7 +23590,7 @@ function _wretchRayHit1(){
       if(typeof seraphSay==='function'&&Math.random()<0.4)seraphSay(e.central?'hitCentral':(Math.random()<0.5?'hit1':'hit2')); return true; } }
     for(const wsp of seraphWingSpheres()){ const wx2=px-wsp.x, wy2=py-wsp.y, wz2=pz-wsp.z;                       // WINGS: big tempting targets — 10% chance a shot wounds (user spec 07-20); feathers soak the rest
       if(wx2*wx2+wy2*wy2+wz2*wz2 < wsp.r*wsp.r){
-        if(Math.random()<0.10){ const _wd=((sg?PELLET_DMG:bolt?100:rev?68:65) - (sup?(sg?PELLET_SUP:20):0));
+        if(Math.random()<0.10){ const _wd=_at((sg?PELLET_DMG:bolt?100:rev?68:65) - (sup?(sg?PELLET_SUP:20):0), t);
           if(!NET.on||wretchOwner()===NET.id){ wretch._gunHit=true; hurtWretch(_wd); } else netSend({t:'hw',v:_wd,h:wretch._hid||0});
           spawnParticles(px,py,pz,0x8a1010,12,2,0.6); flashName('through the wing'); }
         else { spawnParticles(px,py,pz,0xb03030,10,1.8,0.8); spawnParticles(px,py,pz,0xf1e7d9,4,1.2,0.5); }      // feather burst — the shot is EATEN
@@ -23584,7 +23600,7 @@ function _wretchRayHit1(){
     // A PELLET IS WORTH 12, so a whole shell is 108 on the body and 144 through the head — two shells rout even the
     // Horrific one. The suppressor's flat -20 must never drive a pellet NEGATIVE (bullets that heal shipped once
     // already, on animals): 3 is the same share of 12 that 20 is of 70.
-    if(head||body){ const _wd=(sg?(head?Math.round(PELLET_DMG*PELLET_HEAD):PELLET_DMG):bolt?(head?100:70):rev?(head?68:45):(head?65:50)) - (sup?(sg?PELLET_SUP:20):0);
+    if(head||body){ const _wd=_at((sg?(head?Math.round(PELLET_DMG*PELLET_HEAD):PELLET_DMG):bolt?(head?100:70):rev?(head?68:45):(head?65:50)) - (sup?(sg?PELLET_SUP:20):0), t);
       if(!NET.on||wretchOwner()===NET.id){ wretch._gunHit=true; hurtWretch(_wd); } else netSend({t:'hw',v:_wd,h:wretch._hid||0});   // AR 50 / Python 45 body (Ben 07-20), heads scaled; co-op: only the owner mutates HP; guests request the hit
       spawnParticles(px,py,pz,head?0xff3020:0x3a0608,head?16:12,2,0.6); if(head)flashName('headshot'); return true; } }   // blood burst only — no lingering wound decal (Ben 07-21)
   return false;
@@ -33836,7 +33852,11 @@ window.__hc={
       prone:!!player.prone, sneak:!!player.sneak, sprint:!!player.sprint,
       camY:+camera.position.y.toFixed(3), feetY:+player.pos.y.toFixed(3),
       spd:+Math.hypot(player.vel.x,player.vel.z).toFixed(2),
-      gunRange:{ ar:150, revolver:170, bolt:340, shotgun:48 } }; }catch(e){ return {err:e.message}; } },   // whether the player is alive was absent, so "did that kill me" probes read undefined and reported survival
+      // Range in two parts, and the falloff curve itself, so a harness can check the SHAPE rather than trusting two
+      // constants: full is where velocity starts to go, max is where the round is spent, and dmgAt samples the factor.
+      gunRange:{ full:{ar:150,revolver:170,bolt:340,shotgun:48}, mul:2.2, floor:0.34,
+                 sample:[0,0.5,1,1.5,2,2.2].map(k=>{ const f=150, m=Math.round(f*2.2), tt=f*k;
+                   return [+tt.toFixed(0), +(tt<=f?1:Math.max(0.34,1-((tt-f)/(m-f))*0.66)).toFixed(3)]; }) } }; }catch(e){ return {err:e.message}; } },   // whether the player is alive was absent, so "did that kill me" probes read undefined and reported survival
   // QA/bench: the game's OWN per-frame breakdown, averaged over the last n committed frames. Needs ?perf=1 (PERF.on).
   // This reads the existing T ring rather than monkey-patching: wrapping _bulkRun from a bench page hung the probe, and
   // these scopes are already placed where the work is, including the four backrooms ones (br/brPortal/brStream/brBuild).
