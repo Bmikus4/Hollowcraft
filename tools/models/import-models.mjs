@@ -11,6 +11,9 @@ const SRC = 'C:/Users/thera/Desktop/Hollowcraft Models + Instructions';
 // A second drop, given later: the six gun attachments. Same shape of asset, its own category because an
 // attachment is not a gun — it is a thing that mounts to one, and the attachment system reads this folder.
 const SRC_ATT = 'C:/Users/thera/Desktop/Attatchments';
+// Two models were dropped loose on the Desktop rather than into either folder, so they are named one by
+// one: scanning the Desktop would sweep up every unrelated GLB and trip the UNSORTED guard below.
+const SRC_LOOSE = ['C:/Users/thera/Desktop/Foregrip by Pichuliru - yGxkn9quFx.glb'];
 const DST = 'D:/Code/Minecraft/assets/models';
 const TMP = process.env.TEMP + '/hc-model-import';
 
@@ -42,6 +45,7 @@ const MAP = {
   'Flare Gun.glb':                    'guns/flare-gun',
   'Scope.glb':                        'guns/scope',
   'Bipod.glb':                        'guns/bipod',
+  'Foregrip by Pichuliru - yGxkn9quFx.glb': 'attachments/foregrip',
   'Tripod.glb':                       'guns/tripod',
   'Bayonet.glb':                      'guns/bayonet',
   // --- attachments (Ben's second drop) ---
@@ -53,6 +57,7 @@ const MAP = {
   'Suppressor by Pichuliru - VLiLj3j1tS.glb':           'attachments/suppressor',
   // --- tools: held, used, carried ---
   'Axe.glb':                          'tools/axe',
+  'Pickaxe by CreativeTrio - cJp88qPPLc.glb': 'tools/pickaxe',
   'Shovel.glb':                       'tools/shovel',
   'Knife.glb':                        'tools/knife',
   'Compass.glb':                      'tools/compass',
@@ -150,6 +155,7 @@ for (const f of fs.readdirSync(SRC).filter(f => f.toLowerCase().endsWith('.glb')
   fs.copyFileSync(path.join(SRC, f), path.join(TMP, f));
 if (fs.existsSync(SRC_ATT)) for (const f of fs.readdirSync(SRC_ATT).filter(f => f.toLowerCase().endsWith('.glb')))
   fs.copyFileSync(path.join(SRC_ATT, f), path.join(TMP, f));
+for (const f of SRC_LOOSE) if (fs.existsSync(f)) fs.copyFileSync(f, path.join(TMP, path.basename(f)));
 
 const pool = fs.readdirSync(TMP).filter(f => f.toLowerCase().endsWith('.glb'));
 const unmapped = pool.filter(f => !MAP[f]);
