@@ -71,9 +71,21 @@ function ok(label, cond, got){ checks++; if(!cond)fails++; console.log('  '+(con
     // there is no probe that takes an item back out of the bag.
     const cmpOff = await page.evaluate(() => window.__hc.hudCompass(0).why);
     ok('hidden while the player has none', cmpOff.opacity < 0.02 && cmpOff.carried === false, cmpOff);
-    const cmpOn = await page.evaluate(() => { const n = __hc.giveItem('compass_item', 1);
-      return { n, why: window.__hc.hudCompass(0).why }; });
-    ok('shown once one is carried', cmpOn.why.opacity > 0.5, cmpOn);
+    // IN THE SLOT, not in the bag: Ben 2026-08-12 "i want it to only work in the actual compass slot".
+    const cmpBag = await page.evaluate(() => { __hc.giveItem('compass_item', 1);
+      return window.__hc.hudCompass(0).why; });
+    ok('a compass in the BAG still shows nothing', cmpBag.opacity < 0.02 && cmpBag.carried === false, cmpBag);
+    const cmpOn = await page.evaluate(() => { __hc.eqPut(4, 'compass_item');
+      return { why: window.__hc.hudCompass(0).why, off: __hc.offhandUse() }; });
+    ok('shown once it is in the compass slot', cmpOn.why.opacity > 0.5, cmpOn.why);
+    // THE SLOT IS ALSO THE OFFHAND, and an instrument must not become a hand item: no left-hand model, no use mode,
+    // no F badge on the HUD cell. Ben: "the compass slot is still acting like an off hand item".
+    ok('it is not treated as a hand item', cmpOn.off.inHand === false && cmpOn.off.acting === false
+       && cmpOn.off.offViewId == null && cmpOn.off.hudCell === false, cmpOn.off);
+    const fPress = await page.evaluate(async () => { __hc.qSet('inv', __hc.st().selSlot || 0, null);
+      const before = __hc.offhandUse().offUse; __hc.key ? __hc.key('KeyF') : null;
+      return { before, after: __hc.offhandUse().offUse }; });
+    ok('F cannot switch it on', fPress.before === fPress.after, fPress);
 
     console.log('\n[the compass points where you look]');
     // yaw 0 faces north and yaw -90 faces east: the convention the minimap's own label placement used, kept so every
