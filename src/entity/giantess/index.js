@@ -52,7 +52,7 @@ async function imageTex(g, buf, bin, imgIdx){
 
 // Meshes whose only purpose is to be dropped. Ben: "no shoes" — the shoes are one node, so barefoot is
 // one omission rather than a texture edit. Named by node name because that is what the file carries.
-const DROP = new Set(['Low-heeled mules', 'Jean shorts', 'T-Shirt', 'Shoulder Bag']);
+const DROP = new Set(['Low-heeled mules']);
 
 export function giantessLoaded(){ return !!TPL; }
 
@@ -329,9 +329,15 @@ export function giantessStomp(rig, t, leg){
   // THE KNEE COMES UP PAST HER WAIST (Ben 08-11: "leg doesnt raise high enough"). 1.35 rad on the thigh put
   // the sole about a body's width off the ground on a 13.5-block frame, which at her scale is a step, not a
   // stomp. 2.15 folds the leg up in front of her; the shin follows it or the shin passes through her chest.
-  set(rig, 'thigh.' + L, FWD * (2.15 * lift + 0.5 * plant), 0, 0);          // knee to the chest, then the sole out and down
-  set(rig, 'shin.' + L, FWD * -2.0 * lift, 0, 0);                           // the shin folds the other way — that is a knee
-  set(rig, 'foot.' + L, FWD * (-0.7 * lift + 0.25 * plant), 0, 0);          // toes pulled up on the lift, so the sole faces the ground
+  const thighA = 2.15 * lift + 0.5 * plant, kneeA = 2.0 * lift;
+  set(rig, 'thigh.' + L, FWD * thighA, 0, 0);                               // knee to the chest, then the sole out and down
+  set(rig, 'shin.' + L, FWD * -kneeA, 0, 0);                                // the shin folds the other way — that is a knee
+  // THE ANKLE UNDOES THE LEG, exactly as it does in the walk (legIK). The stomp used to author the ankle as
+  // its own curve, and at the impact frame that left the thigh's 0.5 rad of forward drive still in the sole:
+  // she landed toes-up by about 43 degrees and hit the ground with her heel edge. Sole angle is not a free
+  // number on a chain — it is -(thigh - knee), plus whatever dorsiflexion is wanted on top, which is only
+  // the lift here so the sole faces the player on the way up.
+  set(rig, 'foot.' + L, FWD * (-(thighA - kneeA) - 0.35 * lift), 0, 0);
   set(rig, 'thigh.' + O, FWD * (-0.25 * lift - 0.1 * settle), 0, 0);        // the planted leg takes the whole weight and bends for it
   set(rig, 'shin.' + O, FWD * -0.35 * (lift + settle), 0, 0);
   rest(rig, 'foot.' + O);
@@ -346,23 +352,68 @@ export function giantessStomp(rig, t, leg){
 // body does not tip over like a statue, it loses the leg that was holding it and folds. The pitch itself is
 // index.html's, because it rotates her whole group about her feet (her origin IS her feet plane, so that
 // pivot is free); this is only what the limbs do on the way.
+// SHE GOES OVER BACKWARDS AND SPRAWLS (Ben 08-12). The first version folded her forward over her own knees,
+// which is how a body drops when the legs are shot out from under it — but she is being shot in the front,
+// and a 13-block frame taking that goes the other way. Backwards is also the harder one to get right, and
+// the two things that make it read are:
+//
+//   1. IT IS THREE EVENTS, NOT ONE ARC. The knees buckle first and she loses maybe a fifth of her height on
+//      the spot; only then does the topple take over and accelerate; then the body ARRIVES and stops dead
+//      while the limbs keep going for a beat. A single eased rotation reads as a falling statue.
+//   2. THE SPRAWL IS ASYMMETRIC. Two legs at the same angle and two arms at the same angle is a pose, not a
+//      body. Every pair below is deliberately unequal, and the difference is bigger than the tuning.
+//
+// The pitch and the lift are here rather than in the caller because they belong to the same curve as the
+// limbs — the body cannot arrive at a different time from the arms that arrive with it.
+// t runs 0→1 over the fall.
+export function giantessDeathFall(rig, t){
+  const e = Math.min(1, Math.max(0, t));
+  const buckle = Math.min(1, e / 0.22);                            // the legs go first, before anything rotates
+  const q = e < 0.14 ? 0 : Math.min(1, (e - 0.14) / 0.62);
+  const p = q * q * (1.06 - 0.06 * q);                             // gravity: slow off the top, fastest at the floor
+  // The impact, and then the body settling into the ground. Shoulders and hips are not a rigid bar, so she
+  // rocks once and stops — this is the beat that makes the ground feel solid.
+  const land = e > 0.76 ? Math.max(0, 1 - (e - 0.76) / 0.2) : 0;
+  const pitch = -(Math.PI * 0.5) * Math.min(1, p) - land * 0.05 * Math.sin((e - 0.76) / 0.2 * Math.PI * 2);
+  // WHY SHE DOES NOT SINK. The group's origin is her FEET PLANE, and everything rotates about it — so once
+  // she is flat, half of a body that is about 1.5 blocks thick is below the floor unless it is lifted by its
+  // own half-thickness. 0.075 of her height is that half-thickness, measured off the rig's bounds, and it is
+  // multiplied by how far over she is so it arrives exactly as her back does.
+  const lift = rig.height * 0.075 * Math.min(1, p) - rig.height * 0.055 * buckle * (1 - Math.min(1, p));
+  return { pitch, lift, land };
+}
 export function giantessDie(rig, t){
-  const s = Math.min(1, t / 0.5), e = s * s;                       // knees give way fast, then accelerate
+  const e = Math.min(1, Math.max(0, t));
+  const s = Math.min(1, e / 0.5);
+  const buckle = Math.min(1, e / 0.22), settle = Math.min(1, Math.max(0, (e - 0.62) / 0.38));
+  // The legs. They buckle under her, and then they are simply left where the floor found them: the near leg
+  // half-folded with the knee fallen outward, the far one thrown straighter. Feet drop toes-down and roll
+  // out, which is what an unloaded ankle does and what tells a viewer nothing is holding her up any more.
+  const knee = { L: 1.0, R: 0.45 }, splay = { L: 0.34, R: 0.16 };
   for (const L of ['L', 'R']){
-    set(rig, 'thigh.' + L, FWD * 1.15 * e, 0, 0);
-    set(rig, 'shin.' + L, FWD * -1.95 * e, 0, 0);
-    set(rig, 'foot.' + L, FWD * 0.55 * e, 0, 0);
+    set(rig, 'thigh.' + L, FWD * (0.85 * buckle - 0.55 * settle), 0, 0);
+    set(rig, 'shin.' + L, FWD * -(1.5 * buckle) * (0.45 + 0.55 * knee[L]), 0, 0);
+    set(rig, 'foot.' + L, FWD * (0.30 * buckle + 0.35 * settle), 0, 0);     // toes point: nothing is dorsiflexing now
     rest(rig, 'toe.' + L);
+    const b = rig.bone['thigh.' + L];
+    if (b){ rig._e.set(0, 0, (L === 'L' ? 1 : -1) * splay[L] * settle); b.quaternion.multiply(rig._q.setFromEuler(rig._e)); }
   }
-  set(rig, 'spine', 0, 0, 0);
-  set(rig, 'spine.001', 0, 0, 0);
-  set(rig, 'spine.003', FWD * 0.55 * s, 0, 0);                     // she folds forward over her own knees
-  set(rig, 'Neck', FWD * -0.45 * s, 0, 0);                         // …and her head goes back as she goes down
-  // The arms come up and forward — the one thing a falling body always does.
-  set(rig, 'upper_arm.L', FWD * 0.9 * s, 0, -ARM * (1 + 0.8 * s));
-  set(rig, 'upper_arm.R', FWD * 0.9 * s, 0, ARM * (1 + 0.8 * s));
-  set(rig, 'forearm.L', FWD * -1.2 * s, 0, 0);
-  set(rig, 'forearm.R', FWD * -1.2 * s, 0, 0);
+  rest(rig, 'spine');
+  // The trunk ARCHES as she goes over — the reflex of a body falling backwards — and then gives up and
+  // flattens once the ground has it. Both stages live on the lumbar/chest, never the pelvis.
+  const arch = Math.max(0, s - settle);
+  set(rig, 'spine.001', FWD * 0.20 * arch, 0.10 * settle, 0.12 * settle);
+  set(rig, 'spine.003', FWD * (0.34 * arch - 0.12 * settle), -0.14 * settle, 0);
+  // The head is last and it is the tell: it whips back with the fall, hits, and then lolls to one side.
+  set(rig, 'Neck', FWD * (-0.55 * arch + 0.18 * settle), 0.30 * settle, 0);
+  set(rig, 'Head', FWD * -0.15 * settle, 0.22 * settle, 0.10 * settle);
+  // The arms fly up as she loses her feet, then land wide and unequal — one flung out past her shoulder
+  // line, the other across her body. Forearms end supinated and open, which is the whole sprawl.
+  const fling = Math.max(0, Math.min(1, e / 0.34)) * (1 - settle);
+  set(rig, 'upper_arm.L', FWD * (-0.85 * fling + 0.25 * settle), -0.20 * settle, -ARM * (1 + 1.35 * fling + 1.1 * settle));
+  set(rig, 'upper_arm.R', FWD * (-0.85 * fling - 0.35 * settle), 0.28 * settle, ARM * (1 + 1.35 * fling + 0.55 * settle));
+  set(rig, 'forearm.L', FWD * -(0.9 * fling + 0.30 * settle), 0, 0);
+  set(rig, 'forearm.R', FWD * -(0.9 * fling + 0.85 * settle), 0, 0);
 }
 
 // A flinch, layered on whatever she is already doing: struck, the torso snaps away from the hit and the head
@@ -400,6 +451,55 @@ export function giantessIdle(rig, t){
   for (const n of LIMBS) rest(rig, n);
   set(rig, 'spine.003', b, 0, 0);
   set(rig, 'upper_arm.L', 0, 0, -ARM); set(rig, 'upper_arm.R', 0, 0, ARM);
+}
+
+// ---- the squat -------------------------------------------------------------------------------------
+// SHE SQUATS BY THE SAME SOLVE THE WALK USES, and that is the whole reason it looks like a body and not a
+// doll folding. A squat is not "bend the knees": it is the hips travelling DOWN AND BACK while the soles
+// stay where they are, and every other joint answering to that. So the depth is spent on the IK's hip
+// height and the hip's setback, and the knee angle is whatever the chain needs — never authored.
+//
+// Her hips do not move here either. The rig has both thighs under `spine` (see the walk), so the hips can
+// only descend the way they descend in the walk: the solve places the soles HIGHER in her own frame, and
+// giantessGroundY then drops the whole group until they are back on the ground. Head height falls by the
+// same amount, which is what a viewer reads as her going down.
+//
+// d is depth 0..1 (0 = standing, 1 = heels-down deep squat), t is seconds for the breathing.
+export function giantessSquat(rig, d, t){
+  const u = Math.max(0, Math.min(1, d));
+  const g = rig.leg;
+  // Breathing rides INSIDE the depth, not on top of the pose: a held squat is never perfectly still, and a
+  // 2 cm sway on a 13-block frame is a foot of movement at the head.
+  const br = Math.sin((t || 0) * 0.9) * 0.012 * u;
+  // 0.46 of hip height is a real deep squat — thigh below parallel, which is the pose that reads as
+  // crouching over something rather than perching on a chair. Past 0.5 the two-link solve clamps (the sole
+  // reaches the hip) and the legs stop folding, which is why the depth is spent here and capped.
+  const hipY = g.hipY * (1 - (0.46 + br) * u);
+  // The hips go BACK, so the sole ends up ahead of the hip — the counterweight that keeps her over her feet
+  // instead of falling on her face. Without it a deep squat topples backward and the model reads as sitting.
+  const footZ = g.len * 0.20 * u;
+  legIK(rig, 'L', footZ, rig.ankle, 0, hipY, 0);      // roll 0: heels DOWN, the sole flat on the ground
+  legIK(rig, 'R', footZ, rig.ankle, 0, hipY, 0);
+  rest(rig, 'toe.L'); rest(rig, 'toe.R');
+  // The knees splay out over the feet. Applied ON TOP of the solve rather than inside it, because the solve
+  // is a 2D chain in her sagittal plane and splay is the one thing that is not in that plane.
+  for (const L of ['L', 'R']){
+    const b = rig.bone['thigh.' + L]; if (!b) continue;
+    rig._e.set(0, 0, (L === 'L' ? 1 : -1) * 0.20 * u);
+    b.quaternion.multiply(rig._q.setFromEuler(rig._e));
+  }
+  rest(rig, 'spine');                                  // the pelvis, as everywhere else — see the walk
+  set(rig, 'spine.001', FWD * -0.22 * u, 0, 0);        // lumbar folds first
+  set(rig, 'spine.003', FWD * -0.30 * u + br * 3, 0, 0);   // then the chest, forward over the knees
+  set(rig, 'Neck', FWD * 0.34 * u, 0, 0);              // …and the head comes back UP: she is still looking at you
+  set(rig, 'Head', FWD * 0.10 * u, 0, 0);
+  // The arms come down and IN, forearms hanging between the knees. They are held out at ARM when she is
+  // standing (Ben), so the abduction has to be spent on the way down or she squats like a scarecrow.
+  const ab = ARM * (1 - 0.65 * u);
+  set(rig, 'upper_arm.L', FWD * 0.55 * u, 0, -ab);
+  set(rig, 'upper_arm.R', FWD * 0.55 * u, 0, ab);
+  set(rig, 'forearm.L', FWD * -0.85 * u, 0, 0);
+  set(rig, 'forearm.R', FWD * -0.85 * u, 0, 0);
 }
 
 // World position of a foot (or any bone), so the game can put the shockwave, the print and the kill

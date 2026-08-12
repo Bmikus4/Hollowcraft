@@ -145,14 +145,34 @@ try {
   console.log('  damage per shot: ' + JSON.stringify(shots));
   check('every part of her can be hit', Object.values(shots).every(v => v > 0), JSON.stringify(shots));
   check('a head shot is worth double a body shot', shots.Head === shots['spine.003'] * 2, shots.Head + ' vs ' + shots['spine.003']);
+  // ---- the squat -----------------------------------------------------------------------------------
+  // A squat is only a squat if she gets SHORTER. Her bounding box is measured off the posed meshes, so it is
+  // the one number that cannot be satisfied by bending a knee and leaving the body where it was.
+  const tall = (await page.evaluate(`__hc.girlState()`)).headY;
+  await page.evaluate(`__hc.girlIdle(30)`);
+  await sleep(2500);
+  const sq = await page.evaluate(`__hc.girlState()`);
+  console.log('  squat: head ' + tall + ' -> ' + sq.headY + ' blocks, depth ' + sq.sq);
+  check('idle is a squat, and it takes her down', sq.state === 'idle' && sq.sq > 0.95 && sq.headY < tall - 1.5,
+    'her head drops to ' + sq.headY + ' blocks from ' + tall);
+  // Heels DOWN: a squat on the toes is the failure mode of solving a two-link leg without holding the sole,
+  // and the tell is one foot ending up higher than the other or both leaving the floor.
+  check('her heels stay on the ground in the squat', Math.abs(sq.probe.footL[1] - sq.probe.footR[1]) < 0.2,
+    'feet at ' + sq.probe.footL[1] + ' / ' + sq.probe.footR[1]);
+
   const kill = await page.evaluate(`__hc.girlShoot('spine.003',60)`);
   check('enough rifle rounds kill her', kill.state === 'die', kill.hits + ' rounds landed of 60 fired (the rest hit a corpse), hp ' + kill.hp);
   const corpseShot = await page.evaluate(`__hc.girlShoot('spine.003',1)`);
   check('a corpse cannot be shot', corpseShot.hits === 0, JSON.stringify(corpseShot));
   let fell = null;
   for (let i = 0; i < 12; i++){ fell = await page.evaluate(`__hc.girlState()`); if (fell.state === 'dead') break; await sleep(350); }
-  check('she falls and lies there', fell.state === 'dead' && Math.abs(fell.pitch - Math.PI / 2) < 0.02 && fell.ttl > 60,
+  // BACKWARDS, hence the negative pitch: she is shot from the front and goes over the way she was hit.
+  check('she falls BACKWARDS and lies there', fell.state === 'dead' && Math.abs(fell.pitch + Math.PI / 2) < 0.02 && fell.ttl > 60,
     'pitch ' + fell.pitch + ' rad, lying for ' + fell.ttl + ' s');
+  // …and lies ON the floor. Everything rotates about her feet plane, so a body that is not lifted by its own
+  // half-thickness ends up with its back through the ground — invisible from most angles and obvious from one.
+  check('the corpse is on the floor, not inside it', fell.bodyY > 0.3 && fell.bodyY < 3,
+    'her chest sits ' + fell.bodyY + ' blocks above the ground');
 
   check('no page errors', errs.length === 0, errs.slice(0, 3).join(' | ') || 'clean');
 } catch (e){ console.log('  HARNESS ERROR: ' + (e && e.stack || e)); fails++; }
