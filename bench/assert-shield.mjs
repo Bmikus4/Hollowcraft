@@ -123,11 +123,13 @@ function check(name, got, want){
 
     await page.evaluate('__hc.shieldHold("none")');
     await settleFor(page, '__hc.shield().offhand', v => v == null);
-    await page.evaluate('__hc.shieldHold("off")');
-    await settleFor(page, '__hc.shield().offView', v => v === 'shield');
+    // NO OFFHAND CHECK ANY MORE. The offhand mechanic is gone (Ben 2026-08-12: "i want to remove the offhand
+    // completely"), so a board in the left hand is not a thing the game can produce. A shield is a MAIN-HAND item -- it
+    // still has its recipe, its board, its deflection and its third-person pose, all covered above -- and the one
+    // assertion that named the left hand went with the hand.
     const O = await page.evaluate('__hc.shield()');
-    console.log('  offhand:   offView.id='+JSON.stringify(O.offView)+' tris='+O.offTris+' isShieldBoard='+O.offIsShield);
-    check('offhand mesh is the shield board', O.offIsShield, true);
+    console.log('  offhand:   offView.id='+JSON.stringify(O.offView)+' (expected null: there is no left hand)');
+    check('nothing is built in a left hand', O.offView, null);
 
     check('no page errors across the whole run', pageErrors.length, 0);
     await browser.close();

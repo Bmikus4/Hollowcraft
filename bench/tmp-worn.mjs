@@ -18,6 +18,22 @@ await page.waitForTimeout(3000);
 await page.evaluate('__hc.eqUI("inv")'); await page.waitForTimeout(600);
 
 const shots = [];
+// The slung gun is not an armour slot: it is the primary you are NOT holding, so it is set up by putting a rifle in
+// primary 2 and selecting primary 1. Driven through the same probe so the shot and the numbers come from one place.
+const slungShots = [];
+for (const gun of ['ar15', 'hunting_rifle']) {
+  await page.evaluate(async g => { __hc.eqPut(5, null); __hc.eqPut(1, null);
+    __hc.qSet('inv', 1, g, 1); __hc.sel(0); await new Promise(r => setTimeout(r, 700)); }, gun);
+  for (const yaw of [Math.PI, Math.PI / 2]) {
+    await page.evaluate(y => __hc.pview(y, 620), yaw);
+    const box = await page.evaluate(() => { const r = document.getElementById('pview').getBoundingClientRect();
+      return { x: r.left, y: r.top, width: r.width, height: r.height }; });
+    const nm = 'worn-slung-' + gun + '-' + Math.round(yaw * 57) + '.png';
+    await page.screenshot({ path: path.join(OUT, nm), clip: box }); slungShots.push(nm);
+  }
+  console.log(('slung ' + gun).padEnd(19) + JSON.stringify(await page.evaluate(() => { const p = __hc.pview(Math.PI, 620); return { slung: p.slung || null }; })));
+}
+await page.evaluate(() => { __hc.qSet('inv', 1, null); });
 for (const [slot, id] of [[5, 'backpack'], [5, 'field_pack'], [5, 'alice_pack'], [1, 'leather_chestplate'], [1, 'iron_chestplate']]) {
   const st = await page.evaluate(async ([slot, id]) => {
     __hc.eqPut(5, null); __hc.eqPut(1, null);
@@ -36,5 +52,5 @@ for (const [slot, id] of [[5, 'backpack'], [5, 'field_pack'], [5, 'alice_pack'],
   }
 }
 console.log('torso ' + JSON.stringify(await page.evaluate(() => __hc.pview(0, 620).torso)));
-console.log(shots.join(' '));
+console.log(slungShots.concat(shots).join(' '));
 await b.close(); server.kill();
