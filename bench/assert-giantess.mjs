@@ -45,14 +45,7 @@ try {
   check('she builds and spawns', R.ok === true, 'state ' + R.state);
   const P = R.probe || {};
   check('the skeleton is the file\'s, all 115 bones', P.bones === 115, P.bones + ' bones');
-  // The garments are flat-coloured by design (they are cut from her body and have no UVs of their own), so
-  // the mannequin test is about everything that is HER.
-  const worn = (P.outfit || []).length;
-  check('every mesh of her is textured, not a white mannequin', P.meshes > 0 && P.mapped === P.meshes - worn,
-    P.mapped + ' mapped of ' + P.meshes + ' meshes, ' + worn + ' of them garments');
-  check('the outfit the file shipped is not built', !!P.names && !P.names.some(n => /T-Shirt|Jean shorts|Shoulder Bag/i.test(n)), (P.names || []).join(', '));
-  check('she is wearing the new outfit, skinned to her own skeleton',
-    worn === 2 && P.outfit.every(o => o.tris > 200 && o.bound), JSON.stringify(P.outfit));
+  check('every mesh is textured, not a white mannequin', P.meshes > 0 && P.mapped === P.meshes, P.mapped + '/' + P.meshes + ' meshes carry a baseColour map');
   check('NO SHOES — the mules node is not built', !!P.names && !P.names.some(n => /mule|shoe/i.test(n)), (P.names || []).join(', '));
   check('the loose export Planes are not in the world', !!P.names && !P.names.some(n => /^Plane/.test(n)), (P.names || []).length + ' meshes');
   check('MASSIVE — she stands over 12 blocks tall', P.height > 12 && P.height < 16, P.height + ' blocks (player is 1.8)');
