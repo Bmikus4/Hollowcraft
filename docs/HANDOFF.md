@@ -90,6 +90,7 @@ inconsistency task 4 exists to remove.
 | 10 | Forest perf | 12.4 ms of the forest's 13.9 is scene draw, 1019k triangles vs the shore's 266k. **Gates the planar-reflection decision in the water rebuild.** Ben says the FPS pass is later — this is the exception, because task 3 depends on it. |
 | 11 | Ben has never judged | the sun arc, the skylight flood, and now per-corner sky. |
 | 12 | Desktop executable | asked about 08-12. Answer given: no help for lighting/texture/water/load, real wins for vsync uncapping, build ambiguity, tab throttling and Steam. Do it before the FPS pass, not now. |
+| 14 | SMAA, AFTER the FPS pass | Ben 08-12, queued not started. Subpixel Morphological Anti-Aliasing: a post pass in the same family as FXAA but far less destructive to detail and sharpness — FXAA smears texture and edges this game's whole look depends on. three ships `SMAAPass` in `examples/jsm/postprocessing/`, so it vendors like the other passes already in `vendor/jsm/postprocessing/`. It goes in the composer chain and costs frame time, which is why it waits for the FPS pass rather than being added on top of a budget that is already short. |
 | 13 | `_chunksReadyAround(r)` ignores its argument | it hardcodes a 3x3. `LOAD_READY_R = 4` is a dead constant and tuning it does nothing. |
 
 ---
