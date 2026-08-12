@@ -73,6 +73,23 @@ try {
   const footSpread = Math.max(...track.map(t => Math.abs(t.footL[2] - t.footR[2]) + Math.abs(t.footL[0] - t.footR[0])));
   check('the feet separate as she strides (the pose is bone-driven)', footSpread > 1.5, 'feet up to ' + footSpread.toFixed(2) + ' blocks apart');
 
+  // ---- 4b. a canopy she is INSIDE is not a wall ----------------------------------------------------
+  // The rule that keeps her out of the woods is the rule that traps her in them: leaves count as walls, and a
+  // wall test only ever asks about the spot ahead. Build a canopy around her where she stands and she must
+  // still be able to leave — this is the check that says the door out exists.
+  await page.evaluate(`__hc.girlOff(); __hc.cmdRun('/heal 20'); __hc.girl(26);`);
+  await sleep(600);
+  const caged = await page.evaluate(`(()=>{ const s=__hc.girlState(); const x=Math.round(s.pos[0]), z=Math.round(s.pos[2]), y=Math.round(s.pos[1]);
+      for(let dx=-3;dx<=3;dx++) for(let dz=-3;dz<=3;dz++) for(let dy=2;dy<=10;dy++) __hc.cmdRun('/setblock '+(x+dx)+' '+(y+dy)+' '+(z+dz)+' leaves');
+      return { x, z, y }; })()`);
+  await sleep(400);
+  const inTree = await page.evaluate(`__hc.girlState()`);
+  check('she knows when she is inside a tree', inTree.inTree === true, 'inTree ' + inTree.inTree + ' at ' + JSON.stringify(inTree.pos));
+  let out = 0;
+  for (let i = 0; i < 14; i++){ const s = await page.evaluate(`__hc.girlState()`);
+    out = Math.max(out, Math.hypot(s.pos[0] - caged.x, s.pos[2] - caged.z)); if (out > 5) break; await sleep(500); }
+  check('and she walks out of it instead of standing in it', out > 5, 'she got ' + out.toFixed(1) + ' blocks from where the canopy was built');
+
   // ---- 5. she stomps, and standing on you kills ---------------------------------------------------
   const stomped = track.some(t => t.state === 'stomp');
   check('within reach she raises a foot', stomped, 'states seen: ' + [...new Set(track.map(t => t.state))].join('/'));
@@ -177,6 +194,10 @@ try {
   // pose the first attempt produced, and it is not what spread legs look like.
   const wStand = Math.abs(stand['foot.L'].side-stand['foot.R'].side), wSq = Math.abs(sqB['foot.L'].side-sqB['foot.R'].side);
   const kStand = Math.abs(stand['shin.L'].side-stand['shin.R'].side), kSq = Math.abs(sqB['shin.L'].side-sqB['shin.R'].side);
+  // NOT KNOCK-KNEED. Spreading the soles without turning the hips out leaves the knees pinched inside the
+  // feet, which is both the wrong shape and the way a knee gives way.
+  check('her knees track outside her feet, not inside them', Math.abs(sqB['shin.L'].side)>=Math.abs(sqB['foot.L'].side)-0.15 && Math.sign(sqB['shin.L'].side)===Math.sign(sqB['foot.L'].side),
+    'knee at ' + sqB['shin.L'].side + ' against a sole at ' + sqB['foot.L'].side);
   check('her legs are spread — feet apart, not just knees out', wSq > wStand*1.6 && kSq > kStand*1.15,
     'feet ' + wStand.toFixed(2) + ' -> ' + wSq.toFixed(2) + ' blocks apart, knees ' + kStand.toFixed(2) + ' -> ' + kSq.toFixed(2));
   check('her heels stay on the ground in the squat', Math.abs(sq.probe.footL[1] - sq.probe.footR[1]) < 0.2,

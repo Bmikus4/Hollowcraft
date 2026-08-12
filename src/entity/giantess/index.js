@@ -245,7 +245,7 @@ const STANCE = 0.60;
 
 // A two-link solve for one leg. Every angle is a DELTA from the rest pose, which is standing, so 0 is a
 // straight leg. Forward-positive throughout; FWD carries the file's actual bone direction.
-function legIK(rig, L, footZ, footY, hipZ, hipY, roll, splay){
+function legIK(rig, L, footZ, footY, hipZ, hipY, roll, splay, twist){
   const g = rig.leg, dz = footZ - hipZ, dy = footY - hipY;
   const reach = Math.min(g.L1 + g.L2 - 0.02, Math.max(Math.abs(g.L1 - g.L2) + 0.02, Math.hypot(dz, dy)));
   const th = Math.atan2(dz, -dy);                                        // hip-to-ankle line, 0 = straight down
@@ -261,7 +261,7 @@ function legIK(rig, L, footZ, footY, hipZ, hipY, roll, splay){
   // her (0.86 blocks of knee travel for 0.06 of foot). ZYX is R = Rz·Ry·Rx, which is that order.
   // The axis itself is measured, not assumed: __hc.girlPoke('thigh.L','z',0.5,'foot.L') carries the sole 2.8
   // blocks sideways, so Z is abduction on this rig and X is the swing.
-  set(rig, 'thigh.' + L, FWD * thigh, 0, splay || 0, splay ? 'ZYX' : 'XYZ');
+  set(rig, 'thigh.' + L, FWD * thigh, twist || 0, splay || 0, (splay || twist) ? 'ZYX' : 'XYZ');
   set(rig, 'shin.' + L, FWD * -knee, 0, 0);
   // The sole stays parallel to the ground unless it is rolling over the heel or the toes: the ankle undoes
   // whatever the shin is doing in world terms. Without this the foot points wherever the shin left it,
@@ -669,8 +669,18 @@ function squatPose(rig, d, t, c){
   const inPlane = Math.hypot(drop, S);
   // NEGATIVE ON HER LEFT, and the sign is measured rather than reasoned about: girlPoke('thigh.L','z',0.5,'foot.L')
   // carries the left sole 2.8 blocks toward her RIGHT, so out is the other way.
-  legIK(rig, 'L', footZ, hipY - inPlane, 0, hipY, 0, -tilt);      // roll 0: heels DOWN, the sole flat on the ground
-  legIK(rig, 'R', footZ, hipY - inPlane, 0, hipY, 0, tilt);
+  // …AND THE KNEES ARE TURNED OUT OVER THE FEET. The tilt alone spreads the SOLES and leaves the knees half as
+  // far out (1.7 blocks of foot, 0.84 of knee), because a knee bent forward sits almost on the hip's own axis
+  // and tilting that axis barely moves it. That is knock-kneed, which is the one thing a squat must not be —
+  // it is also the shape a knee gives way in. The fix is the hip's external rotation: a twist about the
+  // femur's own long axis, which swings the bent knee outward and turns the toes out with it, and moves the
+  // sole hardly at all. Between the splay and the flex in the ZYX order, because that is what a hip does.
+  // NEGATIVE ON HER LEFT, measured like every other sign here: +Y on thigh.L turned the knee INWARD to -0.67
+  // (knock-kneed, the exact fault this exists to remove); the other way puts it at +2.43 with the sole at
+  // +2.25, so the knee tracks just outside the foot, which is where a knee belongs in a squat.
+  const twist = 0.62 * u;
+  legIK(rig, 'L', footZ, hipY - inPlane, 0, hipY, 0, -tilt, -twist);   // roll 0: heels DOWN, the sole flat on the ground
+  legIK(rig, 'R', footZ, hipY - inPlane, 0, hipY, 0, tilt, twist);
   rest(rig, 'toe.L'); rest(rig, 'toe.R');
 
   rest(rig, 'spine');                                  // the pelvis, as everywhere else — see the walk
