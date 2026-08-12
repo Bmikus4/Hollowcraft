@@ -46,14 +46,28 @@ function ok(l,c,g){ checks++; if(!c)fails++; console.log('  '+(c?'ok  ':'FAIL')+
     const shape=await page.evaluate(()=>window.__hc.gridState());
     ok('hotbar is five slots',   shape.hotN===5, shape.hotN);
     ok('grid is 8 wide',         shape.w===8, shape.w);
-    ok('and four rows unpacked', shape.h===4, shape.h);
+    ok('six pockets to start',   shape.cap===6, {cap:shape.cap, rows:shape.h});
     ok('sizes come off the table', JSON.stringify(shape.sizes)===JSON.stringify({ar15:[2,4],stim_syringe:[1,2],rifle_ammo:[1,1],cobble:[1,1]}), shape.sizes);
     // ...and the items being sized are REAL. itemSize answers [1,1] for an id nobody defined, so without this the
     // check above passes for a typo and the grid quietly fills with magenta error cubes.
     ok('and the probe items exist', Object.values(shape.real).every(Boolean), shape.real);
 
+    console.log('\n[capacity is a sum of what you are wearing]');
+    // Six pockets, four a garment, a pack on top. The numbers are Ben's; what is worth checking is that they ADD
+    // rather than replace, that the ceiling holds, and that a pack nobody has listed yet still gets a size — the third
+    // tier is not in the game, and the fallback is what stops it landing as a zero.
+    const cap=await page.evaluate(()=>window.__hc.gridCap());
+    ok('bare is six',            cap.bare===6, cap);
+    ok('a chestplate adds four', cap.chest===10, cap);
+    ok('leggings add four',      cap.legs===10, cap);
+    ok('the first pack adds 16', cap.pack1===22, cap);
+    ok('a full kit is 128',      cap.full===128, cap);
+    ok('and never more',         cap.pack3<=128 && cap.full<=128, cap);
+    ok('an unlisted pack still sizes', cap.unknownPack>6, cap.unknownPack);
+
     console.log('\n[nothing overlaps and nothing falls out]');
-    const fill=await page.evaluate(()=>window.__hc.gridFill(['ar15','stim_syringe','rifle_ammo','cobble','revolver','wooden_spear']));
+    // With a pack on: six pockets do not hold a rifle, which is the point of the pockets being six.
+    const fill=await page.evaluate(()=>window.__hc.gridFillPacked(['ar15','stim_syringe','rifle_ammo','cobble','revolver','wooden_spear']));
     ok('everything placed',      fill.left===0, fill);
     // A 2x5 hunting rifle does not stand up in a four-row bag, so it LIES DOWN; with a pack on there is headroom and
     // it stands. Nothing about either reading alone shows the fallback working.
@@ -72,7 +86,7 @@ function ok(l,c,g){ checks++; if(!c)fails++; console.log('  '+(c?'ok  ':'FAIL')+
 
     console.log('\n[a pack deepens the bag and taking it off does not eat it]');
     const pack=await page.evaluate(()=>window.__hc.gridPack('alice_pack'));
-    ok('ALICE gives sixteen rows', pack.hWith===16, pack);
+    ok('ALICE gives 120 cells',    pack.hWith===120, pack);
     ok('and the grid is deeper',   pack.hWith>pack.hWithout, pack);
     ok('nothing lost taking it off', pack.countAfter===pack.countBefore, pack);
     ok('and nothing left outside',  pack.outsideAfter===0, pack);
@@ -82,8 +96,10 @@ function ok(l,c,g){ checks++; if(!c)fails++; console.log('  '+(c?'ok  ':'FAIL')+
     ok('same stacks come back',  rt.same===true, rt);
 
     console.log('\n[it is drawn from the pack]');
+    // Packed, so there is a rifle in the block to look at: six pockets cannot hold one.
+    await page.evaluate(()=>window.__hc.gridFillPacked(['ar15','stim_syringe','rifle_ammo','cobble']));
     await page.evaluate(()=>window.__hc.openInv());
-    await sleep(700);
+    await sleep(900);
     const live=await page.evaluate(()=>window.__hc.gridAudit());
     const dom=await page.evaluate(()=>{
       const tiles=[...document.querySelectorAll('#griditems .gitem')];
@@ -93,7 +109,9 @@ function ok(l,c,g){ checks++; if(!c)fails++; console.log('  '+(c?'ok  ':'FAIL')+
                frame:cs?cs.borderImageSource:'', cellFrame:cell?getComputedStyle(cell).borderImageSource:'',
                tall:tiles.map(t=>[parseFloat(t.style.width),parseFloat(t.style.height)]) }; });
     ok('a tile per stack',      dom.tiles===live.stacks, {tiles:dom.tiles, stacks:live.stacks});
-    ok('a cell per grid cell',  dom.cells===8*4, dom.cells);
+    // EXACTLY capacity cells, not a padded rectangle: the block ends mid-row and the cells that are not there must
+    // not be drawn, or they read as placeable.
+    ok('a cell per capacity cell', dom.cells===live.cap, {cells:dom.cells, cap:live.cap});
     ok('tiles wear the pack',   /assets\/ui\//.test(dom.frame), dom.frame.slice(-28));
     ok('cells wear the pack',   /assets\/ui\/hcell/.test(dom.cellFrame), dom.cellFrame.slice(-28));
     // A 2x4 rifle must be 2 cells wide and 4 tall ON SCREEN: the sizes above are a table, this is the geometry.
