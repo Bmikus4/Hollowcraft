@@ -13,15 +13,16 @@ const base = 'http://127.0.0.1:' + port; await waitHttp(base + '/index.html');
 const b = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: true, args: ['--enable-gpu','--use-angle=d3d11','--mute-audio'] });
 const page = await b.newPage({ viewport: { width: 1280, height: 720 } });
 page.on('pageerror', e => console.log('[pageerror]', e.message.slice(0, 300)));
-page.on('console', m => { if (m.type() === 'error') console.log('[error]', m.text().slice(0, 200)); });
+page.on('console', m => { if (m.type() === 'error' || m.type() === 'warning') console.log('[error]', m.text().slice(0, 200)); });
 await page.goto(base + '/index.html?debug=1', { waitUntil: 'load' });
 await page.waitForFunction("(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()", null, { timeout: 300000 });
-await page.waitForTimeout(2500);
+await page.waitForTimeout(9000);
 const IDS = (process.env.IDS || 'avocado,pizza,radio,hunting_knife,bayonet,frying_pan,tent,wooden_torch,dock_long,water_bottle,apple,ar15').split(',');
 console.log(JSON.stringify(await page.evaluate(ids => {
   const out = {};
   for (const id of ids){ try { out[id] = { give: __hc.giveItem(id,1), box: __hc.heldBox(id) }; } catch (e){ out[id] = 'THREW ' + String(e.message).slice(0,60); } }
-  out._inv = __hc.invList();
+  out._dock = __hc.dockInfo();
+  const mp=__hc.modelPack(); out._missing = (mp.missing||[]).length + ": " + (mp.missing||[]).slice(0,6).join(",");
   return out;
 }, IDS), null, 1));
 

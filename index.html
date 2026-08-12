@@ -14575,7 +14575,10 @@ function loop(){ try{
   // world has to be drawing again before that fade is visible - gating on anything later fades into a blank canvas.
   // Both exits reach it: the gate calls _circleHide() directly and the watchdog calls _loadDone(), which is
   // _circleHide() plus initialReady. There is no path to a live game with _circleDone false.
-  const _drawWorld = (started && _circleDone) || CINE;
+  // ?drawload=1 restores the old behaviour (draw the world behind the plate) so the two can be INTERLEAVED in one
+  // A/B. They have to be: this box's cooling fan is failing, and run-to-run drift on blocked runs is larger than the
+  // effect - the identical build measured 8.9 s and 13.4 s twenty minutes apart. A flag is the only way to alternate.
+  const _drawWorld = (started && (_circleDone || _DRAWLOAD)) || CINE;
   if(_drawWorld){
   if(_rtPath){ if(PERF.on) PERF.gpu.mark(2); renderer.setRenderTarget(_sceneRT); renderer.render(scene, camera); renderer.setRenderTarget(null); }   // scene → our depth-carrying target (feeds motionPass); classic path renders inside composer
   if(PERF.on) PERF.gpu.mark(3);
@@ -14599,14 +14602,14 @@ function loop(){ try{
   // now-openAt against an openAt set once at boot, so `gate` reads as the whole session and every frame's cpuMs
   // reads as tens of seconds. That is what a lost begin looks like in this profiler, not a slow loading screen.
   T.begin(TID.gate);
-  // ICONS WAIT FOR THE CHUNKS THE CIRCLE IS WAITING ON, not just for the one under the player's feet. Baking an icon
-  // is a synchronous GPU readback and the slice is 30 ms - more than twice the 14 ms the mesher gets - so starting it
-  // as soon as the CENTRE chunk meshed put the two biggest jobs in the boot in competition, and the one the player is
-  // blocked on is the smaller of the two. Measured at 6x CPU throttle: the ninth chunk of the gate's 3x3 sat unmeshed
-  // for nine seconds and came good three seconds AFTER the watchdog fired, i.e. only once icon baking had stopped.
-  // _chunksReadyAround is the circle's own condition, so this cannot delay the release it is now sequenced behind.
-  if(!initialReady){
-    if(_chunksReadyAround(LOAD_READY_R)){
+  // SEQUENCING THE ICON BAKE BEHIND THE GATE'S FULL 3x3 WAS TRIED AND REVERTED. The reasoning was that a 30 ms icon
+  // slice out-competes the mesher's 14 ms for the chunks the circle is actually waiting on, so icons should not start
+  // until _chunksReadyAround is true. It measured worse: the bake then runs after the release instead of behind the
+  // plate, and the plate's fade waits on the same busy main thread, so unthrottled every entry point lost ~2.5 s.
+  // The 6x-throttle case that motivated it turned out to be the mesher simply being slow - worldMeshed tracks the
+  // 3x3 exactly, so nothing else was competing for those frames. Do not re-derive this.
+  if(!initialReady){ const c=getChunk(Math.floor(player.pos.x)>>4,Math.floor(player.pos.z)>>4);
+    if(c&&c.meshed){
       if(!_preIcons){ try{ _preIcons=Object.keys(ITEMS); }catch(e){ _preIcons=[]; } _preI=0; }
       const t0p=performance.now();
       // A SMALLER SLICE AFTER THE PLATE GOES IS A TRAP, MEASURED AND REJECTED. Cutting this to 6 ms once _circleDone
@@ -30063,16 +30066,55 @@ function buildLighthouse(){ if(_lighthouseDone)return; const lx=spawnX+150, lz=s
 
 // FISHING PIER — finds the nearest shore, then runs a plank pier on log posts out over the water, lamp at the end
 let _dockDone=false;
-function buildDock(){ if(_dockDone)return; const bx=spawnX+120, bz=spawnZ-120;
-  if(!_sReady(bx,bz,16))return;
-  let sx=null; for(let d=0;d<40;d++){ if(surfaceH(bx+d,bz)<=CFG.SEA){ sx=bx+d; break; } }
-  if(sx===null){ _dockDone=true; return; }
-  const shore=sx-1, y=CFG.SEA;
-  for(let d=0;d<10;d++){ const px=shore+d;
-    for(let oz=-1;oz<=1;oz++) setBlockWorld(px,y+1,bz+oz,BID.planks,true);
-    if(d%3===0){ for(let yy=y; yy>y-3; yy--){ setBlockWorld(px,yy,bz-1,BID.log,true); setBlockWorld(px,yy,bz+1,BID.log,true); } } }
-  setBlockWorld(shore+9,y+2,bz,BID.lantern,true);
-  lootChest(shore+1,y+2,bz,[['string',4],['cooked_meat',1],['coal',2]]);
+// THE DOCK IS THE PACK'S MODEL, AND IT IS BY SPAWN (Ben 08-11: "the dock long item should be scaled properly and
+// placed in the water by spawn"). It used to be nine plank blocks and two log pilings a hundred and twenty blocks
+// out on the diagonal — a dock nobody walked past, built out of the same planks as everything else.
+//
+// TWO THINGS ARE PLACED, and that is deliberate. The MODEL is what you see. A thin plank deck of real blocks goes
+// under it at the same height, because a GLB in the scene graph has no collision and a dock you fall through is
+// worse than no dock. The model's deck rides 0.06 above the block deck so the two cannot z-fight.
+//
+// THE ONE NUMBER READ OFF A PICTURE, not off the geometry: DECK_Y, how far up the model its walking surface sits.
+// The planks are rotated node instances, so their accessor bounds are not axis-aligned in the model's frame and the
+// deck plane cannot be recovered by reading vertices — it was measured from bench/results/idx-dock-side.png, where
+// the deck crossbar sits 59% of the way up the model's own 7.80 of height. If it looks wrong in the water, this is
+// the number to move.
+const DOCK_LEN=14;                                   // blocks, along the model's long axis (its own z, 21.69 units)
+const DOCK_DECK_Y=-0.21+0.59*7.80;                   // model units: bbox min y plus the measured deck fraction
+let _dockMesh=null;
+function buildDock(){ if(_dockDone)return;
+  if(!_sReady(spawnX,spawnZ,16))return;
+  // WHICHEVER WAY THE WATER IS. Searching one direction is how the first attempt placed nothing: due east of spawn
+  // there is no sea inside 48 blocks, the scan fell through, and _dockDone was set with no dock built and nothing
+  // logged. All four cardinals are walked and the NEAREST shore wins, which also keeps the dock axis-aligned so the
+  // plank deck under it is a straight run of blocks rather than a diagonal staircase.
+  const DIRS=[[1,0],[-1,0],[0,1],[0,-1]];
+  let best=null;
+  for(const [dx,dz] of DIRS){
+    for(let d=6;d<96;d++){
+      const x=spawnX+dx*d, z=spawnZ+dz*d;
+      if(surfaceH(x,z)<=CFG.SEA){ if(!best||d<best.d) best={d,dx,dz,x,z}; break; }
+    }
+  }
+  if(!best){ _dockDone=true; return; }
+  // Step back one column to stand on land, then run out over the water.
+  const y=CFG.SEA, s=DOCK_LEN/21.69;
+  const sx=best.x-best.dx, sz=best.z-best.dz;                    // the last land column: the dock's root
+  const px=(i)=>sx+best.dx*i, pz=(i)=>sz+best.dz*i;              // i blocks out along the run
+  const ox=best.dz, oz=best.dx;                                  // one step ACROSS the run, for the deck's width
+  for(let i=0;i<DOCK_LEN;i++) for(let w=-1;w<=1;w++) setBlockWorld(px(i)+ox*w, y+1, pz(i)+oz*w, BID.planks, true);
+  setBlockWorld(px(DOCK_LEN-1),y+2,pz(DOCK_LEN-1),BID.lantern,true);
+  lootChest(px(1),y+2,pz(1),[['string',4],['cooked_meat',1],['coal',2]]);
+  // The model runs along its own z, so its yaw is whatever turns z onto the run. The deck rides 0.06 above the
+  // plank blocks: near enough to read as one surface, far enough that the two cannot z-fight.
+  try{
+    const m=glbBuild('misc/dock-long',{style:(nm,mat)=>({color:_glbLift(mat.color,1.15),map:GUN_TEX.wood||woodTex(4),repeat:3,shininess:6,specular:0x12100a})});
+    if(m){ m.scale.setScalar(s); m.rotation.y=Math.atan2(best.dx,best.dz);
+      m.position.set(sx+best.dx*(DOCK_LEN/2-0.5), y+1.06-DOCK_DECK_Y*s, sz+best.dz*(DOCK_LEN/2-0.5));
+      m.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
+      scene.add(m); _dockMesh=m; }
+    else console.warn('[dock] misc/dock-long did not build');
+  }catch(e){ console.warn('[dock] model: '+e.message); }
   _dockDone=true; }
 
 // ---- WEATHER — rain streaks + overcast dimming + lightning flash & delayed thunder ----
@@ -31635,6 +31677,14 @@ window.__hc={
   // footprint is 7x7 (dx,dz within +-3) with walls to gy+3 and a gabled roof to gy+6.
   cabinInfo(){ try{ const cx=spawnX+22, cz=spawnZ-14;
       return { cx, cz, gy:Math.floor(surfaceH(cx,cz)), built:!!_cabinDone, half:3, roofTop:6 }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // QA: the DOCK is two objects that must agree — a model you see and a plank deck you stand on. "It did not throw"
+  // is not the same as "it is there", and the failure that matters is the two of them at different heights.
+  dockInfo(){ try{ if(!_dockDone) return { built:false };
+      const b=_dockMesh?new THREE.Box3().setFromObject(_dockMesh):null;
+      return { built:true, model:!!_dockMesh, sea:CFG.SEA,
+        box:b?{min:b.min.toArray().map(v=>+v.toFixed(2)),max:b.max.toArray().map(v=>+v.toFixed(2))}:null,
+        deckBlockY:CFG.SEA+1, modelDeckY:_dockMesh?+(_dockMesh.position.y+DOCK_DECK_Y*(DOCK_LEN/21.69)).toFixed(2):null }; }
     catch(e){ return {err:String(e.message||e)}; } },
   setBlockAt(x,y,z,id){ try{ setBlockWorld(x,y,z,typeof id==='string'?BID[id]:id,true); return getBlock(x,y,z); }catch(e){ return e.message; } },
   giveItem(id,n){ try{ invAdd(id,n||1); refreshHotbar(); return invCount(id); }catch(e){ return e.message; } },
