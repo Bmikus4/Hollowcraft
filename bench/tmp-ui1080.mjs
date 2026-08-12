@@ -17,6 +17,7 @@ try {
   page.on('response', r => { if (r.url().includes('/assets/ui/') && r.status() >= 400) missing.push(r.url().split('/').pop() + ' ' + r.status()); });
   await page.goto(base + '/index.html', { waitUntil: 'load' }); await sleep(3500);
 
+  await page.screenshot({ path: path.join(OUT, 'ui1080-menu.png'), clip: { x: 560, y: 180, width: 800, height: 620 } });
   const btn = await page.$('#mb-solo');
   const shoot = async (name) => { await sleep(400); await btn.screenshot({ path: path.join(OUT, name) }); };
   await shoot('ui1080-btn-4x.png');

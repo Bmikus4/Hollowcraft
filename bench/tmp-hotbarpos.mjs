@@ -39,7 +39,11 @@ const atSize = async (w, h) => {
     const q = s => document.querySelector(s);
     __hc.openInv(); await new Promise(r => setTimeout(r, 600));
     const cell = q('#hotbar > .slot');
+    // The CELLS, not the box: a six-pocket bag is one row of six, and the bug was a box eight columns wide around it.
+    const cells = [...document.querySelectorAll('#gridbed .gcell')].map(R);
+    const cellsBox = { x: Math.min(...cells.map(c => c.x)), r: Math.max(...cells.map(c => c.r)) };
     const out = { uiz: getComputedStyle(document.documentElement).getPropertyValue('--uiz').trim(),
+      nCells: cells.length, cellsBox, cellW: cells[0].w,
       bar: R(q('#hotbar')), cell: R(cell), rule: R(q('#invrule')), grid: R(q('#gridinv')),
       barDisplay: getComputedStyle(q('#hotbar')).display, pe: getComputedStyle(q('#hotbar')).pointerEvents,
       copies: document.querySelectorAll('#ihot').length };
@@ -143,8 +147,15 @@ for (const [label, m] of [['720p', at720], ['1080p (uiz ' + at1080.uiz + ')', at
     'bar mid=' + (m.bar.x + m.bar.w / 2).toFixed(1) + ' grid mid=' + (m.grid.x + m.grid.w / 2).toFixed(1));
   t(label + ': the grid hangs off the bar, not through it', m.rule.y >= m.bar.b - 0.5 && m.grid.y >= m.rule.b - 0.5,
     'bar.b=' + m.bar.b.toFixed(0) + ' rule=' + m.rule.y.toFixed(0) + '-' + m.rule.b.toFixed(0) + ' grid.y=' + m.grid.y.toFixed(0));
-  t(label + ': one scale for both — cell and grid cell agree', near(m.cell.w, 50, 0.5) && near(m.grid.w / 8, 44, 0.5),
-    'bar cell=' + m.cell.w.toFixed(1) + ' grid cell=' + (m.grid.w / 8).toFixed(1));
+  t(label + ': one scale for both — cell and grid cell agree', near(m.cell.w, 50, 0.5) && near(m.cellW, 44, 0.5),
+    'bar cell=' + m.cell.w.toFixed(1) + ' grid cell=' + m.cellW.toFixed(1));
+  // The real complaint: the CELLS have to be centred, not the box they sit in.
+  t(label + ': the cells themselves are centred on the bar',
+    Math.abs((m.bar.x + m.bar.w / 2) - (m.cellsBox.x + m.cellsBox.r) / 2) <= 0.5,
+    m.nCells + ' cells ' + m.cellsBox.x.toFixed(0) + '-' + m.cellsBox.r.toFixed(0) +
+    ' mid=' + ((m.cellsBox.x + m.cellsBox.r) / 2).toFixed(1) + ' bar mid=' + (m.bar.x + m.bar.w / 2).toFixed(1));
+  t(label + ': the gold line is as wide as the block', near(m.rule.w, m.cellsBox.r - m.cellsBox.x, 1),
+    'rule=' + m.rule.w.toFixed(0) + ' block=' + (m.cellsBox.r - m.cellsBox.x).toFixed(0));
 }
 // --- the gold line and the grid below it
 t('the line sits between the bar and the grid', open.rule.y >= open.ihot.b - 1 && open.rule.b <= open.grid.y + 1,
