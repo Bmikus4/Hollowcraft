@@ -47,12 +47,46 @@ function accessor(g, buf, bin, i){
 function parse(buf){
   const { json: g, bin } = readChunks(buf);
   if (!g || !bin) throw new Error('glb missing a chunk');
+  // THE MODEL'S OWN TEXTURE, WHICH THIS READER USED TO THROW AWAY. The header above said every file in the pack is
+  // untextured vertex-colour geometry, and for the guns it is — but Ben's survival bags ship an atlas that carries
+  // all their detail (bag.glb arrived as 11.34 MB of PNG for 1298 triangles). Keeping only baseColorFactor drew
+  // them as one flat colour each, which is Ben 08-12: "field pack and normal backpack have no textures". The UVs
+  // were already being read on line 71; only the image was missing.
+  //
+  // flipY IS FALSE AND MUST BE. glTF's UV origin is the top-left and three's TextureLoader flips for its own
+  // convention; leaving the flip on turns every atlas upside down, which on a bag means the base panel's pixels
+  // land on the lid and it reads as a differently-wrong texture rather than an obviously-wrong one.
+  const texCache = new Map();
+  const mkTex = ti => {
+    if (ti == null) return null;
+    if (texCache.has(ti)) return texCache.get(ti);
+    let tex = null;
+    try {
+      const t = (g.textures || [])[ti];
+      const img = t && t.source != null ? (g.images || [])[t.source] : null;
+      let url = null;
+      if (img && img.bufferView != null){
+        const v = g.bufferViews[img.bufferView];
+        url = URL.createObjectURL(new Blob([new Uint8Array(buf, bin.off + (v.byteOffset || 0), v.byteLength)],
+                                          { type: img.mimeType || 'image/png' }));
+      } else if (img && img.uri) url = img.uri;
+      if (url){
+        tex = new THREE.TextureLoader().load(url);
+        tex.colorSpace = THREE.SRGBColorSpace; tex.flipY = false;
+        const smp = (g.samplers || [])[t.sampler] || {};
+        tex.wrapS = smp.wrapS === 33071 ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
+        tex.wrapT = smp.wrapT === 33071 ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
+      }
+    } catch (e){ tex = null; }
+    texCache.set(ti, tex); return tex;
+  };
   const mats = (g.materials || []).map(m => {
     const p = m.pbrMetallicRoughness || {};
     const f = p.baseColorFactor || [1, 1, 1, 1];
     const c = new THREE.Color().setRGB(f[0], f[1], f[2], THREE.LinearSRGBColorSpace);
     return { name: m.name || 'mat', color: c, metallic: p.metallicFactor != null ? p.metallicFactor : 1,
-             rough: p.roughnessFactor != null ? p.roughnessFactor : 1 };
+             rough: p.roughnessFactor != null ? p.roughnessFactor : 1,
+             map: mkTex(p.baseColorTexture ? p.baseColorTexture.index : null) };
   });
   const parts = [], box = new THREE.Box3();
   const walk = (idx, parent) => {
@@ -188,9 +222,14 @@ function mkMesh(geo, s, part){
   // s.uv asks for planar UVs WITHOUT a map, which a caller-supplied shader may need: the scope lens samples its
   // render target through vUv over 0..1, and geometry from this pack has no UVs at all — so it read texel (0,0),
   // where the reticle shader's own rim term makes a black disc. That is the whole of "the scope is black".
+  // THE MODEL'S OWN MAP IS THE FALLBACK, NEVER THE OVERRIDE. A caller that names a map means it: the guns wear
+  // Ben's gunmetal and walnut scans over PLANAR UVs precisely because that geometry has no UVs of its own. So the
+  // atlas is used only when no style map was asked for and the geometry really does carry the UVs to read it with
+  // — planarUV would otherwise overwrite the very coordinates the atlas is indexed by.
+  const ownMap = (!s.map && !s.uv && part.mat.map && geo.attributes.uv) ? part.mat.map : null;
   if (s.map || s.uv) planarUV(geo, s.map ? (s.repeat || 3) : (s.uv === true ? 1 : s.uv));
   const md = { color: s.color != null ? new THREE.Color(s.color) : part.mat.color.clone() };
-  if (s.map) md.map = s.map;
+  if (s.map) md.map = s.map; else if (ownMap) md.map = ownMap;
   // A normal map needs the same planar UVs the albedo just got, so it only rides along with a map — never alone.
   if (s.map && s.normalMap) md.normalMap = s.normalMap;
   if (s.transparent){ md.transparent = true; md.opacity = s.opacity != null ? s.opacity : 0.5; }
