@@ -6259,7 +6259,11 @@ const waterMat = new THREE.ShaderMaterial({
     uLampC:{value:[new THREE.Color(0,0,0),new THREE.Color(0,0,0),new THREE.Color(0,0,0),new THREE.Color(0,0,0)]},
     // THE CURRENT, AS SOMETHING YOU CAN SEE (Ben 08-06: "lines in the water that flow with the current"). Gain on the
     // streak field; 0 is the A/B off and restores the pre-streak surface exactly.
-    uStreak:{value:1},
+    // BOTH OFF (Ben 08-11: "water textures look garbage, remove them entirely" / "showing weird lines in the water").
+    // uStreak = the anisotropic flow filaments; uFine = the near-range capillary octaves. Each is a whole shipped item
+    // and each is kept behind its dial rather than deleted, so the next attempt at "textured up close" can see what was
+    // rejected: __hc.waterRefl({streak:1, fine:1}). The coarse ripple is not on a dial — it is the wave normal.
+    uStreak:{value:0}, uFine:{value:0},
     uMeshR:{value:96}, uBody:_uWaterBody, uFogDensity:{value:scene.fog.density}, uDeep:_uWaterDeep, uRing:_uWater, uRingFade:{value:2400},   // the far-sea annulus's outer radius, set per frame in updateHorizon
     // THE CURVE LIVES AT THE FAR END NOW (Ben 08-04: "i just want the ocean to look like its going on forever, and to have an
     // ever so slight world curve out at its end"). It used to be the opposite shape: R=20, k=0.0022 spends the whole fall by
@@ -6365,7 +6369,7 @@ const waterMat = new THREE.ShaderMaterial({
     uniform vec3 uSunDir,uMoonDir,uCamPos; uniform float uDay,uTime; uniform vec3 uFogColor; uniform vec3 uBody; uniform float uFogDensity, uDeep, uWx; uniform vec3 uRing; uniform float uRingFade; uniform vec3 uSeaNight;
     uniform float uGladeAfter, uGladeAmt, uFresCap, uFoam;
     uniform vec4 uScotG, uScotH;   // the scotopic vectors, shared by reference with the land — see the night wash at the end of main()
-    uniform vec3 uHorizonC, uZenithC, uSunColU; uniform float uReflAmt, uReflSharp, uStreak;
+    uniform vec3 uHorizonC, uZenithC, uSunColU; uniform float uReflAmt, uReflSharp, uStreak, uFine;
     uniform vec4 uLampP[4]; uniform vec3 uLampC[4];
     float h2(vec2 p){ return fract(sin(dot(p,vec2(12.9,78.2)))*43758.5); }
     float vn2(vec2 x){ vec2 i=floor(x),f=fract(x); f=f*f*(3.0-2.0*f); return mix(mix(h2(i),h2(i+vec2(1,0)),f.x),mix(h2(i+vec2(0,1)),h2(i+vec2(1,1)),f.x),f.y); }
@@ -6407,7 +6411,15 @@ const waterMat = new THREE.ShaderMaterial({
       vec2 uv=vW.xz - vFlow*uTime;
       float n1=vn2(uv*0.6+uTime*vec2(0.05,0.04)), n2=vn2(uv*1.7-uTime*vec2(0.07,0.03)), n3=vn2(uv*4.0+uTime*vec2(0.02,-0.09));
       vec3 rip=normalize(vec3((n1-0.5)*1.2+(n2-0.5)*0.8+(n3-0.5)*0.5, 1.0, (n2-0.5)+(n3-0.5)*0.6));
-      vec3 N=normalize(vN*0.55+rip*0.6);
+      // ---- AND THE BARS DOWN THE SIDE OF A WATER COLUMN ARE GONE TOO (Ben 08-11: "showing weird lines in the water") ----
+      // NO BACKTICKS IN HERE — see the warning in the streak block below; this comment cost one boot to relearn.
+      // "uv" is vW.xz, so every octave above is CONSTANT down a vertical face: the ripple that reads as waves on the
+      // surface reads as vertical stripes on the wall of a water column, at every shoreline and every river bank. Both
+      // finer items were gated on vTop for exactly this reason and each left a note saying the coarse ripple "already
+      // lives with that at its own scale" — it does not have to. A vertical water face has no wave normal worth
+      // computing: the geometric normal IS the answer there, and blending toward it by vTop removes the stripes without
+      // touching a single pixel of the surface (vTop is 1 on top faces, so the sea is bit-identical).
+      vec3 N=normalize(mix(vN, normalize(vN*0.55+rip*0.6), vTop));
       // NEAR WATER HAS A SURFACE (Ben 08-04: "water should be more beautifully textured/styled when closer to it"). The three
       // noise octaves above are tuned for the SEA — 0.6 to 4.0 world units, which is the scale that reads from a boat and from
       // a cliff. Stand at the edge of it and there is nothing between your eye and a 25 cm feature, so the water goes smooth
@@ -6423,11 +6435,17 @@ const waterMat = new THREE.ShaderMaterial({
       // it. Those constants describe where the world curve applies, not where the water is. The rule lives on the CPU instead,
       // beside farSea's transform in updateHorizon, which is the only place the camera's own column is known.
       float _dEye = length(uCamPos - vW);
-      // TOP FACES ONLY. uv is vW.xz, which is CONSTANT down a vertical face, so any noise sampled from it streaks into
-      // vertical bars on the side of a water column — visible at every shoreline and worse the finer the octave. The coarse
-      // ripple already lives with that at its own scale; adding capillary detail to it would turn every shore edge into a
-      // comb. vTop is 1 on the surface and 0 on the sides, which is exactly the face this is for.
-      float _near = (1.0 - smoothstep(3.0, 22.0, _dEye)) * vTop;
+      // ---- THE CAPILLARY "SURFACE TEXTURE" IS GONE (Ben 08-11: "water textures look garbage, remove them entirely") ----
+      // It was three octaves an order of magnitude finer than the sea ripple (7/13/29 world units), faded in over the last
+      // twenty blocks, added because standing at the water's edge left nothing between the eye and a 25 cm feature
+      // (Ben 08-04, "water should be more beautifully textured/styled when closer to it"). Judged on the water it made:
+      // at close range those octaves are finer than the reflection they perturb, so the surface reads as a bumpy MATERIAL
+      // — sandpaper catching the sky — rather than as water. That is the "garbage texture".
+      // The coarse ripple below (0.6/1.7/4.0) is NOT this and stays: it is the wave normal itself, and it is what the
+      // Fresnel, the glade and the reflections are all shaped by. Removing it would leave a mirror.
+      // Kept behind a dial rather than deleted, because "more texture up close" is a real want that this was a wrong
+      // answer to, and the next attempt should be able to see what this looked like: __hc.water({fine:1}) restores it.
+      float _near = (1.0 - smoothstep(3.0, 22.0, _dEye)) * vTop * uFine;
       if(_near > 0.01){
         float f1=vn2(uv*7.0 + uTime*vec2(0.11,-0.08)), f2=vn2(uv*13.0 - uTime*vec2(0.06,0.14)), f3=vn2(uv*29.0 + uTime*vec2(0.19,0.09));
         vec3 fine=normalize(vec3((f1-0.5)*1.15+(f2-0.5)*0.8+(f3-0.5)*0.5, 1.0, (f2-0.5)*1.0+(f3-0.5)*0.65));
@@ -6452,6 +6470,12 @@ const waterMat = new THREE.ShaderMaterial({
       // It perturbs the NORMAL rather than the colour, so it is lit and reflected like the rest of the surface instead
       // of being a decal painted over it — the streaks catch the sky, the sun track and the lamps, which is the whole
       // reason to do it here and not in the albedo.
+      // ---- OFF BY DEFAULT AS OF 08-11 (Ben: "the other water texture is showing weird lines in the water") ----
+      // This item's own name is "lines in the water", so this is it. It was built to Ben 08-06 and it is the second
+      // thing he now calls a bad texture: anisotropic filaments stretched 5.4 along the flow and squashed 0.16 across it
+      // read as printed streaks on a surface rather than as water travelling, precisely because they are STATIC IN SHAPE
+      // and only advected — a real current's filaments are born and die. uStreak 0 leaves the coarse ripple, which is
+      // the part he has approved. __hc.water({streak:1}) puts it back for the next attempt.
       if(uStreak > 0.001){
         vec2 fdir = (length(vFlow) > 0.02) ? normalize(vFlow) : normalize(vec2(1.0,0.3));
         vec2 perp = vec2(-fdir.y, fdir.x);
@@ -34226,7 +34250,8 @@ window.__hc={
       if(o&&o.amt!=null) U.uReflAmt.value=+o.amt;
       if(o&&o.sharp!=null) U.uReflSharp.value=+o.sharp;
       if(o&&o.streak!=null) U.uStreak.value=+o.streak;
-      return { amt:U.uReflAmt.value, sharp:U.uReflSharp.value, streak:U.uStreak.value, fresCap:U.uFresCap.value,
+      if(o&&o.fine!=null) U.uFine.value=+o.fine;
+      return { amt:U.uReflAmt.value, sharp:U.uReflSharp.value, streak:U.uStreak.value, fine:U.uFine.value, fresCap:U.uFresCap.value,
                lamps:U.uLampP.value.map((p,i)=>({ p:[+p.x.toFixed(1),+p.y.toFixed(1),+p.z.toFixed(1)], r:+p.w.toFixed(1),
                  c:U.uLampC.value[i].getHexString() })).filter(l=>l.r>0) }; }catch(e){ return {err:String(e.message||e)}; } },
   // QA: the flashlight, without a hand or an inventory. `on` flips the switch; the readout is what the shader is
