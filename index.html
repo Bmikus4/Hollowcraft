@@ -12939,9 +12939,10 @@ document.addEventListener('pointerlockchange',()=>{ locked=document.pointerLockE
   else if(MON.on){ MON.look=false; monSync(); }
   else if(started && !player.dead && !openUI && !player.grabbed && performance.now()>=_noPauseUntil){ buildPauseSettings(); pauseFace(false); pause.style.display='flex'; for(const k in keys)delete keys[k]; lmbHeld=false; rmbHeld=false; } });   // no pause overlay mid-capture either — the jumpscare/haul owns the screen; settings rebuild so the achievements ledger stays current
 let _lookDX=0,_lookDY=0;   // raw mouse deltas accumulate here; applyLook() eases them out over a few frames → SMOOTHED looking
+let _lookFresh=false;      // did the mouse actually move since the last frame? (see the coast-stop in applyLook)
 document.addEventListener('mousemove',e=>{ if(!locked)return;
   if(MON.on && MON.look){ monMouse(e.movementX, e.movementY); return; }   // the pointer is captured for the CAMERA, not the player
-  _lookDX+=e.movementX; _lookDY+=e.movementY; });   // FROZEN-MOUSE FIX (Ben 07-27): the pointer-lock look handler was dropped in the camera refactor (732174e) → mouse never fed _lookDX; restored
+  _lookDX+=e.movementX; _lookDY+=e.movementY; _lookFresh=true; });   // FROZEN-MOUSE FIX (Ben 07-27): the pointer-lock look handler was dropped in the camera refactor (732174e) → mouse never fed _lookDX; restored
 let _cine=null;            // CERAPHIM arrival state (declared early — built by bossCutscene far below). It NO LONGER owns the camera.
 // ONE-SHOT LOOK NUDGE (Ben 07-27): the replacement for the old possessed-camera cutscene. It eases your head toward
 // something ONCE — you keep full control the whole time, and the very first mouse twitch cancels it outright.
@@ -13002,6 +13003,13 @@ function applyLook(dt){
   player.yaw+=stepY; player.pitch+=stepP;
   if(sens>1e-9){ _lookDX+=stepY/sens; _lookDY+=stepP/sens; }                     // consume exactly what was applied
   else { _lookDX=0; _lookDY=0; }
+  // THE CAMERA STOPS WHEN THE MOUSE STOPS (Ben 08-12: "when that resistance is active, i dont want it to keep
+  // spinning"). Carrying the unspent delta is what makes a capped flick arrive as a sweep instead of a jump, but the
+  // moment the hand is still that same buffer is the camera turning on its own — the resistance turns into drift, and
+  // a view that keeps moving after the input has ended cannot be aimed. So the remainder is kept only while the mouse
+  // is STILL MOVING; the frame after it stops, whatever the cap has not spent is dropped.
+  if(!_lookFresh && Math.abs(rawY)>capYaw+1e-9){ _lookDX=0; _lookDY=0; }
+  _lookFresh=false;
   // …and the shoulders come round afterwards, which is what gives the neck back. Faster than the body's own turn cap on
   // purpose: catching up is not resisted, only leading is.
   { let d=player.yaw-_bodyYaw; d=Math.atan2(Math.sin(d),Math.cos(d));
@@ -21904,7 +21912,7 @@ buildShotgun  =(sup)    =>buildGlbGun('shotgun',false,sup)|| _procGun.shotgun(su
 // tiers apart (GLB_TIER_MIX; iron is 0.15, i.e. very nearly the model as exported), and the haft takes the
 // tier's handle colour under the same wood grain the procedural tools use.
 // There is no pickaxe and no sword in the pack, so those two keep their procedural models.
-const GLB_TOOLS={ axe:{id:'tools/axe',len:1.07}, shovel:{id:'tools/shovel',len:1.10} };
+const GLB_TOOLS={ axe:{id:'tools/axe',len:1.07}, shovel:{id:'tools/shovel',len:1.10}, pickaxe:{id:'tools/pickaxe',len:1.12} };
 function buildGlbTool(kind,tool){
   const spec=GLB_TOOLS[kind], P=spec&&GLB_PLACE[spec.id];
   if(!spec||!P||!glbHas(spec.id)) return null;
@@ -21914,22 +21922,43 @@ function buildGlbTool(kind,tool){
   const m=glbBuild(spec.id,{style:(nm,mat)=>{
     if(/wood/i.test(nm)) return {color:handle,map:woodTex(6),repeat:6,shininess:8,specular:0x14100a};
     if(tier==='wood')    return {color:handle,map:woodTex(3),repeat:4,shininess:10,specular:0x241811};   // a wooden tier is wood all through, head included, exactly as headMat() has it
-    return {color:_glbLift(mat.color,1.7).lerp(metal,mix),map:metalTex(),repeat:3,shininess:TIER_SHINE[tier]||120,specular:TIER_SPEC[tier]||0xbfc4cc};
+    // A MODEL WITH NO AUTHORED COLOUR IS ALREADY AT THE TOP. The lift exists to bring a dark pack material up to a
+    // tool's metal; applied to the pickaxe, whose single material is plain white, it lifts white and the whole tool
+    // renders as a blown-out bar. Near-white takes the tier's metal straight.
+    const lit=(mat.color.r+mat.color.g+mat.color.b)/3>0.92 ? metal.clone() : _glbLift(mat.color,1.7).lerp(metal,mix);
+    return {color:lit,map:metalTex(),repeat:3,shininess:TIER_SHINE[tier]||120,specular:TIER_SPEC[tier]||0xbfc4cc};
   }});
   if(!m) return null;
   // The procedural tools are built along +Y with the HAND at the origin (see buildAxe's grip), and TOOL_POSE
   // was authored against that. So the model is scaled to the same length and slid until its measured grip
   // point is the origin; nothing in the pose table has to change.
-  const s=spec.len/(P.bbox.size[1]||1);
+  const LI={x:0,y:1,z:2}[(P.axis&&P.axis.long)||'y'];
+  const s=spec.len/(P.bbox.size[LI]||1);
   const g=new THREE.Group(); g.add(m); m.scale.setScalar(s);
-  m.position.set(-s*P.gripPoint.position[0],-s*P.gripPoint.position[1],-s*P.gripPoint.position[2]);
-  if(P.axis&&P.axis.headAtMax===false) m.rotation.z=Math.PI;   // head at the -Y end: turn it over so the tool is head-up like every pose expects
+  if(LI===1){
+    m.position.set(-s*P.gripPoint.position[0],-s*P.gripPoint.position[1],-s*P.gripPoint.position[2]);
+    if(P.axis&&P.axis.headAtMax===false) m.rotation.z=Math.PI;   // head at the -Y end: turn it over so the tool is head-up like every pose expects
+  } else {
+    // A MODEL THAT DOES NOT RUN ALONG +Y. The pack's pickaxe lies along Z with its head at the far end, and the
+    // path above assumes Y both when it scales (bbox.size[1] is the pickaxe's 0.21-thick edge, so it came out
+    // five times too big) and when it flips. The long axis is turned to +Y first, and the grip offset is taken
+    // AFTER that turn — the offset is a vector in the model's own space and rotating the model rotates it too.
+    const f=new THREE.Group(); g.remove(m); f.add(m); g.add(f);
+    if(LI===2) f.rotation.x=-Math.PI/2;                          // +Z runs up
+    else       f.rotation.z=Math.PI/2;                           // +X runs up
+    if(P.axis&&P.axis.headAtMax===false) f.rotateZ(Math.PI);     // head was at the min end: turn it over, head up
+    f.updateMatrix();
+    const gp=new THREE.Vector3(P.gripPoint.position[0],P.gripPoint.position[1],P.gripPoint.position[2])
+      .multiplyScalar(s).applyQuaternion(f.quaternion);
+    f.position.copy(gp.negate());
+  }
   g.traverse(o=>{ if(o.isMesh){o.castShadow=true;o.receiveShadow=true;} });
   return g;
 }
-{ const _procTool={axe:TOOL_BUILDERS.axe,shovel:TOOL_BUILDERS.shovel};
-  TOOL_BUILDERS.axe   =tool=>buildGlbTool('axe',tool)   || _procTool.axe(tool);
-  TOOL_BUILDERS.shovel=tool=>buildGlbTool('shovel',tool)|| _procTool.shovel(tool); }
+{ const _procTool={axe:TOOL_BUILDERS.axe,shovel:TOOL_BUILDERS.shovel,pickaxe:TOOL_BUILDERS.pickaxe};
+  TOOL_BUILDERS.axe    =tool=>buildGlbTool('axe',tool)    || _procTool.axe(tool);
+  TOOL_BUILDERS.shovel =tool=>buildGlbTool('shovel',tool) || _procTool.shovel(tool);
+  TOOL_BUILDERS.pickaxe=tool=>buildGlbTool('pickaxe',tool)|| _procTool.pickaxe(tool); }   // Ben's pack model; the drawn one is the fallback
 // ITEMS THE PACK HAS A REAL OBJECT FOR, which were flat extruded hotbar sprites in the hand and on the ground.
 //   fit    the longest side in game units. A drop is drawn at half this and the icon bake fits its own frame,
 //          so this is the size the thing is in your hand.
@@ -29918,6 +29947,7 @@ function bloodImpact(x,y,z,dir,host,size,surf){
   let _ms=null;                     // the surface meshes, kept so the drip can be fitted against them further down
   let _skinBone=null;               // ...and the bone the struck triangle actually follows (see the pick below)
   let _bind=null;                   // ...or, better, the struck TRIANGLE itself (see _bloodSkinPose)
+  let _tried=false, _found=false;   // did a surface cast run, and did it land? (see the refusal below)
   // SNAP TO THE SKIN. The point handed in is wherever a hit test said the round arrived, and those tests are VOLUMES,
   // not surfaces: giantessHit is eleven spheres centred on bones, and the animal test is a vertical capsule. So the
   // point can sit well inside the body or well outside it, and a normal taken from the body's centre is a sphere's
@@ -29949,6 +29979,7 @@ function bloodImpact(x,y,z,dir,host,size,surf){
           for(const o of ms) if(o.material&&!Array.isArray(o.material)) o.material.side=THREE.DoubleSide;
           const hit=new THREE.Raycaster(from,dv,0.01,back+(size||1.8)*2+8).intersectObjects(ms,false)[0];
           for(let i2=0;i2<ms.length;i2++) if(ms[i2].material && _side[i2]!==undefined) ms[i2].material.side=_side[i2];
+          _tried=true; _found=!!hit;
           _bloodFX.lastSnap={hit:!!hit, meshes:ms.length, skinned:!!(hit&&hit.object.isSkinnedMesh), normal:null,
                              moved:hit?+new THREE.Vector3(x,y,z).distanceTo(hit.point).toFixed(3):null};
           if(hit){ x=hit.point.x; y=hit.point.y; z=hit.point.z;
@@ -30011,6 +30042,12 @@ function bloodImpact(x,y,z,dir,host,size,surf){
     }
   }catch(e){}
   try{
+    // NO SURFACE, NO WOUND (Ben 08-12: "shotguns allow bullet impacts to land off of the body and put holes off of
+    // the body"). A shell is nine pellets and each one is resolved against the same coarse volume the single bullet
+    // is - a sphere round a bone, a capsule round an animal - so the ones that clip the volume's edge arrive at a
+    // point that is beside the creature, not on it. Those are exactly the casts that find no triangle. A hole in
+    // mid-air is worse than no hole, and the spatter below still lands, so the blast is not silent.
+    if(host && _tried && !_found) host=null;
     if(host && !_bind && _skinBone) host=_skinBone;    // no triangle to nail it to: ride the skin's dominant bone
     if(host){
       // A WOUND GROWS WITH THE BODY, BUT NOWHERE NEAR AS FAST AS IT. Linear scaling is what keeps being wrong: 4.5%
@@ -30019,7 +30056,10 @@ function bloodImpact(x,y,z,dir,host,size,surf){
       // problem grows, because a bigger creature is fought from further away. Square-root scaling is exactly that:
       // 10 cm on a man, 27 cm on the giantess (an eighth of her two-block thigh, so it cannot hang off a limb), and
       // hard-capped at 30 so nothing larger than her can ever go past it.
-      const H=Math.max(0.2,size||1.8), mw=Math.min(0.30,Math.max(0.09,0.10*Math.sqrt(H/1.8)));
+      // ...and 2.5x all of it (Ben 08-12: "blood video is wayy too small, it should be 2.5x the size"). The shape of
+      // the curve is his too - it survived the "wayy too big" rejection - so the multiplier goes on the whole thing
+      // rather than being absorbed into the exponent or the cap.
+      const H=Math.max(0.2,size||1.8), mw=Math.min(0.75,Math.max(0.225,0.25*Math.sqrt(H/1.8)));
       // PROUD OF THE SKIN IN PROPORTION TO ITSELF. A fixed 2 cm was enough for an 11 cm mark and nothing like enough
       // for a 60 cm one on a curved limb, where the quad's corners sink into the body and the decal reads as a hole
       // punched through her rather than a mark on her.
@@ -38870,6 +38910,12 @@ window.__hc={
     return { day:+globalU.uDay.value.toFixed(3), termOn:on, mix:+m.toFixed(3),
              fogLum:+L(scene.fog.color).toFixed(5), pineLum:+L(_uPineFog).toFixed(5), folEffLum:+L(eff).toFixed(5),
              ratio:+(L(eff)/Math.max(L(_uPineFog),1e-6)).toFixed(3) }; }catch(e){ return {err:e.message}; } },
+  // QA/bench: what the renderer is holding. Ben 08-12 guessed the random whiteout was "tied to resource management",
+  // and this is the number that answers it — a program count that climbs, or a texture count that drops, at the tick
+  // the frame goes wrong is a different fault from one where both are flat.
+  gpuInfo(){ try{ const I=renderer.info; const h=(performance.memory)?+(performance.memory.usedJSHeapSize/1048576).toFixed(1):null;
+    return { calls:I.render.calls, tris:I.render.triangles, geo:I.memory.geometries, tex:I.memory.textures,
+             prog:(I.programs||[]).length, heapMB:h }; }catch(e){ return { err:String(e.message||e) }; } },
   fogInfo(){ const d=scene.fog.density, c=scene.fog.color;
     return { density:d, coef:d*(CFG.RENDER_DIST*CK)/Math.max(1e-6,CFG.fogMul), reach: d>0? 2.146/d : Infinity,
              day:+globalU.uDay.value.toFixed(3), fogMul:CFG.fogMul,

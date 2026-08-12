@@ -26,12 +26,12 @@ const T=(process.argv[2]||'0');
     await page.goto(base+'/index.html?debug=1&t='+T,{waitUntil:'load',timeout:90000});
     await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:90000});
     await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:240000});
-    await page.waitForFunction(`(()=>{try{return __hc.girlState().loaded===true;}catch(e){return false;}})()`,null,{timeout:120000});
-    await page.evaluate(`__hc.cmdRun('/gamemode creative'); __hc.girl(16)`);
+    
+    
     await sleep(1500);
-    await page.evaluate(`__hc.girlIdle&&__hc.girlIdle(60)`);
+    
     await sleep(800);
-    const info=await page.evaluate(`__hc.girlMats()`);
+    const info=await page.evaluate(`__hc.iconBox(['iron_pickaxe','iron_axe'])`);
     console.log(JSON.stringify(info).slice(0,2200));
     await page.evaluate(`__hc.cam&&__hc.cam({yaw:0,pitch:-0.1})`);
     await sleep(600);
