@@ -412,6 +412,23 @@ export function giantessDeadY(rig, groundY){
   rig.group.updateMatrixWorld(true);
   const p = rig._deadV || (rig._deadV = new THREE.Vector3());
   let min = Infinity;
+  // THE SKIN, WHEN THERE IS SKIN TO ASK. A bone is the centre line of the flesh around it, so resting the lowest
+  // bone on the floor needs a radius for the flesh — and a radius is a guess that is wrong by however much the
+  // limb it guessed for is not that thick. Ben 08-12: she still floats. The skinning shader will say exactly
+  // where her surface is: applyBoneTransform is the same posed-vertex read the wounds use. Every 31st vertex is
+  // enough to find a minimum on a body of this size (~600 samples), and it runs only while she is falling.
+  const S = 31;
+  for (const m of (rig.meshes || [])){
+    if (!m.isSkinnedMesh || !m.visible || !m.geometry || !m.geometry.attributes.position) continue;
+    const pos = m.geometry.attributes.position;
+    for (let i = 0; i < pos.count; i += S){
+      m.applyBoneTransform(i, p.fromBufferAttribute(pos, i));
+      m.localToWorld(p);
+      if (p.y < min) min = p.y;
+    }
+  }
+  if (isFinite(min)) return groundY + (groundY - min);        // the lowest skin IS the contact: no radius to guess
+  min = Infinity;
   // The BODY's bones, not all 115. The fingers are the trap: a fingertip is routinely the lowest bone in a
   // sprawl, and hanging her whole mass off it would lift the body a hand's width clear of the ground — the
   // exact float this function exists to remove. A hand resting on the floor is the hand bone's job.
