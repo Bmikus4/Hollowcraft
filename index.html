@@ -10359,6 +10359,9 @@ function drainUnloads(){ let n=0;
 //  PLAYER + PHYSICS
 // =====================================================================
 const HW=0.3, PH=1.8, EYE=1.62, STEP=0.6;
+// PRONE EYE HEIGHT. 0.32 is a head lying on its side on the ground: low enough that grass is at eye level and a doorway
+// gap you can see under is a real one, high enough that the near plane does not sit inside the block below you.
+const PRONE_EYE=0.32;
 const player={ pos:new THREE.Vector3(), vel:new THREE.Vector3(), yaw:0, pitch:0,
   onGround:false, fly:false, sneak:false, sprint:false, inWater:false,
   health:20, hunger:20, water:20, sat:5, creative:false, bob:0, fov:74, dead:false,
@@ -10496,8 +10499,12 @@ function physics(dt){
   // quarter of the bar is back, or holding shift at empty would stutter between walk and run every frame.
   p.sprint = (K.ShiftLeft||K.ShiftRight) && !p.fly && fwd>0 && !p._stamOut && p.stam>0.5;
   p.sneak = (K.ControlLeft||K.ControlRight||K.KeyX) && !p.fly;   // X crouches too (Ben 07-27) — Ctrl is awkward to hold while running
+  // PRONE IS A LATCH, NOT A HOLD. Z toggles it (see the keydown handler); it cannot survive flight or swimming, and
+  // standing up is what jumping does — which is also the answer to "how do I get up in a hurry".
+  if(p.prone && (p.fly||p.inWater)) p.prone=false;
   const _spdBuf = (!p.fly && (p.speedT||0)>0) ? (p.speedMul||1.4) : 1;   // stim/adrenaline SPEED buff (Ben 07-21): quickens walk+sprint on foot while the window holds
-  const base = (p.fly?(cineMode?cineSpeed:18) : (p.sprint?7.2:(p.sneak?1.9:4.6)) * (p.inWater?(p.sprint?0.26:0.18):(p.wading?0.55:1))) * _spdBuf;   // water DRASTICALLY slows you (Ben 07-20): swim crawls at 0.18× (0.26× sprint), even wading halves you — the sea is not a shortcut; cinematic flight uses the scroll-set speed
+  if(p.prone) p.sprint=false;                                    // nobody sprints on their belly
+  const base = (p.fly?(cineMode?cineSpeed:18) : (p.prone?1.15:p.sprint?7.2:(p.sneak?1.9:4.6)) * (p.inWater?(p.sprint?0.26:0.18):(p.wading?0.55:1))) * _spdBuf;   // water DRASTICALLY slows you (Ben 07-20): swim crawls at 0.18× (0.26× sprint), even wading halves you — the sea is not a shortcut; cinematic flight uses the scroll-set speed
   let mvx=0,mvz=0;
   if(mag>0){ const nx=fwd/mag, ns=str/mag; mvx=(-sy*nx + cy*ns); mvz=(-cy*nx - sy*ns); }
   if(p.fly && cineMode){ const k=Math.min(1,dt*2.4);   // CINEMATIC FLIGHT — inertial easing on all three axes → glassy, floaty camera glide; look pitch drives forward too (fly where you look)
@@ -12981,6 +12988,13 @@ addEventListener('keydown',e=>{ if(e.code==='Space')e.preventDefault();
   // travelled with it. All of that was the mechanic. F is unbound now; CTRL+F stays as flight for the fingers that learnt it.
   // V FLIES (Ben). CTRL+F is kept as the old binding rather than removed: F was flight until the offhand swap took it, and
   // anyone with that in their fingers should not be dropped out of the air by an update.
+  // Z LIES DOWN (Ben 2026-08-12: "z should lay the player down on the ground facing forward still"). A toggle rather than
+  // a hold, because it is a posture you stay in — and it refuses while flying or swimming, where "lying down" has no
+  // meaning. Jumping stands you back up, which is the fast way out that a player will try first.
+  if(e.code==='KeyZ' && !e.ctrlKey){ if(player.fly||player.inWater){ flashName('not here'); return; }
+    player.prone=!player.prone; if(player.prone) player.sprint=false;
+    flashName(player.prone?'prone':'up'); return; }
+  if(e.code==='Space' && player.prone && player.onGround){ player.prone=false; flashName('up'); return; }   // the first thing anyone tries
   if(e.code==='KeyV' || (e.code==='KeyF' && e.ctrlKey)){ if(!window._allowCreative){ flashName('flight is locked in survival'); return; } player.fly=!player.fly; player.vel.y=0; flashName(player.fly?'fly':'walk'); return; }   // SURVIVAL: no flight
   if(e.code==='KeyG'){ if(!window._allowCreative){ flashName('creative is locked in survival'); return; }   // G CYCLES gamemodes: survival → creative → cinematic → survival (Ben 07-21)
     if(cineMode){ applyCine(false); player.creative=false; flashName('survival'); }
@@ -14644,7 +14658,13 @@ function updateCamera(dt){
   camera.quaternion.copy(_cq);
   if(swimRoll) camera.rotateZ(swimRoll);   // swimming body roll
   const right=_tmp.set(Math.cos(p.yaw),0,-Math.sin(p.yaw));
-  camera.position.set(p.pos.x+right.x*bobX, p.pos.y+EYE+bobY, p.pos.z+right.z*bobX);
+  // PRONE (Ben 2026-08-12: "z should lay the player down on the ground facing forward still"). The eye goes to the dirt
+  // and the YAW IS UNTOUCHED — that is the "facing forward still": going prone must not turn you, so this is a height and
+  // a speed and nothing else. Eased at 7/s rather than snapped, because a camera that teleports 1.3m down reads as a
+  // falling-through-the-floor bug; ~0.2s of drop reads as lying down.
+  p._proneT=(p._proneT||0)+((p.prone?1:0)-(p._proneT||0))*Math.min(1,dt*7);
+  const proneDrop=(EYE-PRONE_EYE)*p._proneT;
+  camera.position.set(p.pos.x+right.x*bobX, p.pos.y+EYE-proneDrop+bobY, p.pos.z+right.z*bobX);
   // ---- F4 THIRD PERSON (Ben 07-27) — deliberately ROUGH tracking: the boom lags the eye instead of being welded to it,
   //      so the camera swings and settles behind you rather than snapping. Pulled in if a wall is in the way.
   _tpsAct = _tpsOn && !_tpsUpdateIndoors(dt);   // the player's preference, minus the indoor override
@@ -22592,7 +22612,12 @@ function updateView(dt){ updateRecoil(dt);                                      
   // the sight line and relaxes the tilt, undoing the block-out exactly when it is needed. You cannot aim down a sight with
   // the muzzle against a wall, so the aim is REFUSED rather than fought: same recompute-every-frame shape as the offhand rule
   // above, so pressing into a wall also drops an aim already up, and backing off re-raises it with rmb still held.
-  view.ads = !!((isBolt||isDotG||isRev||isIronAR) && rmbHeld && locked && !openUI && !armor[EQ_OFF] && !(view.reloadT>0) && !(isBolt && (view.boltT||0)>0) && !((view.gunBend||0)>0.55));   // right-hold aims; firing never breaks ADS EXCEPT the bolt rifle — working the bolt drops the sight, then it re-raises (rmb still held)
+  // AN INSTRUMENT IN THE SLOT IS NOT A SECOND HAND (Ben 08-12: "i should be able to ADS with a compass in the slot").
+  // The gate read the slot's OCCUPANCY, so anything sitting in it refused the aim - and the compass lives there now,
+  // worn for its effect rather than held. offInHand() is the predicate that already draws that distinction, and it is
+  // the one every other path uses, so the mode, the click paths, the left-hand model, the HUD cell and now the aim all
+  // agree with each other by construction rather than by four copies of the same test.
+  view.ads = !!((isBolt||isDotG||isRev||isIronAR) && rmbHeld && locked && !openUI && !offInHand() && !(view.reloadT>0) && !(isBolt && (view.boltT||0)>0) && !((view.gunBend||0)>0.55));   // right-hold aims; firing never breaks ADS EXCEPT the bolt rifle — working the bolt drops the sight, then it re-raises (rmb still held)
   if(scopeEl) scopeEl.style.display='none';                          // old black surround retired — the PiP scope (renderScope) draws the glass without blacking the screen
   view.group.visible = true;   // viewmodel is ALWAYS drawn — the magnified sight lives on the rifle's rear lens (PiP), so we keep the whole optic on-screen and let adsT drive the raise/zoom/fade
   if(isBolt && view.mesh && view.mesh.userData.bolt){ const bh=view.mesh.userData.bolt, bz=view.mesh.userData.boltZ||0.12;
