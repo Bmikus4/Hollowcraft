@@ -76,9 +76,11 @@ function check(name, got, want){
     console.log('kill switch '+(KILLED?'ON  (?noequip2=1) — every assertion below is EXPECTED to fail':'off — feature live'));
     console.log('EQ_N='+E.EQ_N+' EQ_OFF='+E.EQ_OFF+' EQ_PACK='+E.EQ_PACK+' _NO_EQ2='+E._NO_EQ2);
 
-    // ---------- 1. the column really renders six cells ----------
-    console.log('\n[1] column');
-    check('#armorcol cell count', E.cells, 6);
+    // ---------- 1. only the two SPEC cells are drawn ----------
+    // TWO, not six (Ben 2026-08-12): clothing has no slot anywhere any more — it is worn on the paperdoll and taken off
+    // by clicking the body. Only the offhand and the pack keep a cell, because neither is legible from the model.
+    console.log('\n[1] equip cells');
+    check('equip cell count (offhand + pack only)', E.cells, 2);
 
     // ---------- 2. eqAccepts routing ----------
     console.log('\n[2] eqAccepts — what each slot takes');

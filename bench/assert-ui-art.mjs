@@ -115,7 +115,9 @@ function ok(label, cond, got){ checks++; if(!cond)fails++; console.log('  '+(con
     // Each bar must wear its OWN colour out of the pack, or the five rows are one image five times.
     const beds=new Set(['health','food','water','stam','armor'].map(k=>hud[k].bed.replace(/.*\/(bar_[a-z_]+)\.png.*/,'$1')));
     ok('the bars are not all one image', beds.size>=4, [...beds]);
-    ok('hotbar plate is art',   /assets\/ui\//.test(hud.hotbar), hud.hotbar.slice(-30));
+    // NO PLATE BEHIND THE BAR, by instruction (Ben 2026-08-12: "just remove the background from the hotbar the actual
+    // panes look good"). The cells carry the art; a tray around them is furniture. This check used to demand the plate.
+    ok('the bar has no plate behind it', hud.hotbar === 'none', hud.hotbar.slice(-30));
     ok('hotbar cells are art',  /assets\/ui\/hcell/.test(hud.slot), hud.slot.slice(-30));
     ok('the offhand keeps its dashed edge', /assets\/ui\/btn_dash/.test(hud.off), hud.off.slice(-30));
 
