@@ -21,10 +21,10 @@ const shots = [];
 // The slung gun is not an armour slot: it is the primary you are NOT holding, so it is set up by putting a rifle in
 // primary 2 and selecting primary 1. Driven through the same probe so the shot and the numbers come from one place.
 const slungShots = [];
-for (const gun of ['ar15', 'hunting_rifle']) {
+for (const gun of (process.env.GUNS||'ar15,ak,shotgun,smg,pistol_heavy,marksman_rifle').split(',')) {
   await page.evaluate(async g => { __hc.eqPut(5, null); __hc.eqPut(1, null);
     __hc.qSet('inv', 1, g, 1); __hc.sel(0); await new Promise(r => setTimeout(r, 700)); }, gun);
-  for (const yaw of [Math.PI, Math.PI / 2]) {
+  for (const yaw of [Math.PI]) {
     await page.evaluate(y => __hc.pview(y, 620), yaw);
     const box = await page.evaluate(() => { const r = document.getElementById('pview').getBoundingClientRect();
       return { x: r.left, y: r.top, width: r.width, height: r.height }; });
