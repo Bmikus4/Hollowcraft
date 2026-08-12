@@ -37,9 +37,10 @@ fault that has already cost a session.
 |---|---|---|---|
 | 1 | **Black texels / "textures don't show in dark areas"** | `docs/handoff/02-black-texels.md` | **START HERE.** Fix measured, shipped OFF, needs the guard run. |
 | 2 | Water: the black band on the far water | `docs/handoff/03-water.md` | CLOSED 08-12 on Ben: "it actually looks like its gone now". Not NaN, not the grade — kelp. |
-| 3 | Water: the actual rebuild | `docs/ONE-LIGHT-WATER-HORIZON-PLAN.md` §2 | Not started. Ben's biggest open ask. |
+| 3 | Water: the rebuild | `docs/handoff/05-horizon-pines.md` (its water table) | SHIPPED 08-12 as three's webgl_shaders_ocean, on by default, land-masked, old ocean deleted. Open: a LOCALISED glare (sunColor cannot do it), sky reflections, and the sky vanishing with the ocean on. |
 | 4 | One lighting model, steps 2-5 | `docs/handoff/04-lighting.md` | Step 1 SHIPPED ON. Step 2 reverted, read before retrying. |
-| 5 | Horizon, fog + DoF | `docs/ONE-LIGHT-WATER-HORIZON-PLAN.md` §3-4 | Not started. |
+| 5 | **Skybox pines, then inland mountains** | `docs/handoff/05-horizon-pines.md` | **NEXT, on Ben 08-12.** The pines were deleted in adfa6bb and that re-opened the render-wall seam they existed to hide. Mountains are built WITH him. |
+| 6 | Fog + DoF | `docs/ONE-LIGHT-WATER-HORIZON-PLAN.md` §4 | Not started. |
 
 Ben's standing priorities: *"cohesion and beauty are your two main goals"*, *"hyperrealistic"* means
 *"it fits in with our existing lighting"*. **His current order, verbatim (08-12): lighting,
