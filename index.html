@@ -5592,7 +5592,12 @@ function injectAtlas(mat, opts={}){
       // main(), so this needs no second depth computation of its own.
       .replace('uniform float uWhiteTile;', 'uniform float uWhiteTile;'+(opts.nightFoliage?'\nuniform float uDayF;\nuniform vec3 uFolNight;':''))
       .replace('#include <fog_fragment>', '#include <fog_fragment>'+((opts.nightFoliage&&!_NO_FOL_NIGHT)?
-        '\n{ float _nt=1.0-uDayF; gl_FragColor.rgb=mix(gl_FragColor.rgb, uFolNight, clamp(fogFactor*_nt*0.94,0.0,1.0)); }':''))
+        // 0.94 -> 0.72 (Ben 08-12: "leaves arent rendering at night... its because of the fog"). At 0.94 a leaf standing
+        // in fog at night is 94% the fade target and 6% itself, so the canopy stops being foliage and becomes a flat
+        // silhouette of whatever colour the target is. 0.72 leaves better than a quarter of the leaf's own lit colour at
+        // every distance, so a fogged night wood still reads as leaves. Daylight is untouched: the term is gated on
+        // (1-uDayF) and is exactly zero at noon.
+        '\n{ float _nt=1.0-uDayF; gl_FragColor.rgb=mix(gl_FragColor.rgb, uFolNight, clamp(fogFactor*_nt*0.72,0.0,1.0)); }':''))
       // THE SHADED SIDE OF A LEAF IS STILL GREEN (Ben 08-05: "make the un-lit side of foliage look not solid black"). These quads
       // are DoubleSide, so one of every crossed pair faces away from the sun; with N·L negative that face keeps only ambient and
       // goes to black, and a blade of grass turns into a black slit. Real foliage does not do this because it is thin enough to
@@ -6768,15 +6773,88 @@ function _ensureOcean3(){
   const mtex=new THREE.DataTexture(mdata, MW, MW, THREE.RedFormat);
   mtex.minFilter=mtex.magFilter=THREE.LinearFilter; mtex.needsUpdate=true;
   _ocean3.userData.mask={ tex:mtex, data:mdata, W:MW, STEP:MSTEP, ox:1e9, oz:1e9 };
-  const mu={ uLandTex:{value:mtex}, uLandOrigin:{value:new THREE.Vector2(0,0)}, uLandSpan:{value:MW*MSTEP} };
+  const mu={ uLandTex:{value:mtex}, uLandOrigin:{value:new THREE.Vector2(0,0)}, uLandSpan:{value:MW*MSTEP},
+    // THE SHORELINE IS A HEIGHT COMPARISON, NOT A FLAG (Ben 08-12: "the ocean water is still extending into the coast").
+    // The mask used to hold 0 or 255 for "is this land", tested against 0.5 — and a bilinear filter over a step function
+    // puts the transition half a texel out from the last land texel, on top of a deliberate one-block outward bias in the
+    // JS ("sea+1"). Between them the plane ran one to two blocks up the sand, which is what he is looking at. Now the
+    // texel carries the terrain HEIGHT and the fragment discards where the interpolated ground stands above sea level, so
+    // the filter interpolates something geometric: the discard edge lands on the real waterline, to a fraction of a
+    // block, with no bias to tune and no stair-steps. Encoded 1/8 block per unit over a 32-block window at sea level —
+    // ground more than 16 blocks under water saturates at 0 and cliffs saturate at 255, and both are unambiguous.
+    uSeaY:{value:CFG.SEA}, uLandBias:{value:0.0},
+    // THE SEA'S OWN SKY, AND WHY IT NO LONGER COMES OUT OF THE MIRROR. The example's reflection branch is
+    // "vec3(0.1) + reflectionSample*0.9": a hard 0.1 linear ambient plus whatever the mirror target holds. That
+    // constant is a lit sea at midnight all by itself (0.1 linear is mid-grey through this tone curve, and at grazing
+    // angles Fresnel is ~1, so it covers the whole surface) — Ben 08-12 "water is still too bright at night, especially
+    // water inland". And the mirror target's sky is a FLAT colour swapped in for the pass, because the raymarched dome
+    // cannot draw with a mirrored camera, so the sea reflected no sky at all — "sky and water reflections are gone".
+    // Both are the same fix: synthesise the sky in this shader from the same uniforms the old water's skyAt() reads
+    // (horizon, zenith, sun direction, sun colour, hour), reflect the eye ray about the wave normal, and use the mirror
+    // sample only where it actually holds geometry. The mirror then adds trees, cliffs and the cathedral to a sea that
+    // is already correct without it — so a stale, black or broken target costs the reflected LAND and nothing else.
+    uHorizonC:globalU.uHorizon, uZenithC:globalU.uZenith, uSunColU:globalU.uSunCol, uSunDirW:globalU.uSunDir,
+    uDayF:globalU.uDay, uSkyDim:{value:1}, uReflSharp:{value:1}, uMirror:{value:1},
+    // THE BROAD LIGHT AND THE GLARE, PRISED APART. The example multiplies sunColor into its diffuse term twice
+    // (sunLight() already scales by sunColor, then the albedo line multiplies by sunColor again), so the one uniform
+    // that looks like a specular knob is really a squared, whole-surface floodlight — the recorded reason the sea went
+    // white at sunColor 5 and 16. uBroad now prices that flood on its own, and the glare comes from a lobe with its own
+    // exponent and gain, ADDED to the surface instead of being multiplied by the mirror sample. That multiply is why
+    // there was no sun on the water at all with the reflection dead: no target, no glint.
+    // TWO LOBES, because one cannot be both. The tight core is the disc's own image; the wide sheen is the long track a
+    // low sun lays toward the eye. Ben 08-12 asked for bright sun reflections and this is where they live.
+    uBroad:{value:0.30}, uSpecExp:{value:220.0}, uSpecGain:{value:5.5}, uWideExp:{value:14.0}, uWideGain:{value:0.55},
+    // THE NIGHT WASH THE LAND AND THE OLD WATER TAKE. Same vec4s, by reference, so the sea desaturates into scotopic
+    // night with everything else instead of holding its daylight chroma after dark.
+    uScotG:{value:_scotG}, uScotH:{value:_scotH} };
   _ocean3.userData.maskU=mu;
   _ocean3.material.onBeforeCompile=(sh)=>{
-    sh.uniforms.uLandTex=mu.uLandTex; sh.uniforms.uLandOrigin=mu.uLandOrigin; sh.uniforms.uLandSpan=mu.uLandSpan;
+    for(const k in mu) sh.uniforms[k]=mu[k];
     sh.fragmentShader=sh.fragmentShader
       .replace('void main() {',
-        'uniform sampler2D uLandTex;\nuniform vec2 uLandOrigin;\nuniform float uLandSpan;\nvoid main() {\n'+
-        '  vec2 _luv=(worldPosition.xz - uLandOrigin)/uLandSpan;\n'+
-        '  if(_luv.x>0.0 && _luv.x<1.0 && _luv.y>0.0 && _luv.y<1.0 && texture2D(uLandTex,_luv).r > 0.5) discard;\n');
+        ['uniform sampler2D uLandTex; uniform vec2 uLandOrigin; uniform float uLandSpan, uSeaY, uLandBias;',
+         'uniform vec3 uHorizonC, uZenithC, uSunColU, uSunDirW;',
+         'uniform float uDayF, uSkyDim, uReflSharp, uMirror, uBroad, uSpecExp, uSpecGain, uWideExp, uWideGain;',
+         'uniform vec4 uScotG, uScotH;',
+         // The old water shader's own sky, term for term, so the two seas cannot reflect two different skies. Scaled by
+         // uSkyDim: uHorizonC and uZenithC are the sky's COLOURS and stay near their daylight values after dark (the
+         // dome darkens them downstream), and fed in raw they filled the night sea with a daylight sky.
+         'vec3 _o3SkyAt(vec3 d){',
+         '  float h=d.y;',
+         '  vec3 c=mix(uHorizonC, uZenithC, pow(clamp(h,0.0,1.0),0.42));',
+         '  c=mix(uHorizonC*0.72, c, smoothstep(-0.22,0.02,h));',
+         '  float sd=max(dot(d, normalize(uSunDirW)),0.0);',
+         '  float above=smoothstep(-0.06,0.05,uSunDirW.y);',
+         '  c+=uSunColU*(pow(sd,7.0)*0.22 + pow(sd,mix(90.0,260.0,uReflSharp))*1.9)*uDayF*above;',
+         '  return c*uSkyDim;',
+         '}',
+         'void main() {',
+         '  vec2 _luv=(worldPosition.xz - uLandOrigin)/uLandSpan;',
+         '  if(_luv.x>0.0 && _luv.x<1.0 && _luv.y>0.0 && _luv.y<1.0){',
+         '    float _lh=texture2D(uLandTex,_luv).r*31.875 + (uSeaY-16.0);',   // raw/255 -> blocks: 255 units = 31.875 blocks over a window starting 16 under the sea
+         '    if(_lh > uSeaY + uLandBias) discard;',
+         '  }'].join('\n'))
+      // The lobe's shape becomes a pair of dials instead of two literals baked into a vendored file.
+      .replace('sunLight( surfaceNormal, eyeDirection, 100.0, 2.0, 0.5, diffuseLight, specularLight );',
+        ['sunLight( surfaceNormal, eyeDirection, uSpecExp, uSpecGain, 0.5, diffuseLight, specularLight );',
+         'vec3 _o3Wide = pow(max(0.0, dot(eyeDirection, normalize(reflect(-sunDirection, surfaceNormal)))), uWideExp) * sunColor * uWideGain;'].join('\n'))
+      .replace('vec3 albedo = mix( ( sunColor * diffuseLight * 0.3 + scatter ) * getShadowMask(), ( vec3( 0.1 ) + reflectionSample * 0.9 + reflectionSample * specularLight ), reflectance);',
+        [// A grazing ray reflected off the far side of a wave points down into the water; the sky it would show is the
+         // sky above either way, and folding it up is cheaper and steadier than clamping the colour afterwards.
+         'vec3 _o3R = reflect(-eyeDirection, surfaceNormal); _o3R.y = abs(_o3R.y);',
+         'vec3 _o3Sky = _o3SkyAt(normalize(_o3R));',
+         // THE MIRROR IS KEYED, NOT BLENDED. Its background is cleared to black for the pass (see onBeforeRender), so a
+         // non-black texel is geometry and a black one is sky — and sky is the one thing the pass cannot draw. Blending
+         // the two instead would halve the reflected land and lay a flat wash over the synthesised sky.
+         'float _o3Key = step(0.0025, dot(reflectionSample, vec3(0.2126,0.7152,0.0722))) * uMirror;',
+         'vec3 _o3Refl = mix(_o3Sky, reflectionSample, _o3Key);',
+         'vec3 albedo = mix( ( uBroad * diffuseLight + scatter ) * getShadowMask(), _o3Refl, reflectance );',
+         'albedo += (specularLight + _o3Wide) * (0.35 + 0.65 * reflectance);'].join('\n'))
+      .replace('gl_FragColor = vec4( outgoingLight, alpha );',
+        ['{ float _nw=1.0-smoothstep(uScotG.y,uScotG.z,uScotG.w);',
+         '  float _nl=dot(outgoingLight, vec3(0.2126,0.7152,0.0722));',
+         '  outgoingLight=mix(outgoingLight, vec3(_nl), uScotG.x*_nw); }',
+         'gl_FragColor = vec4( outgoingLight, alpha );'].join('\n'));
   };
   _ocean3.material.needsUpdate=true;
   // ---- THE REFLECTION PASS MUST NOT TOUCH THE SKY (Ben 08-12: sky on load, then grey, and pure black at night) ----
@@ -6818,17 +6896,13 @@ function _ensureOcean3(){
     // the dome. The scene's background is swapped for the sky's own colours for the duration of the pass, so the
     // mirror target is filled with sky before the land is drawn into it. Same uniforms the water shader's own skyAt()
     // reads, so it tracks the hour, the sunset and the night without a second source of truth to drift from.
+    // CLEARED TO BLACK, AND THAT IS NOW A SIGNAL RATHER THAN A LOSS. A flat average of the horizon and zenith colours
+    // used to be swapped in here so the target held "sky" — and a flat colour is exactly what Ben saw when he said the
+    // sky reflection was gone: no gradient, no sun, no hour beyond a brightness. The shader synthesises the sky itself
+    // now, so the one thing this pass has to do is say WHERE the sky is. Black does that: the fragment keys on the
+    // sample's luminance and takes the mirror only where geometry drew into it.
     const sv=skyDome.visible, sa=renderer.shadowMap.autoUpdate, bg=scene_.background;
-    try{
-      const hz=waterMat.uniforms.uHorizonC && waterMat.uniforms.uHorizonC.value, zn=waterMat.uniforms.uZenithC && waterMat.uniforms.uZenithC.value;
-      // TAKEN DOWN WITH THE HOUR. uHorizonC and uZenithC are the sky's colours, not the sky's BRIGHTNESS — they stay
-      // near their daylight values after dark, because the real dome darkens them further downstream. Fed into the
-      // mirror target raw they filled the reflection with a daylight sky at midnight, and since the sea is nearly all
-      // reflection at grazing angles the whole ocean washed out (Ben 08-12). Scaled by the day factor, with a floor so
-      // a moonlit sea is not a void.
-      const _dk=0.04+0.96*globalU.uDay.value;
-      if(hz && zn){ _o3Sky.setRGB((hz.r*0.55+zn.r*0.45)*_dk, (hz.g*0.55+zn.g*0.45)*_dk, (hz.b*0.55+zn.b*0.45)*_dk); scene_.background=_o3Sky; }
-    }catch(e){}
+    try{ _o3Sky.setRGB(0,0,0); scene_.background=_o3Sky; }catch(e){}
     skyDome.visible=false; renderer.shadowMap.autoUpdate=false;
     try{ _obr(renderer, scene_, camera_); }
     finally{
@@ -6858,15 +6932,15 @@ function _o3Mask(){
   if(Math.abs(ox-m.ox) < span/4 && Math.abs(oz-m.oz) < span/4) return;
   if(typeof surfaceH!=='function') return;
   const sea=CFG.SEA;
+  // THE TEXEL IS THE GROUND HEIGHT, and the fragment does the comparing (see uSeaY in the material). Every version of
+  // this that stored a flag had to pick a threshold in JS — "> sea", ">= sea", ">= sea+1" — and then had a bilinear
+  // filter smear that step half a texel further out on top of whichever it picked. Ben watched the sea climb the sand
+  // through all three. A height interpolates honestly: halfway between a texel of beach and a texel of seabed is a
+  // ground halfway between them, so the discard edge lands where the terrain actually crosses sea level.
+  // 8 units per block over a window from 16 under the sea upward: (h - (sea-16)) * 8, clamped into a byte.
   for(let j=0;j<m.W;j++){ const wz=oz+j*m.STEP;
-    // ">= sea", not "> sea", and that one character is the last block of shoreline. A cell holds water only where the
-    // ground is BELOW sea level, so a column whose ground stands exactly at it is beach — with "> sea" it counted as
-    // ocean and the plane ran one block up onto the sand.
-    // "sea + 1", so the sea runs ONE BLOCK further inland than the mask strictly allows (Ben 08-12: "the edges which
-    // water connects to land has gaps, extend by one block"). A mask sampled at block centres cannot land exactly on
-    // the shoreline a voxel edge draws, and erring outward hides the seam under the beach while erring inward leaves
-    // a gap you can see through. This is the same edge that "> sea" clipped and ">= sea" only half-fixed.
-    for(let i=0;i<m.W;i++){ m.data[j*m.W+i] = surfaceH(ox+i*m.STEP, wz) >= sea+1 ? 255 : 0; } }
+    for(let i=0;i<m.W;i++){ const h=surfaceH(ox+i*m.STEP, wz);
+      m.data[j*m.W+i] = h<=sea-16 ? 0 : h>=sea+15.875 ? 255 : Math.round((h-(sea-16))*8); } }
   m.ox=ox; m.oz=oz; m.tex.needsUpdate=true;
   u.uLandOrigin.value.set(ox,oz); u.uLandSpan.value=span;
 }
@@ -6960,6 +7034,21 @@ function updateOcean3(dt){
   // and whatever stands on the shore. Those come through the mirror sample, which is deliberately untouched here.
   const nb=0.02+0.98*day*day;
   u.waterColor.value.setRGB(0.023*nb, 0.157*nb, 0.235*nb);
+  // ---- WHAT THE SEA REFLECTS, AND HOW HARD IT GLARES, BY THE HOUR ----
+  // uSkyDim takes the synthesised sky reflection down after dark. uHorizonC/uZenithC are colours and hold their
+  // daylight values through the night (the dome darkens them downstream), so a night sea handed them raw reflects a
+  // daylight sky — and at grazing angles the sea is almost entirely reflection, which is the whole ocean glowing at
+  // midnight. The floor is the moon's, not a constant: with the moon up the water keeps a sky to reflect, and on a
+  // moonless night there is nothing up there to see.
+  { const mu2=_ocean3.userData.maskU; if(mu2){
+      const me=Math.max(0, globalU.uMoonDir.value.y), mk=Math.min(1, me/0.06);
+      mu2.uSkyDim.value = 0.012 + 0.988*day*day + 0.055*mk*(1-day);
+      // THE GLARE IS THE POINT AT NIGHT (Ben 08-12: "bright sun reflections"). The lobe is additive now rather than
+      // multiplied by the mirror sample, so it survives a dead reflection — and it is the only bright thing on a dark
+      // sea, which is what a moon track is. Held at full gain after dark and priced by the moon's own elevation
+      // through sunColor above.
+      mu2.uBroad.value = _night ? 0.05 : 0.30;
+    } }
 }
 function updateHorizon(){ oceanLayer.position.copy(camera.position); const day=globalU.uDay.value;
   // The far sea sits at sea level in WORLD terms while its parent follows the camera, so its local y is the difference.
@@ -7039,10 +7128,29 @@ function updateHorizon(){ oceanLayer.position.copy(camera.position); const day=g
   // treeline dissolved into, and real leaves fade to the same place (_uFolNight) — deriving both from one expression
   // is the only reason they ever stopped darkening at two different rates. The name stays: it is what the underwater
   // fog override and the QA readouts call it.
+  // ---- AND IN A FOG BANK AT NIGHT IT IS THE FOG'S COLOUR, NOT A DARK BLUE (Ben 08-12: "leaves arent rendering at
+  // night ... its because of the fog") ----
+  // The night term on the leaf materials is mix(colour, uFolNight, fogFactor*(1-day)*0.94) — a distance-weighted fade
+  // toward this target. In a weather fog the fogFactor is near 1 within a few blocks, so at night the whole canopy took
+  // the target almost undiluted, and the target was scene.fog.color pulled toward storm blue and then multiplied by
+  // 0.10: a tenth of the brightness of the air the leaves are standing IN. Every leaf inside the bank therefore went to
+  // near-black against a lit fog, which does not read as a dark wood — it reads as the leaves not being drawn, which is
+  // exactly what he reported. The weather lerp that fixes it already existed one line below and was applied to
+  // _uPineFog AFTER this copy, so the foliage never saw it; the horizon treeline got the correction and the trees in
+  // front of it did not. Copied after the lerp instead, so foliage in a bank fades to the bank.
+  // 0.94 stays: the term is what makes a wood recede into blackness on a CLEAR night, which is Ben's, and clear-night
+  // behaviour is bit-identical here — weather.fog is 0, so the lerp is a no-op and the target is what it always was.
+  // AND IT IS NO LONGER A TENTH OF THE AIR IT STANDS IN. 0.10 at night is a target ten times darker than the fog the
+  // terrain behind those leaves fades to, so at any distance where the fog term saturates the canopy is a black hole
+  // punched through a fogged wood rather than a dark canopy. 0.45 is still well under the air — a wood at night is
+  // darker than the sky between its trees, which is the read Ben asked for on 08-11 — and it is a mass you can see.
+  // The two targets split here for the first time: _uPineFog also feeds the underwater fog override and the QA
+  // readouts, and both want the old value.
   { _uPineFog.copy(scene.fog.color).lerp(_stormBlue, 0.55*(1-day)).multiplyScalar(0.10+0.90*day);
-    _uFolNight.value.copy(_uPineFog);
     const _wf2=(typeof weather!=='undefined'?(weather.fog||0):0);
-    if(_wf2>0.01) _uPineFog.lerp(scene.fog.color, Math.min(1,_wf2*0.95));
+    _uFolNight.value.copy(scene.fog.color).lerp(_stormBlue, 0.55*(1-day)).multiplyScalar(0.45+0.55*day);
+    if(_wf2>0.01){ _uPineFog.lerp(scene.fog.color, Math.min(1,_wf2*0.95));
+      _uFolNight.value.lerp(scene.fog.color, Math.min(1,_wf2*0.95)); }
     oceanMat.uniforms.uWx.value=_wf2; } }
 function bakeSky(){ if(!USE_SKYCUBE) return; try{ const prevTone=renderer.toneMapping; renderer.toneMapping=THREE.NoToneMapping;   // bake LINEAR (background render tonemaps once, like the old dome)
   skyCubeCam.position.set(0,0,0); skyCubeCam.update(renderer, skyScene); renderer.toneMapping=prevTone; }catch(e){} }
@@ -10386,6 +10494,11 @@ const HW=0.3, PH=1.8, EYE=1.62, STEP=0.6;
 // PRONE EYE HEIGHT. 0.32 is a head lying on its side on the ground: low enough that grass is at eye level and a doorway
 // gap you can see under is a real one, high enough that the near plane does not sit inside the block below you.
 const PRONE_EYE=0.32;
+// HOW TALL THE PLAYER ACTUALLY IS RIGHT NOW (Ben 2026-08-12: "make the hitbox"). PH is the standing constant and stays —
+// it is a build-time number used by peers, mobs and worldgen — but the LOCAL body's collision height and the capsule a
+// bullet is tested against are postures, not constants. Prone is 0.62: low enough to crawl under a one-block gap, which
+// is the whole point of lying down, and low enough that a shot aimed at a standing man passes over you.
+function bodyH(){ return player.prone?0.62:(player.sneak?1.45:PH); }
 const player={ pos:new THREE.Vector3(), vel:new THREE.Vector3(), yaw:0, pitch:0,
   onGround:false, fly:false, sneak:false, sprint:false, inWater:false,
   health:20, hunger:20, water:20, sat:5, creative:false, bob:0, fov:74, dead:false,
@@ -10439,7 +10552,7 @@ function _vaultLeafHit(x,y,z){
     // VERIFIED AGAINST THE WORLD, not trusted from the list. The list is a fast index and anything that writes the block by
     // another route — a console command, a load, a peer's edit — would otherwise leave a panel standing in an empty doorway.
     { const b=getBlock(v.x,v.y,v.z); if(b!==BID.vault_door_x_open && b!==BID.vault_door_z_open) continue; }
-    if(y+PH-0.02 <= v.y || y >= v.y+2) continue;
+    if(y+bodyH()-0.02 <= v.y || y >= v.y+2) continue;
     // The panel is 0.26 thick and it swings OUT of the opening, so its box starts at the doorway's far face — half a block
     // earlier and it would fill the doorway it just cleared, which is the same bug from the other side.
     if(v.alongX){ const hx=v.x, hz=v.z+1.0;
@@ -10449,7 +10562,8 @@ function _vaultLeafHit(x,y,z){
   return false; }
 function aabbHits(x,y,z){
   if(_vaultLeafHit(x,y,z)) return true;
-  const x0=Math.floor(x-HW),x1=Math.floor(x+HW), y0=Math.floor(y),y1=Math.floor(y+PH-0.02), z0=Math.floor(z-HW),z1=Math.floor(z+HW);
+  const _bh=bodyH();   // posture, not the standing constant: prone fits under a one-block gap
+  const x0=Math.floor(x-HW),x1=Math.floor(x+HW), y0=Math.floor(y),y1=Math.floor(y+_bh-0.02), z0=Math.floor(z-HW),z1=Math.floor(z+HW);
   for(let xx=x0;xx<=x1;xx++)for(let yy=y0;yy<=y1;yy++)for(let zz=z0;zz<=z1;zz++){ const b=getBlock(xx,yy,zz);
     // AN OPEN DOOR IS STILL A PANEL (Ben 08-04: "we should not be able to walk inside doors"). The open ids are solid:false so
     // that the DOORWAY is passable, and that made the whole cell passable — including the leaf, which has merely swung 90° to
@@ -10670,7 +10784,7 @@ function physics(dt){
         // arrive on (you were airborne) with real speed behind it; the resting nudge is neither.
         const _corr=(Math.floor(ny)+topH)-ny;
         if(_corr>0.004 && !p._wasGround && p.vel.y<-1.5) p._landCorr=Math.min(0.34, Math.max(p._landCorr||0, _corr));
-        p.pos.y=Math.floor(ny)+topH; p.onGround=true; p._impactVy=p.vel.y; } else { p.pos.y=Math.floor(ny+PH)-PH-0.001; }   // land ON a corner-step/slab top or a full block; else clamp head below the ceiling
+        p.pos.y=Math.floor(ny)+topH; p.onGround=true; p._impactVy=p.vel.y; } else { p.pos.y=Math.floor(ny+bodyH())-bodyH()-0.001; }   // land ON a corner-step/slab top or a full block; else clamp head below the ceiling
       p.vel.y=0;
     } else p.pos.y=ny;
   }
@@ -14866,8 +14980,26 @@ function updateTpsBody(dt){
   dy=((yawTo-P.bodyYaw+Math.PI*3)%(Math.PI*2))-Math.PI;
   const LIM=1.3; if(dy>LIM){ P.bodyYaw+=dy-LIM; dy=LIM; } else if(dy<-LIM){ P.bodyYaw+=dy+LIM; dy=-LIM; }
   P.group.rotation.y = P.bodyYaw + Math.PI;                                     // the model is built facing +z (its feet point that way); the camera looks down -z
-  if(P.head){ P.head.rotation.y = dy; P.head.rotation.x = -player.pitch*0.85; } // the neck carries the residual yaw, and all of the pitch
-  P.group.position.y -= player.sneak?0.22:0;                                    // crouch: sink the whole body, matching the eye drop
+  // The neck carries the residual yaw and all of the pitch — and while prone it also has to lift the face off the floor,
+  // or the player is looking at the dirt 20cm in front of them. -1.15 rad against the body's new pitch puts the eyes level.
+  if(P.head){ P.head.rotation.y = dy; P.head.rotation.x = -player.pitch*0.85 - 1.15*(P.proneT||0); }
+  // POSTURE, EASED, AND WITH A POSE (Ben 2026-08-12: "make it third person, and make the hitbox, also fix the ctrl
+  // croucning animation"). The crouch used to be one line — sink the whole body 0.22 — so a crouching player was a
+  // standing player lowered into the floor on straight legs, which is what was wrong with it. A crouch is knees, then
+  // height: the thighs fold, the arms come in, the head drops, and the sink is what is left over.
+  // Both are eased: a posture that snaps between two rigs reads as a glitch, and the eye is already easing (see PRONE_EYE).
+  P.crouchT=(P.crouchT||0)+((player.sneak&&!player.prone?1:0)-(P.crouchT||0))*Math.min(1,dt*9);
+  P.proneT=(P.proneT||0)+((player.prone?1:0)-(P.proneT||0))*Math.min(1,dt*7);
+  const _cT=P.crouchT, _pT=P.proneT;
+  P.group.position.y -= 0.15*_cT;
+  // AND LYING DOWN IS A ROTATION, not a shorter stand. YXZ order is what makes it one: yaw first, then pitch about the
+  // body's OWN right axis, so a prone body lies along the direction it is facing instead of tipping about the world's x.
+  // +90 about that axis sends the body's up (+y, the head) to its forward (+z) and its forward to the ground — face down,
+  // head first, "facing forward still". Lifted 0.16 because the origin is at the feet and half the body's thickness would
+  // otherwise be under the floor.
+  if(P.group.rotation.order!=='YXZ') P.group.rotation.order='YXZ';
+  P.group.rotation.x = (Math.PI/2)*_pT;
+  P.group.position.y += 0.16*_pT;
   P.group.position.y -= (player._landCorr||0);                                  // the body took a collision snap; the eye is walking down through it, and so is this
   if(player.landT>0) P.group.position.y -= Math.sin(Math.min(1,player.landT/0.34)*Math.PI)*0.10;   // …and the whole body dips with it
   // WALK CYCLE from actual velocity rather than from the keys: knockback, water drift and a slide down a slope all move you
@@ -14880,6 +15012,15 @@ function updateTpsBody(dt){
   // The knee-give goes on AFTER the walk cycle, not before it: the cycle ASSIGNS these angles, so a bend applied first is simply
   // overwritten and the landing reads as a body dropping on straight legs.
   if(player.landT>0){ const k=Math.sin(Math.min(1,player.landT/0.34)*Math.PI)*0.5; P.legL.rotation.x+=k; P.legR.rotation.x+=k; }
+  // THE CROUCH POSE, applied after the walk cycle for the same reason the knee-give is: the cycle ASSIGNS these angles, so
+  // anything added before it is simply overwritten. Thighs fold forward, arms tuck in, and the gait shortens with them.
+  if(_cT>0.001){ P.legL.rotation.x=P.legL.rotation.x*0.55+0.78*_cT; P.legR.rotation.x=P.legR.rotation.x*0.55+0.78*_cT;
+    P.armL.rotation.x=P.armL.rotation.x*0.6-0.42*_cT; P.armR.rotation.x=P.armR.rotation.x*0.6-0.42*_cT; }
+  // AND THE PRONE POSE: legs straight together, arms forward along the ground. The body is already rotated flat, so these
+  // are the limbs' own angles within it — a prone body with a walk cycle still swinging reads as swimming on the carpet.
+  if(_pT>0.001){ const k=1-_pT;
+    P.legL.rotation.x*=k; P.legR.rotation.x*=k;
+    P.armL.rotation.x=P.armL.rotation.x*k - 1.15*_pT; P.armR.rotation.x=P.armR.rotation.x*k - 1.15*_pT; }
   // THE HELD ITEM IS IN THE HAND (Ben: "should render from the hand"), which is also where a gun has to be for the arm pose to
   // mean anything: holding a rifle raises the right arm to point it down the look direction instead of letting it swing.
   const hs=inv[selSlot], hid=hs?hs.id:null;
@@ -20115,7 +20256,7 @@ function updateSpears(dt){ for(let i=spears.length-1;i>=0;i--){ const s=spears[i
       // of the eye — so without a delay every throw would kill you instantly. 0.35 s is long enough for any throw to clear the body and
       // far shorter than the arc of a spear lobbed upward, which is the case this is for.
       if(s.age>0.35 && !player.dead && Math.abs(s.x-player.pos.x)<HW+0.25 && Math.abs(s.z-player.pos.z)<HW+0.25
-         && s.y>player.pos.y-0.15 && s.y<player.pos.y+PH+0.15){
+         && s.y>player.pos.y-0.15 && s.y<player.pos.y+bodyH()+0.15){
         if(typeof damage==='function') damage(thrown, 'your own spear found you', 'spear');
         spawnParticles(s.x,s.y,s.z,0xcc2018,10,1.8,0.5); stickSpear(s,null); stuck=true; break; }
       const b=getBlock(Math.floor(s.x),Math.floor(s.y),Math.floor(s.z));
@@ -23504,7 +23645,7 @@ function _traceBullet(o,d,bolt,rev,sup,sg,vo){
   for(let t=(seg?0.05:0.6); travelled+t<_maxR; t+=0.35){ const px=o.x+d.x*t, py=o.y+d.y*t, pz=o.z+d.z*t;                      // finer step so tight hitboxes aren't skipped
     if(seg>0){ const _nd=Math.hypot(px-player.pos.x, pz-player.pos.z); if(_nd<_ricoNear) _ricoNear=_nd; }   // QA only: how close the return came
     if(seg>0 && !player.dead && !player.creative && Math.abs(px-player.pos.x)<HW+0.2 && Math.abs(pz-player.pos.z)<HW+0.2
-       && py>player.pos.y-0.1 && py<player.pos.y+PH+0.1){                                              // your own ricochet, coming back
+       && py>player.pos.y-0.1 && py<player.pos.y+bodyH()+0.1){                                              // your own ricochet, coming back
       if(typeof damage==='function') damage(_at(animDmg,t), 'your own ricochet found you', 'bullet');
       spawnParticles(px,py,pz,0xcc2018,10,1.8,0.5); return true; }
     // PVP — A ROUND FINDS ANOTHER PLAYER (Ben's item 23, second half). The same capsule as the shooter's own above, tested at every
@@ -29604,6 +29745,19 @@ function updateBloodFx(dt){
       for(let v=0;v<4;v++) c.setW(v,a); c.needsUpdate=true; }
     if(d.t>=BLOOD_LIFE){ if(d.m.parent)d.m.parent.remove(d.m); d.m.geometry.dispose(); L.splice(i,1); } }
 }
+// HOW FAR OFF THE SKIN IS THIS POINT? Step out along the surface normal and cast back in: a point lying on the skin
+// is met at exactly the distance stepped out. Positive means it floats clear of the body, negative that it is sunk
+// into it, null that there is no skin under it at all. DoubleSide for the same reason the impact snap needs it - the
+// giantess's shells are wound facing away, and a culled ray reports open air where there is a chest.
+function _bloodGap(ms,p,n,out){
+  if(!ms||!ms.length) return null;
+  const O=out||0.6;
+  const side=ms.map(o=>(o.material&&!Array.isArray(o.material))?o.material.side:undefined);
+  for(const o of ms) if(o.material&&!Array.isArray(o.material)) o.material.side=THREE.DoubleSide;
+  const hit=new THREE.Raycaster(p.clone().addScaledVector(n,O),n.clone().negate(),0.001,O*3).intersectObjects(ms,false)[0];
+  for(let i=0;i<ms.length;i++) if(ms[i].material && side[i]!==undefined) ms[i].material.side=side[i];
+  return hit?hit.distance-O:null;
+}
 // A BLOCK FACE NEAR THE IMPACT. The world is voxels, so this is a short march rather than a raycast: step until a
 // solid cell is entered, and the face is whichever axis that step crossed.
 function _bloodNearFace(x,y,z,dx,dy,dz,maxD){
@@ -29632,6 +29786,8 @@ function _bloodNearFace(x,y,z,dx,dy,dz,maxD){
 // its siblings under the rig.
 function bloodImpact(x,y,z,dir,host,size,surf){
   if(!bloodFxInit()||_bloodFX.dead) return;
+  let _ms=null;                     // the surface meshes, kept so the drip can be fitted against them further down
+  let _skinBone=null;               // ...and the bone the struck triangle actually follows (see the pick below)
   // SNAP TO THE SKIN. The point handed in is wherever a hit test said the round arrived, and those tests are VOLUMES,
   // not surfaces: giantessHit is eleven spheres centred on bones, and the animal test is a vertical capsule. So the
   // point can sit well inside the body or well outside it, and a normal taken from the body's centre is a sphere's
@@ -29647,6 +29803,7 @@ function bloodImpact(x,y,z,dir,host,size,surf){
       const dv=new THREE.Vector3(dir.x||0,dir.y||0,dir.z||0);
       if(dv.lengthSq()>1e-8){ dv.normalize();
         const ms=[]; _t.traverse(o=>{ if(o.isMesh&&o.visible&&o.geometry) ms.push(o); });
+        _ms=ms;
         if(ms.length){
           // BACK OUT PAST THE WHOLE BODY, NOT A FIXED FOUR BLOCKS. The hit tests are volumes, so the point can sit
           // deep inside the mesh — and on the giantess four blocks back is STILL inside her torso. A ray that starts
@@ -29690,12 +29847,35 @@ function bloodImpact(x,y,z,dir,host,size,surf){
             }catch(e){ n=null; }
             if(n && isFinite(n.x)){ dir={x:-n.x,y:-n.y,z:-n.z};
               _bloodFX.lastSnap.normal=[+n.x.toFixed(2),+n.y.toFixed(2),+n.z.toFixed(2)]; }
+            // THE BONE THE STRUCK SKIN ACTUALLY FOLLOWS, not the bone the hit TEST named. giantessHit resolves to a
+            // part by asking which of eleven spheres the point is in, and those spheres are coarse: a round that
+            // lands on the hip is called 'spine.003' and the wound then rides the spine while the skin under it
+            // rides the thigh. That is Ben 08-12 — "some of them arent particularly bound to her body ... some jump
+            // around as she moves" — and it is not a placement error, it is the wrong parent. The skin weights are
+            // the answer: whichever bone carries the most weight at the struck vertex is the one the surface there
+            // moves with, so hanging the decal off THAT bone makes it swim only as much as the skin does.
+            try{
+              const so=hit.object;
+              if(so.isSkinnedMesh && so.skeleton && hit.face){
+                const si=so.geometry.attributes.skinIndex, sw=so.geometry.attributes.skinWeight;
+                if(si&&sw){
+                  const W={};
+                  for(const vi of [hit.face.a,hit.face.b,hit.face.c])
+                    for(let k=0;k<4;k++){ const b=si.getComponent(vi,k), w=sw.getComponent(vi,k);
+                      if(w>0) W[b]=(W[b]||0)+w; }
+                  let best=-1,bw=0; for(const b in W) if(W[b]>bw){ bw=W[b]; best=+b; }
+                  if(best>=0 && so.skeleton.bones[best]) _skinBone=so.skeleton.bones[best];
+                }
+              }
+            }catch(e){}
+            if(_bloodFX.lastSnap) _bloodFX.lastSnap.bone=_skinBone?_skinBone.name:null;
           }
         }
       }
     }
   }catch(e){}
   try{
+    if(host && _skinBone) host=_skinBone;              // ride the skin's own bone, not the one the hit test named
     if(host){
       const g=new THREE.Group();
       const n=new THREE.Vector3(-((dir&&dir.x)||0),-((dir&&dir.y)||0),-((dir&&dir.z)||0));
@@ -29740,10 +29920,24 @@ function bloodImpact(x,y,z,dir,host,size,surf){
       const mk=_bloodQuad('impact',mw,mw,false);                            // one still, so no animation
       g.add(mk); _bloodTrack(mk,0);
       // The drip hangs BELOW the mark on the same plane and grows downward over four seconds. Its sheet cell is a
-      // vertical streak, so the quad takes that aspect — but the LENGTH is capped at a third of the body, because a
+      // vertical streak, so the quad takes that aspect — but the LENGTH is capped at a tenth of the body, because a
       // drip that runs past the feet is blood hanging in the air under an animal.
-      const dm=_bloodFX.meta.drip||{cell:[46,192]}, dw=mw*0.6;
-      const dh=Math.min(dw*(dm.cell[1]/dm.cell[0]), H*0.10);   // and a run of blood no longer than a tenth of the body
+      //
+      // AND THE LENGTH IS FITTED TO THE BODY IT IS RUNNING DOWN. The drip is flat, the body is not: past a few
+      // centimetres the plane leaves a curved limb and the far end of the streak is hanging in air beside her, which
+      // is Ben 08-12 — "there is no drip video positioned on her, they are slightly off of her mesh". So the tail is
+      // measured against the skin and the longest length that still lands on it is the one used. Wider than it was,
+      // too: at 0.6 of a 27 cm mark the streak was a thread nobody could see at the range she is fought at.
+      const dm=_bloodFX.meta.drip||{cell:[46,192]}, dw=mw*0.9;
+      const full=Math.min(dw*(dm.cell[1]/dm.cell[0]), H*0.10);
+      let dh=full*0.3;
+      if(_ms&&_ms.length){
+        g.updateWorldMatrix(true,false);
+        for(const f of [1,0.8,0.6,0.45,0.3]){
+          const p=g.localToWorld(new THREE.Vector3(0,-full*f,0));
+          const gp=_bloodGap(_ms,p,n,0.5);
+          if(gp!=null && Math.abs(gp)<0.12){ dh=full*f; break; } }
+      } else dh=full;
       const dr=_bloodQuad('drip',dw,dh);
       dr.position.set(0,-dh/2,0.002); g.add(dr); _bloodTrack(dr,4.0);
     }
@@ -34810,7 +35004,8 @@ window.__hc={
                    onSkin:hit!=null&&Math.abs(gap)<0.12 }); }
       const marks=out.filter(o=>o.kind==='mark');
       return { n:out.length, marks:marks.length, wounds:out, snap:_bloodFX.lastSnap,
-               offSkin:marks.filter(o=>!o.onSkin).length, maxW:marks.length?Math.max(...marks.map(o=>o.w)):0 }; }catch(e){ return {err:String(e.message||e)}; } },
+               offSkin:marks.filter(o=>!o.onSkin).length, offSkinAll:out.filter(o=>!o.onSkin).length,
+               maxW:marks.length?Math.max(...marks.map(o=>o.w)):0 }; }catch(e){ return {err:String(e.message||e)}; } },
   // BOTH HANDS AT ONCE: which arms exist, which are drawn, and whether each gun has a hand ON it.
   handsProbe(){ try{ const gh=(v)=>!!(v && v.mesh && (v.mesh.userData._gunHand || (v.mesh.children||[]).some(c=>c.userData&&c.userData._gunHand)));
       const gunHandOf=(m)=>{ if(!m) return false; let f=!!m.userData._gunHand; if(!f) m.traverse(o=>{ if(o.userData&&o.userData._gunHand) f=true; }); return f; };
@@ -36514,7 +36709,13 @@ window.__hc={
                boreVsLookDeg:+(Math.acos(Math.max(-1,Math.min(1,bore.dot(look))))*57.29578).toFixed(2) }; }
     catch(e){ return {err:String(e.message||e)}; } },
   tpsPose(){ try{ const P=_tpsBody; if(!P) return {no:'no rig'};
-      return { armRx:+P.armR.rotation.x.toFixed(3), armRz:+P.armR.rotation.z.toFixed(3),
+      return { // POSTURE: the eased latches, the body's own pitch, and the limb angles that make a crouch a crouch. A
+               // boolean says which posture is asked for; only these say whether the rig is IN it.
+               crouchT:+(P.crouchT||0).toFixed(3), proneT:+(P.proneT||0).toFixed(3),
+               bodyRx:+P.group.rotation.x.toFixed(3), bodyY:+P.group.position.y.toFixed(3),
+               legLx:+P.legL.rotation.x.toFixed(3), headRx:+P.head.rotation.x.toFixed(3),
+               feetY:+player.pos.y.toFixed(3), hitH:bodyH(),
+               armRx:+P.armR.rotation.x.toFixed(3), armRz:+P.armR.rotation.z.toFixed(3),
                handPos:P.hand.position?P.hand.position.toArray().map(n=>+n.toFixed(3)):null,
                armLx:P.armL?+P.armL.rotation.x.toFixed(3):null, armLz:P.armL?+P.armL.rotation.z.toFixed(3):null,
                heldScale:P.heldMesh?+P.heldMesh.scale.x.toFixed(3):null, held:P.heldMesh?true:false,
