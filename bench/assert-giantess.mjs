@@ -128,6 +128,34 @@ try {
   const after = await page.evaluate(`__hc.girlState()`);
   check('right-clicking the egg spawns her', after.active === true, 'held ' + egg.held + ' -> ' + after.state + ' at ' + after.dist + ' blocks');
 
+  // ---- 7. SHE CAN BE KILLED (Ben 08-11) ------------------------------------------------------------
+  // Through the real bullet door (girlRayHit), aimed at bone world positions, so this exercises the cylinder
+  // reject, the eleven-sphere skeleton test and the damage table exactly as a rifle does.
+  // CREATIVE FOR THIS SECTION. She had already killed the bench player by here, and the whole entity tick is
+  // gated on `!player.dead` (the Wretch included), so her fall froze at pitch 0 and the check read as a
+  // broken death animation. damage() ignores a creative player, so she can still be killed but not kill.
+  await page.evaluate(`__hc.cmdRun('/gamemode creative'); __hc.cmdRun('/heal 20'); __hc.girlOff(); __hc.girl(18);`);
+  await sleep(400);
+  const miss = await page.evaluate(`__hc.girlShootMiss(9)`);
+  check('a shot beside her does not register', miss.hit === false && miss.hpUnchanged === true, JSON.stringify(miss));
+  const shots = {};
+  for (const part of ['Head', 'spine.003', 'thigh.L', 'foot.R']){
+    const before = (await page.evaluate(`__hc.girlState()`)).hp;
+    await page.evaluate(`__hc.girlShoot('${part}',1)`);
+    shots[part] = before - (await page.evaluate(`__hc.girlState()`)).hp;
+  }
+  console.log('  damage per shot: ' + JSON.stringify(shots));
+  check('every part of her can be hit', Object.values(shots).every(v => v > 0), JSON.stringify(shots));
+  check('a head shot is worth double a body shot', shots.Head === shots['spine.003'] * 2, shots.Head + ' vs ' + shots['spine.003']);
+  const kill = await page.evaluate(`__hc.girlShoot('spine.003',60)`);
+  check('enough rifle rounds kill her', kill.state === 'die', kill.hits + ' rounds landed of 60 fired (the rest hit a corpse), hp ' + kill.hp);
+  const corpseShot = await page.evaluate(`__hc.girlShoot('spine.003',1)`);
+  check('a corpse cannot be shot', corpseShot.hits === 0, JSON.stringify(corpseShot));
+  let fell = null;
+  for (let i = 0; i < 12; i++){ fell = await page.evaluate(`__hc.girlState()`); if (fell.state === 'dead') break; await sleep(350); }
+  check('she falls and lies there', fell.state === 'dead' && Math.abs(fell.pitch - Math.PI / 2) < 0.02 && fell.ttl > 60,
+    'pitch ' + fell.pitch + ' rad, lying for ' + fell.ttl + ' s');
+
   check('no page errors', errs.length === 0, errs.slice(0, 3).join(' | ') || 'clean');
 } catch (e){ console.log('  HARNESS ERROR: ' + (e && e.stack || e)); fails++; }
 finally {

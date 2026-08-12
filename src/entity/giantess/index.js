@@ -342,6 +342,59 @@ export function giantessStomp(rig, t, leg){
   set(rig, 'upper_arm.R', FWD * 0.4 * lift, 0, ARM * (1 + 0.5 * lift));
 }
 
+// THE COLLAPSE. t runs 0→1 over the fall. The knees go first and the body follows them down — a felled
+// body does not tip over like a statue, it loses the leg that was holding it and folds. The pitch itself is
+// index.html's, because it rotates her whole group about her feet (her origin IS her feet plane, so that
+// pivot is free); this is only what the limbs do on the way.
+export function giantessDie(rig, t){
+  const s = Math.min(1, t / 0.5), e = s * s;                       // knees give way fast, then accelerate
+  for (const L of ['L', 'R']){
+    set(rig, 'thigh.' + L, FWD * 1.15 * e, 0, 0);
+    set(rig, 'shin.' + L, FWD * -1.95 * e, 0, 0);
+    set(rig, 'foot.' + L, FWD * 0.55 * e, 0, 0);
+    rest(rig, 'toe.' + L);
+  }
+  set(rig, 'spine', 0, 0, 0);
+  set(rig, 'spine.001', 0, 0, 0);
+  set(rig, 'spine.003', FWD * 0.55 * s, 0, 0);                     // she folds forward over her own knees
+  set(rig, 'Neck', FWD * -0.45 * s, 0, 0);                         // …and her head goes back as she goes down
+  // The arms come up and forward — the one thing a falling body always does.
+  set(rig, 'upper_arm.L', FWD * 0.9 * s, 0, -ARM * (1 + 0.8 * s));
+  set(rig, 'upper_arm.R', FWD * 0.9 * s, 0, ARM * (1 + 0.8 * s));
+  set(rig, 'forearm.L', FWD * -1.2 * s, 0, 0);
+  set(rig, 'forearm.R', FWD * -1.2 * s, 0, 0);
+}
+
+// A flinch, layered on whatever she is already doing: struck, the torso snaps away from the hit and the head
+// with it. f decays in index.html, so one call per frame with a falling number is the whole effect.
+export function giantessFlinch(rig, f, side){
+  if (!(f > 0)) return;
+  const b = rig.bone['spine.003']; if (!b) return;
+  rig._e.set(FWD * -0.22 * f, 0.18 * f * (side || 1), 0);
+  b.quaternion.multiply(rig._q.setFromEuler(rig._e));               // MULTIPLIED onto the pose, not replacing it
+  const n = rig.bone['Neck'];
+  if (n){ rig._e.set(FWD * -0.3 * f, 0, 0); n.quaternion.multiply(rig._q.setFromEuler(rig._e)); }
+}
+
+// The bones a bullet can find, as spheres in world space, with the damage share each is worth. Her body is
+// 13.5 blocks of moving limb, so a single capsule at her origin would either miss her legs mid-stride or
+// swallow the air she is striding through — the hit volume has to be the skeleton, and the skeleton is right
+// here. Cheap enough because callers reject on a bounding cylinder first.
+const HITBOX = [['Head', 1.05, 2.0], ['spine.003', 1.75, 1.0], ['spine', 1.6, 1.0],
+                ['thigh.L', 1.25, 0.85], ['shin.L', 1.0, 0.85], ['foot.L', 0.95, 0.7],
+                ['thigh.R', 1.25, 0.85], ['shin.R', 1.0, 0.85], ['foot.R', 0.95, 0.7],
+                ['upper_arm.L', 0.8, 0.6], ['upper_arm.R', 0.8, 0.6]];
+export function giantessHit(rig, x, y, z){
+  rig.group.updateMatrixWorld(true);
+  const p = rig._hitV || (rig._hitV = new THREE.Vector3());
+  for (const [name, r, mult] of HITBOX){
+    const b = rig.bone[name]; if (!b) continue;
+    b.getWorldPosition(p);
+    const dx = x - p.x, dy = y - p.y, dz = z - p.z, rr = r * rig.scale / 8;   // radii are quoted at her shipped x8
+    if (dx * dx + dy * dy + dz * dz < rr * rr) return { part: name, mult };
+  }
+  return null;
+}
 export function giantessIdle(rig, t){
   const b = Math.sin(t * 1.1) * 0.04;
   for (const n of LIMBS) rest(rig, n);
