@@ -12,9 +12,15 @@ const base = 'http://127.0.0.1:' + port; await waitHttp(base + '/index.html');
 const b = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: true, args: ['--enable-gpu', '--use-angle=d3d11', '--mute-audio'] });
 const page = await b.newPage({ viewport: { width: 1280, height: 720 } });
 const errs = []; page.on('pageerror', e => errs.push(String(e).slice(0, 200)));
-await page.goto(base + '/index.html?debug=1', { waitUntil: 'load' });
-await page.waitForFunction("(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()", null, { timeout: 300000 });
-await page.waitForTimeout(4000);
+// THE REAL START PATH, NOT ?debug=1. updateBars hides the whole HUD while `!_circleDone`, and the debug auto-start
+// never runs the loading circle — so under ?debug=1 #hud is visibility:hidden for the session. Geometry still reads
+// correctly off a hidden element, which is exactly why it went unnoticed; a click does not.
+await page.goto(base + '/index.html', { waitUntil: 'load' });
+await page.waitForTimeout(2500);
+await page.click('#mb-solo');
+await page.waitForFunction("(()=>{try{return window.__hc&&__hc.loadState().circleDone===true;}catch(e){return false;}})()", null, { timeout: 300000 });
+await page.waitForTimeout(3000);
+const hudVisible = await page.evaluate(() => getComputedStyle(document.getElementById('hud')).visibility);
 
 const shut = await page.evaluate(() => {
   const R = el => { const b = el.getBoundingClientRect(); return { x: b.left, y: b.top, w: b.width, h: b.height, r: b.right, b: b.bottom }; };
@@ -24,13 +30,34 @@ const shut = await page.evaluate(() => {
            nums: cells.map(c => c.querySelector('.num').textContent).join(''), vh: innerHeight, vw: innerWidth };
 });
 
+// THE SIZE THAT CAUGHT IT. --uiz is min(w/1280,h/720) clamped to [1,1.9], so 1280x720 is the ONE viewport where a
+// zoomed copy of the bar and the real bar agree. Every geometry claim here is re-checked at 1920x1080, where uiz=1.5.
+const atSize = async (w, h) => {
+  await page.setViewportSize({ width: w, height: h }); await page.waitForTimeout(900);
+  return page.evaluate(async () => {
+    const R = el => { const b = el.getBoundingClientRect(); return { x: b.left, y: b.top, w: b.width, h: b.height, r: b.right, b: b.bottom }; };
+    const q = s => document.querySelector(s);
+    __hc.openInv(); await new Promise(r => setTimeout(r, 600));
+    const cell = q('#hotbar > .slot');
+    const out = { uiz: getComputedStyle(document.documentElement).getPropertyValue('--uiz').trim(),
+      bar: R(q('#hotbar')), cell: R(cell), rule: R(q('#invrule')), grid: R(q('#gridinv')),
+      barDisplay: getComputedStyle(q('#hotbar')).display, pe: getComputedStyle(q('#hotbar')).pointerEvents,
+      copies: document.querySelectorAll('#ihot').length };
+    __hc.eqUI('close'); await new Promise(r => setTimeout(r, 400));
+    out.barShut = R(q('#hotbar')); out.cellShut = R(q('#hotbar > .slot'));
+    return out; });
+};
+const at720 = await atSize(1280, 720);
+const at1080 = await atSize(1920, 1080);
+await page.setViewportSize({ width: 1280, height: 720 }); await page.waitForTimeout(800);
+
 const open = await page.evaluate(async () => {
   const R = el => { const b = el.getBoundingClientRect(); return { x: b.left, y: b.top, w: b.width, h: b.height, r: b.right, b: b.bottom }; };
   const q = s => document.querySelector(s), qa = s => [...document.querySelectorAll(s)];
   __hc.openInv(); await new Promise(r => setTimeout(r, 600));
   const prim = qa('#primaries .islot'), carry = qa('#carrycol .islot');
   const armorCells = qa('#invui [data-src="armor"]');
-  const out = { ihot: R(q('#ihot')), cell: R(qa('#ihot .islot')[0]), n: qa('#ihot .islot').length,
+  const out = { ihot: R(q('#hotbar')), cell: R(q('#hotbar > .slot')), n: qa('#hotbar > .slot').length,
     rule: R(q('#invrule')), grid: R(q('#gridinv')), prim: prim.map(R), primN: prim.length,
     carry: carry.map(R), carryN: carry.length, pv: R(q('#pview')), bands: qa('.pvband').length,
     armorCells: armorCells.length, armorIdx: armorCells.map(d => d.dataset.idx).join(','),
@@ -45,6 +72,23 @@ const open = await page.evaluate(async () => {
   out.hudBack = getComputedStyle(q('#hotbar')).display; out.hbAfter = R(q('#hotbar'));
   return out;
 });
+
+// A REAL CLICK on a HUD cell with the inventory open. pointer-events alone is not enough — the modal dim is z-index 12
+// over a z-index 5 HUD — and only a real click through the browser proves the sheet is not swallowing it.
+const click = await (async () => {
+  const put = await page.evaluate(async () => { __hc.openInv(); await new Promise(r => setTimeout(r, 500));
+    __hc.qSet('inv', 4, 'iron_ingot', 3); __hc.qSet('inv', 5, null);
+    const b = document.querySelectorAll('#hotbar > .slot')[2].getBoundingClientRect();   // slot index 4 = third of the five
+    return { x: b.left + b.width / 2, y: b.top + b.height / 2, before: JSON.stringify(__hc.qGet('inv', 4)) }; });
+  await page.mouse.click(put.x, put.y); await page.waitForTimeout(300);
+  const after = await page.evaluate(p => { const e = document.elementFromPoint(p.x, p.y);
+    return { slot: JSON.stringify(__hc.qGet('inv', 4)),
+             hit: e ? (e.id || e.className) + ' in ' + (e.parentElement ? (e.parentElement.id || e.parentElement.className) : '-') : 'none',
+             uiZ: getComputedStyle(document.getElementById('ui')).zIndex,
+             cls: document.body.className }; }, { x: put.x, y: put.y });
+  await page.evaluate(async () => { __hc.eqUI('close'); await new Promise(r => setTimeout(r, 300)); });
+  return { ...put, ...after };
+})();
 
 const fade = await page.evaluate(async () => {
   const R = el => { const b = el.getBoundingClientRect(); return { x: b.left, y: b.top, w: b.width, h: b.height, r: b.right, b: b.bottom }; };
@@ -76,6 +120,7 @@ let pass = 0, fail = 0;
 const t = (name, ok, got) => { (ok ? pass++ : fail++); console.log((ok ? 'PASS  ' : 'FAIL  ') + name + '   ' + got); };
 const near = (a, c, tol = 2) => Math.abs(a - c) <= tol;
 // --- the bar, inventory shut
+t('the HUD is actually visible', hudVisible === 'visible', 'visibility=' + hudVisible);
 t('bar sits in the top third', shut.hb.y < shut.vh / 3, 'top=' + shut.hb.y.toFixed(0));
 t('the nav ribbon is at the bottom', shut.cmp && shut.cmp.y > shut.vh * 0.8, 'cmp.top=' + (shut.cmp ? shut.cmp.y.toFixed(0) : '-') + ' vh=' + shut.vh);
 t('nothing shares the bar row', shut.cmp && shut.cmp.y > shut.hb.b, 'hb.bottom=' + shut.hb.b.toFixed(0) + ' cmp.top=' + (shut.cmp ? shut.cmp.y.toFixed(0) : '-'));
@@ -86,13 +131,21 @@ t('the primaries share the bar row', near(fade.left.y, fade.bar.y, 2), 'left.y='
 t('the five never move', near(fade.barAfter.x, fade.bar.x, 1) && near(fade.barAfter.w, fade.bar.w, 1),
   'before=' + fade.bar.x.toFixed(0) + '/' + fade.bar.w.toFixed(0) + ' after=' + fade.barAfter.x.toFixed(0) + '/' + fade.barAfter.w.toFixed(0));
 // --- the bar, inventory open: same pixels
-t('the open bar stands on the shut bar', near(open.ihot.y, shut.hb.y, 3) && near(open.ihot.x, shut.hb.x, 3) && near(open.ihot.w, shut.hb.w, 3),
-  'open=' + [open.ihot.x, open.ihot.y, open.ihot.w].map(n => n.toFixed(0)) + ' shut=' + [shut.hb.x, shut.hb.y, shut.hb.w].map(n => n.toFixed(0)));
-t('five cells in the inventory too', open.n === 5, 'n=' + open.n);
-t('cells are the same size in both', near(open.cell.w, shut.cell.w, 1) && near(open.cell.h, shut.cell.h, 1),
-  'open=' + open.cell.w.toFixed(0) + 'x' + open.cell.h.toFixed(0) + ' shut=' + shut.cell.w.toFixed(0) + 'x' + shut.cell.h.toFixed(0));
-t('the HUD bar is hidden while the inventory is open', open.hudHidden === 'none', 'display=' + open.hudHidden);
-t('and back when it closes', open.hudBack !== 'none' && near(open.hbAfter.y, shut.hb.y, 2), 'display=' + open.hudBack + ' top=' + open.hbAfter.y.toFixed(0));
+// --- the bar IS the inventory's row, at every window size
+for (const [label, m] of [['720p', at720], ['1080p (uiz ' + at1080.uiz + ')', at1080]]) {
+  t(label + ': there is only one row of five', m.copies === 0 && m.barDisplay !== 'none', 'copies=' + m.copies + ' display=' + m.barDisplay);
+  t(label + ': the bar does not move or resize when the inventory opens',
+    near(m.bar.x, m.barShut.x, 0.5) && near(m.bar.w, m.barShut.w, 0.5) && near(m.cell.w, m.cellShut.w, 0.5),
+    'open=' + m.bar.x.toFixed(0) + '/' + m.bar.w.toFixed(0) + ' cell=' + m.cell.w.toFixed(1) +
+    '  shut=' + m.barShut.x.toFixed(0) + '/' + m.barShut.w.toFixed(0) + ' cell=' + m.cellShut.w.toFixed(1));
+  t(label + ': the bar takes clicks while open', m.pe === 'auto', 'pointer-events=' + m.pe);
+  t(label + ': the grid is centred on the bar', Math.abs((m.bar.x + m.bar.w / 2) - (m.grid.x + m.grid.w / 2)) <= 0.5,
+    'bar mid=' + (m.bar.x + m.bar.w / 2).toFixed(1) + ' grid mid=' + (m.grid.x + m.grid.w / 2).toFixed(1));
+  t(label + ': the grid hangs off the bar, not through it', m.rule.y >= m.bar.b - 0.5 && m.grid.y >= m.rule.b - 0.5,
+    'bar.b=' + m.bar.b.toFixed(0) + ' rule=' + m.rule.y.toFixed(0) + '-' + m.rule.b.toFixed(0) + ' grid.y=' + m.grid.y.toFixed(0));
+  t(label + ': one scale for both — cell and grid cell agree', near(m.cell.w, 50, 0.5) && near(m.grid.w / 8, 44, 0.5),
+    'bar cell=' + m.cell.w.toFixed(1) + ' grid cell=' + (m.grid.w / 8).toFixed(1));
+}
 // --- the gold line and the grid below it
 t('the line sits between the bar and the grid', open.rule.y >= open.ihot.b - 1 && open.rule.b <= open.grid.y + 1,
   'ihot.b=' + open.ihot.b.toFixed(0) + ' rule=' + open.rule.y.toFixed(0) + '-' + open.rule.b.toFixed(0) + ' grid=' + open.grid.y.toFixed(0));
@@ -112,6 +165,9 @@ t('primaries sit below the model', open.prim[0].y >= open.pv.b - 2, 'prim.y=' + 
 t('spec slots are directly right of them', open.carryN === 2 && open.carry[0].x >= open.prim[0].r - 2,
   'carry.x=' + open.carry.map(c => c.x.toFixed(0)) + ' prim.right=' + open.prim[0].r.toFixed(0));
 // --- crafting + the border
+t('a real click on a bar cell picks the stack up', click.before !== 'null' && click.slot === 'null',
+  'before=' + click.before + ' after=' + click.slot + ' at=' + click.x.toFixed(0) + ',' + click.y.toFixed(0) +
+  ' hit=' + click.hit + ' uiZ=' + click.uiZ + ' body=' + click.cls);
 t('no border around the inventory', open.panelBorder === '0px', 'border=' + open.panelBorder);
 t('crafting is a button in the top right', open.craftbtn.x > open.vw * 0.7 && open.craftbtn.y < open.vh * 0.2,
   'btn=' + open.craftbtn.x.toFixed(0) + ',' + open.craftbtn.y.toFixed(0));

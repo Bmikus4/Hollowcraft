@@ -287,6 +287,35 @@ def panel_mask(sub):
     return out
 
 
+# --- the 1080p pass ---------------------------------------------------------
+# THE SHEET IS 1536x1024 AND THAT IS ALL THERE IS. A menu button's frame is cut from a 58px cell and then stretched
+# across 618px of a 1080p screen, so the browser is inventing nine pixels out of every ten and the result is the mush
+# Ben means by "redo/1080p the menu button backgrounds".
+#
+# There is no higher-resolution source to re-cut, so the resolution is MADE here, once, at bake time rather than by the
+# browser on every paint: Lanczos to 4x, then an unsharp mask, then the alpha is re-hardened. That last step is the one
+# that matters. Lanczos leaves a soft ramp across the chamfered edge, and a soft ALPHA edge is what reads as a blurred
+# frame; a curve that pushes alpha away from the middle and towards 0/255 gives the edge back without touching colour,
+# which is what a hand-drawn pixel edge would have looked like at this size. The border-image SLICE numbers in the CSS
+# are source pixels, so anything pointed at an @4x file needs its slice multiplied by 4 and its /width left alone.
+UPSCALE = {
+    'hcell': 4, 'hcell_white': 4, 'hcell_sel': 4,   # every menu button, in its three states
+    'frame_main': 4,                                # the pause card, the menu panels, the modals
+    'tex_grit': 4, 'tex_soot': 4,                   # the plates behind both, drawn at 150/240px from ~80px tiles
+}
+
+
+def upscale(img, k):
+    im = img.convert('RGBA').resize((img.width * k, img.height * k), Image.LANCZOS)
+    im = im.filter(ImageFilter.UnsharpMask(radius=k * 0.9, percent=118, threshold=2))
+    a = np.asarray(im.split()[3], dtype=np.float32) / 255.0
+    # A smoothstep-style S-curve on alpha only: 0.5 stays 0.5, everything else is pushed to the edge it is nearer.
+    a = np.clip(a * a * (3.0 - 2.0 * a), 0.0, 1.0)
+    a = np.clip(a * a * (3.0 - 2.0 * a), 0.0, 1.0)
+    im.putalpha(Image.fromarray((a * 255.0 + 0.5).astype(np.uint8), 'L'))
+    return im
+
+
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     if not os.path.exists(PACK):
@@ -308,6 +337,12 @@ def main():
         img.save(os.path.join(OUT_DIR, name + '.png'))
         manifest[name] = {'w': img.width, 'h': img.height, 'mode': mode,
                           'rect': [x, y, w, h]}
+        if name in UPSCALE:
+            big = upscale(img, UPSCALE[name])
+            big.save(os.path.join(OUT_DIR, '%s@%dx.png' % (name, UPSCALE[name])))
+            manifest['%s@%dx' % (name, UPSCALE[name])] = {
+                'w': big.width, 'h': big.height, 'mode': mode + '+up',
+                'rect': [x, y, w, h], 'of': name}
 
     for out_name, src_name in COPIES.items():
         p = os.path.join(SRC_DIR, src_name)
