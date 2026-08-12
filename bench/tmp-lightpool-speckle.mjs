@@ -39,9 +39,19 @@ function stat(file,c){
       for(let dy=-2;dy<=2&&!bright;dy++) for(let dx=-2;dx<=2;dx++){ if(!dx&&!dy) continue; const xx=x+dx,yy=y+dy;
         if(xx<x0||xx>=x1||yy<y0||yy>=y1) continue; if(L(xx,yy)>18){ bright=true; break; } }
       if(bright) iso++; } }
+  // texSD: mean per-tile luminance standard deviation over 8x8 tiles. This is the ONLY metric here that answers
+  // "is the texture visible", which is a different question from "is it dark" - Ben, 08-12: "in dark areas textures
+  // still dont show up at all". A dim surface carrying its grain and a dim surface flattened to one value have the
+  // same median and the same black share; they differ here and nowhere else.
+  let sdSum=0, tiles=0;
+  for(let ty=y0; ty+8<=y1; ty+=8) for(let tx=x0; tx+8<=x1; tx+=8){
+    let s1=0,s2=0;
+    for(let y=ty;y<ty+8;y++) for(let x=tx;x<tx+8;x++){ const l=L(x,y); s1+=l; s2+=l*l; }
+    const m=s1/64; sdSum+=Math.sqrt(Math.max(0,s2/64-m*m)); tiles++;
+  }
   v.sort((a,b)=>a-b);
   const q=f=>+v[Math.min(v.length-1,(v.length*f)|0)].toFixed(1);
-  return { med:q(0.5), p10:q(0.10), p90:q(0.90),
+  return { med:q(0.5), p10:q(0.10), p90:q(0.90), texSD:+(sdSum/Math.max(1,tiles)).toFixed(3),
            pureBlack:+(100*pure/n).toFixed(3), isoBlack:+(100*iso/n).toFixed(3), litShare:+(100*lit/n).toFixed(1) };
 }
 const CROP=[0.22,0.78,0.20,0.78];
@@ -104,7 +114,7 @@ const KS=(process.argv[2]||'0.030/0').split(',').map(s=>{ const p=s.split('/'); 
       const tag=`k${String(k).replace('.','_')}-d${String(disp).replace('.','_')}`;
       const f=path.join(OUT,`pool-${tag}.png`); await page.screenshot({path:f});
       const r=stat(f,CROP);
-      console.log(`    k ${String(k).padEnd(6)} disp ${String(disp).padEnd(8)} med ${String(r.med).padEnd(6)} p10 ${String(r.p10).padEnd(6)} p90 ${String(r.p90).padEnd(6)} pureBlack ${String(r.pureBlack).padEnd(7)}% isoBlack ${String(r.isoBlack).padEnd(7)}% lit ${r.litShare}%`);
+      console.log(`    k ${String(k).padEnd(6)} disp ${String(disp).padEnd(8)} med ${String(r.med).padEnd(6)} p10 ${String(r.p10).padEnd(6)} p90 ${String(r.p90).padEnd(6)} texSD ${String(r.texSD).padEnd(7)} pureBlack ${String(r.pureBlack).padEnd(7)}% isoBlack ${String(r.isoBlack).padEnd(7)}% lit ${r.litShare}%`);
     }
   } finally { try{ if(browser) await browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }
 })().catch(e=>{ console.error(e); process.exit(1); });

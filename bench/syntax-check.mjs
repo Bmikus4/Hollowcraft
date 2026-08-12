@@ -4,7 +4,14 @@
 // it tries to import three and dies on module resolution.
 import fs from 'node:fs'; import path from 'node:path'; import vm from 'node:vm';
 const ROOT=path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/,'$1')),'..');
-const html=fs.readFileSync(path.join(ROOT,'index.html'),'utf8');
+const raw=fs.readFileSync(path.join(ROOT,'index.html'),'utf8');
+// HTML COMMENTS ARE BLANKED FIRST, KEEPING THE LINE COUNT, and this is not tidying. On 08-12 a comment
+// explaining the new UI-scale block contained the words "a classic <script>, not the module" - so the scan
+// matched that literal <script> inside the comment, swallowed the comment's own prose as the script body,
+// and reported "Unexpected token ','" against a file that was perfectly valid. A guard that cries wolf gets
+// ignored, and this one is the last thing standing between a shared checkout and a build that does not run.
+// Newlines are preserved so the reported line number still points at the real script.
+const html=raw.replace(/<!--[\s\S]*?-->/g, c => c.replace(/[^\n]/g,' '));
 const re=/<script\b([^>]*)>([\s\S]*?)<\/script>/gi;
 let m, n=0, bad=0;
 while((m=re.exec(html))){
