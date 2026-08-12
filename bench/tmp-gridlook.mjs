@@ -16,11 +16,11 @@ try{
   await p.click('#mb-solo');
   for(let i=0;i<90;i++){ if(await p.evaluate(()=>window.__hc.loadState().circleDone)) break; await sleep(500); }
   await sleep(2500);
-  await p.evaluate(()=>window.__hc.gridFill(['ar15','stim_syringe','rifle_ammo','cobble','revolver','wooden_spear','iron_helmet']));
+  await p.evaluate(()=>window.__hc.gridFillPacked(['ar15','stim_syringe','rifle_ammo','cobble','revolver','wooden_spear','iron_helmet']));
   await p.evaluate(()=>window.__hc.openInv()); await sleep(1500);
   console.log(JSON.stringify(await p.evaluate(()=>[...document.querySelectorAll('#griditems .gitem')].map(t=>{
     const im=t.querySelector('.gimg').style.backgroundImage; return {id:t._st.id, len:im.length, kind:im.slice(0,26)}; })),null,1));
-  const b=await p.evaluate(()=>{ const r=document.getElementById('gridinv').getBoundingClientRect(); return {x:r.x,y:r.y,w:r.width,h:r.height}; });
-  await p.screenshot({path:path.join(OUT,'grid-crop.png'),clip:{x:b.x-6,y:b.y-6,width:b.w+12,height:b.h+12}});
+  const b=await p.evaluate(()=>{ const r=document.querySelector('#invui>.panel').getBoundingClientRect(); return {x:r.x,y:r.y,w:r.width,h:r.height}; });
+  await p.screenshot({path:path.join(OUT,'grid-crop.png'),clip:{x:Math.max(0,b.x-10),y:Math.max(0,b.y-10),width:b.w+20,height:b.h+20}});
   await br.close();
 } finally { try{ server.kill(); }catch(e){} }
