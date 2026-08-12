@@ -124,10 +124,16 @@ function planarUV(geo, repeat){
   const sz = new THREE.Vector3(); b.getSize(sz);
   const ax = [0, 1, 2].sort((a, c) => sz.getComponent(c) - sz.getComponent(a)), u = ax[0], v = ax[1];
   const su = repeat / Math.max(1e-4, sz.getComponent(u)), sv = repeat / Math.max(1e-4, sz.getComponent(v));
+  // getComponent TAKES TWO ARGUMENTS: (vertexIndex, component). Called as getComponent(i*3+u) — treating it as a
+  // flat-array index, which is what the underlying array wants — the component is undefined, three reads
+  // array[index*itemSize + undefined], and every u and v came out NaN. A NaN UV samples nothing, so the map
+  // contributed one flat colour and the gun looked painted. That is the whole of Ben 08-12 "why guns are loading
+  // without textures": the maps were attached, the UVs were not numbers. Nothing about this is visible from the
+  // material — __hc.viewMaps() reports a correct 512x512 albedo on every mesh either way.
   const uv = new Float32Array(p.count * 2);
   for (let i = 0; i < p.count; i++){
-    uv[i * 2]     = (p.getComponent(i * 3 + u) - b.min.getComponent(u)) * su;
-    uv[i * 2 + 1] = (p.getComponent(i * 3 + v) - b.min.getComponent(v)) * sv;
+    uv[i * 2]     = (p.getComponent(i, u) - b.min.getComponent(u)) * su;
+    uv[i * 2 + 1] = (p.getComponent(i, v) - b.min.getComponent(v)) * sv;
   }
   geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
 }
