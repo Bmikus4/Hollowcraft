@@ -79,9 +79,38 @@ node bench/tmp-texel-day.mjs "0.030/0,0.030/0/__hc.waterNan(1)"
 The seawall reproduces at pure black 1.579% with isolated black 1.579% - i.e. EVERY black pixel
 has a lit neighbour, which is the NaN signature and not an unlit surface. Confirmed again on 08-12.
 
-### What the run means
+### THE RUN HAPPENED, 2026-08-12. BOTH FORKS ARE CLOSED AND THE ITEM IS SHUT.
 
-### The next step, which is one bench run
+Ben, looking at the game on 08-12: **"it actually looks like its gone now"**, and: **"that stuff is caused by
+the kelp in the water."** The item is closed on his word. What the runs established, so nobody reopens it:
+
+- **It is not a NaN.** Mode 1 is bit-identical to baseline. The detector was worthless until it had a
+  positive control, which is the transferable lesson here: **a detector that reports nothing cannot be
+  told apart from a detector that never ran.** `__hc.waterNan(2)` paints every water fragment and moves the
+  crop med 58.7 -> 144.5. Only once that fired did the mode-1 zero mean anything.
+- **It is not the grade.** `grade('shipped')` reads 4.539%, identical to nordic to three decimals. The
+  second fork branch above — "the GRADE is crushing it" — is measured false, do not re-run it.
+- **The isolation signature was an artifact of the crop.** "Every black pixel has a lit neighbour" drove
+  this entire investigation toward NaN. The crop is a thin horizon strip full of sun glitter, so a bright
+  neighbour within two pixels is near-guaranteed. It was never evidence.
+- **Mode 2 does not prove the black pixels ARE water.** It overdraws whatever is seen THROUGH the surface,
+  which is exactly where kelp lives. This session read it as proof and was wrong; Ben's pointer is what
+  corrected it. Kelp is derived into the foliage mesh, alpha-tested, and sub-pixel at the render wall.
+- Numbers, one interleaved run, baseline repeated first and last at **4.539% with zero spread**: reflection
+  branch 73% (-> 1.235 at `waterRefl amt:0`), far-sea disc 8% (-> 4.168), wave normal 20%
+  (-> 3.633 at `normFade(60)`).
+- **Cross-run baselines are NOT comparable.** The same build measured 0.948%, 4.333% and 4.539% on three
+  runs while being bit-stable within each. Every earlier number in this file is cross-run, including the
+  1.584 -> 0.885 that made the far-sea disc look like half the fault. It is 8%.
+
+Left in the source, all shipping OFF, carried into `0520df2` (the other session's commit — the shared
+checkout swept them up mid-session, which is the norm, not an accident):
+`__hc.waterNan(0-6)` (2 = paint all, 3/4/5 = bisect probes, 6 = threshold sweep against `__hc.dbgT`),
+`__hc.normFade(blocks)` (fades the wave normal to geometric with distance — a real 20% of the band and an
+honest mip-map for a procedural normal, but it also thins the sun track Ben asked to keep at distance, so
+it is a dial and not a decision), and `__hc.folOn(false)` (hides every chunk's foliage mesh; the kelp test).
+
+### The next step, which is one bench run (SUPERSEDED — see the section above; kept only so the reasoning it forked on is legible)
 
 Put a **non-finite / negative detector** on the FINAL water fragment colour:
 

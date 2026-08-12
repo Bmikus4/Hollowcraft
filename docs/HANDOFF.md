@@ -36,7 +36,7 @@ fault that has already cost a session.
 | # | task | read when you start it | state |
 |---|---|---|---|
 | 1 | **Black texels / "textures don't show in dark areas"** | `docs/handoff/02-black-texels.md` | **START HERE.** Fix measured, shipped OFF, needs the guard run. |
-| 2 | Water: the black band on the far water | `docs/handoff/03-water.md` | Detector built and NOT YET RUN — one bench run forks it. |
+| 2 | Water: the black band on the far water | `docs/handoff/03-water.md` | CLOSED 08-12 on Ben: "it actually looks like its gone now". Not NaN, not the grade — kelp. |
 | 3 | Water: the actual rebuild | `docs/ONE-LIGHT-WATER-HORIZON-PLAN.md` §2 | Not started. Ben's biggest open ask. |
 | 4 | One lighting model, steps 2-5 | `docs/handoff/04-lighting.md` | Step 1 SHIPPED ON. Step 2 reverted, read before retrying. |
 | 5 | Horizon, fog + DoF | `docs/ONE-LIGHT-WATER-HORIZON-PLAN.md` §3-4 | Not started. |
