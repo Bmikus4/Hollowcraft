@@ -154,6 +154,12 @@ export function giantessBuild(scale){
     // rather than transparent: 12 nested transparent meshes on one body sort against each other
     // every frame and flicker, and nothing here needs partial opacity.
     mat.alphaTest = 0.5; mat.transparent = false;
+    // SHE CASTS FROM HER FRONT FACES (Ben 08-12: "weird dark shadows at night"). Her shells are double-sided, and
+    // three then defaults shadowSide to BackSide — so the surface that casts her shadow is the one BEHIND the
+    // surface being lit, half a limb further from the light. At a human's size that error is under a pixel of the
+    // shadow map; at 13.5 blocks it is bands of self-shadow crawling up her arms and legs, which is what the
+    // "weird dark shadows" are. The depth the light should see is her FRONT.
+    mat.shadowSide = THREE.FrontSide;
     const sm = new THREE.SkinnedMesh(geo, mat);
     sm.name = m.name;
     sm.castShadow = true; sm.receiveShadow = true;
