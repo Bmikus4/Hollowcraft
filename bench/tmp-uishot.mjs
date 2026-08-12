@@ -31,6 +31,13 @@ function findBrowser(){ for(const p of ['C:\\Program Files\\Google\\Chrome\\Appl
     await page.goto(base+'/index.html',{waitUntil:'load'});
     await sleep(3500);
     await page.screenshot({path:path.join(OUT,'ui-menu.png')});
+    // The hover must not resize the button: measure it cold, hover it, measure again.
+    const cold=await page.evaluate(()=>{const r=document.getElementById('mb-solo').getBoundingClientRect();return {w:+r.width.toFixed(1),h:+r.height.toFixed(1)};});
+    await page.hover('#mb-solo'); await sleep(500);
+    const hot=await page.evaluate(()=>{const r=document.getElementById('mb-solo').getBoundingClientRect();return {w:+r.width.toFixed(1),h:+r.height.toFixed(1)};});
+    console.log('hover size', JSON.stringify({cold,hot,same:cold.w===hot.w&&cold.h===hot.h}));
+    await page.screenshot({path:path.join(OUT,'ui-menu-hover.png'),clip:{x:440,y:250,width:420,height:300}});
+    await page.mouse.move(10,10); await sleep(300);
     await page.click('#mb-settings'); await sleep(600);
     await page.screenshot({path:path.join(OUT,'ui-settings.png')});
     await page.evaluate(()=>document.querySelector('#set-panel [data-back]').click()); await sleep(400);
