@@ -46,6 +46,8 @@ const MAP = {
   'Scope.glb':                        'guns/scope',
   'Bipod.glb':                        'guns/bipod',
   'Foregrip by Pichuliru - yGxkn9quFx.glb': 'attachments/foregrip',
+  // Ben's two survival bags, one file, two meshes. The 512px rewrite is imported and the original is not: see SKIP.
+  'bag-512.glb':                      'misc/bag',
   'Tripod.glb':                       'guns/tripod',
   'Bayonet.glb':                      'guns/bayonet',
   // --- attachments (Ben's second drop) ---
@@ -157,7 +159,17 @@ if (fs.existsSync(SRC_ATT)) for (const f of fs.readdirSync(SRC_ATT).filter(f => 
   fs.copyFileSync(path.join(SRC_ATT, f), path.join(TMP, f));
 for (const f of SRC_LOOSE) if (fs.existsSync(f)) fs.copyFileSync(f, path.join(TMP, path.basename(f)));
 
-const pool = fs.readdirSync(TMP).filter(f => f.toLowerCase().endsWith('.glb'));
+// DELIBERATELY NOT IMPORTED, and named here rather than silently skipped, because an unmapped file is an error and
+// "why is this one missing" must have an answer in the file that decides it.
+const SKIP = {
+  'bag.glb': 'superseded by bag-512.glb — the original carries an 11.34 MB PNG atlas for 1298 triangles, which is '
+           + 'nearly three times the entire rest of the pack, and the pack is awaited before the game draws '
+           + '(tools/models/shrink-glb-texture.mjs made the 512px copy)',
+  // Not an item and not this importer's business: it belongs to src/entity/giantess, which loads it itself and
+  // deliberately outside the pack's preload because it is eight megabytes.
+  'Anime+Girl+Kawaii.glb': 'an entity model owned by src/entity/giantess, not part of the item pack',
+};
+const pool = fs.readdirSync(TMP).filter(f => f.toLowerCase().endsWith('.glb') && !SKIP[f]);
 const unmapped = pool.filter(f => !MAP[f]);
 if (unmapped.length) { console.error('UNSORTED:', unmapped); process.exit(1); }
 
