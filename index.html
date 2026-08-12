@@ -5486,6 +5486,18 @@ const _uHorizonBlend={value:new THREE.Color(0.10,0.14,0.20)};
 // The night target for real foliage: the SAME colour the horizon pine backdrop fades to, so the wood and the treeline
 // behind it sink into darkness together instead of at two different rates. Driven per frame in updateSky.
 const _uFolNight={ value:new THREE.Color(0.006,0.008,0.014) };
+// ---- THE NIGHT SKY IS A LIGHT ON A CANOPY (Ben 08-12: "leaves arent rendering at night") ----
+// Measured at the canopy vantage with the clock pinned: a leaf under open sky reads luminance 2 of 255 at midnight
+// while the sky behind it reads 73, so a wood is a hole cut out of a visible sky — which is what "not rendering" looks
+// like. And it is not the night fade term: with that term compiled out (?nofolnight=1) the canopy measures 2 as well,
+// on both a clear night and in a bank. The leaves simply have no light at night. Every other night term was removed on
+// purpose (the 0.20 albedo floor on 08-11, "foliage doesnt listen to darkness properly") and none of them should come
+// back, because they lit foliage with no reference to the sky at all.
+// This one does: it is the fade target — the night air's own colour — added back in proportion to the face's OWN sky
+// exposure (vSky), so a canopy top under the open sky catches the sky and a leaf walled inside a trunk cluster or under
+// a rock overhang stays exactly as black as it is now. Gated on (1-uDay), so daylight is bit-identical.
+// __hc.folAmb(n) is the dial; 0 is the pre-dial build.
+const _uFolAmb={ value:0.12 };
 // ?nofolnight=1 compiles the foliage shaders WITHOUT the night term, so bench/assert-foliage-night.mjs can prove itself
 // capable of failing against this build. A check that has only ever run on working code is not evidence.
 const _NO_FOL_NIGHT = Q.get('nofolnight')!=null;
@@ -5522,7 +5534,7 @@ function injectAtlas(mat, opts={}){
     sh.uniforms.uAtlas = { value: arrayTex };
     sh.uniforms.uLight3D = { value: _emptyLight3D };   // per-chunk block-light volume — a per-chunk material clone overrides this at compile (see _chunkMat)
     if(globalU.uWhiteTile.value<0 && typeof TILEIDX!=='undefined' && TILEIDX.vantawhite!=null) globalU.uWhiteTile.value=TILEIDX.vantawhite;   // latch the real tile index the first time it's known
-    if(opts.nightFoliage && !_NO_FOL_NIGHT){ sh.uniforms.uDayF = globalU.uDay; sh.uniforms.uFolNight = _uFolNight; }   // SHARED refs, so per-chunk material clones all track the same live value
+    if(opts.nightFoliage && !_NO_FOL_NIGHT){ sh.uniforms.uDayF = globalU.uDay; sh.uniforms.uFolNight = _uFolNight; sh.uniforms.uFolAmb = _uFolAmb; }   // SHARED refs, so per-chunk material clones all track the same live value
     if(opts.leafTrans) sh.uniforms.uFolTrans = _uFolTrans;   // SHARED ref, so __hc.folTrans moves every per-chunk clone at once
     // SHARED refs, same reason as uWhiteTile: the A/B flag has to move every chunk clone at once or half the world keeps its
     // cloud shadows and the measurement is of nothing.
@@ -5590,14 +5602,14 @@ function injectAtlas(mat, opts={}){
       // is genuinely distance-weighted rather than a flat tint: near leaves are untouched, far ones sink to the same
       // target the horizon pines use. fogFactor is still in scope after <fog_fragment> because three declares it inside
       // main(), so this needs no second depth computation of its own.
-      .replace('uniform float uWhiteTile;', 'uniform float uWhiteTile;'+(opts.nightFoliage?'\nuniform float uDayF;\nuniform vec3 uFolNight;':''))
+      .replace('uniform float uWhiteTile;', 'uniform float uWhiteTile;'+(opts.nightFoliage?'\nuniform float uDayF;\nuniform vec3 uFolNight;\nuniform float uFolAmb;':''))
       .replace('#include <fog_fragment>', '#include <fog_fragment>'+((opts.nightFoliage&&!_NO_FOL_NIGHT)?
         // 0.94 -> 0.72 (Ben 08-12: "leaves arent rendering at night... its because of the fog"). At 0.94 a leaf standing
         // in fog at night is 94% the fade target and 6% itself, so the canopy stops being foliage and becomes a flat
         // silhouette of whatever colour the target is. 0.72 leaves better than a quarter of the leaf's own lit colour at
         // every distance, so a fogged night wood still reads as leaves. Daylight is untouched: the term is gated on
         // (1-uDayF) and is exactly zero at noon.
-        '\n{ float _nt=1.0-uDayF; gl_FragColor.rgb=mix(gl_FragColor.rgb, uFolNight, clamp(fogFactor*_nt*0.72,0.0,1.0)); }':''))
+        '\n{ float _nt=1.0-uDayF; gl_FragColor.rgb=mix(gl_FragColor.rgb, uFolNight, clamp(fogFactor*_nt*0.72,0.0,1.0));\n  gl_FragColor.rgb += uFolNight*uFolAmb*_nt*clamp(vSky,0.0,1.0); }':''))
       // THE SHADED SIDE OF A LEAF IS STILL GREEN (Ben 08-05: "make the un-lit side of foliage look not solid black"). These quads
       // are DoubleSide, so one of every crossed pair faces away from the sun; with N·L negative that face keeps only ambient and
       // goes to black, and a blade of grass turns into a black slit. Real foliage does not do this because it is thin enough to
@@ -20066,7 +20078,7 @@ function icon3DURL(id){ if(_icon3D[id])return _icon3D[id];
     _iconScene.add(new THREE.AmbientLight(0xffffff,0.85)); const dl=new THREE.DirectionalLight(0xffffff,0.9); dl.position.set(1.2,2,1.4); _iconScene.add(dl);
     _iconCanvas=document.createElement('canvas'); _iconCanvas.width=_iconCanvas.height=100; _iconCtx=_iconCanvas.getContext('2d'); _iconPix=new Uint8Array(40000); }
   const _t0=performance.now();
-  const m=ICON_MODEL[id]?ICON_MODEL[id]():itemModel(id); let box=new THREE.Box3().setFromObject(m), sz=box.getSize(new THREE.Vector3());
+  const m=ICON_MODEL[id]?ICON_MODEL[id]():itemModel(id); let box=_visBox(m), sz=box.getSize(new THREE.Vector3());
   // A LONG THIN ITEM IS LAID DIAGONALLY, which is how every game draws a rifle or a rocket in a square slot. The bake fits the
   // LONGEST axis into the frame, so an item's other two axes get whatever is left: the ICBM is 4.5:1, so it came out as a nine-pixel
   // sliver in a hundred-pixel icon and read as a dark smudge at hotbar size. Rotating it onto the square's diagonal buys the
@@ -20133,6 +20145,19 @@ function _sideInit(){ if(_sideScene) return;
   const fill=new THREE.DirectionalLight(0x9fb4d0,0.42); fill.position.set(1.6,-0.4,1.1); _sideScene.add(fill);
   _sideCam=new THREE.OrthographicCamera(-1,1,1,-1,0.01,40); _sideCam.position.set(0,0,10); _sideCam.lookAt(0,0,0);
   _sideCanvas=document.createElement('canvas'); _sideCtx=_sideCanvas.getContext('2d'); }
+// THE BOX MUST IGNORE WHAT IS NOT DRAWN (Ben 2026-08-12: the AR-15's tile "bakes to a thin vertical bar"). Box3's own
+// setFromObject counts INVISIBLE objects, and every gun carries a hidden muzzle-flash quad — 0.44 x 0.44 x 0 on the AR,
+// 0.30 x 0.30 on the revolver. So the bake framed a square whose width was a flash sprite, and the rifle inside it came
+// out a stripe. Measured with __hc.iconBox: the AR's box was [0.44,0.44,0.80] around a gun 0.06 wide.
+function _visBox(root){ const b=new THREE.Box3(); const _t=new THREE.Box3();
+  root.updateMatrixWorld(true);
+  root.traverse(o=>{ if(!o.visible) return;                       // and a hidden PARENT takes its children with it
+    for(let p=o.parent; p; p=p.parent) if(!p.visible) return;
+    if(!o.isMesh && !o.isPoints && !o.isLine) return;             // sprites are excluded on purpose: a flash is not the object
+    if(!o.geometry) return;
+    if(!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+    _t.copy(o.geometry.boundingBox).applyMatrix4(o.matrixWorld); b.union(_t); });
+  return b.isEmpty()? new THREE.Box3().setFromObject(root) : b; }   // nothing visible at all → fall back rather than bake an empty frame
 function iconSideURL(id){ if(_iconSide[id]) return _iconSide[id];
   if(typeof renderer==='undefined'||!renderer) return '';
   _sideInit();
@@ -20143,14 +20168,14 @@ function iconSideURL(id){ if(_iconSide[id]) return _iconSide[id];
   let m; try{ m=(typeof ICON_MODEL!=='undefined'&&ICON_MODEL[id])?ICON_MODEL[id]():itemModel(id); }catch(e){ return ''; }
   if(!m) return '';
   const g=new THREE.Group(); g.add(m); g.updateMatrixWorld(true);
-  let box=new THREE.Box3().setFromObject(g), sz=box.getSize(new THREE.Vector3());
+  let box=_visBox(g), sz=box.getSize(new THREE.Vector3());
   const e=[sz.x,sz.y,sz.z], ord=[0,1,2].sort((a,b)=>e[b]-e[a]);   // long, mid, short
   const col=[null,null,null], X=new THREE.Vector3(1,0,0), Y=new THREE.Vector3(0,1,0), Z=new THREE.Vector3(0,0,1);
   col[ord[1]]=X; col[ord[0]]=Y; col[ord[2]]=Z;
   let M=new THREE.Matrix4().makeBasis(col[0],col[1],col[2]);
   if(M.determinant()<0){ col[ord[2]]=new THREE.Vector3(0,0,-1); M=new THREE.Matrix4().makeBasis(col[0],col[1],col[2]); }
   g.applyMatrix4(M); g.updateMatrixWorld(true);
-  box=new THREE.Box3().setFromObject(g); sz=box.getSize(new THREE.Vector3());
+  box=_visBox(g); sz=box.getSize(new THREE.Vector3());
   // FRAME IN CELL UNITS, so the picture and the cells it lies in are the same shape and nothing is stretched. 0.86 of
   // the cell leaves a hair of air on every side — an icon that touches its own border reads as clipped.
   const sc=Math.min((cw*0.86)/(sz.x||1e-4), (ch*0.86)/(sz.y||1e-4));
@@ -35087,6 +35112,15 @@ window.__hc={
                splatMapped:!!t, markMapped:!!(_markBlood&&_markBlood.im.material.map),
                markTint:'#'+(_markBlood?_markBlood.base.toString(16).padStart(6,'0'):'?'),
                brMapped:(typeof _brGoreMat==='object'&&_brGoreMat)?!!_brGoreMat.blood.map:null }; }catch(e){ return {err:String(e.message||e)}; } },
+  // IS SHE ACTUALLY ON THE GROUND WHEN SHE IS DEAD? The gap between her lowest posed VERTEX and the floor she was
+  // rested on. Bones cannot answer this — they sit inside the flesh — which is why the float kept coming back.
+  girlFloat(){ try{ if(!GIRL.rig) return {err:'no rig'};
+      let min=Infinity; const p=new THREE.Vector3();
+      for(const m of (GIRL.rig.meshes||[])){ if(!m.isSkinnedMesh||!m.visible) continue;
+        const pos=m.geometry.attributes.position;
+        for(let i=0;i<pos.count;i+=31){ m.applyBoneTransform(i,p.fromBufferAttribute(pos,i)); m.localToWorld(p); if(p.y<min)min=p.y; } }
+      const gy=(GIRL.deadY!=null&&(GIRL.state==='die'||GIRL.state==='dead'))?GIRL.deadY:groundYAt(GIRL.x,GIRL.z);
+      return { state:GIRL.state, gap:+(min-gy).toFixed(3), ground:+gy.toFixed(2) }; }catch(e){ return {err:String(e.message||e)}; } },
   // IS THE WOUND ON HER SKIN? "The blood holes are not on her actual body" (Ben 08-12) is invisible to every existing
   // probe, because a decal parented to a bone is always in the right PLACE in the graph whether or not it is on the
   // surface. So this measures it: from each wound, step out along its own facing and cast back in — a decal lying on
@@ -38470,6 +38504,17 @@ window.__hc={
       return { dist:d, hp:wretch.hp, wx:+wx.toFixed(2), wz:+wz.toFixed(2), wy:+wretch.pos.y.toFixed(2),
                px:+player.pos.x.toFixed(2), pz:+player.pos.z.toFixed(2), eye:+(player.pos.y+EYE).toFixed(2), pitch:+player.pitch.toFixed(3) }; }
     catch(e){ return {err:String(e.message||e)}; } },
+  // QA: what the ICON BAKE frames. The bake fits the item's own bounding box, so an icon that comes out a thin bar is a
+  // box inflated by something invisible — a flash sprite, a light's helper, a zero-alpha plane. This reports the box and
+  // the widest few children, which is what says WHICH part did it.
+  iconBox(ids){ try{ return (ids||['ar15']).map(id=>{ const m=itemModel(id);
+      const bb=new THREE.Box3().setFromObject(m), sz=bb.getSize(new THREE.Vector3());
+      const parts=[]; m.traverse(o=>{ if(!o.isMesh&&!o.isSprite&&!o.isPoints) return;
+        const b2=new THREE.Box3().setFromObject(o), s2=b2.getSize(new THREE.Vector3());
+        parts.push({n:(o.name||o.type)+(o.visible?'':' (hidden)'), w:+s2.x.toFixed(3), h:+s2.y.toFixed(3), d:+s2.z.toFixed(3)}); });
+      parts.sort((a,b)=>Math.max(b.w,b.h,b.d)-Math.max(a.w,a.h,a.d));
+      return { id, box:[+sz.x.toFixed(3),+sz.y.toFixed(3),+sz.z.toFixed(3)], parts:parts.slice(0,4) }; });
+    }catch(e){ return {err:String(e.message||e)}; } },
   wretchHp(){ try{ return wretch.hp==null?null:wretch.hp; }catch(e){ return null; } },
   // QA/bench: WHERE THE SUN IS, and the camera angles that face it. Three attempts to photograph the water's sunglade
   // failed because nothing exposed this: the harness could find open water and pin the clock, but aiming at the sun was
@@ -38778,6 +38823,8 @@ window.__hc={
   // once the night term has been applied on top of three's own fog. If those two disagree the treeline and the wood in
   // front of it sink at different rates, which is the artefact. A near/far brightness comparison CANNOT see this — it
   // measures fog density, and passed identically with the fix compiled out.
+  // QA/bench: the night SKY-AMBIENT on foliage (see _uFolAmb). 0 is the pre-dial build — leaves with no light at night.
+  folAmb(v){ try{ if(v!=null) _uFolAmb.value=+v; return +_uFolAmb.value.toFixed(3); }catch(e){ return String(e.message||e); } },
   fadeTargets(){ try{ const L=(c)=>c.r*0.2126+c.g*0.7152+c.b*0.0722;
     const on=!_NO_FOL_NIGHT, k=on?0.94:0.0, nt=1-globalU.uDay.value, m=Math.min(1,Math.max(0,k*nt));
     const eff=new THREE.Color(scene.fog.color.r+(_uFolNight.value.r-scene.fog.color.r)*m,
