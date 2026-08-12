@@ -706,7 +706,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { seraphOn, seraphOff, seraphAnimate, seraphShowBeam, seraphHideBeam, seraphBeamGold, seraphMiniBeam, seraphHideMiniBeam, seraphHideMiniBeams, seraphBloom, seraphEyeSpheres, seraphWingSpheres, seraphFold, seraphWoundEye, seraphHealEyes, seraphFreshEyes, seraphEyeClose, seraphEyesReset, seraphBodyBox, buildSeraphStoneProto, seraphCorpseMode, prewarm as seraphPrewarm } from './src/boss/seraphim/adapter.js';
 import { driftInit, driftAttach, driftDetach, driftStep, driftFlush, driftTune, driftTintLock, driftState, driftHas, driftProbe, driftFraming, driftHostWorld } from './src/entity/drift/index.js';
 import { loadModels as glbLoad, build as glbBuild, hasModel as glbHas, modelBox as glbBox } from './src/models/glb.js';
-import { giantessLoad, giantessLoaded, giantessBuild, giantessWalk, giantessStomp, giantessIdle, giantessBonePos, giantessProbe, giantessStep, giantessGroundY, STOMP_HIT } from './src/entity/giantess/index.js';
+import { giantessLoad, giantessLoaded, giantessBuild, giantessWalk, giantessStomp, giantessIdle, giantessDie, giantessFlinch, giantessHit, giantessBonePos, giantessProbe, giantessStep, giantessGroundY, STOMP_HIT } from './src/entity/giantess/index.js';
 
 // =====================================================================
 //  THE MODEL PACK IS LOADED BEFORE ANYTHING IS DRAWN — see the big section at buildGlbGun for what it replaces.
@@ -876,6 +876,11 @@ const _scotH = new Float32Array([1.0, 0.02, 0.5, 0.009]);
 // for +1.8 levels of median, while turning the descent off costs +14. 0.016 is too much: it lifts the crop's lit share
 // 47% -> 90%, which is the night itself coming up.
 const _scotK = new Float32Array([0.45, 0, 0.030, 0.008]);
+// THE ZEROED-FRAGMENT LIFT, as a dial, and shared BY REFERENCE the way globalU's uniforms are: one object handed to
+// every lit ShaderLib entry, so writing .value here moves all of them at once. It is a dial rather than a constant
+// because it has to be A/B'd INTERLEAVED - blocked runs on this box drift further than most effects here are wide.
+// 1 = the floor can reach a fragment the scale form cannot, 0 = the shipped behaviour to the bit. __hc.texFloor({zero:n}).
+const _zeroLiftU = { value: 1 };
 // ---- A PROP IN SHADE IS NOT A PROP AT NIGHT (Ben 08-05: the scarecrow near spawn "is completely black") ----
 // (r, g, b, -). The daylight SKY FILL that every non-atlas lit material was missing.
 //
@@ -987,7 +992,7 @@ const HC_LIGHT_GLSL = [
   // which is what makes steps 3 and 4 a call rather than a copy. A material outside three's lit set
   // (water, the viewmodel) prepends HC_LIGHT_GLSL to its own source instead; same text either way.
   /* pre-extraction: HC_LIGHT_GLSL not appended */
-  THREE.ShaderChunk.lights_pars_begin += '\nuniform vec4 uScotG;\nuniform vec4 uScotH;\nuniform vec4 uScotK;\nuniform vec4 uPropFill;\n';
+  THREE.ShaderChunk.lights_pars_begin += '\nuniform vec4 uScotG;\nuniform vec4 uScotH;\nuniform vec4 uScotK;\nuniform vec4 uPropFill;\nuniform float uZeroLift;\n';
   // ATLAS MATERIALS ARE EXCLUDED BY THE SAME DEFINE THE WASH BRANCHES ON, and the exclusion is the whole point: a block
   // already has this term, baked and sky-occluded, so adding a flat one would lift caves and interiors by daylight.
   // diffuseColor-weighted, so a dark prop stays dark and a pale one lifts — a flat add is a fog, not a fill.
@@ -1221,6 +1226,24 @@ const HC_LIGHT_GLSL = [
     '  float _fmin = uScotK.w * _lk;\n'+
     '  float _fl = dot(gl_FragColor.rgb, '+L+');\n'+
     '  if(_fmin > 0.0 && _fl > 1e-7 && _fl < _fmin) gl_FragColor.rgb *= (_fmin/_fl);\n'+
+    // AND THE ZEROED FRAGMENT, which the scale above cannot reach. Scaling is a direction as well as a magnitude, and a
+    // fragment at exactly zero has no direction left in it - so the one case the rule exists to prevent, a lit face
+    // showing a fully black texel, is the one case it skipped. That is not a corner: it is why per-corner sky access
+    // (_SKY_SMOOTH) had to be turned off after shipping, because averaging four cells pulls quad edges down and took
+    // night canopy pure black from 0.889% to 3.145%.
+    // THE DIRECTION COMES FROM THE ALBEDO, which is the only chroma the fragment still has, and diffuseColor is in
+    // scope here in all four lit shaders. Dividing it by its own luminance and multiplying by _fmin lands the result
+    // at exactly _fmin with the TEXTURE's channel ratio - so this desaturates less than the scale form does, not more.
+    // ALL THREE SAFETY PROPERTIES OF THE SCALE SURVIVE, and none of them is weakened:
+    //   · it still cannot light an unlit fragment - the gate is _fmin > 0, i.e. _lk > 0, the same delivered-light ramp
+    //     the cave descent is released by. A sealed room, an unlit cave and open ground under nothing but the moon all
+    //     sit at _lk = 0, take a floor of exactly zero, and are untouched. Ben's black night is preserved by the gate,
+    //     not by the arithmetic, which is the stronger of the two guarantees.
+    //   · it cannot desaturate, because it writes the texture's own ratio rather than a grey vector - the failure that
+    //     made a lantern-lit cave wall grey and produced "lit dark caves dont act as they should".
+    //   · units agree: _fmin is a rendered luminance and albedo/_albL is dimensionless, so the product is a radiance.
+    // A genuinely black TEXTURE is left alone by _albL > 1e-5: black paint under a light is still black.
+    '  else if(uZeroLift > 0.0 && _fmin > 0.0 && _fl <= 1e-7 && _albL > 1e-5) gl_FragColor.rgb = diffuseColor.rgb * (_fmin/_albL) * uZeroLift;\n'+
     '}\n'+
     '#endif\n';
 }
@@ -1228,7 +1251,7 @@ const HC_LIGHT_GLSL = [
 // the 225 call sites; an entry the GLSL never references is dropped by seqWithValue and costs nothing.
 for(const k of ['lambert','phong','standard','physical','toon','dashed','basic','points','sprite']){
   const S=THREE.ShaderLib[k]; if(!S||!S.uniforms) continue;
-  S.uniforms.uScotG={ value:_scotG }; S.uniforms.uScotH={ value:_scotH }; S.uniforms.uScotK={ value:_scotK }; S.uniforms.uPropFill={ value:_propFill };
+  S.uniforms.uScotG={ value:_scotG }; S.uniforms.uScotH={ value:_scotH }; S.uniforms.uScotK={ value:_scotK }; S.uniforms.uPropFill={ value:_propFill }; S.uniforms.uZeroLift=_zeroLiftU;
 }
 
 // =====================================================================
@@ -11005,15 +11028,37 @@ function invRemove(id,n){ for(let i=0;i<INV_N&&n>0;i++){ const s=inv[i]; if(s&&s
 //     gun by its class — and ITEM_SIZE names the exceptions. Three hundred items do not need three hundred entries.
 //  3. ONE ICON RULE, NO PER-ITEM TABLE (see iconSideURL, further down with the other icon bakes).
 const CELL=44;                       // one grid cell, in css px before --uiz
-const GRID_W=8;                      // 8 wide at every tier; a pack adds ROWS, which is how a bag gets deeper
-const GRID_BASE_H=4;                 // 32 cells with nothing on your back
-const PACK_GRID_H={backpack:8, alice_pack:16};   // 64 and 128 (Ben: "32-128 slots, expandable when different backpacks are equipped")
-// A PACK NOBODY LISTED STILL GETS A SIZE. Deriving the fallback from PACK_SLOTS — the table the rest of the game
-// already sizes packs by — means the next pack somebody adds needs no edit here.
-function gridH(){ const p=(typeof armor!=='undefined')?armor[EQ_PACK]:null; if(!p) return GRID_BASE_H;
-  if(PACK_GRID_H[p.id]) return PACK_GRID_H[p.id];
-  const s=(typeof PACK_SLOTS!=='undefined')?PACK_SLOTS[p.id]:0;
-  return s? Math.max(GRID_BASE_H, Math.min(16, GRID_BASE_H+Math.ceil(s/GRID_W))) : GRID_BASE_H; }
+const GRID_W=8;                      // 8 wide always; capacity is a COUNT OF CELLS, and the block wraps at 8
+// CAPACITY IS A SUM OF WHAT YOU ARE WEARING (Ben 08-11: "the player should start with 8 slots, pockets take up 6,
+// hands 2... leggings, chestplate both increase by 4 each. backpack adds 16, but there are 3 tiers of backpack, so
+// the inventory should be increased up to 128 max with the alicepack").
+//   THE HANDS ARE NOT GRID CELLS. They are the two big boxes under the player model, so of the eight slots you start
+// with, six are the block and two are hands. GRID_POCKETS is therefore 6, not 8.
+//   ONE CONTIGUOUS BLOCK, NOT SECTIONS. Adding leggings adds four cells to the same block, which is why capacity is a
+// count and the geometry is derived from it — a per-garment sub-grid would be four containers pretending to be one,
+// and every item that straddled a boundary would need a rule.
+const GRID_POCKETS=6;                // what you have with nothing on
+const GRID_MAX=128;                  // the ceiling, reached by a full kit with the ALICE pack
+const ARMOR_CELLS={1:4, 2:4};        // armour SLOT -> cells: 1 chestplate, 2 leggings (0 helmet and 3 boots add none)
+// Packs by id. The third tier is not in the game yet (Ben: "the new backpack will be added soon") — when it lands it
+// is ONE LINE here, and the fallback below means it already has a size before anybody writes that line.
+const PACK_CELLS={ backpack:16, alice_pack:114 };   // 6 + 4 + 4 + 114 = 128 exactly, for a fully kitted player
+function packCells(id){ if(!id) return 0;
+  if(PACK_CELLS[id]!=null) return PACK_CELLS[id];
+  const s=(typeof PACK_SLOTS!=='undefined')?PACK_SLOTS[id]:0;   // the table the rest of the game already sizes packs by
+  // A PACK THAT IS NOT IN EITHER TABLE STILL CARRIES SOMETHING. Ben's third tier is coming, and a pack that lands
+  // before somebody edits PACK_CELLS should behave like the smallest one rather than like a pocketful of nothing —
+  // a zero here is a bag you can wear that does not open.
+  return Math.max(16, s|0); }
+function gridCapacity(){ let n=GRID_POCKETS;
+  if(typeof armor!=='undefined'){
+    for(const slot in ARMOR_CELLS) if(armor[slot]) n+=ARMOR_CELLS[slot];
+    n+=packCells(armor[EQ_PACK]&&armor[EQ_PACK].id); }
+  return Math.max(GRID_POCKETS, Math.min(GRID_MAX, n)); }
+// Rows the block spans. The LAST ROW IS USUALLY PARTIAL — 6 pockets is one row of six — and the cells that are not
+// there must not be placeable, which is what gridHas is for.
+function gridH(){ return Math.ceil(gridCapacity()/GRID_W); }
+function gridHas(x,y){ return x>=0 && x<GRID_W && y>=0 && (y*GRID_W+x) < gridCapacity(); }
 // A grid entry is a stack that knows where it lies: x,y are its top-left cell and rot is 0 (upright) or 1 (turned right).
 const GRID={items:[]};
 // w x h in cells, UPRIGHT. Ben's own numbers where he gave them (AR-15 2x4, adrenaline 1x2, ammo 1x1); the rest sized
@@ -11065,9 +11110,11 @@ function gridMap(skip){ const H=gridH(), m=new Array(GRID_W*H).fill(null);
   for(const st of GRID.items){ if(st===skip) continue; const [w,h]=stackSize(st);
     for(let y=st.y;y<st.y+h;y++) for(let x=st.x;x<st.x+w;x++){ if(x<GRID_W&&y<H) m[y*GRID_W+x]=st; } }
   return m; }
-function gridFits(x,y,w,h,skip,map){ const H=gridH(); if(x<0||y<0||x+w>GRID_W||y+h>H) return false;
+function gridFits(x,y,w,h,skip,map){ if(x<0||y<0||x+w>GRID_W) return false;
   const m=map||gridMap(skip);
-  for(let yy=y;yy<y+h;yy++) for(let xx=x;xx<x+w;xx++) if(m[yy*GRID_W+xx]) return false;
+  // EVERY cell has to EXIST as well as be empty. The block ends mid-row whenever capacity is not a multiple of eight,
+  // and a rectangle that runs off the end of it is a rectangle half outside the bag.
+  for(let yy=y;yy<y+h;yy++) for(let xx=x;xx<x+w;xx++){ if(!gridHas(xx,yy)) return false; if(m[yy*GRID_W+xx]) return false; }
   return true; }
 // FIRST FIT, ROW BY ROW, UPRIGHT BEFORE TURNED. Row-major so things gather at the top the way a bag fills; upright
 // first so a rifle only lies down when it has to, which is what makes a turned item read as deliberate.
@@ -11077,7 +11124,7 @@ function gridPlace(st){ const H=gridH(), map=gridMap(st);
     for(let y=0;y<=H-h;y++) for(let x=0;x<=GRID_W-w;x++)
       if(gridFits(x,y,w,h,st,map)){ st.x=x; st.y=y; st.rot=rot; return true; } }
   return false; }
-function gridAt(x,y){ const H=gridH(); if(x<0||y<0||x>=GRID_W||y>=H) return null; return gridMap()[y*GRID_W+x]; }
+function gridAt(x,y){ if(!gridHas(x,y)) return null; return gridMap()[y*GRID_W+x]; }
 // Add n of an item: top up open stacks first, then place new ones. Returns what would not fit.
 function gridAdd(id,n,uid,dur){ n=n||1; const max=itMaxG(id);
   if(uid==null) for(const st of GRID.items){ if(st.id===id && st.uid==null && st.n<max){ const t=Math.min(max-st.n,n); st.n+=t; n-=t; if(n<=0) return 0; } }
@@ -11096,8 +11143,11 @@ function gridTake(id,n){ for(let i=GRID.items.length-1;i>=0&&n>0;i--){ const st=
 // rather than leaving it in a cell nothing can reach.
 // Returns how many items were tossed, which is the one outcome a caller may need to tell the player about (and the
 // one number that proves the pack shrinking did not simply delete a stack).
-function gridReflow(){ const H=gridH(), keep=[], spill=[]; let tossed=0;
-  for(const st of GRID.items){ const [w,h]=stackSize(st); if(st.x+w<=GRID_W && st.y+h<=H) keep.push(st); else spill.push(st); }
+function gridReflow(){ const keep=[], spill=[]; let tossed=0;
+  for(const st of GRID.items){ const [w,h]=stackSize(st);
+    let inside=true;
+    for(let y=st.y;y<st.y+h&&inside;y++) for(let x=st.x;x<st.x+w;x++) if(!gridHas(x,y)){ inside=false; break; }
+    (inside?keep:spill).push(st); }
   GRID.items=keep;
   for(const st of spill){ if(gridPlace(st)) GRID.items.push(st);
     else if(typeof tossOne==='function'){ for(let i=0;i<st.n;i++) tossOne(st.id,st.uid); tossed+=st.n; } }
@@ -17696,7 +17746,9 @@ function dropHovered(){ const h=_hoverSlot; if(!h) return false;
   updateCraftOut(); renderInvUI(); return true; }
 function getSlot(src,idx){ return src==='inv'?inv[idx]:src==='craft'?craftGrid[idx]:src==='chest'?(curChest?curChest[idx]:null):src==='armor'?armor[idx]:null; }
 function setSlot(src,idx,v){ if(src==='inv')inv[idx]=v; else if(src==='craft')craftGrid[idx]=v; else if(src==='chest'&&curChest){ curChest[idx]=v; if(NET.on&&curChestKey&&typeof localChests!=='undefined'&&!localChests.has(curChestKey)&&typeof netSend==='function')netSend({t:'chest',k:curChestKey,c:curChest}); } else if(src==='armor'){ armor[idx]=v; if(typeof updateArmorView==='function')updateArmorView();
-    if(idx===EQ_PACK && typeof gridReflow==='function') gridReflow(); } }   // a pack on or off resizes the grid, and anything now outside it has to be re-placed   // co-op: live-sync PLACED chest slot changes (not just on close)
+    // A PACK IS NOT THE ONLY THING THAT RESIZES THE BLOCK any more: a chestplate and leggings carry four cells each,
+    // so any equip change can shrink it and strand whatever was in the cells that just stopped existing.
+    if(typeof gridReflow==='function') gridReflow(); } }   // co-op: live-sync PLACED chest slot changes (not just on close)
 function buildContainers(){
   const ih=$('ihot'); ih.innerHTML='';
   ih.style.gridTemplateColumns='repeat('+HOT_N+',46px)';
@@ -17751,9 +17803,12 @@ function buildCraftGrid(size){ const g=$('cgrid'); g.innerHTML=''; g.style.gridT
 //  THE TILE IS SIZED IN CELLS AND SO IS ITS PICTURE (see iconSideURL), which is what makes a rifle look like a rifle
 //  lying across four cells rather than a rifle squashed into a square.
 function buildGridBed(){ const bed=$('gridbed'); if(!bed) return;
-  const H=gridH(); if(bed._h===H) return; bed._h=H; bed.innerHTML='';
-  const inner=$('gridinv'); inner.style.width=(GRID_W*CELL)+'px'; inner.style.height=(H*CELL)+'px';
-  for(let y=0;y<H;y++) for(let x=0;x<GRID_W;x++){
+  const N=gridCapacity(); if(bed._n===N) return; bed._n=N; bed.innerHTML='';
+  const H=gridH(), inner=$('gridinv');
+  inner.style.width=(GRID_W*CELL)+'px'; inner.style.height=(H*CELL)+'px';
+  // EXACTLY `capacity` cells, laid row-major. The last row stops where the block stops rather than being padded out
+  // to eight — a padded row is four cells that look placeable and are not.
+  for(let i=0;i<N;i++){ const x=i%GRID_W, y=(i/GRID_W)|0;
     const c=document.createElement('div'); c.className='gcell';
     c.style.left=(x*CELL)+'px'; c.style.top=(y*CELL)+'px'; c.dataset.x=x; c.dataset.y=y; bed.appendChild(c); } }
 function renderGrid(){ const host=$('griditems'); if(!host) return;
@@ -20095,7 +20150,11 @@ const _GUN_REF={metal:0.054,wood:0.0805};   // what the pack's own steel and wal
 // procedural map, so the photograph at a tint of 1.0 already sits about twice as bright as what it replaced. It
 // does not want a gain on top — an earlier attempt at 1.65 would have put it at 0.162, three times the pack's
 // steel, on the mistaken belief that the albedo was dark.
-const _GUN_GAIN=1.0;
+// 0.098 x 0.55 = 0.054, which is exactly what guns/assault-rifle and guns/revolver paint their steel at. Tinting a
+// photograph by 1.0 does not mean "unchanged", it means the surface is now as bright as the photograph — and this
+// one is twice the brightness of the flat paint it replaced, which photographed as a near-white rifle
+// (bench/results/models/bs-ar15.png). The gain exists to put the scan back at the pack's own level.
+const _GUN_GAIN=0.55;
 function _glbGunStyle(name,mat,lift){
   if(/glass|lens/i.test(name)) return {color:0x0b1c2e,shininess:220,specular:0x88bbff};
   const wood=/wood/i.test(name), c=mat.color;
@@ -22009,6 +22068,10 @@ function _traceBullet(o,d,bolt,rev,sup,sg,vo){
 let _wrp={x:0,y:0,z:0,d:null,bolt:false,rev:false,sup:false,sg:false};
 function _wretchRayHit(px,py,pz,d,bolt,rev,sup,sg){
   _wrp.x=px; _wrp.y=py; _wrp.z=pz; _wrp.d=d; _wrp.bolt=bolt; _wrp.rev=rev; _wrp.sup=sup; _wrp.sg=sg;
+  // THE GIANTESS IS TESTED HERE, in the outer wrapper, not inside _wretchRayHit1: that one is re-run once per
+  // extra Wretch by the binder, so a hit on her would be counted and damaged twice over whenever a second
+  // creature existed. Cheap either way — girlBounds rejects on a cylinder before a single bone is read.
+  if(typeof girlRayHit==="function" && girlRayHit(px,py,pz,bolt,rev,sup,sg)) return true;
   return wretchExtra.length ? anyWretch(_wretchRayHit1) : _wretchRayHit1();   // no extras → skip the binder entirely rather than pay try/finally 600 times a bullet
 }
 function _wretchRayHit1(){
@@ -22056,6 +22119,7 @@ function _meleeAttack(){ const d=lookDir(), ox=player.pos.x, oy=player.pos.y+EYE
   if(wretch.active){ const wx=wretch.pos.x-ox, wz=wretch.pos.z-oz, wd=Math.hypot(wx,wz); if(wd<reach && (d.x*wx+d.z*wz)/(wd||1)>0.4){
       if(wretch.dragging){ wretchBlowFails(); return; }                                        // gripped: the blow LANDS and does nothing — see wretchBlowFails
       if(!(it&&it.tool))achUnlock('fists'); hurtWretch(it&&it.tool?(5+Math.random()*3):2); return; } }   // any tool/sword = 5–8, fist = 2
+  if(typeof girlMeleeHit==="function" && girlMeleeHit(ox,oz,d.x,d.z,dmg)) return;   // a blade reaches her shins, and that is all it reaches
   let best=null,bd=reach; for(const a of animals){ if(a.dead)continue; const ax=a.x-ox, az=a.z-oz, ad=Math.hypot(ax,az); if(ad<bd && (d.x*ax+d.z*az)/(ad||1)>0.35){ bd=ad; best=a; } }
   if(best) hurtAnimal(best,dmg); }
 function hurtWretch(dmg){ if(wretch.hp==null){ wretch.hpMax=2700; wretch.hp=2700; }
@@ -29163,7 +29227,13 @@ _animalsFrame=updateAnimalsFrame;   // hook into the existing updateAnimals(dt) 
 // enough that her knee is above the player's head and her foot fills the screen on the way down, and short
 // enough to still fit under the tree canopy and inside the render distance she walks in from.
 const GIRL_SCALE=8;
-const GIRL={ active:false, rig:null, x:0, y:0, z:0, yaw:0, phase:0, state:'walk', t:0, leg:'R', hit:false, cool:0, spd:0, steps:0, kills:0, aim:null };
+// HER HEALTH IS A GIANT'S, not a boss's. 1200 is about two rifle magazines to the body or one and a bit to
+// the head, which is a fight you can win while she is walking you down and cannot win standing still. The
+// Wretch's 2700 is the wrong bar to copy: it is the creature the whole game builds toward, she is a monster
+// you were handed in an egg.
+const GIRL_HP=1200;
+const GIRL={ active:false, rig:null, x:0, y:0, z:0, yaw:0, phase:0, state:'walk', t:0, leg:'R', hit:false, cool:0, spd:0, steps:0, kills:0, aim:null,
+             hp:GIRL_HP, flinch:0, flinchSide:1, ttl:0, hurtN:0, told:0 };
 let _girlGroup=null;
 // HER STEP LENGTH IS NOT A CONSTANT HERE ANY MORE. It is measured off the rig by walking the pose through
 // one cycle and reading how far the sole actually travels (giantessStep), because that is the only number
@@ -29172,8 +29242,12 @@ let _girlGroup=null;
 function girlSpawn(x,z){
   if(!giantessLoaded()){ flashName('she is not here yet'); return false; }
   if(!GIRL.rig){ GIRL.rig=giantessBuild(GIRL_SCALE); if(!GIRL.rig){ flashName('she did not come together'); return false; }
-    _girlGroup=GIRL.rig.group; scene.add(_girlGroup); }
+    _girlGroup=GIRL.rig.group; _girlGroup.rotation.order='YXZ'; scene.add(_girlGroup); }   // YXZ: yaw first, so the death pitch tips her forward whichever way she is facing (XYZ would tip her sideways)
   GIRL.x=x; GIRL.z=z; GIRL.y=groundYAt(x,z); GIRL.active=true; GIRL.state='walk'; GIRL.t=0; GIRL.cool=0; GIRL.phase=0;
+  // EVERYTHING DEATH TOUCHED IS UNDONE HERE, or the second egg spawns a transparent corpse lying on its face.
+  GIRL.hp=GIRL_HP; GIRL.flinch=0; GIRL.told=0; GIRL.ttl=0; GIRL._thud=false;
+  _girlGroup.rotation.x=0;
+  for(const m of GIRL.rig.meshes){ m.material.transparent=false; m.material.opacity=1; }
   _girlGroup.visible=true; _girlGroup.position.set(GIRL.x,GIRL.y,GIRL.z);
   const dx=player.pos.x-x, dz=player.pos.z-z; GIRL.yaw=Math.atan2(dx,dz);
   _girlGroup.rotation.y=GIRL.yaw;
@@ -29195,9 +29269,77 @@ function girlFootfall(fx,fy,fz,heavy){
   if(AC && near>0){ const p=panAt(fx,fy,fz);
     burst(p,(heavy?0.9:0.45)*near,heavy?0.34:0.2,heavy?46:62,1.1,heavy?18:26);   // low sine thump — a foot the size of a car
     burst(p,(heavy?0.5:0.2)*near,heavy?0.22:0.12,heavy?190:240,0.7,120,'noise'); } }
+// ---- SHE CAN BE KILLED (Ben 08-11) -----------------------------------------------------------------
+// Two doors, and they are the game's existing ones rather than new ones: every bullet in the game already
+// walks its ray through _wretchRayHit, and every swing already goes through _meleeAttack. A third path for
+// her would be a third place for a weapon to be forgotten — the minigun and the shotgun pellets and a
+// thrown spear all reach her for free by hanging off the same call.
+//
+// The hit volume is her SKELETON (giantessHit), not a capsule at her origin: she is 13.5 blocks of moving
+// limb, and a capsule wide enough to contain a mid-stride leg also contains several blocks of the air she
+// is striding through. A bounding-cylinder test rejects first, so the eleven sphere tests only run for a
+// bullet that is already inside her.
+function girlBounds(px,py,pz){
+  if(!GIRL.active||!GIRL.rig||GIRL.state==='die'||GIRL.state==='dead') return false;
+  const dx=px-GIRL.x, dz=pz-GIRL.z, dy=py-GIRL.y;
+  return dy>-1 && dy<GIRL.rig.height+1.5 && dx*dx+dz*dz < 36;      // 6 blocks: wide enough for a leg at full stride
+}
+function girlRayHit(px,py,pz,bolt,rev,sup,sg){
+  if(!girlBounds(px,py,pz)) return false;
+  const h=giantessHit(GIRL.rig,px,py,pz); if(!h) return false;
+  // The same weapon table the Wretch is shot with, so a gun does not mean two different things in one game.
+  const base=(sg?PELLET_DMG:bolt?70:rev?45:50) - (sup?(sg?PELLET_SUP:20):0);
+  girlHurt(Math.max(1,Math.round(base*h.mult)), px,py,pz, h.part);
+  return true;
+}
+function girlMeleeHit(ox,oz,dx,dz,dmg){
+  if(!GIRL.active||!GIRL.rig||GIRL.state==='die'||GIRL.state==='dead') return false;
+  const gx=GIRL.x-ox, gz=GIRL.z-oz, d=Math.hypot(gx,gz);
+  if(d>5.2 || (dx*gx+dz*gz)/(d||1)<0.35) return false;             // her shins are the only part in reach of a blade
+  girlHurt(dmg, GIRL.x, GIRL.y+1.2, GIRL.z, 'shin');
+  return true;
+}
+function girlHurt(dmg,px,py,pz,part){
+  if(!GIRL.active||GIRL.state==='die'||GIRL.state==='dead') return;
+  GIRL.hp-=dmg; GIRL.hurtN++;
+  GIRL.flinch=Math.min(1,(GIRL.flinch||0)+ (part==='Head'?0.9:0.5));
+  GIRL.flinchSide=(px-GIRL.x)*Math.cos(GIRL.yaw)-(pz-GIRL.z)*Math.sin(GIRL.yaw)>0?1:-1;
+  spawnParticles(px,py,pz,part==='Head'?0xff3020:0x8a1010,part==='Head'?16:10,2,0.6);
+  if(part==='Head') flashName('headshot');
+  // She is told in thirds rather than with a health bar: a bar over a creature this size is either tiny at
+  // her feet or a banner across the sky, and the staggers read better anyway.
+  const f=GIRL.hp/GIRL_HP;
+  if(f<=0.66&&GIRL.told<1){ GIRL.told=1; flashName('she staggers'); }
+  else if(f<=0.33&&GIRL.told<2){ GIRL.told=2; flashName('she is failing'); }
+  if(GIRL.hp<=0) girlKill(); }
+function girlKill(){
+  GIRL.state='die'; GIRL.t=0; GIRL.hp=0; GIRL.aim=null; GIRL.spd=0;
+  flashName('she falls');
+  const f=GIRL.rig?GIRL.rig.height:12;
+  spawnParticles(GIRL.x,GIRL.y+f*0.5,GIRL.z,0x8a1010,26,3.2,1.2);
+  if(typeof achUnlock==='function') achUnlock('hunter'); }
 function updateGiantess(dt){
   if(!GIRL.active||!GIRL.rig) return;
   const rig=GIRL.rig, g=_girlGroup;
+  // DEAD OR DYING FIRST, and nothing below it runs: she does not turn to face you, walk, aim or stomp once
+  // she is down. The pitch pivots her whole group about her origin, which IS her feet plane — a body falls
+  // about the feet it lost, and that pivot is free here.
+  if(GIRL.state==='die'||GIRL.state==='dead'){
+    if(GIRL.state==='die'){
+      GIRL.t+=dt/1.9;
+      const e=Math.min(1,GIRL.t), p=e<0.85?(e/0.85)*(e/0.85):1;               // accelerating over, then still
+      giantessDie(rig,e);
+      g.rotation.x=p*Math.PI*0.5;
+      g.position.set(GIRL.x,groundYAt(GIRL.x,GIRL.z),GIRL.z);
+      if(!GIRL._thud && GIRL.t>0.8){ GIRL._thud=true;                          // the body landing, felt the same way her steps are
+        girlFootfall(GIRL.x+Math.sin(GIRL.yaw)*rig.height*0.35, groundYAt(GIRL.x,GIRL.z), GIRL.z+Math.cos(GIRL.yaw)*rig.height*0.35, true);
+        if(typeof bloodMark==='function') for(let i=0;i<5;i++) bloodMark(GIRL.x+Math.sin(GIRL.yaw)*(1+i*2.2)+(Math.random()-0.5), groundYAt(GIRL.x,GIRL.z)+0.1, GIRL.z+Math.cos(GIRL.yaw)*(1+i*2.2)+(Math.random()-0.5), 1.4+Math.random(), 240); }
+      if(GIRL.t>=1){ GIRL.state='dead'; GIRL.ttl=90; } }
+    else {
+      GIRL.ttl-=dt;
+      if(GIRL.ttl<8) for(const m of rig.meshes){ m.material.transparent=true; m.material.opacity=Math.max(0,GIRL.ttl/8); }   // the body fades out over its last 8s, like a carcass
+      if(GIRL.ttl<=0) girlDespawn(); }
+    return; }
   const dx=player.pos.x-GIRL.x, dz=player.pos.z-GIRL.z, dist=Math.hypot(dx,dz);
   // Face the player, but at her own rate: a body this size cannot pivot in a frame, and a giant that snaps
   // to your bearing reads as a turret rather than a creature.
@@ -29263,6 +29405,9 @@ function updateGiantess(dt){
     // and that is the only defence there is against her.
     if(dist<9 && GIRL.cool<=0){ GIRL.state='stomp'; GIRL.t=0; GIRL.hit=false; GIRL.aim={x:player.pos.x,z:player.pos.z}; }
   }
+  // The flinch is LAYERED, so it reads on top of a walk, a stomp or an idle without any of them knowing.
+  if(GIRL.flinch>0){ GIRL.flinch=Math.max(0,GIRL.flinch-dt*2.2); giantessFlinch(rig,GIRL.flinch,GIRL.flinchSide);
+    if(GIRL.flinch>0.6&&GIRL.state==='walk') GIRL.cool=Math.max(GIRL.cool,0.25); }   // a solid hit costs her the stomp she was about to start
   // GROUNDED AFTER THE POSE, not before it: how high her hips sit is a consequence of how straight the
   // loaded leg is, so it can only be known once the legs are posed. This is where the vertical rise and fall
   // of a walk comes from — it is derived, never animated.
@@ -31849,6 +31994,26 @@ window.__hc={
         nearClipped:bb.max.z > -camera.near,
         dotY:(m.userData&&m.userData.dotY)||null, adsZ:(m.userData&&m.userData.adsZ)!=null?m.userData.adsZ:null }; }catch(e){ return {err:String(e.message||e)}; } },
   viewDbg(){ try{ const vm=view.mesh; return { id:view.id, locked:!!locked, vis:!!view.group.visible, hasMesh:!!vm, meshVis:vm?!!vm.visible:null, children:view.group.children.length, rot:[+view.group.rotation.x.toFixed(3),+view.group.rotation.y.toFixed(3),+view.group.rotation.z.toFixed(3)], pos:[+view.group.position.x.toFixed(3),+view.group.position.y.toFixed(3),+view.group.position.z.toFixed(3)] }; }catch(e){ return e.message; } },
+  // QA: EVERY MESH IN THE HELD MODEL, with its size, its material and whether it is drawn. "A big black square
+  // appears in the viewport" is a question about one object among thirty, and the frame cannot answer which —
+  // especially not a frame that will not render. Size is in the viewmodel's own space, where the whole gun is
+  // under a unit long, so anything approaching a unit across IS the square.
+  viewDump(){ try{ const g=view.mesh; if(!g) return {id:view.id,mesh:null};
+      // The world matrices must be forced: a viewmodel that has not been rendered this frame still carries last
+      // frame's (or no) transform, and a size read off a stale matrix is the raw geometry — which reads as a gun
+      // 250 times too big and sends you hunting a scale bug that is not there.
+      g.updateMatrixWorld(true);
+      const out=[]; const b=new THREE.Box3(), v=new THREE.Vector3();
+      g.traverse(o=>{ if(!o.isMesh) return;
+        b.setFromObject(o); b.getSize(v);
+        const m=o.material||{};
+        out.push({ n:o.name||o.userData.glbMat||'?', vis:!!o.visible, ord:o.renderOrder|0,
+          size:[+v.x.toFixed(3),+v.y.toFixed(3),+v.z.toFixed(3)],
+          mat:m.type||'?', map:!!m.map, tr:!!m.transparent, op:m.opacity!=null?+m.opacity.toFixed(2):null,
+          col:m.color?'#'+m.color.getHexString():null }); });
+      out.sort((a,b2)=>Math.max(...b2.size)-Math.max(...a.size));
+      return { id:view.id, count:out.length, biggest:out.slice(0,6) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   invList(){ try{ return inv.filter(Boolean).map(s=>s.id+':'+s.n); }catch(e){ return e.message; } },
   pos(){ try{ return {x:player.pos.x,y:player.pos.y,z:player.pos.z,yaw:player.yaw,pitch:player.pitch}; }catch(e){ return e.message; } },
   st(){ try{ return {started, grabbed:player.grabbed, gp:wretch.grabPhase, ws:wretch.state, wa:wretch.active, dist:+(wretch.dist||0).toFixed(2), watched:!!(wretch.sense&&wretch.sense.watched), seen:!!(wretch.sense&&wretch.sense.seen), obs:+(wretch.observed||0).toFixed(1), form:wretch.form, wy:+wretch.pos.y.toFixed(1), px:+player.pos.x.toFixed(1), pz:+player.pos.z.toFixed(1), sx:(typeof spawnX!=='undefined'?spawnX:null), sz:(typeof spawnZ!=='undefined'?spawnZ:null), py:+player.pos.y.toFixed(1), day:+globalU.uDay.value.toFixed(2), fps:Math.round(fpsAvg),
@@ -32017,11 +32182,24 @@ window.__hc={
   girl(d){ try{ const dir=lookDir(), dd=d==null?12:d, x=player.pos.x+dir.x*dd, z=player.pos.z+dir.z*dd;
       const ok=girlSpawn(x,z); return { ok, loaded:giantessLoaded(), state:GIRL.state, probe:ok?giantessProbe(GIRL.rig):null }; }catch(e){ return {err:String(e.message||e)}; } },
   girlState(){ try{ if(!GIRL.rig) return { active:false, loaded:giantessLoaded() };
-      return { active:GIRL.active, state:GIRL.state, t:+GIRL.t.toFixed(3), leg:GIRL.leg, spd:+GIRL.spd.toFixed(2),
+      return { active:GIRL.active, state:GIRL.state, hp:Math.round(GIRL.hp), hpMax:GIRL_HP, hurtN:GIRL.hurtN, ttl:+GIRL.ttl.toFixed(1),
+        pitch:+_girlGroup.rotation.x.toFixed(3), t:+GIRL.t.toFixed(3), leg:GIRL.leg, spd:+GIRL.spd.toFixed(2),
         steps:GIRL.steps, kills:GIRL.kills, yaw:+GIRL.yaw.toFixed(3), hit:GIRL.hit,
         dist:+Math.hypot(GIRL.x-player.pos.x,GIRL.z-player.pos.z).toFixed(2),
         pos:[+GIRL.x.toFixed(2),+GIRL.y.toFixed(2),+GIRL.z.toFixed(2)], probe:giantessProbe(GIRL.rig) }; }catch(e){ return {err:String(e.message||e)}; } },
   girlOff(){ try{ girlDespawn(); return true; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA: shoot her, through the REAL bullet door. The point is a hit at a bone's world position, so this
+  // exercises girlBounds -> giantessHit -> girlHurt exactly as a rifle does, rather than writing hp.
+  girlShoot(part,n){ try{ if(!GIRL.rig) return {err:'no rig'}; const nm=part||'spine.003';
+      let hits=0, missed=0;
+      for(let i=0;i<(n||1);i++){
+        const p=giantessBonePos(GIRL.rig,nm,new THREE.Vector3());
+        if(girlRayHit(p.x,p.y,p.z,false,false,false,false)) hits++; else missed++; }
+      return { hits, missed, hp:Math.round(GIRL.hp), state:GIRL.state }; }catch(e){ return {err:String(e.message||e)}; } },
+  // …and the same shot aimed at empty air beside her, which must NOT register.
+  girlShootMiss(off){ try{ if(!GIRL.rig) return {err:'no rig'}; const d=off==null?9:off;
+      const hp0=GIRL.hp, hit=girlRayHit(GIRL.x+d,GIRL.y+2,GIRL.z,false,false,false,false);
+      return { hit, hpUnchanged:GIRL.hp===hp0 }; }catch(e){ return {err:String(e.message||e)}; } },
   // The five bar slots, READ WITHOUT USING THEM. useHeld() calls doPlace() first, so asking it what is in the
   // bar right-clicks whatever it finds: it spawned the giantess and then reported an empty hotbar, which read
   // as "the egg went to the bag" after that had already been fixed.
@@ -35386,8 +35564,8 @@ window.__hc={
   // whatever light arrives), disp is a minimum RENDERED luminance for a fragment a light actually reaches. k fixes a
   // texture whose spread is too wide; disp fixes one the terms downstream have pushed under the 8-bit floor entirely.
   // Sweep it with bench/tmp-lightpool-speckle.mjs, which is the lantern-in-a-night-wood frame it was reported at.
-  texFloor(o){ try{ if(o&&o.k!=null) _scotK[2]=+o.k; if(o&&o.disp!=null) _scotK[3]=+o.disp;
-      return { k:+_scotK[2].toFixed(5), disp:+_scotK[3].toFixed(5), litKnee:+_scotH[3].toFixed(4) }; }catch(e){ return {err:String(e.message||e)}; } },
+  texFloor(o){ try{ if(o&&o.k!=null) _scotK[2]=+o.k; if(o&&o.disp!=null) _scotK[3]=+o.disp; if(o&&o.zero!=null) _zeroLiftU.value=+o.zero;
+      return { k:+_scotK[2].toFixed(5), disp:+_scotK[3].toFixed(5), litKnee:+_scotH[3].toFixed(4), zero:_zeroLiftU.value }; }catch(e){ return {err:String(e.message||e)}; } },
   freezeT(v){ try{ if(v===null) _pinT=null; else if(v!==undefined) _pinT=+v;
       return { pinned:_pinT, uTime:+globalU.uTime.value.toFixed(3) }; }catch(e){ return {err:String(e.message||e)}; } },
   // QA + the A/B for the water rebuild. amt 0 restores the flat-uRing surface exactly, streak 0 the pre-streak normal,
@@ -35653,35 +35831,61 @@ window.__hc={
   // back the bearing and the label nearest the index, and the direction of travel is a fact rather than a hope.
   // QA: THE GRID INVENTORY. Every probe here answers through the game's own packer rather than through the DOM, because
   // what can break in a rectangle-packed bag is the OCCUPANCY, and the DOM is a picture of it drawn afterwards.
+  gridCap(){ try{ const keep=armor.slice();
+      const set=a=>{ for(let i=0;i<6;i++) armor[i]=a[i]||null; };
+      const out={};
+      set([]);                                   out.bare=gridCapacity();
+      set([null,{id:'iron_chestplate',n:1}]);    out.chest=gridCapacity();
+      set([null,null,{id:'iron_leggings',n:1}]); out.legs=gridCapacity();
+      set([null,null,null,null,null,{id:'backpack',n:1}]);   out.pack1=gridCapacity();
+      set([null,null,null,null,null,{id:'alice_pack',n:1}]); out.pack3=gridCapacity();
+      set([null,{id:'iron_chestplate',n:1},{id:'iron_leggings',n:1},null,null,{id:'alice_pack',n:1}]);
+      out.full=gridCapacity(); out.fullRows=gridH();
+      set([null,null,null,null,null,{id:'not_a_real_pack',n:1}]); out.unknownPack=gridCapacity();
+      set(keep); return out; }catch(e){ return {err:String(e.message||e)}; } },
   gridState(){ try{ const probe=['ar15','stim_syringe','rifle_ammo','cobble'];
       // WHETHER THE ITEM EXISTS IS REPORTED, not assumed. itemSize() answers [1,1] for an id nobody defined, so a
       // bench that names a typo passes every size check while measuring nothing. (It did: 'cobblestone'.)
       const sizes={}, real={}; for(const id of probe){ sizes[id]=itemSize(id); real[id]=!!ITEMS[id]; }
-      return { hotN:HOT_N, w:GRID_W, h:gridH(), n:GRID.items.length, sizes, real }; }
+      return { hotN:HOT_N, w:GRID_W, h:gridH(), cap:gridCapacity(), n:GRID.items.length, sizes, real }; }
     catch(e){ return {err:String(e.message||e)}; } },
   gridFill(ids){ try{ GRID.items=[]; let left=0; for(const id of ids) left+=gridAdd(id,1);
       return { left, n:GRID.items.length }; }catch(e){ return {err:String(e.message||e)}; } },
+  // The same fill with a pack on. Six pockets cannot hold a rifle — that is the point of the pockets being six — so a
+  // packing test has to say which container it is packing.
+  gridFillPacked(ids){ try{ armor[EQ_PACK]={id:'alice_pack',n:1}; gridReflow();
+      return this.gridFill(ids); }catch(e){ return {err:String(e.message||e)}; } },
   // The audit walks every claimed cell and counts collisions itself instead of trusting gridMap, which is the thing
   // under test: a map that drops a stack silently would make an overlapping grid look clean.
   gridAudit(){ try{ const H=gridH(), seen=new Map(); let overlap=0, outside=0, claimed=0;
       for(const st of GRID.items){ const [w,h]=stackSize(st); claimed+=w*h;
-        if(st.x<0||st.y<0||st.x+w>GRID_W||st.y+h>H){ outside++; continue; }
+        let bad=false;
+        for(let y=st.y;y<st.y+h&&!bad;y++) for(let x=st.x;x<st.x+w;x++) if(!gridHas(x,y)){ bad=true; break; }
+        if(bad){ outside++; continue; }
         for(let y=st.y;y<st.y+h;y++) for(let x=st.x;x<st.x+w;x++){ const k=y*GRID_W+x;
           if(seen.has(k)) overlap++; else seen.set(k,st); } }
-      return { stacks:GRID.items.length, overlap, outside, cellsUsed:seen.size, cellsClaimed:claimed, h:H }; }
+      return { stacks:GRID.items.length, overlap, outside, cellsUsed:seen.size, cellsClaimed:claimed, h:H, cap:gridCapacity() }; }
     catch(e){ return {err:String(e.message||e)}; } },
   gridStacks(){ try{ return { ammoMax:itMaxG('rifle_ammo'), blockMax:itMaxG('cobble') }; }catch(e){ return {err:String(e.message||e)}; } },
   // AN ITEM TALLER THAN THE BAG LIES DOWN. A 2x5 rifle does not fit upright in a four-row bag, and gridPlace's second
   // pass turns it: 5 across by 2 deep does fit. With a pack on there is room to stand it up, and it stands up. That
   // pair is the rotate-on-place fallback, and it is invisible in any single reading.
-  gridTall(id){ try{ const keep=GRID.items, pack=armor[EQ_PACK];
-      GRID.items=[]; armor[EQ_PACK]=null; const leftFlat=gridAdd(id,1); const rotFlat=GRID.items[0]?GRID.items[0].rot:null;
-      GRID.items=[]; armor[EQ_PACK]={id:'alice_pack',n:1}; const leftDeep=gridAdd(id,1); const rotDeep=GRID.items[0]?GRID.items[0].rot:null;
-      GRID.items=keep; armor[EQ_PACK]=pack;
-      return { leftFlat, rotFlat, leftDeep, rotDeep, size:itemSize(id) }; }catch(e){ return {err:String(e.message||e)}; } },
-  gridPack(id){ try{ const hWithout=gridH();
+  gridTall(id){ try{ const keep=GRID.items, was=armor.slice();
+      const set=a=>{ for(let i=0;i<6;i++) armor[i]=a[i]||null; };
+      GRID.items=[]; set([]); const leftPockets=gridAdd(id,1);
+      // Chestplate + leggings = 14 cells, so the block is one full row of eight and six more. A 2x5 rifle cannot
+      // stand up in that and CAN lie across it as 5x2: this is the exact shape where the rotate fallback decides.
+      GRID.items=[]; set([null,{id:'iron_chestplate',n:1},{id:'iron_leggings',n:1}]);
+      const leftFlat=gridAdd(id,1), rotFlat=GRID.items[0]?GRID.items[0].rot:null, capFlat=gridCapacity();
+      GRID.items=[]; set([null,null,null,null,null,{id:'alice_pack',n:1}]);
+      const leftDeep=gridAdd(id,1), rotDeep=GRID.items[0]?GRID.items[0].rot:null;
+      GRID.items=keep; set(was);
+      return { leftPockets, leftFlat, rotFlat, capFlat, leftDeep, rotDeep, size:itemSize(id) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  gridPack(id){ try{ for(let i=0;i<6;i++) armor[i]=null;   // start bare, or a pack left on by an earlier probe is the baseline
+      const hWithout=gridCapacity();
       GRID.items=[]; for(let i=0;i<40;i++) gridAdd('cobble',64);
-      armor[EQ_PACK]={id,n:1}; gridReflow(); const hWith=gridH();
+      armor[EQ_PACK]={id,n:1}; gridReflow(); const hWith=gridCapacity();
       GRID.items=[]; for(let i=0;i<40;i++) gridAdd('cobble',64);
       const countBefore=gridCount('cobble');
       armor[EQ_PACK]=null;                       // take it off with the bag full: this is the case that can eat items
