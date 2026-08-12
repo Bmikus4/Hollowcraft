@@ -70,11 +70,16 @@ function ok(label, cond, got){ checks++; if(!cond)fails++; console.log('  '+(con
     const menu = await page.evaluate(()=>{
       const cs=s=>getComputedStyle(document.querySelector(s));
       const b=cs('#mb-solo');
-      return { btnFrame:b.borderImageSource, btnBg:b.backgroundImage,
+      // The plate lives on ::before, not on the button: clipping the button to the frame's bevel would clip the frame.
+      return { btnFrame:b.borderImageSource, btnBg:getComputedStyle(document.querySelector('#mb-solo'),'::before').backgroundImage,
+               btnClip:getComputedStyle(document.querySelector('#mb-solo'),'::before').clipPath,
                flourish:getComputedStyle(document.querySelector('#menucard .flourish')).backgroundImage };
     });
     ok('menu button is 9-sliced art', /assets\/ui\/.*\.png/.test(menu.btnFrame), menu.btnFrame.slice(0,90));
     ok('its plate is a grunge tile',  /assets\/ui\/tex_/.test(menu.btnBg), menu.btnBg.slice(0,90));
+    // ...and it is cut to the bevel. A square plate on a chamfered frame pokes out at all four corners, which is
+    // what Ben saw; clipping the BUTTON instead removes the frame's own corners, which is what he saw next.
+    ok('and cut to the frame bevel',  /polygon/.test(menu.btnClip), menu.btnClip.slice(0,40));
     ok('the flourish is decoration 59', /assets\/ui\/deco_star/.test(menu.flourish), menu.flourish.slice(0,80));
 
     await page.click('#mb-settings'); await sleep(500);
