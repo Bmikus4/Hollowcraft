@@ -6745,17 +6745,64 @@ function _ensureOcean3(){
   _ocean3.rotation.x=-Math.PI/2;
   _ocean3.frustumCulled=false;
   _ocean3.visible=false;
+  // ---- THE LAND MASK, and it is why an infinite plane can be the sea at all ----
+  // A plane at sea level is water EVERYWHERE, including every inland hollow that happens to sit below sea level and
+  // every hole dug through the shore. The old far-sea disc had one camera-position rule for this and it was never
+  // enough — it can only answer "am I underground", never "is there land over there". The mask answers the second
+  // question: surfaceH is a pure function of world x,z, so the terrain height is sampled on the CPU into a coarse
+  // texture and the fragment discards wherever the ground stands above the sea. Outside the window the plane stays,
+  // which is correct — the window is centred on the player and everything beyond it is open ocean.
+  const MW=256, MSTEP=8;                                    // 256 texels at 8 blocks each = a 2048-block window
+  const mdata=new Uint8Array(MW*MW);
+  const mtex=new THREE.DataTexture(mdata, MW, MW, THREE.RedFormat);
+  mtex.minFilter=mtex.magFilter=THREE.LinearFilter; mtex.needsUpdate=true;
+  _ocean3.userData.mask={ tex:mtex, data:mdata, W:MW, STEP:MSTEP, ox:1e9, oz:1e9 };
+  const mu={ uLandTex:{value:mtex}, uLandOrigin:{value:new THREE.Vector2(0,0)}, uLandSpan:{value:MW*MSTEP} };
+  _ocean3.userData.maskU=mu;
+  _ocean3.material.onBeforeCompile=(sh)=>{
+    sh.uniforms.uLandTex=mu.uLandTex; sh.uniforms.uLandOrigin=mu.uLandOrigin; sh.uniforms.uLandSpan=mu.uLandSpan;
+    sh.fragmentShader=sh.fragmentShader
+      .replace('void main() {',
+        'uniform sampler2D uLandTex;\nuniform vec2 uLandOrigin;\nuniform float uLandSpan;\nvoid main() {\n'+
+        '  vec2 _luv=(worldPosition.xz - uLandOrigin)/uLandSpan;\n'+
+        '  if(_luv.x>0.0 && _luv.x<1.0 && _luv.y>0.0 && _luv.y<1.0 && texture2D(uLandTex,_luv).r > 0.5) discard;\n');
+  };
+  _ocean3.material.needsUpdate=true;
   // ABOVE the voxel surface by a hair. Same height and the two z-fight across the whole sea; this way the example's
   // plane simply wins wherever both exist, and no chunk mesh has to be found and hidden as it streams in.
   _ocean3.position.y=(CFG.SEA + 1 - WATER_SURF_DROP) + 0.02;
   scene.add(_ocean3);
   return _ocean3;
 }
+// Re-centred on the player in whole texels, and only when it has drifted a quarter of the window — a rebuild is
+// 65k surfaceH calls, which is a visible hitch if it runs on a schedule instead of on a need.
+function _o3Mask(){
+  const m=_ocean3.userData.mask, u=_ocean3.userData.maskU, span=m.W*m.STEP;
+  const cx=Math.round(camera.position.x/m.STEP)*m.STEP, cz=Math.round(camera.position.z/m.STEP)*m.STEP;
+  const ox=cx-span/2, oz=cz-span/2;
+  if(Math.abs(ox-m.ox) < span/4 && Math.abs(oz-m.oz) < span/4) return;
+  if(typeof surfaceH!=='function') return;
+  const sea=CFG.SEA;
+  for(let j=0;j<m.W;j++){ const wz=oz+j*m.STEP;
+    for(let i=0;i<m.W;i++){ m.data[j*m.W+i] = surfaceH(ox+i*m.STEP, wz) > sea ? 255 : 0; } }
+  m.ox=ox; m.oz=oz; m.tex.needsUpdate=true;
+  u.uLandOrigin.value.set(ox,oz); u.uLandSpan.value=span;
+}
 function updateOcean3(dt){
-  if(!_ocean3Want){ if(_ocean3) _ocean3.visible=false; return; }
+  if(!_ocean3Want){ if(_ocean3) _ocean3.visible=false;
+    // Put the old sea back exactly as it was, or turning the new one off leaves a world with no water at all.
+    if(waterMat.colorWrite===false){ waterMat.colorWrite=true; waterMat.depthWrite=true; }
+    return; }
   // Built on the first frame that wants it rather than at module scope: the scene, CFG and the sea level all have to
   // exist first, and a texture fetch at parse time is one more way for a build to arrive dead.
-  if(!_ocean3){ _ensureOcean3(); oceanLayer.visible=false; _farSeaWant=false; if(farSea) farSea.visible=false; }
+  if(!_ocean3){ _ensureOcean3(); }
+  // THE OLD OCEAN IS GONE, not merely covered (Ben 08-12: "delete the old ocean completely", "i can still see the old
+  // ocean underneath"). Three things drew it and all three stop: the painted horizon band, the far-sea disc, and the
+  // voxel water surface itself. The last one is switched off through the MATERIAL rather than by finding meshes,
+  // because chunk water meshes keep streaming in and a traversal would have to run for ever to catch them.
+  oceanLayer.visible=false; _farSeaWant=false; if(farSea) farSea.visible=false;
+  if(waterMat.colorWrite!==false){ waterMat.colorWrite=false; waterMat.depthWrite=false; }
+  _o3Mask();
   // The same underground rule the far-sea disc carries: a sea plane seen through a hole you dug is the 08-05 report.
   // The column height is recomputed here rather than borrowed: updateHorizon's "_colH" is a const inside its own body,
   // and reading it from here throws a ReferenceError every frame — which aborts updateSky and everything after it, and
@@ -20954,7 +21001,11 @@ const GLB_GUNS={
   // which is the move Ben asked for and also buys a 0.85 sight radius on a 1.98 gun.
   // rise IS ZERO, and that is the point of front:'none': the sight line is the tip of the blade the model already
   // has, so the prongs are cut to reach exactly it rather than a line invented above it.
+  // cyl = the CYLINDER's two end faces and its outer wall radius, in the model's own units, measured off the mesh by
+  // tools/gun-cylinder.py rather than eyeballed: the placement data has no cylinder landmark (its `magRange` on this
+  // model is the trigger guard, 0.37 below the bore). Loaded chambers are built from these three numbers.
   revolver:{id:'guns/revolver',     len:0.46,muzzleZ:-0.310,boreY:0.028,flash:0.75,flashS:0.75,can:[0.020,0.13],irons:true,cal:'357',
+            cyl:{rear:0.35,front:0.675,wall:0.26},
             sights:{fx:1.63,fy:0.574,rx:0.78,ry:0.525,rise:0,rear:'prongs',front:'none'}},
   shotgun: {id:'guns/shotgun',      len:0.87,muzzleZ:-0.560,boreY:0.030,flash:1.60,flashS:1.50,can:[0.026,0.15],irons:true,pump:true,adsZ:-0.42,cal:'12ga'},
   // ---- THE OTHER EIGHTEEN --------------------------------------------------------------------------------------
@@ -21049,6 +21100,29 @@ function buildGlbGun(key,dot,suppressed){
   // still took the sky's colour and photographed navy against the grey model, which is Ben's "not coloured
   // correctly". Lambert cannot produce a highlight, so the sights are dark under any sky — which is the entire
   // point of sight blacking on a real gun.
+  // LOADED CHAMBERS (Ben 2026-08-12: "revolvers need bullets in thier chambers"). The pack's cylinder is a smooth
+  // fluted drum with no chamber holes at all, so there is nothing to see through — the cartridges have to be objects
+  // sitting in it. Six cases on a bolt circle at 0.60 of the wall radius, which is where a real cylinder puts them,
+  // with their heads standing 2mm proud of the rear face: that brass ring at the back edge of the drum is the part a
+  // shooter's eye can actually see on a closed revolver, and the noses at the front face carry the same read for the
+  // third-person and inventory-icon angles. Same _shellMat as the cases the guns throw — one brass in the game.
+  if(spec.cyl){
+    const R=spec.cyl.wall*0.60*s, cr=Math.max(0.004,spec.cyl.wall*0.20*s);
+    const zR=gz(spec.cyl.rear), zF=gz(spec.cyl.front), span=Math.abs(zR-zF);
+    const caseG=new THREE.CylinderGeometry(cr,cr,span*0.94,10);
+    const headG=new THREE.CylinderGeometry(cr*1.22,cr*1.22,0.004,10);
+    const noseG=new THREE.CylinderGeometry(cr*0.80,cr*0.62,0.010,10);
+    const lead=new THREE.MeshPhongMaterial({color:0x9a9a96,shininess:24,specular:0x3a3a38});
+    const mid=(zR+zF)/2;
+    for(let i=0;i<6;i++){
+      // Half a step off top-dead-centre so no chamber hides behind the frame's top strap, and none sits under the rib.
+      const a=Math.PI/6+i*Math.PI/3, px=Math.cos(a)*R, py=boreG+Math.sin(a)*R;
+      const put=(geo,mat,z)=>{ const o=new THREE.Mesh(geo,mat); o.rotation.x=Math.PI/2; o.position.set(px,py,z); g.add(o); return o; };
+      put(caseG,_shellMat,mid);
+      put(headG,_shellMat,zR+0.002);          // +z is toward the shooter: the head stands proud of the rear face
+      put(noseG,lead,zF-0.004);
+    }
+  }
   const blk=new THREE.MeshLambertMaterial({map:metalTex(),color:0x1e2024});
   // Every element the sight pass adds is tagged, so __hc.sightPix() can project the ACTUAL drawn geometry
   // rather than the two abstract points of sightPts. Those points always land on the crosshair by
@@ -22093,10 +22167,13 @@ function updateView(dt){ updateRecoil(dt);                                      
     // rifle held by the trigger hand alone floats: there is nothing under the forend and nothing explaining how the
     // muzzle stays up. handgun:true is the existing flag for the guns this must NOT happen to — a pistol is held out
     // from the fist by design, and a second arm on one would be wrong in the other direction.
-    // The support arm rises from below-left instead of running back past the eye. Given the trigger arm's direction
-    // it would put an elbow near the camera, because the forend is half a gun further forward than the grip.
+    // ALMOST STRAIGHT DOWN, and that is the whole trick. The trigger arm's direction runs back past the eye, which is
+    // right for a grip near the shoulder; applied to a forend half a gun further forward it laid a 50 cm forearm
+    // diagonally across the middle of the frame and read as a plank, not an arm. Steep means the elbow is below the
+    // forend and out of frame, so what you see is a hand under the handguard and a wrist — which is all you see of
+    // your own support hand.
     const _sup=view.mesh.userData.supportAt;
-    if(_sup && !ITEMS[view.id].handgun) attachGunHand(view.mesh, -1, {at:_sup, back:[-0.42,-0.86,0.29], slot:'_gunHand2'});
+    if(_sup && !ITEMS[view.id].handgun) attachGunHand(view.mesh, -1, {at:_sup, back:[-0.16,-0.96,0.22], slot:'_gunHand2'});
   }
   mainArm.group.position.y=OFF_ARM_Y+b;   // the right arm rides the same walk bob as the left, or the two drift apart
   offView.group.position.y=(offView.baseY!=null?offView.baseY:OFF_VIEW_Y)+b; offArm.group.position.y=OFF_ARM_Y+b;   // the left hand rides the same walk bob; a pinned shield beside a bobbing tool reads as a HUD sprite
