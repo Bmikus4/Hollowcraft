@@ -33,10 +33,11 @@ try {
   await sleep(2500);
   await page.evaluate(() => { const p = document.getElementById('pause'); p.style.display = 'flex'; });
   await sleep(600);
-  const card = await page.$('#pause > div');
+  const card = await page.$('#pause > .gcard');   // NOT '#pause > div': the first div is the objectives ledger beside the card
   await card.screenshot({ path: path.join(OUT, 'ui1080-card-4x.png') });
-  await page.evaluate(() => { const c = document.querySelector('#pause > div');
+  await page.evaluate(() => { const c = document.querySelector('#pause > .gcard');
     c.style.borderImageSource = "url('assets/ui/frame_main.png')"; c.style.borderImageSlice = '46'; });
+  await page.screenshot({ path: path.join(OUT, 'ui1080-pause.png'), clip: { x: 430, y: 120, width: 1060, height: 840 } });
   await sleep(400);
   await card.screenshot({ path: path.join(OUT, 'ui1080-card-1x.png') });
 
