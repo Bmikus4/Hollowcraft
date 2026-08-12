@@ -89,6 +89,26 @@ try {
   for (let i = 0; i < 24; i++){ const s = await sample(); hp0 = Math.min(hp0, s.hp); if (s.kills > kills0){ killed = true; break; } await sleep(400); }
   check('a foot aimed at the player kills him', killed, 'health floor ' + hp0 + ', kills ' + kills0 + ' -> ' + (await sample()).kills);
 
+  // ---- 6. THE EGG, which is half of what was asked for and was not covered here at first ------------
+  // Ben: "dont see the egg". The item was correct all along; /give stopped putting anything in the five-slot
+  // bar when the inventory became a bag-first grid, so nothing an egg-shaped check does through /give proves
+  // it works. These three go through the doors a player actually uses.
+  // CREATIVE FIRST: the C menu will not open for a survival player, so the check read "among 0 items" and
+  // said nothing about the egg.
+  await page.evaluate(`__hc.girlOff(); __hc.cmdRun('/gamemode creative');`);
+  const eggs = await page.evaluate(`(()=>{ window.dispatchEvent(new KeyboardEvent('keydown',{code:'KeyC'}));
+    const el=document.getElementById('creative'); const cells=el?[...el.querySelectorAll('div[title]')].map(d=>d.title):[];
+    window.dispatchEvent(new KeyboardEvent('keydown',{code:'KeyC'}));
+    return { n:cells.length, has:cells.includes('Giantess Spawn Egg') }; })()`);
+  check('her egg is in the creative menu', eggs.has === true, 'among ' + eggs.n + ' items');
+  const cmd = await page.evaluate(`__hc.cmdRun('/gamemode survival'); __hc.cmdRun('/spawn giantess')`);
+  check('/spawn knows the creature', /spawned/.test(String(cmd.out)), String(cmd.out).slice(0, 60));
+  await page.evaluate(`__hc.girlOff();`);
+  const egg = await page.evaluate(`(()=>{ const h=__hc.hold('egg_giantess'); __hc.useHeld(); return h; })()`);
+  await sleep(400);
+  const after = await page.evaluate(`__hc.girlState()`);
+  check('right-clicking the egg spawns her', after.active === true, 'held ' + egg.held + ' -> ' + after.state + ' at ' + after.dist + ' blocks');
+
   check('no page errors', errs.length === 0, errs.slice(0, 3).join(' | ') || 'clean');
 } catch (e){ console.log('  HARNESS ERROR: ' + (e && e.stack || e)); fails++; }
 finally {
