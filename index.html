@@ -459,8 +459,13 @@
     position:fixed; inset:0; width:auto; height:auto; padding:0; margin:0; }
   /* NO `/ var(--uiz)` ANYWHERE IN THIS BLOCK — it is a child of the modal, not of the zoomed panel, so its pixels are
      screen pixels, the same ones #hud is laid out in. 100px is the bar's top (50) plus its cell (50). */
-  #invtop{ position:fixed; top:100px; left:0; right:0; bottom:16px; z-index:1;
-    display:flex; flex-direction:column; align-items:center; gap:0; min-height:0; }
+  /* CENTRED BY TRANSFORM, NOT BY STRETCHING. left:0/right:0 made this an invisible full-width sheet from y=100 to the
+     foot of the screen, and z-index:1 put it over the panel — so every click aimed at the primaries or the spec slots
+     in the bottom-left corner hit this instead. It is as wide as the grid inside it now, and pointer-events are handed
+     back only to the children that draw something. */
+  #invtop{ position:fixed; top:100px; left:50%; transform:translateX(-50%); bottom:16px; z-index:1;
+    display:flex; flex-direction:column; align-items:center; gap:0; min-height:0; pointer-events:none; }
+  #invtop #invgridhost{ pointer-events:auto; }
   /* THE GOLD LINE — Ben's rule art used as a MASK over a gold gradient, the same inversion the compass band uses: the
      art is white ink, and drawn straight it is a white scratch across a gold UI. */
   /* The width here is only the value before the first paint — buildGridBed writes the real one, gridCols()*CELL, so the
@@ -515,7 +520,9 @@
   /* An empty spec slot shows what belongs in it. The glyph is a background of the SLOT, so a real item's icon
      simply paints over it the moment one is equipped — no second element to hide and show. */
   .islot.spec-pack:not(.filled){ background-image:url('assets/ui/icon_crate.png'); background-size:52%; opacity:.9; }
-  .islot.spec-off:not(.filled){ background-image:url('assets/ui/icon_hand.png'); background-size:52%; opacity:.9; }
+  /* The pack's compass ROSE, because this is the compass slot — an empty slot should say what belongs in it, and a hand
+     said "offhand", which is the mechanic riding along in the same slot rather than what the slot is for. */
+  .islot.spec-off:not(.filled){ background-image:url('assets/ui/rose.png'); background-size:56%; opacity:.9; }
   /* THE PAUSE CARD HAS TO FIT A 720p WINDOW, frame and all. 52px of art per axis is 52px the settings list no longer
      has, and a card whose Exit button is below the fold is a card you cannot leave. */
   #pausesettings.setbox{ max-height:calc(min(36vh,330px) / var(--uiz)); }
@@ -6715,8 +6722,10 @@ function _ensureOcean3(){
   if(_ocean3) return _ocean3;
   const nrm=new THREE.TextureLoader().load('assets/textures/waternormals.jpg', t=>{ t.wrapS=t.wrapT=THREE.RepeatWrapping; });
   nrm.wrapS=nrm.wrapT=THREE.RepeatWrapping;
-  // Sized off the render wall, like the far-sea disc, so it reaches the horizon at any render distance.
-  const span=Math.max(4096, CFG.RENDER_DIST*CK*8);
+  // BIG ENOUGH TO REACH THE HORIZON. Sized off the render wall it ended a couple of thousand blocks out, and the old
+  // horizon band showed through the gap as a white seam across the frame — the plane has to outrun the sky, not the
+  // render distance.
+  const span=120000;
   _ocean3=new Water(new THREE.PlaneGeometry(span, span), {
     textureWidth:512, textureHeight:512, waterNormals:nrm,
     sunDirection:new THREE.Vector3(), sunColor:0xffffff, waterColor:0x001e0f,
@@ -6734,7 +6743,12 @@ function _ensureOcean3(){
 function updateOcean3(dt){
   if(!_ocean3Want || !_ocean3) return;
   // The same underground rule the far-sea disc carries: a sea plane seen through a hole you dug is the 08-05 report.
-  const under = _colH > CFG.SEA+2 && camera.position.y < CFG.SEA+0.85;
+  // The column height is recomputed here rather than borrowed: updateHorizon's "_colH" is a const inside its own body,
+  // and reading it from here throws a ReferenceError every frame — which aborts updateSky and everything after it, and
+  // reads on a bench as the ocean making the game FASTER (18.2 ms -> 7.0 ms). It is not a speedup, it is a dead frame.
+  const _cx=camera.position.x, _cz=camera.position.z;
+  const colH=(typeof surfaceH==='function')?surfaceH(_cx,_cz):(CFG.SEA+1);
+  const under = colH > CFG.SEA+2 && camera.position.y < CFG.SEA+0.85;
   _ocean3.visible = !under;
   if(!_ocean3.visible) return;
   _ocean3.position.x=camera.position.x; _ocean3.position.z=camera.position.z;
@@ -13800,9 +13814,10 @@ function _cmpBand(){ const un=uiArt('underlay_line'); if(!un) return null;
 function playerBearing(){ let b=(-(player.yaw)*180/Math.PI)%360; if(b<0)b+=360; return b; }
 // WHERE THE COMPASS ITEM WILL GATE THIS. Ben's inventory rebuild gives the player a compass SLOT; when it lands, the
 // ribbon becomes conditional on something being in it — one test here, and nothing else in the file has to know.
-// One test, so nothing else in the file has to know what a compass is. Cheap enough to call per frame: it walks 43
-// slots and the grid's stack list, both of which every other HUD tick already touches.
-function hasCompass(){ try{ return invCount('compass_item')>0; }catch(e){ return false; } }
+// THE COMPASS SLOT, not the pockets (Ben 2026-08-12: "i want it to only work in the actual compass slot, the slot
+// other than the backpack slot"). EQ_OFF is that slot — the spec pair is the pack and this one. Carrying a compass in
+// the bag does nothing, which is the point: the slot is what the item is for.
+function hasCompass(){ try{ return !!(armor[EQ_OFF] && armor[EQ_OFF].id==='compass_item'); }catch(e){ return false; } }
 function updateCompass(dt){ if(!_cmp) buildCompass();
   const W=_cmp.wrap;
   if(!started || (typeof intro!=='undefined' && intro.active)){ W.style.opacity='0'; return; }
@@ -18407,7 +18422,9 @@ function buildContainers(){
   // The two SPEC slots stay: a pack and an offhand change what you can carry and what your left hand does, and neither
   // is legible from the paperdoll. They sit beside the primaries, stacked to match them.
   const cy=$('carrycol'); if(cy){ cy.innerHTML='';
-    if(EQ_N>EQ_ARMOR){ for(const [i,label] of [[EQ_OFF,'Offhand'],[EQ_PACK,'Backpack']]){
+    // "Compass · offhand": the slot is the compass slot now (it is what gates the nav ribbon) and it is still the slot a
+    // shield or a torch goes in, so the tooltip says both rather than picking one and lying about the other.
+    if(EQ_N>EQ_ARMOR){ for(const [i,label] of [[EQ_OFF,'Compass · offhand'],[EQ_PACK,'Backpack']]){
       const d=slotEl('armor',i); d.title=label; d.style.boxShadow='inset 0 0 0 1px #6b5a34';   // the warm rim still marks them as carry, not armour
       // NO TEXT UNDER THEM (Ben: "offhand and backpack should show icons in them, they dont, no text labels"). The
       // slot carries the glyph as its own background, so an empty pack slot still says what it is.
@@ -20925,7 +20942,7 @@ const GLB_GUNS={
   // has, so the prongs are cut to reach exactly it rather than a line invented above it.
   revolver:{id:'guns/revolver',     len:0.46,muzzleZ:-0.310,boreY:0.028,flash:0.75,flashS:0.75,can:[0.020,0.13],irons:true,cal:'357',
             sights:{fx:1.63,fy:0.574,rx:0.78,ry:0.525,rise:0,rear:'prongs',front:'none'}},
-  shotgun: {id:'guns/shotgun',      len:0.87,muzzleZ:-0.560,boreY:0.030,flash:1.60,flashS:1.50,can:[0.026,0.15],irons:true,pump:true,adsZ:-0.46,cal:'12ga'},
+  shotgun: {id:'guns/shotgun',      len:0.87,muzzleZ:-0.560,boreY:0.030,flash:1.60,flashS:1.50,can:[0.026,0.15],irons:true,pump:true,adsZ:-0.42,cal:'12ga'},
   // ---- THE OTHER EIGHTEEN --------------------------------------------------------------------------------------
   // EVERY `len` IS THIS MODEL'S OWN LENGTH, not a class default: each is its measured X extent (printed in
   // docs/GUN-MODEL-INDEX.md) times the units-per-model-unit of the gun of that class that was already tuned by
@@ -20950,8 +20967,8 @@ const GLB_GUNS={
   revolver_snub:  {id:'guns/revolver-snub',                   len:0.441,muzzleZ:-0.282,boreY:0.028,flash:0.75,flashS:0.75,can:[0.020,0.13],irons:true,cal:'357'},
   revolver_rail:  {id:'guns/revolver-wood-grip',              len:0.461,muzzleZ:-0.295,boreY:0.028,flash:0.75,flashS:0.75,can:[0.020,0.13],irons:true,cal:'357'},
   flare_gun:      {id:'guns/flare-gun',                       len:0.581,muzzleZ:-0.372,boreY:0.028,flash:0.90,flashS:1.20,can:[0.020,0.13],irons:true,cal:'45acp'},
-  shotgun_long:   {id:'guns/shotgun-long',                    len:0.870,muzzleZ:-0.557,boreY:0.030,flash:1.60,flashS:1.50,can:[0.026,0.15],irons:true,pump:true,adsZ:-0.46,cal:'12ga'},
-  shotgun_riot:   {id:'guns/shotgun-short-stock',             len:0.672,muzzleZ:-0.430,boreY:0.030,flash:1.55,flashS:1.45,can:[0.026,0.15],irons:true,pump:true,adsZ:-0.42,cal:'12ga'},
+  shotgun_long:   {id:'guns/shotgun-long',                    len:0.870,muzzleZ:-0.557,boreY:0.030,flash:1.60,flashS:1.50,can:[0.026,0.15],irons:true,pump:true,adsZ:-0.42,cal:'12ga'},
+  shotgun_riot:   {id:'guns/shotgun-short-stock',             len:0.672,muzzleZ:-0.430,boreY:0.030,flash:1.55,flashS:1.45,can:[0.026,0.15],irons:true,pump:true,adsZ:-0.38,cal:'12ga'},
   sawn_off:       {id:'guns/shotgun-sawed-off',               len:0.555,muzzleZ:-0.355,boreY:0.030,flash:1.70,flashS:1.60,can:[0.026,0.15],irons:true,cal:'12ga'},
   marksman_rifle: {id:'guns/sniper-rifle-long',               len:1.189,muzzleZ:-0.761,boreY:0.022,opticY:0.100,flash:1.00,flashS:1.00,can:[0.040,0.22],scope:true,cal:'7.62x51'},
   forest_rifle:   {id:'guns/sniper-rifle-green',              len:1.197,muzzleZ:-0.766,boreY:0.022,opticY:0.100,flash:1.00,flashS:1.00,can:[0.040,0.22],scope:true,cal:'7.62x51'},
@@ -21044,6 +21061,18 @@ function buildGlbGun(key,dot,suppressed){
         // question was blind to the four guns that most need it.
         disc.userData.scopeLens=true; disc.userData.rearGlass=true; disc.userData.lensR=rad;
         disc.renderOrder=6; g.add(disc); UD.lensDisc=disc;
+        // AND IT GROWS INTO THE EYE. At the model's own glass radius the sight picture measured 32 px across a
+        // 900 px frame — physically honest and completely unusable, which is Ben 08-12 "i cannot see the scopes in
+        // the actual scope". The old full-screen black surround was retired on purpose (see scopeEl) because the PiP
+        // glass was meant to BE the sight picture, and a 32 px disc cannot be one.
+        // The target is not invented: 0.028/0.273 is the radius-over-distance of the procedural rifle's lens, the
+        // scope Ben tuned and approved. So the disc opens from its true size at the hip to that same angular size at
+        // full aim, where the eye is at the eyepiece and the tube's rear rim is at the cheek. updateView drives it.
+        // 0.155, not the procedural 0.1026. The procedural rifle's lens sat further from the eye than this model's
+        // eyepiece does, so matching the RATIO still left a small disc; this is the same window it gives, measured on
+        // screen rather than copied off its numbers.
+        UD.lensGrow=Math.max(1, (0.155*Math.abs(disc.position.z))/Math.max(1e-4,rad));
+        UD.lensZ=disc.position.z;
       }
       sub.lens.traverse(o=>{ if(o.isMesh) o.userData.scopeLens=true; });   // what __hc.sight() and the PiP pass look for
     }
@@ -22158,7 +22187,11 @@ function updateView(dt){ updateRecoil(dt);                                      
     // ---- POSE BLEND: hip(ready) ↔ scope(aimed), a REAL interpolation by smoothstep(adsT) — no hard flip ----
     // NO BEND TERMS IN EITHER POSE any more: the block-out is one post-pass over the finished pose (blockOutHand, called
     // below), because the tilt has to pivot at the butt and a pose term cannot express a rotation about a point.
-    const sPx=swx*SWAY_POS + lat*0.010, sPy=-0.10 + b*0.3 + swy*SWAY_POS, sPz=-0.38;   // scope (cheek-weld) pose — flipped + tamed strafe lean
+    // -0.34, was -0.38 (Ben 08-12: "all rifles should be brought closer to the eye just slightly"). This is the
+    // cheek-weld every scoped rifle uses, and four centimetres is the difference between looking AT a scope and
+    // looking THROUGH one — the eyepiece's angular size goes up with the same move. nearPlaneClear still guards the
+    // limit, so a long stock cannot be driven into the camera by this.
+    const sPx=swx*SWAY_POS + lat*0.010, sPy=-0.10 + b*0.3 + swy*SWAY_POS, sPz=-0.34;   // scope (cheek-weld) pose — flipped + tamed strafe lean
     const sRx=view.swing*0.4 + swy*SWAY_ROT, sRy=swx*SWAY_ROT + lat*0.022, sRz=-lat*0.028;
     const hPx=0.17 + lat*0.024, hPy=-0.20+b-vert*0.028, hPz=-0.5;                             // hip (ready) pose — flipped + tamed strafe lean
     // THE MUZZLE TIPS THE OTHER WAY (Ben 08-05: "its also reversed, when jumping up, the gun should tilt down, when coming back,
@@ -22176,9 +22209,12 @@ function updateView(dt){ updateRecoil(dt);                                      
     // its own copy of the sway coefficients, which is how they drifted apart from the scope's; there is now ONE place
     // sway enters an aimed pose. isDotG is tested FIRST because a dot-equipped 'auto' is BOTH isDotG and isIronAR and
     // the holosight must win, exactly as the old if/else chain ordered it.
-    const optic = isDotG ? {dy:0.10, z:-0.30}          // ANY holosight gun (bolt included) — look through the XPS
+    // The same slight move as the cheek weld above, for the guns that aim down their own irons. The PYTHON is left
+    // where it is: it is a handgun, held out at arm's length by design, and pulling a revolver toward the face is not
+    // what "rifles closer to the eye" asked for.
+    const optic = isDotG ? {dy:0.10, z:-0.27}          // ANY holosight gun (bolt included) — look through the XPS
                 : isRev  ? {dy:0.084, z:-0.36}         // the PYTHON'S IRONS: rear notch + front blade, arms extended
-                : isIronAR ? {dy:0.118, z:-0.30}       // the AR'S A2 IRONS (bare/suppressed alike): rear aperture + front post
+                : isIronAR ? {dy:0.118, z:-0.27}       // the AR'S A2 IRONS (bare/suppressed alike): rear aperture + front post
                 : null;
     // THE EYE LINE IS THE GLASS, NOT dotY (Ben 08-04: "holosights have fully dissapeared"). The aimed pose lifts the gun by dy so
     // the optic lands on the camera axis, and dy came from the model's declared dotY — which is the emitter's height, 1.6 cm above
@@ -22303,6 +22339,14 @@ function updateView(dt){ updateRecoil(dt);                                      
     // AND THE GUN DROPS TO DO IT. Working a forend takes the support hand forward and rolls the receiver inboard, so
     // the muzzle dips and the gun comes off the cheek — Ben's "make it low to fire". The dip is what makes the rate
     // limit legible: you can SEE why the next shot has to wait, rather than clicking into a refusal.
+    // The scope's glass opens as the sight comes to the eye (see UD.lensGrow where the disc is built).
+    { const _U=view.mesh&&view.mesh.userData, _LD=_U&&_U.lensDisc;
+      if(_LD&&_U.lensGrow){ const t=clamp(view.adsT||0,0,1);
+        _LD.scale.setScalar(1+t*(_U.lensGrow-1));
+        // AND IT COMES OUT OF THE TUBE. Grown in place, the disc intersects the scope body and the depth test eats
+        // its edge — a ragged rim instead of a clean circle. Sliding it toward the eye as the sight rises clears the
+        // rear rim, which is also where the glass appears to be when your eye is behind it.
+        _LD.position.z=_U.lensZ+t*0.022; } }
     if((view.pumpT||0)>0 && view.mesh){
       const M=view.mesh.userData, u=1-view.pumpT/PUMP_CYCLE;
       const stroke = u<0.30 ? u/0.30                                  // back
@@ -22722,7 +22766,14 @@ function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id
   if(isFinite(_cap)){ const _mk=gunKey(held); if(magGet(_mk,it,held)<=0){ if(AC)burst(master,0.4,0.04,340,0.4,80);   // DRY CLICK on an empty mag → auto-reload
       startReload(held); return false; }
     magSet(_mk, GUNMAG[_mk]-1, held); if(bolt)_fv0.boltT=0.95; if(pump)_fv0.pumpT=PUMP_CYCLE; }                                                     // fire from THIS gun's MAG (per-instance); inventory ammo is consumed at reload
-  const KP=(bolt?0.056 : rev?0.049 : (it.gun==='auto'?0.006 : it.gun==='shotgun'?0.062 : 0.019))*5;   // the 12 gauge kicks hardest of all — a cylinder-bore pump against the shoulder                            // camera recoil per shot ×5 (Ben 07-20): rifle 16° / Python 14° / AR 5.4° / minigun 1.7° — the gun OWNS your aim
+  // FULL AUTO PAYS PER SHOT AND FIRES TEN A SECOND (Ben 08-12: "less recoil on full auto guns, reasonable"). 0.019 was
+  // set when the AR was semi-automatic for want of an `auto` field — one trigger pull, one climb, entirely fair. Made
+  // automatic it charges that same climb at up to 17 rounds a second: measured, a one-second AR burst walked the aim
+  // 24 degrees up the screen, and the gun was unusable held down. 0.0032 puts a one-second burst near ten degrees —
+  // it still climbs, it still has to be managed, and it can be held on a target. The minigun's own 0.006 is untouched
+  // and, per shot, is still the smallest in the game; it fires 38 a second and has its own ADS multiplier below.
+  const _autoKP = (it.auto && it.gun!=='auto') ? 0.0032 : null;
+  const KP=(_autoKP!=null?_autoKP : bolt?0.056 : rev?0.049 : (it.gun==='auto'?0.006 : it.gun==='shotgun'?0.062 : 0.019))*5;   // the 12 gauge kicks hardest of all — a cylinder-bore pump against the shoulder                            // camera recoil per shot ×5 (Ben 07-20): rifle 16° / Python 14° / AR 5.4° / minigun 1.7° — the gun OWNS your aim
   // THE MINIGUN FIGHTS BACK WHEN YOU AIM IT (Ben 08-05: "the minigun needs more recoil when ADS"). Its per-shot kick is the
   // smallest in the game — 0.006, a thirtieth of the shotgun's — because it fires 38 rounds a second and anything else would put
   // the aim in the sky. That is right from the hip. Sighted, holding a spun-up rotary cannon steady is the one thing it should not
@@ -36704,7 +36755,10 @@ window.__hc={
   // QA/bench: the far-sea DISC on its own, so a frame with it and a frame without it can be differenced. Inland the two must
   // be identical — that is Ben's "the ocean still appears below a certain level inland" as a number.
   // three's ocean (webgl_shaders_ocean). Built on first use so nothing pays for it until it is asked for.
-  ocean3(v){ try{ if(v!=null){ _ocean3Want=!!v; if(_ocean3Want) _ensureOcean3(); if(_ocean3) _ocean3.visible=_ocean3Want; }
+  // The painted horizon band and the far-sea disc are what the example's plane REPLACES, so they go with it. Left on,
+  // they draw over its far half and the sea reads as two different oceans meeting at a line.
+  ocean3(v){ try{ if(v!=null){ _ocean3Want=!!v; if(_ocean3Want) _ensureOcean3(); if(_ocean3) _ocean3.visible=_ocean3Want;
+        oceanLayer.visible=!_ocean3Want; _farSeaWant=!_ocean3Want; if(farSea) farSea.visible=_farSeaWant && _farSeaAllow; }
       return { on:_ocean3Want, built:!!_ocean3, y:_ocean3?+_ocean3.position.y.toFixed(2):null }; }catch(e){ return String(e.message||e); } },
   // The example's own dials, so it can be tuned from the console against the frame rather than by editing constants.
   ocean3Set(o){ try{ _ensureOcean3(); const u=_ocean3.material.uniforms; o=o||{};
@@ -36712,6 +36766,9 @@ window.__hc={
       if(o.size!=null) u.size.value=+o.size;
       if(o.alpha!=null) u.alpha.value=+o.alpha;
       if(o.color!=null) u.waterColor.value.set(o.color);
+      // The plane's height above the voxel surface. 0.02 is enough to win the depth test up close and NOT enough at
+      // the render wall, where the depth buffer's precision is spent — which is where the dotted dark band lives.
+      if(o.y!=null) _ocean3.position.y=(CFG.SEA + 1 - WATER_SURF_DROP) + (+o.y);
       return { distortion:u.distortionScale.value, size:u.size.value, alpha:u.alpha.value, color:'#'+u.waterColor.value.getHexString() }; }
     catch(e){ return String(e.message||e); } },
   farSeaOn(v){ try{ if(v!=null){ _farSeaWant=!!v; if(farSea) farSea.visible=_farSeaWant && _farSeaAllow; }

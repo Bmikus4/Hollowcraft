@@ -94,6 +94,33 @@ const click = await (async () => {
   return { ...put, ...after };
 })();
 
+// EVERY CELL IN THE OPEN INVENTORY, CLICKED FOR REAL. The primaries and the spec slots sit in the bottom-left corner
+// under whatever else the screen has put there; a computed style says nothing about which element gets the pointer.
+const cells = await (async () => {
+  const out = {};
+  const targets = [['primary 1', '#primaries .islot', 0, 'inv', 0], ['primary 2', '#primaries .islot', 1, 'inv', 1],
+                   ['compass slot', '#carrycol .islot', 0, 'armor', 4], ['pack slot', '#carrycol .islot', 1, 'armor', 5]];
+  for (const [label, sel, nth, src, idx] of targets) {
+    const at = await page.evaluate(async ([sel, nth, src, idx]) => {
+      __hc.openInv(); await new Promise(r => setTimeout(r, 400));
+      // A click leaves the stack ON THE CURSOR, and the next click would then SWAP rather than empty — so each target
+      // starts from a closed inventory, which is what puts the cursor's contents back in the bag.
+      __hc.eqUI('close'); await new Promise(r => setTimeout(r, 250)); __hc.openInv(); await new Promise(r => setTimeout(r, 400));
+      if (src === 'inv') __hc.qSet('inv', idx, 'revolver', 1); else __hc.eqPut(idx, 'torch');
+      await new Promise(r => setTimeout(r, 200));
+      const el = document.querySelectorAll(sel)[nth], b = el.getBoundingClientRect();
+      const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+      return { x: b.left + b.width / 2, y: b.top + b.height / 2, before: JSON.stringify(__hc.qGet(src, idx)),
+               hit: hit ? (hit.className || hit.id) + ' in ' + (hit.parentElement ? (hit.parentElement.id || hit.parentElement.className) : '-') : 'none' };
+    }, [sel, nth, src, idx]);
+    await page.mouse.click(at.x, at.y); await page.waitForTimeout(250);
+    const after = await page.evaluate(([src, idx]) => JSON.stringify(__hc.qGet(src, idx)), [src, idx]);
+    out[label] = { ...at, after };
+  }
+  await page.evaluate(async () => { __hc.eqUI('close'); await new Promise(r => setTimeout(r, 300)); });
+  return out;
+})();
+
 const fade = await page.evaluate(async () => {
   const R = el => { const b = el.getBoundingClientRect(); return { x: b.left, y: b.top, w: b.width, h: b.height, r: b.right, b: b.bottom }; };
   const hb = document.getElementById('hotbar'), hl = document.getElementById('hotleft');
@@ -147,7 +174,9 @@ for (const [label, m] of [['720p', at720], ['1080p (uiz ' + at1080.uiz + ')', at
     'bar mid=' + (m.bar.x + m.bar.w / 2).toFixed(1) + ' grid mid=' + (m.grid.x + m.grid.w / 2).toFixed(1));
   t(label + ': the grid hangs off the bar, not through it', m.rule.y >= m.bar.b - 0.5 && m.grid.y >= m.rule.b - 0.5,
     'bar.b=' + m.bar.b.toFixed(0) + ' rule=' + m.rule.y.toFixed(0) + '-' + m.rule.b.toFixed(0) + ' grid.y=' + m.grid.y.toFixed(0));
-  t(label + ': one scale for both — cell and grid cell agree', near(m.cell.w, 50, 0.5) && near(m.cellW, 44, 0.5),
+  // A grid cell IS a hotbar cell as of the other session's 7436cf7 (CELL=50): same size, same frame. This check used to
+  // want 44 and now wants them equal, which is the stronger claim anyway.
+  t(label + ': one scale for both — cell and grid cell agree', near(m.cell.w, 50, 0.5) && near(m.cellW, m.cell.w, 0.5),
     'bar cell=' + m.cell.w.toFixed(1) + ' grid cell=' + m.cellW.toFixed(1));
   // The real complaint: the CELLS have to be centred, not the box they sit in.
   t(label + ': the cells themselves are centred on the bar',
@@ -179,6 +208,9 @@ t('spec slots are directly right of them', open.carryN === 2 && open.carry[0].x 
 t('a real click on a bar cell picks the stack up', click.before !== 'null' && click.slot === 'null',
   'before=' + click.before + ' after=' + click.slot + ' at=' + click.x.toFixed(0) + ',' + click.y.toFixed(0) +
   ' hit=' + click.hit + ' uiZ=' + click.uiZ + ' body=' + click.cls);
+for (const [label, c] of Object.entries(cells))
+  t('a real click empties the ' + label, c.before !== 'null' && c.after === 'null',
+    'before=' + c.before + ' after=' + c.after + ' pointer hits ' + c.hit);
 t('no border around the inventory', open.panelBorder === '0px', 'border=' + open.panelBorder);
 t('crafting is a button in the top right', open.craftbtn.x > open.vw * 0.7 && open.craftbtn.y < open.vh * 0.2,
   'btn=' + open.craftbtn.x.toFixed(0) + ',' + open.craftbtn.y.toFixed(0));
