@@ -149,6 +149,9 @@ try {
   // A squat is only a squat if she gets SHORTER. Her bounding box is measured off the posed meshes, so it is
   // the one number that cannot be satisfied by bending a knee and leaving the body where it was.
   const tall = (await page.evaluate(`__hc.girlState()`)).headY;
+  // The STANDING sole is the reference for the squatting one. A toe bone sits below its ankle in the bind pose
+  // by an amount only the file knows, so "flat" is that same difference, not zero.
+  const stand = await page.evaluate(`__hc.girlBone('foot.L','toe.L','foot.R','toe.R','shin.L','shin.R')`);
   await page.evaluate(`__hc.girlIdle(30)`);
   await sleep(2500);
   const sq = await page.evaluate(`__hc.girlState()`);
@@ -157,6 +160,25 @@ try {
     'her head drops to ' + sq.headY + ' blocks from ' + tall);
   // Heels DOWN: a squat on the toes is the failure mode of solving a two-link leg without holding the sole,
   // and the tell is one foot ending up higher than the other or both leaving the floor.
+  const sqB = await page.evaluate(`__hc.girlBone('f_middle.03.L','f_middle.03.R','foot.L','foot.R','toe.L','toe.R','shin.L','shin.R')`);
+  console.log('  squat bones: ' + JSON.stringify(sqB));
+  // FINGERTIPS ON THE FLOOR (Ben 08-12). Half a block of tolerance on a 13.5-block body is about a centimetre
+  // on a person: touching, not hovering and not driven through the ground.
+  check('her fingertips reach the ground', Math.abs(sqB['f_middle.03.L'].y)<0.6 && Math.abs(sqB['f_middle.03.R'].y)<0.6,
+    'left tip at ' + sqB['f_middle.03.L'].y + ', right at ' + sqB['f_middle.03.R'].y + ' blocks');
+  // FLAT FEET: the toe and the ankle at the same height means the sole is parallel to the floor, which is the
+  // only thing that separates a squat from a crouch on the balls of the feet.
+  const flatL = (sqB['foot.L'].y-sqB['toe.L'].y) - (stand['foot.L'].y-stand['toe.L'].y);
+  const flatR = (sqB['foot.R'].y-sqB['toe.R'].y) - (stand['foot.R'].y-stand['toe.R'].y);
+  check('her soles stay flat on the floor', Math.abs(flatL)<0.3 && Math.abs(flatR)<0.3,
+    'ankle-to-toe drop differs from standing by ' + flatL.toFixed(2) + ' / ' + flatR.toFixed(2) + ' blocks');
+  // SPREAD: her knees on opposite sides of her, and wider apart than they are standing.
+  // Wider than standing, at the KNEE and at the FOOT — a squat with the knees out and the feet together is the
+  // pose the first attempt produced, and it is not what spread legs look like.
+  const wStand = Math.abs(stand['foot.L'].side-stand['foot.R'].side), wSq = Math.abs(sqB['foot.L'].side-sqB['foot.R'].side);
+  const kStand = Math.abs(stand['shin.L'].side-stand['shin.R'].side), kSq = Math.abs(sqB['shin.L'].side-sqB['shin.R'].side);
+  check('her legs are spread — feet apart, not just knees out', wSq > wStand*1.6 && kSq > kStand*1.15,
+    'feet ' + wStand.toFixed(2) + ' -> ' + wSq.toFixed(2) + ' blocks apart, knees ' + kStand.toFixed(2) + ' -> ' + kSq.toFixed(2));
   check('her heels stay on the ground in the squat', Math.abs(sq.probe.footL[1] - sq.probe.footR[1]) < 0.2,
     'feet at ' + sq.probe.footL[1] + ' / ' + sq.probe.footR[1]);
 
@@ -171,8 +193,16 @@ try {
     'pitch ' + fell.pitch + ' rad, lying for ' + fell.ttl + ' s');
   // …and lies ON the floor. Everything rotates about her feet plane, so a body that is not lifted by its own
   // half-thickness ends up with its back through the ground — invisible from most angles and obvious from one.
-  check('the corpse is on the floor, not inside it', fell.bodyY > 0.3 && fell.bodyY < 3,
-    'her chest sits ' + fell.bodyY + ' blocks above the ground');
+  const deadB = await page.evaluate(`__hc.girlBone('spine.003','Head','thigh.L','thigh.R','shin.L','shin.R','foot.L','foot.R')`);
+  console.log('  corpse bones: ' + JSON.stringify(deadB));
+  // ON the floor: the lowest bone in the body a limb's radius above it. Higher than that is the float Ben saw,
+  // lower is a body with its back through the ground.
+  const low = Math.min(...['spine.003','Head','thigh.L','thigh.R','shin.L','shin.R','foot.L','foot.R'].map(n=>deadB[n].y));
+  check('the corpse rests ON the floor rather than floating over it', low>0.2 && low<1.1,
+    'her lowest bone sits ' + low.toFixed(2) + ' blocks up');
+  // THE LEGS DO NOT CROSS: her left leg on her left, her right on her right, and a real gap between them.
+  check('her legs do not cross', deadB['shin.L'].side>0.4 && deadB['shin.R'].side<-0.4,
+    'shins at ' + deadB['shin.L'].side + ' / ' + deadB['shin.R'].side);
 
   check('no page errors', errs.length === 0, errs.slice(0, 3).join(' | ') || 'clean');
 } catch (e){ console.log('  HARNESS ERROR: ' + (e && e.stack || e)); fails++; }

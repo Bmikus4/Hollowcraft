@@ -198,9 +198,9 @@ export function giantessBuild(scale){
 
 // A bone set to rest * euler(x,y,z). Blender bones point along their own +Y, so X is the swing axis of
 // a limb and Z is its splay — that is why every pose below is mostly X.
-function set(rig, name, x, y, z){
+function set(rig, name, x, y, z, order){
   const b = rig.bone[name]; if (!b) return;
-  rig._e.set(x || 0, y || 0, z || 0);
+  rig._e.set(x || 0, y || 0, z || 0, order || 'XYZ');
   b.quaternion.copy(rig.rest.get(b)).multiply(rig._q.setFromEuler(rig._e));
 }
 function rest(rig, name){ const b = rig.bone[name]; if (b) b.quaternion.copy(rig.rest.get(b)); }
@@ -254,12 +254,14 @@ function legIK(rig, L, footZ, footY, hipZ, hipY, roll, splay){
   const beta = Math.acos(Math.max(-1, Math.min(1, cb)));                 // the thigh sits forward of that line by beta
   const knee = Math.PI - Math.acos(Math.max(-1, Math.min(1, ck)));       // …and the knee bends backward by this
   const thigh = th + beta;
-  // SPLAY GOES IN THE EULER, NOT ONTO THE QUATERNION AFTERWARDS, and the difference is the whole squat. three's
-  // XYZ euler applies Z FIRST, so this is "swing the leg out from the rest pose, then flex it" — the plane the
-  // solve was done in, tilted. Multiplying a Z rotation onto the finished quaternion instead rotates about the
-  // ALREADY FLEXED thigh's axis, which spins the knee around the hip and leaves the ankle where it was
-  // (measured: 0.86 blocks of knee travel for 0.06 of foot).
-  set(rig, 'thigh.' + L, FWD * thigh, 0, splay || 0);
+  // ZYX, AND THE ORDER IS THE WHOLE SQUAT. Splay has to be the OUTER rotation: flex the leg in her sagittal
+  // plane first, then swing the finished leg out from the hip. Both other orderings were tried and measured on
+  // the rig, and both leave the ankle on the centre line — with the hip folded past a right angle, a splay
+  // applied before (or onto) the flexion sweeps the knee around a cone and brings the foot back underneath
+  // her (0.86 blocks of knee travel for 0.06 of foot). ZYX is R = Rz·Ry·Rx, which is that order.
+  // The axis itself is measured, not assumed: __hc.girlPoke('thigh.L','z',0.5,'foot.L') carries the sole 2.8
+  // blocks sideways, so Z is abduction on this rig and X is the swing.
+  set(rig, 'thigh.' + L, FWD * thigh, 0, splay || 0, splay ? 'ZYX' : 'XYZ');
   set(rig, 'shin.' + L, FWD * -knee, 0, 0);
   // The sole stays parallel to the ground unless it is rolling over the heel or the toes: the ankle undoes
   // whatever the shin is doing in world terms. Without this the foot points wherever the shin left it,
@@ -501,6 +503,12 @@ export function giantessHit(rig, x, y, z){
   }
   return null;
 }
+// EVERY BONE BACK TO THE FILE'S OWN POSE. Each animation here writes the bones IT cares about and leaves the
+// rest alone, which is what lets the flinch and the walk layer — and it means a pose left behind by one of
+// them outlives it. The squat calibration is the case that forced this: it runs once, off the loading screen,
+// and it folds the lumbar a full radian; the walk resets that joint every frame but nothing resets the hands,
+// the toes or the head, and she spawned 2.6 blocks shorter than she is (bench: "MASSIVE", 10.9 of 13.5).
+export function giantessRest(rig){ for (const b of rig.bones) b.quaternion.copy(rig.rest.get(b)); }
 export function giantessIdle(rig, t){
   const b = Math.sin(t * 1.1) * 0.04;
   for (const n of LIMBS) rest(rig, n);
@@ -578,40 +586,58 @@ const SQ_HAND = 0.30;           // the wrist's own break, so the palm faces down
 // whether her arms are long enough to reach the floor is a fact about the file, not a thing to be assumed.
 // Descent rather than a grid because a grid dense enough in four dimensions is thousands of poses, and this
 // runs inside a gameplay frame the first time she squats.
-const SQ_P = [ { k: 'adduct', lo: -1.30, hi: 0.30 }, { k: 'pitch', lo: -0.60, hi: 2.60 },
-               { k: 'elbow', lo: 0.00, hi: 1.60 }, { k: 'fold', lo: 0.00, hi: 0.45 } ];
+// THE SWEEP IS NESTED, NOT A DESCENT, and the reason is worth keeping: folding the trunk lowers her shoulder
+// (about 1.3 blocks per radian) but swings the whole arm forward with it, because the arm bones are the
+// spine's children. At a FIXED shoulder angle a deeper fold therefore makes the reach WORSE, so a coordinate
+// descent finds no improving direction and stops — it stalled at a fold of 0.4 rad with the fingertips 2.8
+// blocks off the floor, twice. The two only pay off together, so the fold's loop contains the shoulder's.
+// ~1500 poses, run once, off the loading screen (see the giantess prewarm in index.html) rather than in play.
+const SQ_ADDUCT = [-1.30, -1.00, -0.70, -0.35];
 function squatCalibrate(rig){
   if (rig._sqArm) return rig._sqArm;
   const tipB = rig.bone['f_middle.03.L'] || rig.bone['hand.L'], footB = rig.bone['foot.L'];
-  const a = { adduct: -0.6, pitch: 1.2, elbow: 0.4, fold: 0.1 };
-  if (!tipB || !footB) return (rig._sqArm = a);
+  let best = { adduct: -1.0, pitch: 1.2, elbow: 0.15, fold: 0.4, err: Infinity };
+  if (!tipB || !footB) return (rig._sqArm = best);
   const tip = new THREE.Vector3(), ft = new THREE.Vector3(), loc = new THREE.Vector3();
   const cost = (c) => {
     squatPose(rig, 1, 0, c);
     rig.group.updateMatrixWorld(true);
     tipB.getWorldPosition(tip); footB.getWorldPosition(ft);
     loc.copy(tip); rig.group.worldToLocal(loc);
-    // Height is the claim; the width term only keeps the hands from ending up out at arm's length beside her,
-    // which reaches the floor just as well and is a different pose entirely.
-    return Math.abs(tip.y - (ft.y - rig.ankle)) + 0.35 * Math.max(0, Math.abs(loc.x * rig.scale) - 2.4);
+    // Height is the claim. The width term only keeps the hands from reaching the floor out at arm's length
+    // beside her, which touches just as well and is a different pose; the fold term breaks ties toward the
+    // most upright back that still reaches, so she is not folded further than the floor actually requires.
+    return Math.abs(tip.y - (ft.y - rig.ankle))
+         + 0.35 * Math.max(0, Math.abs(loc.x * rig.scale) - 2.4)
+         + 0.05 * c.fold;
   };
-  let best = cost(a);
-  for (let pass = 0; pass < 4; pass++){
-    for (const p of SQ_P){
-      const step = (p.hi - p.lo) / (pass === 0 ? 16 : 16 * Math.pow(3, pass));
+  const c = { adduct: 0, pitch: 0, elbow: 0.15, fold: 0 };
+  for (const ad of SQ_ADDUCT){
+    c.adduct = ad;
+    for (let fi = 0; fi <= 16; fi++){
+      c.fold = fi * (1.45 / 16);
+      for (let pi = 0; pi <= 24; pi++){
+        c.pitch = -2.4 + pi * (4.8 / 24);
+        const e = cost(c);
+        if (e < best.err) best = { adduct: c.adduct, pitch: c.pitch, elbow: c.elbow, fold: c.fold, err: e };
+      }
+    }
+  }
+  // …then a short local refine on all four, now that the coarse grid has put it in the right basin.
+  const P = [['adduct', 0.10], ['pitch', 0.10], ['fold', 0.06], ['elbow', 0.10]];
+  for (let pass = 0; pass < 3; pass++){
+    for (const [k, st0] of P){
+      const step = st0 / (pass + 1);
       for (const dir of [1, -1]){
         for (;;){
-          const v = a[p.k] + dir * step;
-          if (v < p.lo || v > p.hi) break;
-          const was = a[p.k]; a[p.k] = v;
-          const c = cost(a);
-          if (c < best - 1e-4){ best = c; } else { a[p.k] = was; break; }
+          const was = best[k]; best[k] = was + dir * step;
+          const e = cost(best);
+          if (e < best.err - 1e-4) best.err = e; else { best[k] = was; break; }
         }
       }
     }
   }
-  a.err = best;
-  return (rig._sqArm = a);
+  return (rig._sqArm = best);
 }
 // d is depth 0..1 (0 = standing, 1 = heels-down deep squat), t is seconds for the breathing.
 export function giantessSquat(rig, d, t){
@@ -641,14 +667,22 @@ function squatPose(rig, d, t, c){
   // into it. The sole then lands at the width AND the height asked for, by construction.
   const S = g.len * 0.20 * u, drop = hipY - rig.ankle, tilt = Math.atan2(S, drop);
   const inPlane = Math.hypot(drop, S);
-  legIK(rig, 'L', footZ, hipY - inPlane, 0, hipY, 0, tilt);      // roll 0: heels DOWN, the sole flat on the ground
-  legIK(rig, 'R', footZ, hipY - inPlane, 0, hipY, 0, -tilt);
+  // NEGATIVE ON HER LEFT, and the sign is measured rather than reasoned about: girlPoke('thigh.L','z',0.5,'foot.L')
+  // carries the left sole 2.8 blocks toward her RIGHT, so out is the other way.
+  legIK(rig, 'L', footZ, hipY - inPlane, 0, hipY, 0, -tilt);      // roll 0: heels DOWN, the sole flat on the ground
+  legIK(rig, 'R', footZ, hipY - inPlane, 0, hipY, 0, tilt);
   rest(rig, 'toe.L'); rest(rig, 'toe.R');
 
   rest(rig, 'spine');                                  // the pelvis, as everywhere else — see the walk
-  set(rig, 'spine.001', FWD * -0.22 * u, 0, 0);        // lumbar folds first
-  set(rig, 'spine.003', FWD * (-0.30 - (c ? c.fold : 0)) * u + br * 3, 0, 0);   // then the chest, forward over the knees — the extra fold is however much the hands needed to reach
-  set(rig, 'Neck', FWD * 0.34 * u, 0, 0);              // …and the head comes back UP: she is still looking at you
+  // THE TRUNK FOLD IS PART OF THE REACH, and it is the part that makes the reach possible at all. Her shoulder
+  // sits 3.9 blocks above her hip and her whole arm, fingertips included, is 4.59 — so in a deep squat with an
+  // upright back the tip stops 3 blocks off the floor no matter what the shoulder does. That is arithmetic
+  // about this file, not a tuning failure, and the only joint left that can lower a shoulder is the spine.
+  // Split across both joints because one hinge at the chest is a hunch and two is a person folding over.
+  const fold = c ? c.fold : 0;
+  set(rig, 'spine.001', FWD * (-0.22 - fold * 0.45) * u, 0, 0);      // lumbar folds first
+  set(rig, 'spine.003', FWD * (-0.30 - fold * 0.55) * u + br * 3, 0, 0);   // then the chest, forward over the knees
+  set(rig, 'Neck', FWD * (0.34 + fold * 0.75) * u, 0, 0);   // …and the head comes back UP against the fold: she is still looking at you
   set(rig, 'Head', FWD * 0.10 * u, 0, 0);
   // The arms go DOWN to the floor between her spread knees, at the angle the sweep above found. They are held
   // out at ARM when she is standing (Ben), so that abduction is spent on the way down or she squats like a
