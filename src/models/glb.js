@@ -152,7 +152,7 @@ function splitTris(geo, boxes){
   return out;
 }
 
-// opts.style(matName, mat) → {color, map, repeat, shininess, specular, emissive, transparent, opacity,
+// opts.style(matName, mat) → {color, map, normalMap, repeat, shininess, specular, emissive, transparent, opacity,
 // flat} decides what each of the model's materials becomes. Return nothing and the model's own colour
 // is used. This is the hook the tool tiers ride: same geometry, a different palette and map per tier.
 // opts.parts = [{name, box:THREE.Box3}] carves those regions into child groups (see splitTris); they land
@@ -191,6 +191,8 @@ function mkMesh(geo, s, part){
   if (s.map || s.uv) planarUV(geo, s.map ? (s.repeat || 3) : (s.uv === true ? 1 : s.uv));
   const md = { color: s.color != null ? new THREE.Color(s.color) : part.mat.color.clone() };
   if (s.map) md.map = s.map;
+  // A normal map needs the same planar UVs the albedo just got, so it only rides along with a map — never alone.
+  if (s.map && s.normalMap) md.normalMap = s.normalMap;
   if (s.transparent){ md.transparent = true; md.opacity = s.opacity != null ? s.opacity : 0.5; }
   if (s.emissive != null) md.emissive = new THREE.Color(s.emissive);
   let mat;
