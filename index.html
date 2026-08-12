@@ -13883,7 +13883,14 @@ function refreshHotbar(){ for(let i=0;i<HOT_N;i++){ const d=hotbarSlots[i], s=in
     if(it&&it.tool){ const cur=(s.dur==null?it.tool.dur:s.dur), f=clamp(cur/it.tool.dur,0,1); db.style.display=f<1?'block':'none'; db.style.width=(42*f).toFixed(0)+'px'; db.style.background='hsl('+(f*115).toFixed(0)+',80%,45%)'; } else db.style.display='none'; }
   if(typeof refreshOffSlot==='function') refreshOffSlot();
   if(typeof warmPrimaries==='function') warmPrimaries();   // a gun that has just reached a primary slot gets built off the swap path
+  // THE SLUNG GUN CHANGES WITH THE BAR, not with your armour. What rides your back is the primary you are not holding, so
+  // it moves when either primary changes AND when the selection moves between them — and updateArmorView, which is what
+  // repaints it, used to be called only from equip changes. Gated on a signature rather than called every refresh:
+  // refreshHotbar runs on every shot and every tick of a tool's wear, and applyWorn is not free.
+  { const sig=(inv[0]&&inv[0].id||'')+'|'+(inv[1]&&inv[1].id||'')+'|'+(selSlot<HOT_PRIMARY?selSlot:'x');
+    if(sig!==_slungSig){ _slungSig=sig; if(typeof updateArmorView==='function') updateArmorView(); } }
   hotSense(); }
+let _slungSig='';
 // EACH GROUP FADES ON WHAT CHANGED IN IT, NOT ON ANY REFRESH. refreshHotbar is called from ninety-odd places — every
 // pickup, every round fired, every tick that wears a tool — so waking on the call itself would flash the whole bar at
 // events that touched neither half of it. hotSense paints nothing: it diffs a per-slot signature of what was just
@@ -19147,6 +19154,37 @@ function _wornPackMesh(id){
   g.traverse(o=>{ o.userData.keepColor=true; if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
   return g;
 }
+// THE SECOND GUN IS WORN ON THE BACK (Ben 2026-08-12: "deleting it does not delete the second gun slot, it deletes just
+// off hand mechanics. secondary guns should be worn on the back"). Slung muzzle-down across the spine, which is where a
+// long arm goes when both hands are busy — and it is only ever the primary you are NOT holding, so the gun in your hands
+// is never also on your back.
+// Sized by LENGTH rather than by enclosure: a gun is a long thin object and what has to look right is its length against
+// the torso, not its bounding box. 0.86 of the torso's height puts a rifle's muzzle at the hip and its stock at the
+// shoulder, which is how a sling hangs.
+const WORN_GUN={len:0.86, y:1.14, z:-0.26, packZ:-0.46, roll:-0.62, yaw:0.10};
+function _wornGunMesh(id){
+  let m=null; try{ m=itemModel(id); }catch(e){ return null; }
+  if(!m) return null;
+  const w=new THREE.Group(); w.add(m); w.updateMatrixWorld(true);
+  const bb=new THREE.Box3().setFromObject(w), sz=bb.getSize(new THREE.Vector3()), ctr=bb.getCenter(new THREE.Vector3());
+  const long=Math.max(sz.x,sz.y,sz.z)||1;
+  // THE WHOLE LENGTH, not a fraction of it. At 0.62 the rifle came out 0.48 long against a 1.7 body -- a toy, and mostly
+  // inside the torso, which is what Ben would have called it. A slung long arm runs shoulder to hip: 0.86 is that span.
+  const s=WORN_GUN.len/long;
+  w.scale.setScalar(s); w.position.set(-ctr.x*s,-ctr.y*s,-ctr.z*s);
+  const g=new THREE.Group(); g.add(w);
+  // The models are authored for the VIEWMODEL, muzzle down -z. Turned to lie along the body's own up axis and then rolled
+  // off vertical, which is what makes it read as slung rather than bolted on.
+  w.rotation.set(Math.PI/2, 0, 0);
+  g.rotation.set(0, WORN_GUN.yaw, WORN_GUN.roll);
+  g.traverse(o=>{ o.userData.keepColor=true; if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
+  return g;
+}
+function _wornGunOn(host,parent,id){
+  if(!host||!id||!parent) return null; host._guns=host._guns||{};
+  if(host._guns[id]===undefined){ const g=_wornGunMesh(id); if(!g) return null; parent.add(g); host._guns[id]=g; }
+  return host._guns[id];
+}
 // Same not-caching-a-failure rule as the shells: the models load asynchronously and a pack equipped mid-load must
 // not pin the procedural one for the session.
 function _wornPackOn(host,parent,id){
@@ -19162,6 +19200,15 @@ function applyWorn(P){ if(!P) return; const isStraw=!!(armor[0]&&armor[0].id==='
   // EACH TIER WEARS ITS OWN MODEL. The procedural satchel stays as the fallback for a pack whose model has not
   // loaded (or a tier nobody has given a model to), and is hidden the moment the real one is standing there.
   const wornPack = packOn ? _wornPackOn(P, P.pack&&P.pack.parent, armor[EQ_PACK].id) : null;
+  // THE PRIMARY YOU ARE NOT HOLDING RIDES YOUR BACK. Both primaries can hold a firearm, so this asks which one is not
+  // selected rather than naming slot 1 — and a gun in your hands must never also be on your back.
+  // It sits FURTHER OUT when a pack is worn, or the two occupy the same slice of air and the rifle grows out of the bag.
+  let slungId=null;
+  for(let i=0;i<HOT_PRIMARY;i++){ if(i===selSlot) continue; const st=inv[i];
+    if(st && ITEMS[st.id] && ITEMS[st.id].gun){ slungId=st.id; break; } }
+  const slung = slungId ? _wornGunOn(P, P.pack&&P.pack.parent, slungId) : null;
+  if(P._guns) for(const k in P._guns){ const g=P._guns[k]; g.visible=(g===slung);
+    if(g.visible) g.position.set(0, WORN_GUN.y, packOn?WORN_GUN.packZ:WORN_GUN.z); }
   if(P._packs) for(const k in P._packs) P._packs[k].visible = (P._packs[k]===wornPack);
   if(P.pack) P.pack.visible = packOn && !wornPack;
   if(P.pack && P.pack.visible) P.pack.scale.setScalar(1);
@@ -29375,7 +29422,7 @@ function bloodAssetTex(){
 const BLOOD_LIFE=180;                          // seconds a wound stays on a creature - Ben's three minutes, exactly
 const BLOOD_FADE=3;                            // ...and the last three of them fade it out, so it does not pop
 const BLOOD_MAX=64;                            // live decals, oldest first out. The cap IS the budget.
-const _bloodFX={ tex:{}, mat:{}, meta:null, live:[], ready:false, dead:false };
+const _bloodFX={ tex:{}, mat:{}, meta:null, live:[], ready:false, dead:false, lastSnap:null };
 function bloodFxInit(){
   if(_bloodFX.ready || _bloodFX.dead) return _bloodFX.ready;
   const TL=new THREE.TextureLoader();
@@ -29478,15 +29525,34 @@ function bloodImpact(x,y,z,dir,host,size,surf){
         if(ms.length){
           const from=new THREE.Vector3(x,y,z).addScaledVector(dv,-4.0);   // back out of the body, then come in
           const hit=new THREE.Raycaster(from,dv,0.01,12.0).intersectObjects(ms,false)[0];
+          _bloodFX.lastSnap={hit:!!hit, meshes:ms.length, skinned:!!(hit&&hit.object.isSkinnedMesh), normal:null,
+                             moved:hit?+new THREE.Vector3(x,y,z).distanceTo(hit.point).toFixed(3):null};
           if(hit){ x=hit.point.x; y=hit.point.y; z=hit.point.z;
-            // THE FACE'S OWN NORMAL, where it can be trusted. On a rigid mesh that is the surface's true facing and
-            // the decal lies flat on it. On a SKINNED mesh the reported face normal is the BIND pose's — three deforms
-            // positions for a raycast, not normals — so a rotated limb would hand back the normal it had at export.
-            // There, facing the decal back down the round's flight is both honest and stable.
-            if(!hit.object.isSkinnedMesh && hit.face){
-              const n=hit.face.normal.clone()
-                .applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld)).normalize();
-              dir={x:-n.x,y:-n.y,z:-n.z}; }
+            // THE POSED TRIANGLE'S OWN NORMAL. hit.face.normal is the BIND pose's, because three deforms POSITIONS for
+            // a raycast and not normals - so on a limb that has rotated since export it is simply the wrong direction,
+            // and a decal built on it lies at an angle through the skin rather than flat on it. That is the other half
+            // of Ben's "weird planes sticking off the model".
+            //
+            // The deformed triangle is recoverable: SkinnedMesh.applyBoneTransform returns the skinned position of any
+            // vertex, so the three face vertices give the normal the surface ACTUALLY has right now. A rigid mesh takes
+            // its bind normal through the world normal matrix, which for it is the same thing.
+            let n=null;
+            try{
+              const g2=hit.object.geometry, f=hit.face;
+              if(hit.object.isSkinnedMesh && f && typeof hit.object.applyBoneTransform==='function'){
+                const va=new THREE.Vector3(), vb=new THREE.Vector3(), vc=new THREE.Vector3();
+                hit.object.applyBoneTransform(f.a, va.fromBufferAttribute(g2.attributes.position,f.a));
+                hit.object.applyBoneTransform(f.b, vb.fromBufferAttribute(g2.attributes.position,f.b));
+                hit.object.applyBoneTransform(f.c, vc.fromBufferAttribute(g2.attributes.position,f.c));
+                hit.object.localToWorld(va); hit.object.localToWorld(vb); hit.object.localToWorld(vc);
+                n=new THREE.Vector3().subVectors(vc,va).cross(new THREE.Vector3().subVectors(vb,va)).normalize();
+                if(n.dot(dv)>0) n.negate();                      // face the shooter whichever way the winding runs
+              } else if(f){
+                n=f.normal.clone().applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld)).normalize();
+              }
+            }catch(e){ n=null; }
+            if(n && isFinite(n.x)){ dir={x:-n.x,y:-n.y,z:-n.z};
+              _bloodFX.lastSnap.normal=[+n.x.toFixed(2),+n.y.toFixed(2),+n.z.toFixed(2)]; }
           }
         }
       }
@@ -29506,24 +29572,30 @@ function bloodImpact(x,y,z,dir,host,size,surf){
       if(up.lengthSq()<1e-6) up.set(0,1,0); else up.normalize();
       const right=new THREE.Vector3().crossVectors(up,ln).normalize();
       g.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right,up,ln));
-      g.position.copy(host.worldToLocal(new THREE.Vector3(x,y,z))).add(ln.clone().multiplyScalar(0.02));
+      g.position.copy(host.worldToLocal(new THREE.Vector3(x,y,z)));
       host.add(g);
       // A WOUND IS A WOUND WHATEVER IT IS ON. 0.16 of the body's height made a two-block mark on a thirteen-block
       // giantess, and her thigh is about two blocks wide - so the quad covered the whole limb and hung off it into
       // open air, which is Ben's "blood can not appear off of a creatures model". It scales with the body only
       // gently now and is capped hard: 11 cm on a man, the 6 cm floor on a fox, 45 cm on the giantess.
-      // A BULLET HOLE IS NEARLY THE SAME SIZE ON EVERYTHING, because a bullet is. Scaled with the body it came
-      // out a 45 cm hole on the giantess, which Ben read as "wayy too big" - and he is right: a round that leaves
-      // a 2 cm wound in a man leaves a 2 cm wound in her. It grows only enough to stay legible at her scale, so
-      // the formula is mostly a constant: 11 cm on a man, 18 cm on the giantess, the 8 cm floor on a fox.
-      const H=Math.max(0.2,size||1.8), mw=Math.min(0.22,Math.max(0.08,0.10+H*0.006));
+      // BIG ENOUGH TO SEE AT THE RANGE YOU FIGHT AT, and this is the middle of two corrections. 0.16 of the body was
+      // a 45 cm hole on the giantess that hung off her limbs ("wayy too big"). A near-constant, physically honest
+      // 2 cm hole was INVISIBLE on a thirteen-block body seen from ten blocks away, which is why Ben saw no change at
+      // all. 4.5% of height reads at fighting range and still sits well inside a limb - her thighs are about two
+      // blocks across and this is 0.6 of one. A man gets the 0.10 floor, which is about a fist: larger than a real
+      // wound, and it has to be, or it is a single pixel.
+      const H=Math.max(0.2,size||1.8), mw=Math.min(0.70,Math.max(0.10,H*0.045));
+      // PROUD OF THE SKIN IN PROPORTION TO ITSELF. A fixed 2 cm was enough for an 11 cm mark and nothing like enough
+      // for a 60 cm one on a curved limb, where the quad's corners sink into the body and the decal reads as a hole
+      // punched through her rather than a mark on her. Applied here because mw is not known until now.
+      g.position.add(ln.clone().multiplyScalar(0.02+mw*0.10));
       const mk=_bloodQuad('impact',mw,mw,false);                            // one still, so no animation
       g.add(mk); _bloodTrack(mk,0);
       // The drip hangs BELOW the mark on the same plane and grows downward over four seconds. Its sheet cell is a
       // vertical streak, so the quad takes that aspect — but the LENGTH is capped at a third of the body, because a
       // drip that runs past the feet is blood hanging in the air under an animal.
       const dm=_bloodFX.meta.drip||{cell:[46,192]}, dw=mw*0.6;
-      const dh=Math.min(dw*(dm.cell[1]/dm.cell[0]), H*0.05);   // and a run of blood no longer than a twentieth of the body
+      const dh=Math.min(dw*(dm.cell[1]/dm.cell[0]), H*0.10);   // and a run of blood no longer than a tenth of the body
       const dr=_bloodQuad('drip',dw,dh);
       dr.position.set(0,-dh/2,0.002); g.add(dr); _bloodTrack(dr,4.0);
     }
@@ -37996,7 +38068,11 @@ window.__hc={
   // has left. "The blood sticks to the creature" is a claim about PARENTAGE, and a screenshot of a stationary animal
   // cannot tell a decal that rides the mesh from one that happens to be next to it.
   bloodState(){ try{ if(typeof _bloodFX==='undefined') return {err:'no blood fx'};
-      const out={ live:_bloodFX.live.length, ready:!!_bloodFX.ready, dead:!!_bloodFX.dead, meta:_bloodFX.meta, decals:[] };
+      const out={ live:_bloodFX.live.length, ready:!!_bloodFX.ready, dead:!!_bloodFX.dead, meta:_bloodFX.meta,
+        // WHETHER THE SURFACE SNAP ACTUALLY LANDED. Without this a raycast that quietly misses is
+        // indistinguishable from one that works: the decal still appears, just back at the volume-test point it
+        // was always at, which is exactly the failure that would look like "no visible change".
+        lastSnap:_bloodFX.lastSnap||null, decals:[] };
       for(const d of _bloodFX.live){ const M=d.m.userData._bl||{}, w=new THREE.Vector3();
         d.m.getWorldPosition(w);
         let root=d.m, depth=0; while(root.parent && root.parent!==scene){ root=root.parent; depth++; }
@@ -38301,7 +38377,8 @@ window.__hc={
             return {w:+s.x.toFixed(3),h:+s.y.toFixed(3),d:+s.z.toFixed(3),cy:+c.y.toFixed(3),cz:+c.z.toFixed(3),
                     top:+(c.y+s.y/2).toFixed(3),bot:+(c.y-s.y/2).toFixed(3)}; };
           const vis=m=>{ for(const k in (m||{})) if(m[k].visible) return [k,m[k]]; return null; };
-          const p=vis(_pv.P._packs), sh=vis(_pv.P._shells);
+          const p=vis(_pv.P._packs), sh=vis(_pv.P._shells), gn=vis(_pv.P._guns);
+          if(gn) out.slung={id:gn[0], ...box(gn[1])};
           if(p) out.wornPack={id:p[0], ...box(p[1])};
           if(sh) out.shell={id:sh[0], rot:[+sh[1].rotation.x.toFixed(3),+sh[1].rotation.y.toFixed(3),+sh[1].rotation.z.toFixed(3)], ...box(sh[1])};
           return out; })() }; }catch(e){ return {err:String(e.message||e)}; } },
