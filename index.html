@@ -721,9 +721,10 @@ let GLB_PLACE={};
 let MUZZLE_IMG=null;
 // BEN'S GUN TEXTURES, loaded with the pack for the same reason the pack is loaded here: an icon bakes ONCE, so a
 // texture that lands a frame late is baked out of every inventory picture permanently. Two 512px albedos with their
-// ambient occlusion already multiplied in (93 KB the pair, down from 14 MB of 2048px Unity source) and their normal
-// maps. These carry the guns' colour now, which is what finally settles the navy: a photographed gunmetal albedo
-// does not care what the model was painted.
+// ambient occlusion already multiplied in, 93 KB the pair, down from 14 MB of 2048px Unity source. These carry the
+// guns' colour now, which is what finally settles the navy: a photographed gunmetal albedo does not care what the
+// model was painted. The source sets ship normal maps too and they are deliberately NOT loaded — see the note in
+// _glbGunStyle about what a tangent-less normal map did to a held gun.
 const GUN_TEX={};
 const _texLoad=(k,u,srgb)=>new Promise(r=>new THREE.TextureLoader().load(u,t=>{
   t.wrapS=t.wrapT=THREE.RepeatWrapping; if(srgb)t.colorSpace=THREE.SRGBColorSpace; t.anisotropy=4; GUN_TEX[k]=t; r();
@@ -736,8 +737,7 @@ await Promise.race([
     // one that misses it. createImageBitmap rather than an Image element, so the decode is off the main thread.
     fetch('./assets/fx/muzzle-flash.png').then(r=>r.blob()).then(b=>createImageBitmap(b)).then(b=>{ MUZZLE_IMG=b; }).catch(e=>console.warn('[fx] muzzle sheet: '+e.message)),
     fetch('./assets/models/placement-data.json').then(r=>r.json()).then(j=>{ GLB_PLACE=j.models||{}; }).catch(e=>console.warn('[glb] placement data: '+e.message)),
-    _texLoad('metal','./assets/tex/gun-metal.jpg',true), _texLoad('metalN','./assets/tex/gun-metal-n.jpg',false),
-    _texLoad('wood','./assets/tex/gun-wood.jpg',true),   _texLoad('woodN','./assets/tex/gun-wood-n.jpg',false) ]),
+    _texLoad('metal','./assets/tex/gun-metal.jpg',true), _texLoad('wood','./assets/tex/gun-wood.jpg',true) ]),
   new Promise(r=>setTimeout(r,8000)),
 ]);
 // THE GIANTESS LOADS IN THE BACKGROUND, deliberately outside the race above. Her GLB is 8 MB — as much as
@@ -6430,6 +6430,10 @@ const waterMat = new THREE.ShaderMaterial({
     // only thing standing between it and eye level is how much of the depth colour this cap lets the grazing reflection erase. At
     // 0.80 a fifth survived; at 0.42 well over half does, so the sea reads as water from a shore as well as from the air.
     uFresCap:{value:0.42},   // how far the grazing-angle reflection is allowed to replace the depth colour — 1.0 is the old behaviour
+    // THE BLACK BAND DETECTOR (task 3). 1 paints every non-finite or negative water fragment magenta. Ships at 0 and
+    // costs one comparison per water pixel when it is 0. Every black pixel in that band is ISOLATED - it has a lit
+    // neighbour - which is the signature of a per-pixel NaN, not of an unlit surface. __hc.waterNan(1) turns it on.
+    uNanDbg:{value:0},
     uSeaNight:_uSeaNight,    // night-only in-scatter floor; see the shader note beside "NIGHT IN-SCATTER FLOOR". 0,0,0 is the A/B off
     // OFF (Ben 08-05: "I want to get rid of the white foam"). The term stays because it is measured and harnessed and he may want it
     // back at a lower strength; __hc.foam({amt:1}) is the whole way back. It costs nothing at 0 — the multiply is still there, but
@@ -6563,7 +6567,7 @@ const waterMat = new THREE.ShaderMaterial({
     varying float vFar; uniform float uMeshR;
     varying float vTop; varying float vDepth; varying vec3 vW; varying vec3 vN; varying float vFog; varying float vCrest; varying vec2 vFlow;
     uniform vec3 uSunDir,uMoonDir,uCamPos; uniform float uDay,uTime; uniform vec3 uFogColor; uniform vec3 uBody; uniform float uFogDensity, uDeep, uWx; uniform vec3 uRing; uniform float uRingFade; uniform vec3 uSeaNight;
-    uniform float uGladeAfter, uGladeAmt, uFresCap, uFoam;
+    uniform float uGladeAfter, uGladeAmt, uFresCap, uFoam, uNanDbg;
     uniform vec4 uScotG, uScotH;   // the scotopic vectors, shared by reference with the land — see the night wash at the end of main()
     uniform vec3 uHorizonC, uZenithC, uSunColU; uniform float uReflAmt, uReflSharp, uStreak, uFine;
     uniform vec4 uLampP[4]; uniform vec3 uLampC[4];
@@ -6937,6 +6941,13 @@ const waterMat = new THREE.ShaderMaterial({
       // LAST, AFTER the ring landing above. That landing is unconditional and overwrites everything before it at distance, which is
       // the trap that has eaten two features already; a wash applied earlier would simply vanish out at the horizon.
       gl_FragColor=vec4(col,alpha);
+      // Written as "not (x >= 0)" rather than with isnan(), which is unavailable in GLSL ES 1.0 and unreliable where a
+      // driver compiles with fast-math: the negated comparison is true for NaN AND for negatives, and both of those
+      // reach the framebuffer as black. Reads gl_FragColor back rather than "col" so it sees the final written value.
+      if(uNanDbg > 0.5){
+        vec3 _nc = gl_FragColor.rgb;
+        if(!(_nc.r >= 0.0) || !(_nc.g >= 0.0) || !(_nc.b >= 0.0)) gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0);
+      }
     }`
 });
 
@@ -10487,22 +10498,27 @@ const PACK_ITEMS={
   compass_item: {m:'tools/compass',     n:'Brass Compass',  fit:0.16,c:'#b8912a',t:'round',max:1},
   battery:      {m:'tools/battery',     n:'Battery',        fit:0.14,c:'#3a3a3a',t:'bar',max:16},
   battery_aa:   {m:'tools/battery-aa',  n:'AA Battery',     fit:0.12,c:'#5a5a4a',t:'bar',max:16},
-  match:        {m:'tools/match',       n:'Match',          fit:0.12,c:'#c8a06a',t:'shard',max:32},
-  match_burnt:  {m:'tools/match-burnt', n:'Spent Match',    fit:0.12,c:'#3a3028',t:'shard',max:32},
+  match:        {m:'tools/match',       n:'Match',          fit:0.12,c:'#c8a06a',t:'shard',max:32,rot:[-Math.PI/2,0,0]},
+  match_burnt:  {m:'tools/match-burnt', n:'Spent Match',    fit:0.12,c:'#3a3028',t:'shard',max:32,rot:[-Math.PI/2,0,0]},
   matchbox:     {m:'tools/matchbox',    n:'Matchbox',       fit:0.16,c:'#a8622a',t:'bar',max:8},
   gas_can:      {m:'tools/gas-can',     n:'Jerrycan',       fit:0.34,c:'#8a2a24',t:'bucket',max:1},
   propane_tank: {m:'tools/propane-tank',n:'Propane Tank',   fit:0.38,c:'#b8862a',t:'bucket',max:1},
   bear_trap:    {m:'tools/bear-trap',   n:'Bear Trap',      fit:0.30,c:'#6a6a66',t:'shard',max:4},
   raft_paddle:  {m:'tools/raft-paddle', n:'Raft Paddle',    fit:0.60,c:'#8a6a3a',t:'bar',max:1},
   first_aid_hard:{m:'tools/first-aid-kit-hard',n:'Trauma Kit',fit:0.26,c:'#d8d8d8',t:'bandage',max:1},
-  chopsticks:   {m:'tools/chopsticks',  n:'Chopsticks',     fit:0.20,c:'#c8a878',t:'bar',max:8},
+  chopsticks:   {m:'tools/chopsticks',  n:'Chopsticks',     fit:0.20,c:'#c8a878',t:'bar',max:8,rot:[0,Math.PI/2,0]},
   spoon:        {m:'tools/spoon',       n:'Spoon',          fit:0.18,c:'#b8bcc4',t:'bar',max:8},
   // The pack's torch stands on +Y like the flashlight, and for the same reason takes the same quarter turn: a held
   // torch whose flame end points at the sky lights the sky.
   wooden_torch: {m:'tools/wooden-torch',n:'Wooden Torch',   fit:0.34,c:'#a8702a',t:'bar',max:16,rot:[-Math.PI/2,0,0]},
   // --- BOTH KNIVES (Ben counts these as the pack's two knives, and neither was an item) -------------------
-  hunting_knife:{m:'tools/knife',       n:'Hunting Knife',  fit:0.30,c:'#c0c4cc',t:'shard',max:1},
-  bayonet:      {m:'guns/bayonet',      n:'Bayonet',        fit:0.34,c:'#aab0b8',t:'shard',max:1},
+  // A BLADE POINTS WHERE THE HAND POINTS. Held items follow the viewmodel convention that the business end faces
+  // -z (the note on the flashlight says so), and these two models do not: tools/knife runs along +Y and
+  // guns/bayonet along +X, which is measured in placement-data, not guessed. Unrotated, one is held straight up
+  // like a candle and the other across the fist. A quarter turn about x lays the Y one down the barrel of the
+  // view; a quarter turn about y swings the X one onto -z, which is the same turn every gun in the pack takes.
+  hunting_knife:{m:'tools/knife',       n:'Hunting Knife',  fit:0.30,c:'#c0c4cc',t:'shard',max:1,rot:[-Math.PI/2,0,0]},
+  bayonet:      {m:'guns/bayonet',      n:'Bayonet',        fit:0.34,c:'#aab0b8',t:'shard',max:1,rot:[0,Math.PI/2,0]},
   // --- pots and pans ---------------------------------------------------
   pot:          {m:'pots/pot',          n:'Cooking Pot',    fit:0.30,c:'#6a6a66',t:'bowl',max:1},
   pot_shallow:  {m:'pots/pot-shallow',  n:'Shallow Pot',    fit:0.28,c:'#6a6a66',t:'bowl',max:1},
@@ -11003,7 +11019,15 @@ const ITEM_SIZE={
   iron_chestplate:[3,3], leather_chestplate:[3,3], iron_leggings:[2,3], leather_leggings:[2,3],
   iron_helmet:[2,2], leather_helmet:[2,2], iron_boots:[2,2], leather_boots:[2,2],
   recipe_book:[2,2], field_guide:[2,2], atlas:[2,2], handcuffs:[2,1],
-  ghost:[3,3], icbm:[3,5], launch_console:[3,3], camera:[2,1] };
+  ghost:[3,3], icbm:[3,5], launch_console:[3,3], camera:[2,1],
+  // THE PACK'S OWN ITEMS, sized by what the thing is rather than by the 1x1 default every food fell into. Only the
+  // ones that are not a handful of something are listed; an apple stays 1x1 because an apple is 1x1.
+  field_pack:[3,4],
+  hunting_knife:[1,2], bayonet:[1,3], raft_paddle:[2,5], bear_trap:[2,2], gas_can:[2,3], propane_tank:[2,3],
+  radio:[2,2], first_aid_hard:[2,2], matchbox:[1,1], wooden_torch:[1,2],
+  pot:[2,2], pot_shallow:[2,2], cooking_pot:[2,2], cooking_pot_lid:[2,2], pan:[2,3], frying_pan:[2,3], plate_square:[2,2],
+  tent:[3,3], raft:[3,4], wood_log:[2,2], bonfire:[2,2], dock_long:[3,3],
+  pizza:[2,2], pumpkin:[2,2], water_bottle:[1,2], ketchup_bottle:[1,2] };
 // AMMO STACKS TO 32 (Ben) and is 1x1 like everything else that is a handful of a thing. Matched by NAME rather than by a
 // flag, because ammo has never carried one: those items are plain icon entries identified downstream by id.
 function isAmmo(id){ return /_(ammo|shells|rounds|cartridges?)$/.test(id); }
@@ -11012,7 +11036,11 @@ function itemSize(id){
   const it=ITEMS[id]; if(!it) return [1,1];
   if(it.gun) return [2,4];                        // an unlisted gun is a rifle until somebody says otherwise
   if(it.spear) return [1,4];
-  if(it.tool) return [1,2];                       // haft plus a head: every axe, pick, shovel and sword here
+  // A HAFTED TOOL IS A TWO-HANDED OBJECT AND TAKES THE ROOM ONE TAKES (Ben 08-11: "tools should take up more
+  // inventory space"). 1x2 was the size of a torch: an axe read as smaller than the shield next to it and about
+  // the same as a syringe. 2x3 puts it between a pistol (2x2) and a rifle (2x4), which is where an axe belongs.
+  // Small tools are listed in ITEM_SIZE and keep their own size — a knife is not a felling axe.
+  if(it.tool) return [2,3];
   if(it.armor) return [2,2];
   return [1,1]; }                                 // foliage, materials, blocks, food, ammo (Ben: "all a 1x1")
 // The size a stack OCCUPIES, which is its item size turned on its side when rot is set.
@@ -20010,20 +20038,31 @@ function _glbLift(c,k){ return c.clone().multiplyScalar(k); }            // a ma
 // walnut 0.0516, sniper green 0.0228) — nothing lands between, so 0.018 splits them with room on both sides. The
 // flare gun stays red and sniper-rifle-green stays green; the carbine loses its blue.
 const _GUN_REF={metal:0.054,wood:0.0805};   // what the pack's own steel and walnut are painted at: the brightness the photograph is tinted to
+// MEASURED, so the tint is not guessed at: assets/tex/gun-metal.jpg has a linear mean of 0.0982 and gun-wood 0.0548
+// (mean of the actual pixels, AO already multiplied in). The pack's own flat steel was 0.053 under a near-white
+// procedural map, so the photograph at a tint of 1.0 already sits about twice as bright as what it replaced. It
+// does not want a gain on top — an earlier attempt at 1.65 would have put it at 0.162, three times the pack's
+// steel, on the mistaken belief that the albedo was dark.
+const _GUN_GAIN=1.0;
 function _glbGunStyle(name,mat,lift){
   if(/glass|lens/i.test(name)) return {color:0x0b1c2e,shininess:220,specular:0x88bbff};
   const wood=/wood/i.test(name), c=mat.color;
   const l=(Math.max(c.r,c.g,c.b)+Math.min(c.r,c.g,c.b))/2, spread=Math.max(c.r,c.g,c.b)-Math.min(c.r,c.g,c.b);
   // rel is why a DarkMetal part still reads darker than the Metal beside it once both wear the same photograph.
   // Clamped, because the pack's darkest material is a fifth of its brightest and a fifth of this albedo is pitch.
-  const rel=Math.min(1.45,Math.max(0.62,l/_GUN_REF[wood?'wood':'metal']))*(lift||1);
+  const rel=Math.min(1.45,Math.max(0.78,l/_GUN_REF[wood?'wood':'metal']))*_GUN_GAIN*(lift||1);
   let col;
   if(spread<0.018) col=new THREE.Color(rel,rel,rel);
   else { const k=rel/Math.max(c.r,c.g,c.b); col=new THREE.Color(c.r*k,c.g*k,c.b*k); }   // hue kept, brightness normalised to the photograph
-  const map=GUN_TEX[wood?'wood':'metal'], nrm=GUN_TEX[wood?'woodN':'metalN'];
+  const map=GUN_TEX[wood?'wood':'metal'];
+  // NO NORMAL MAP ON THESE. It was wired up with the albedo and is the one thing here that can turn a lit surface
+  // black rather than merely wrong: this geometry ships no tangents and no UVs of its own, so the UVs are the
+  // planar set generated at build time and the tangent basis is reconstructed from screen-space derivatives across
+  // a hard-edged low-poly gun. Ben, holding one: "guns are a black square when held." The albedo is what was
+  // actually asked for and carries the detail on a 1300-triangle model; the normal map is not worth a black gun.
   if(!map) return {color:col,map:wood?woodTex(4):metalTex(),repeat:wood?5:3,shininess:wood?8:80,specular:wood?0x14100a:0x3a3d42};   // the procedural grain, if a texture fetch failed
-  return wood?{color:col,map,normalMap:nrm,repeat:2.2,shininess:12,specular:0x1a1508}
-             :{color:col,map,normalMap:nrm,repeat:2.6,shininess:70,specular:0x33363c};
+  return wood?{color:col,map,repeat:2.2,shininess:12,specular:0x1a1508}
+             :{color:col,map,repeat:2.6,shininess:70,specular:0x33363c};
 }
 // len       the gun's length in game units, taken from the procedural gun it replaces so nothing about the
 //           poses, the offhand fit or the third-person body has to be retuned
@@ -31946,6 +31985,46 @@ window.__hc={
       b.quaternion.copy(rig.rest.get(b));
       const s=Math.sin(GIRL.yaw), c=Math.cos(GIRL.yaw), d=p1.clone().sub(p0);
       return { amt, dz:+d.z.toFixed(3), dy:+d.y.toFixed(3), forward:+(d.x*s+d.z*c).toFixed(3) }; }catch(e){ return {err:String(e.message||e)}; } },
+  // GAIT QUALITY AS A NUMBER. "Hyperrealistic" has exactly one measurable core: the sole that is on the
+  // ground does not move while it is on the ground. This walks the pose forward analytically at a fixed dt
+  // — her body advancing at `speed`, the phase advancing at speed/step — and reports how far the LOWER
+  // ankle slides per block travelled, plus the rise and fall of her hips over the cycle (which is derived
+  // from leg extension, so a flat number there means the grounding is not working). Analytic rather than
+  // sampled from the live sim because a headless frame loop runs at whatever rate it likes, and the noise
+  // in that is bigger than the thing being measured.
+  girlGait(speed,secs,k){ try{ if(!GIRL.rig) return {err:'no rig'}; const rig=GIRL.rig, g=rig.group;
+      const sp=speed==null?5.2:speed, dt=1/60, n=Math.round((secs==null?4:secs)/dt), step=giantessStep(rig)/(k==null?1:k);
+      const keepP=g.position.clone(), keepY=g.rotation.y, keepPh=GIRL.phase;
+      g.rotation.y=0; g.position.set(0,0,0);
+      const a=new THREE.Vector3(), b=new THREE.Vector3();
+      let ph=0, z=0, slip=0, prev=null, hipLo=1e9, hipHi=-1e9, lift=0;
+      for(let i=0;i<n;i++){
+        giantessWalk(rig,ph,1);
+        const y=giantessGroundY(rig,0); g.position.set(0,y,z); g.updateMatrixWorld(true);
+        rig.bone['foot.L'].getWorldPosition(a); rig.bone['foot.R'].getWorldPosition(b);
+        const low=(a.y<=b.y)?a:b, hi=(a.y<=b.y)?b:a;                  // the planted foot is the lower one
+        if(prev && prev.side===((a.y<=b.y)?'L':'R')) slip+=Math.hypot(low.x-prev.x,low.z-prev.z);
+        prev={side:(a.y<=b.y)?'L':'R', x:low.x, z:low.z};
+        lift=Math.max(lift,hi.y-low.y);                                // how far the swing foot clears the stance foot
+        hipLo=Math.min(hipLo,y); hipHi=Math.max(hipHi,y);
+        ph+=(sp/step)*Math.PI*dt; z+=sp*dt; }
+      g.position.copy(keepP); g.rotation.y=keepY; GIRL.phase=keepPh;
+      return { step:+step.toFixed(3), travelled:+z.toFixed(2), slip:+slip.toFixed(2),
+               slipPerBlock:+(slip/Math.max(1e-6,z)).toFixed(3), hipRise:+(hipHi-hipLo).toFixed(3), swingClear:+lift.toFixed(2) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // The raw gait trace, because the sweep above only says "no rate is right", never why. One cycle, her
+  // facing +Z and her body held still: for each sample, the fore-aft and vertical position of each ankle
+  // relative to her origin and which one is carrying her.
+  girlTrace(n){ try{ if(!GIRL.rig) return {err:'no rig'}; const rig=GIRL.rig, g=rig.group;
+      const N=n||24, keep=g.position.clone(), keepY=g.rotation.y, keepPh=GIRL.phase;
+      g.rotation.y=0; const a=new THREE.Vector3(), b=new THREE.Vector3(), out=[];
+      for(let i=0;i<N;i++){ const u=i/N;
+        giantessWalk(rig,u*Math.PI*2,1);
+        const y=giantessGroundY(rig,0); g.position.set(0,y,0); g.updateMatrixWorld(true);
+        rig.bone['foot.L'].getWorldPosition(a); rig.bone['foot.R'].getWorldPosition(b);
+        out.push({ u:+u.toFixed(3), hip:+y.toFixed(2), lz:+a.z.toFixed(2), ly:+a.y.toFixed(2), rz:+b.z.toFixed(2), ry:+b.y.toFixed(2), low:(a.y<=b.y)?'L':'R' }); }
+      g.position.copy(keep); g.rotation.y=keepY; GIRL.phase=keepPh;
+      return out; }catch(e){ return {err:String(e.message||e)}; } },
   // The same question for any bone and any axis: rotate `name` by `amt` about x|y|z and report how far the
   // bone at `read` moved. Every pose constant in src/entity/giantess/index.js was settled with this rather
   // than by eye — a Blender rig's local axes after the glTF Y-up conversion are not guessable, and the first
@@ -35263,6 +35342,11 @@ window.__hc={
   // so both halves of the change can be priced in one page without a rebuild. The lamp readout is what the water is
   // actually being handed — a reflection that is missing because no lamp reached the uniform and one that is missing
   // because the lobe is wrong look identical on screen.
+  // QA/bench: paint every non-finite or negative water fragment magenta. The black band on the far water is 100%
+  // ISOLATED black - every black pixel has a lit neighbour - and that is what a per-pixel NaN looks like, not what an
+  // unlit surface looks like. If the band goes magenta the fault is upstream of the final write; if it stays black the
+  // colour is legitimately near-zero and the grade is crushing it, which is a different fix entirely.
+  waterNan(v){ try{ waterMat.uniforms.uNanDbg.value = v?1:0; return waterMat.uniforms.uNanDbg.value; }catch(e){ return String(e.message||e); } },
   waterRefl(o){ try{ const U=waterMat.uniforms;
       if(o&&o.amt!=null) U.uReflAmt.value=+o.amt;
       if(o&&o.sharp!=null) U.uReflSharp.value=+o.sharp;
