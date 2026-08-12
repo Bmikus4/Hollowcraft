@@ -218,6 +218,41 @@ function splitTris(geo, boxes, matName){
 // is used. This is the hook the tool tiers ride: same geometry, a different palette and map per tier.
 // opts.parts = [{name, box:THREE.Box3}] carves those regions into child groups (see splitTris); they land
 // in g.userData.parts[name] and are NOT in the main body.
+// BOX PROJECTION, PER TRIANGLE — because one plane cannot texture a solid. planarUV projects the whole part off its
+// two widest axes, which for a rifle is length and height, i.e. from the SIDE. Any face not parallel to that plane
+// gets a smear: the top of a receiver has a constant y, so its whole width takes ONE row of texels stretched across
+// it, and the same happens on the front, the rear and the bottom. Grain appeared on the flanks and nowhere else,
+// which is Ben 08-12 "rifles are still not textured properly" and most of "the backs of the scopes still have weird
+// texturing" — the eyepiece end of a scope is exactly a face pointing along the projection axis.
+//
+// Each triangle is projected onto whichever axis plane it most faces, at ONE shared texel density, so the grain is
+// the same size on every surface and does not step where the projection changes. That needs per-triangle UVs, so the
+// geometry is expanded to non-indexed first: a vertex shared between the top and the side of a receiver cannot hold
+// one UV that suits both. These are 1000-triangle models, so the expansion costs nothing worth measuring.
+function boxUV(geo, repeat){
+  const g = geo.index ? geo.toNonIndexed() : geo;
+  const p = g.attributes.position;
+  g.computeBoundingBox();
+  const sz = new THREE.Vector3(); g.boundingBox.getSize(sz);
+  const k = repeat / Math.max(1e-4, Math.max(sz.x, sz.y, sz.z));
+  const uv = new Float32Array(p.count * 2);
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(), e1 = new THREE.Vector3(), n = new THREE.Vector3();
+  for (let i = 0; i + 2 < p.count; i += 3){
+    a.fromBufferAttribute(p, i); b.fromBufferAttribute(p, i + 1); c.fromBufferAttribute(p, i + 2);
+    e1.subVectors(b, a); n.subVectors(c, a).cross(e1);
+    const ax = Math.abs(n.x), ay = Math.abs(n.y), az = Math.abs(n.z);
+    // the two axes that survive: a face pointing along x is textured by z and y, and so on
+    const u0 = (ax >= ay && ax >= az) ? 2 : 0, v0 = (ay >= ax && ay >= az) ? 2 : 1;
+    for (let j = 0; j < 3; j++){
+      const v = j === 0 ? a : j === 1 ? b : c;
+      uv[(i + j) * 2]     = v.getComponent(u0) * k;
+      uv[(i + j) * 2 + 1] = v.getComponent(v0) * k;
+    }
+  }
+  g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  return g;
+}
+
 export function build(id, opts){
   const t = TEMPLATES.get(id); if (!t) return null;
   opts = opts || {};
@@ -250,11 +285,14 @@ function mkMesh(geo, s, part){
   // render target through vUv over 0..1, and geometry from this pack has no UVs at all — so it read texel (0,0),
   // where the reticle shader's own rim term makes a black disc. That is the whole of "the scope is black".
   // THE MODEL'S OWN MAP IS THE FALLBACK, NEVER THE OVERRIDE. A caller that names a map means it: the guns wear
-  // Ben's gunmetal and walnut scans over PLANAR UVs precisely because that geometry has no UVs of its own. So the
+  // Ben's gunmetal and walnut scans over GENERATED UVs precisely because that geometry has no UVs of its own. So the
   // atlas is used only when no style map was asked for and the geometry really does carry the UVs to read it with
-  // — planarUV would otherwise overwrite the very coordinates the atlas is indexed by.
+  // — generating them would otherwise overwrite the very coordinates the atlas is indexed by.
   const ownMap = (!s.map && !s.uv && part.mat.map && geo.attributes.uv) ? part.mat.map : null;
-  if (s.map || s.uv) planarUV(geo, s.map ? (s.repeat || 3) : (s.uv === true ? 1 : s.uv), !s.map);
+  // A tiling MAP gets box projection (every face, one texel density). s.uv without a map is a lens asking for a
+  // 0..1 sweep across its own disc, which is a single flat surface and wants the planar one.
+  if (s.map) geo = boxUV(geo, s.repeat || 3);
+  else if (s.uv) planarUV(geo, s.uv === true ? 1 : s.uv, true);
   const md = { color: s.color != null ? new THREE.Color(s.color) : part.mat.color.clone() };
   if (s.map) md.map = s.map; else if (ownMap) md.map = ownMap;
   // A normal map needs the same planar UVs the albedo just got, so it only rides along with a map — never alone.
