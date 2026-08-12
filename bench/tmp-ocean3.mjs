@@ -46,7 +46,8 @@ const FRAMES=`(async()=>{ const N=90, ts=[]; let last=performance.now();
         if(g>0 && g<=${IC.sea}+1){ const bx=x+4; return {x:bx, z:cz, g:__hc.groundY(bx,cz)}; } }
       return null; })()`);
     console.log(`  shore ${JSON.stringify(shore)}`);
-    console.log(`  build ${JSON.stringify(await page.evaluate(`__hc.ocean3(0)`))}`);
+    // NO ARGUMENT: reads the state without setting it, which is the only way to see what a normal load actually ships.
+    console.log(`  default ${JSON.stringify(await page.evaluate(`__hc.ocean3()`))}`);
     // Two vantages: the shore looking seaward (where the ocean IS) and the island centre (the forest, the expensive one).
     const VIEWS=[['shore', shore.x+0.5, shore.g+3, shore.z+0.5, Math.atan2(1,-0), -0.02],
                  ['forest', IC.cx+0.5, null, IC.cz+0.5, Math.atan2(-0,-1), 0.0]];
