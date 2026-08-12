@@ -6749,11 +6749,15 @@ function _ensureOcean3(){
     // rather than as a reflection. This is the single biggest lever on how it looks and it is also the cost.
     textureWidth:1024, textureHeight:1024, waterNormals:nrm,
     sunDirection:new THREE.Vector3(), sunColor:0xffffff, waterColor:0x001e0f,
-    distortionScale:3.7, fog:!!scene.fog
+    // Slightly bluer than the example's 0x001e0f, which is a green-black (Ben 08-12: "very slightly more blue").
+    distortionScale:3.7, fog:!!scene.fog, alpha:0.86, waterColor:0x06283c
   });
   // Size 3, not the example's 1: its default is tuned to a plane a few hundred units across, and this world is measured
   // in blocks. Judged off four shots at the shore (0.5 / 1 / 3, and 3 at distortion 8).
   _ocean3.material.uniforms.size.value=3.0;
+  // TRANSPARENT, so the seabed and anything in the water reads through it rather than the sea being a lid (Ben 08-12).
+  // alpha is the example's own uniform; the material has to be told as well or the alpha it writes is discarded.
+  _ocean3.material.transparent=true;
   _ocean3.rotation.x=-Math.PI/2;
   _ocean3.frustumCulled=false;
   _ocean3.visible=false;
@@ -6856,6 +6860,12 @@ function updateOcean3(dt){
   // The sun's own colour and the day factor, so the example's specular does not blaze at midnight.
   const day=globalU.uDay.value;
   u.sunColor.value.setRGB(day, day*0.96, day*0.88);
+  // DARK AT NIGHT WITHOUT KILLING THE REFLECTION (Ben 08-12: "dark at night while still maintaining realistic
+  // reflections"). Only the water's own BODY colour is taken down — the mirror sample is left alone, so the moon, the
+  // sky and the land still land on the surface at full strength. Darkening the reflection instead is what turns night
+  // water into a hole, which is the fault the old shader's in-scatter floor exists to prevent.
+  const nb=0.18+0.82*day;
+  u.waterColor.value.setRGB(0.023*nb, 0.157*nb, 0.235*nb);
 }
 function updateHorizon(){ oceanLayer.position.copy(camera.position); const day=globalU.uDay.value;
   // The far sea sits at sea level in WORLD terms while its parent follows the camera, so its local y is the difference.
@@ -12644,13 +12654,34 @@ let _cine=null;            // CERAPHIM arrival state (declared early — built b
 let _lookNudge=null;
 function nudgeLook(x,y,z,dur){ const dx=x-player.pos.x, dz=z-player.pos.z, dy=y-(player.pos.y+EYE), Lh=Math.hypot(dx,dz)||1e-6;
   _lookNudge={ ty:Math.atan2(-dx,-dz), tp:clamp(Math.atan2(dy,Lh),-1.3,1.3), t:0, dur:dur||1.3 }; }
+// Radians per second the head may turn, at the hip and at full aim. 7.2 rad/s is a 180 in half a second, which is fast
+// enough to answer something behind you and slow enough that you cannot be facing three ways in one second.
+const TURN_CAP_HIP=7.2, TURN_CAP_ADS=3.4;
 function applyLook(dt){
   if(_lookNudge && (_lookNudge.t+=dt) >= _lookNudge.dur+0.5) _lookNudge=null;    // expires on the wall clock — a nudge fired while you're paused/unlocked dies there, it never waits to grab your camera later
   if(!locked)return; const base=0.0022*_sensMult;
   const _mouseMoved=Math.abs(_lookDX)+Math.abs(_lookDY)>4;                       // sampled BEFORE the deltas are eased out below
   const _aT=(view&&view.adsT)||0, sens=base*(1-(1-_aimFrac)*_aT);   // sensitivity eases down WITH the raise (full at hip → _aimFrac at full cheek-weld), no snap
-  const k=1-Math.exp(-dt*26);                                                    // smoothing rate (higher = snappier, lower = floatier)
-  player.yaw-=_lookDX*sens*k; player.pitch-=_lookDY*sens*k; _lookDX*=(1-k); _lookDY*=(1-k);
+  // TURNING RESISTANCE (Ben 2026-08-12: "the player should not be able to spin/turn around immediatley"). Two parts,
+  // and the second is the one that matters:
+  //   * the ease is slower — 13/s instead of 26/s, so a flick resolves over ~120ms rather than ~40ms and the head has
+  //     weight — and
+  //   * a HARD CAP on radians per second, which is what actually stops a spin. A smoother alone does not: it eases a
+  //     360 degree swipe, it does not refuse it, so any mouse fast enough still whips the camera round in one frame.
+  // NOTHING IS LOST TO THE CAP. The pending delta is reduced by exactly the angle that was applied, so a 90 degree flick
+  // still ends at 90 degrees — it arrives as a sweep instead of a jump. Decaying the whole pending delta each frame
+  // regardless (the obvious way) would silently eat part of every fast flick, and inconsistent aim is worse than heavy aim.
+  // The cap is in radians and so is deliberately independent of the sensitivity setting: the limit is the player's neck,
+  // not their mouse. It tightens as the gun comes up, because that is a shouldered weapon turning, not a head.
+  const k=1-Math.exp(-dt*13);
+  // AND A CEILING PER FRAME, not only per second. A rad/s cap is dt-scaled, so a 150ms hitch grants a 1.1 rad step and
+  // the camera spins through exactly the stall a player is already fighting. 0.16 rad is ~9 degrees, which no 60fps frame
+  // ever reaches (7.2 x 0.0167 = 0.12), so this binds only when the frame time does.
+  const capYaw=Math.min((TURN_CAP_HIP+(TURN_CAP_ADS-TURN_CAP_HIP)*_aT)*dt, 0.16), capPit=capYaw*0.85;
+  const stepY=clamp(-_lookDX*sens*k, -capYaw, capYaw), stepP=clamp(-_lookDY*sens*k, -capPit, capPit);
+  player.yaw+=stepY; player.pitch+=stepP;
+  if(sens>1e-9){ _lookDX+=stepY/sens; _lookDY+=stepP/sens; }                     // consume exactly what was applied
+  else { _lookDX=0; _lookDY=0; }
   const L=Math.PI/2-0.01; player.pitch=clamp(player.pitch,-L,L);
   if(_lookNudge){ const n=_lookNudge;
     if(_mouseMoved){ _lookNudge=null; return; }                                  // you moved the mouse → it's your camera again, instantly
@@ -36141,7 +36172,11 @@ window.__hc={
   pitch(p){ player.pitch=(p==null?-0.9:p); return player.pitch; },   // QA: aim the camera (e.g. down at the ground)
   pitchNow(){ return +player.pitch.toFixed(3); }, yawNow(){ return +player.yaw.toFixed(3); },   // QA: read the live camera angles
   qaLocked(on){ locked=!!on; return locked; },                                                   // QA ONLY: fake pointer-lock so headless runs can exercise look code
-  lookInject(dx,dy){ _lookDX+=(dx||0); _lookDY+=(dy||0); return {dx:_lookDX,dy:_lookDY}; },      // QA: feed raw look deltas (CDP-synthesised mousemove carries no movementX/Y)
+  // QA: feed raw look deltas (CDP-synthesised mousemove carries no movementX/Y). It reports the PENDING deltas, which is
+  // what lets a harness zero them by injecting their negation, and the turn caps, which is what assert-turn-resistance
+  // measures against — those two numbers are the difference between "the camera is heavy" and "the camera is broken".
+  lookInject(dx,dy){ _lookDX+=(dx||0); _lookDY+=(dy||0);
+    return {dx:_lookDX,dy:_lookDY,capHip:TURN_CAP_HIP,capAds:TURN_CAP_ADS,capFrame:0.16,locked}; },
   nudgeActive(){ return !!_lookNudge; },                                                      // QA: is the one-shot look-up nudge still running?
   cineKill(){ if(typeof endBossCutscene==='function')endBossCutscene(); _lookNudge=null; return {cine:!!_cine}; },   // QA: end an arrival early
   summon(){ HORROR._firstNight=true; wretch.debug=false; if(!wretch.active){ wretch.spawnT=0; if(!spawnWretch(Math.random()*360,26)) wretch.spawnT=0.5; } return wretch.active; },
@@ -37671,8 +37706,12 @@ window.__hc={
       // NOT THE NEAREST ONE. Jesus is unkillable and is often the closest thing to spawn, and at eleven metres a ray
       // can be eaten by a tuft of grass, so this picks a killable animal and walks the player to arm's length of it.
       let best=null,bd=1e9;
-      for(const a of animals){ if(a.dead||a.type==='jesus')continue; const dd=Math.hypot(a.x-player.pos.x,a.z-player.pos.z); if(dd<bd){bd=dd;best=a;} }
+      for(const a of animals){ if(a.dead||a.type==='jesus')continue;
+        const big=((ANIMALS[a.type]&&ANIMALS[a.type].h)||0)>1.3;             // deer/sheep: a 0.9 capsule, not a 0.5 one
+        const dd=Math.hypot(a.x-player.pos.x,a.z-player.pos.z)+(big?0:1000);
+        if(dd<bd){bd=dd;best=a;} }
       if(!best) return {err:'no killable animal alive'};
+      bd=Math.hypot(best.x-player.pos.x,best.z-player.pos.z);
       const h=(ANIMALS[best.type]?ANIMALS[best.type].h:1)*0.55;
       const ux=Math.sign(Math.random()-0.5)||1;
       player.pos.set(best.x+2.4*ux, best.y, best.z);
@@ -37685,16 +37724,26 @@ window.__hc={
     catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: THE test for "it does not move from them". Move the creature and report how far each decal travelled.
   // A decal merely placed in the world stays put; one parented to the mesh travels exactly as far as the mesh did.
-  bloodRide(dx,dz){ try{ const a=this._bloodHost; if(!a||!a.mesh) return {err:'shoot an animal first'};
+  bloodRide(dx,dz){ try{
+      // THE HOST IS DERIVED FROM THE DECALS, not remembered from the last call. Remembering it made this test lie:
+      // two probes each set it, so the second one moved an animal that had nothing attached, every decal reported
+      // travelling 0, and that reads exactly like a wound failing to ride the mesh.
+      let a=null;
+      for(const d of _bloodFX.live){ let o=d.m; while(o.parent && o.parent!==scene) o=o.parent;
+        if(o===d.m) continue;                                  // straight on the scene: a spatter, not a wound
+        for(const an of animals) if(an.mesh===o){ a=an; break; }
+        if(a) break; }
+      if(!a) a=this._bloodHost;
+      if(!a||!a.mesh) return {err:'no wound is parented to an animal'};
       const pos=k=>_bloodFX.live.map(d=>{ const w=new THREE.Vector3(); d.m.getWorldPosition(w);
         return { kind:(d.m.material===_bloodFX.mat.impact)?'impact':(d.m.material===_bloodFX.mat.drip)?'drip':'splatter',
                  x:+w.x.toFixed(2), z:+w.z.toFixed(2) }; });
-      const b4=pos();
+      const b4=pos(), hb=new THREE.Vector3(); a.mesh.getWorldPosition(hb);
       dx=dx==null?3:dx; dz=dz==null?2:dz;
       a.x+=dx; a.z+=dz; a.mesh.position.set(a.x,a.y,a.z); a.mesh.updateMatrixWorld(true);
-      const af=pos();
-      return { moved:dx+','+dz, decals:b4.map((p,i)=>({ kind:p.kind,
-        travelled:af[i]?+Math.hypot(af[i].x-p.x,af[i].z-p.z).toFixed(2):null })) }; }
+      const af=pos(), ha=new THREE.Vector3(); a.mesh.getWorldPosition(ha);
+      return { host:a.type, hostTravelled:+Math.hypot(ha.x-hb.x,ha.z-hb.z).toFixed(2), moved:dx+','+dz,
+        decals:b4.map((p,i)=>({ kind:p.kind, travelled:af[i]?+Math.hypot(af[i].x-p.x,af[i].z-p.z).toFixed(2):null })) }; }
     catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: the FX alone, with no shooting in the way - place a wound on the nearest creature and spatter behind it.
   bloodPlace(){ try{ let best=null,bd=1e9;
