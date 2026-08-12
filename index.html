@@ -22567,11 +22567,12 @@ function updateView(dt){ updateRecoil(dt);                                      
     // ---- POSE BLEND: hip(ready) ↔ scope(aimed), a REAL interpolation by smoothstep(adsT) — no hard flip ----
     // NO BEND TERMS IN EITHER POSE any more: the block-out is one post-pass over the finished pose (blockOutHand, called
     // below), because the tilt has to pivot at the butt and a pose term cannot express a rotation about a point.
-    // -0.34, was -0.38 (Ben 08-12: "all rifles should be brought closer to the eye just slightly"). This is the
-    // cheek-weld every scoped rifle uses, and four centimetres is the difference between looking AT a scope and
-    // looking THROUGH one — the eyepiece's angular size goes up with the same move. nearPlaneClear still guards the
-    // limit, so a long stock cannot be driven into the camera by this.
-    const sPx=swx*SWAY_POS + lat*0.010, sPy=-0.10 + b*0.3 + swy*SWAY_POS, sPz=-0.34;   // scope (cheek-weld) pose — flipped + tamed strafe lean
+    // -0.30, by two moves: -0.38 to -0.34 for "all rifles should be brought closer to the eye just slightly", then to
+    // -0.30 for "scoped rifles always closer to the eye than they are now". This is the cheek weld every scoped rifle
+    // uses, and it is the only lever on how big the sight picture is: the eyepiece's angular size rises as the eye
+    // closes on it. It cannot go much further — nearPlaneClear pushes the whole gun forward when its rearmost corner
+    // enters camera.near, and a rifle's stock is behind its eyepiece, so past some point the guard simply undoes this.
+    const sPx=swx*SWAY_POS + lat*0.010, sPy=-0.10 + b*0.3 + swy*SWAY_POS, sPz=-0.30;   // scope (cheek-weld) pose — flipped + tamed strafe lean
     const sRx=view.swing*0.4 + swy*SWAY_ROT, sRy=swx*SWAY_ROT + lat*0.022, sRz=-lat*0.028;
     const hPx=0.17 + lat*0.024, hPy=-0.20+b-vert*0.028, hPz=-0.5;                             // hip (ready) pose — flipped + tamed strafe lean
     // THE MUZZLE TIPS THE OTHER WAY (Ben 08-05: "its also reversed, when jumping up, the gun should tilt down, when coming back,
@@ -23187,8 +23188,12 @@ function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id
   // enough recoil"). 0.0052 sits between them at about 15 degrees for a one-second AR burst — a climb you fight
   // rather than one you cannot hold. The minigun's own 0.006 is untouched and, per shot, is still the smallest in the
   // game; it fires 38 a second and has its own ADS multiplier below.
-  const _autoKP = (it.auto && it.gun!=='auto') ? 0.0052 : null;
-  const KP=(_autoKP!=null?_autoKP : bolt?0.056 : rev?0.049 : (it.gun==='auto'?0.006 : it.gun==='shotgun'?0.062 : 0.019))*5;   // the 12 gauge kicks hardest of all — a cylinder-bore pump against the shoulder                            // camera recoil per shot ×5 (Ben 07-20): rifle 16° / Python 14° / AR 5.4° / minigun 1.7° — the gun OWNS your aim
+  const _autoKP = (it.auto && it.gun!=='auto') ? 0.0068 : null;
+  // RAISED ~30% ACROSS THE BOARD (Ben 08-12: "more recoil in general"). Every one of these was tuned against a
+  // slower, semi-automatic game; the ladder between them is Ben's and is kept exactly - bolt hardest per pull,
+  // then the 12 gauge, then the Python, then everything else - only the scale has moved. The minigun's 0.006 is
+  // deliberately untouched: it fires 38 rounds a second and already walks the aim 65 degrees in one.
+  const KP=(_autoKP!=null?_autoKP : bolt?0.073 : rev?0.064 : (it.gun==='auto'?0.006 : it.gun==='shotgun'?0.081 : 0.025))*5;   // the 12 gauge kicks hardest of all — a cylinder-bore pump against the shoulder                            // camera recoil per shot ×5 (Ben 07-20): rifle 16° / Python 14° / AR 5.4° / minigun 1.7° — the gun OWNS your aim
   // THE MINIGUN FIGHTS BACK WHEN YOU AIM IT (Ben 08-05: "the minigun needs more recoil when ADS"). Its per-shot kick is the
   // smallest in the game — 0.006, a thirtieth of the shotgun's — because it fires 38 rounds a second and anything else would put
   // the aim in the sky. That is right from the hip. Sighted, holding a spun-up rotary cannon steady is the one thing it should not
@@ -29419,8 +29424,43 @@ function _bloodNearFace(x,y,z,dx,dy,dz,maxD){
 // than a fox and a pinprick on a thirteen-block giantess, so on the small bodies the quad hung out past the silhouette
 // into open air — Ben 08-12: "blood can not appear off of a creatures model". Everything the wound measures is a
 // fraction of the body it is on, and the drip is additionally clamped so it cannot hang below the feet.
-function bloodImpact(x,y,z,dir,host,size){
+// surf = what to RAYCAST against to find the real surface, when that is not the same object the decal hangs on. The
+// giantess is the case that needs it: her wound rides a BONE, and a bone has no geometry under it — her meshes are
+// its siblings under the rig.
+function bloodImpact(x,y,z,dir,host,size,surf){
   if(!bloodFxInit()||_bloodFX.dead) return;
+  // SNAP TO THE SKIN. The point handed in is wherever a hit test said the round arrived, and those tests are VOLUMES,
+  // not surfaces: giantessHit is eleven spheres centred on bones, and the animal test is a vertical capsule. So the
+  // point can sit well inside the body or well outside it, and a normal taken from the body's centre is a sphere's
+  // radius rather than the surface's facing. Together those are Ben 08-12: "bullet holes need to actually appear on
+  // the meshs surface ... on weird planes sticking off the model".
+  //
+  // Casting back along the round's own flight and taking the first triangle it crosses gives the point the bullet
+  // actually struck. three's SkinnedMesh raycast applies the bone transforms, so this is her POSED skin, not her bind
+  // pose — which is the only reason this works on her at all.
+  try{
+    const _t=surf||host;
+    if(_t && dir){
+      const dv=new THREE.Vector3(dir.x||0,dir.y||0,dir.z||0);
+      if(dv.lengthSq()>1e-8){ dv.normalize();
+        const ms=[]; _t.traverse(o=>{ if(o.isMesh&&o.visible&&o.geometry) ms.push(o); });
+        if(ms.length){
+          const from=new THREE.Vector3(x,y,z).addScaledVector(dv,-4.0);   // back out of the body, then come in
+          const hit=new THREE.Raycaster(from,dv,0.01,12.0).intersectObjects(ms,false)[0];
+          if(hit){ x=hit.point.x; y=hit.point.y; z=hit.point.z;
+            // THE FACE'S OWN NORMAL, where it can be trusted. On a rigid mesh that is the surface's true facing and
+            // the decal lies flat on it. On a SKINNED mesh the reported face normal is the BIND pose's — three deforms
+            // positions for a raycast, not normals — so a rotated limb would hand back the normal it had at export.
+            // There, facing the decal back down the round's flight is both honest and stable.
+            if(!hit.object.isSkinnedMesh && hit.face){
+              const n=hit.face.normal.clone()
+                .applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld)).normalize();
+              dir={x:-n.x,y:-n.y,z:-n.z}; }
+          }
+        }
+      }
+    }
+  }catch(e){}
   try{
     if(host){
       const g=new THREE.Group();
@@ -29441,14 +29481,18 @@ function bloodImpact(x,y,z,dir,host,size){
       // giantess, and her thigh is about two blocks wide - so the quad covered the whole limb and hung off it into
       // open air, which is Ben's "blood can not appear off of a creatures model". It scales with the body only
       // gently now and is capped hard: 11 cm on a man, the 6 cm floor on a fox, 45 cm on the giantess.
-      const H=Math.max(0.2,size||1.8), mw=Math.min(0.45,Math.max(0.06,H*0.06));
+      // A BULLET HOLE IS NEARLY THE SAME SIZE ON EVERYTHING, because a bullet is. Scaled with the body it came
+      // out a 45 cm hole on the giantess, which Ben read as "wayy too big" - and he is right: a round that leaves
+      // a 2 cm wound in a man leaves a 2 cm wound in her. It grows only enough to stay legible at her scale, so
+      // the formula is mostly a constant: 11 cm on a man, 18 cm on the giantess, the 8 cm floor on a fox.
+      const H=Math.max(0.2,size||1.8), mw=Math.min(0.22,Math.max(0.08,0.10+H*0.006));
       const mk=_bloodQuad('impact',mw,mw,false);                            // one still, so no animation
       g.add(mk); _bloodTrack(mk,0);
       // The drip hangs BELOW the mark on the same plane and grows downward over four seconds. Its sheet cell is a
       // vertical streak, so the quad takes that aspect — but the LENGTH is capped at a third of the body, because a
       // drip that runs past the feet is blood hanging in the air under an animal.
       const dm=_bloodFX.meta.drip||{cell:[46,192]}, dw=mw*0.6;
-      const dh=Math.min(dw*(dm.cell[1]/dm.cell[0]), H*0.12);   // and a run of blood no longer than an eighth of the body
+      const dh=Math.min(dw*(dm.cell[1]/dm.cell[0]), H*0.05);   // and a run of blood no longer than a twentieth of the body
       const dr=_bloodQuad('drip',dw,dh);
       dr.position.set(0,-dh/2,0.002); g.add(dr); _bloodTrack(dr,4.0);
     }
@@ -30823,10 +30867,16 @@ function girlHurt(dmg,px,py,pz,part){
   //
   // Reading GIRL.rig.bone is deliberate: her module is another session's, and hooking here needs nothing added to it.
   try{ const _b=(GIRL.rig&&GIRL.rig.bone&&part)?GIRL.rig.bone[part]:null;
-    if(_b){ const _c=new THREE.Vector3(); _b.getWorldPosition(_c);
-      // No bullet direction reaches this far, and on a body this size the outward normal is better anyway: the wound
-      // faces away from the limb's axis, so it lies on her rather than at an angle through her.
-      bloodImpact(px,py,pz,{x:_c.x-px,y:_c.y-py,z:_c.z-pz},_b,GIRL.rig.height||13.5); } }catch(e){}
+    if(_b){
+      // THE DIRECTION IS THE SHOT, not a radius from the bone. girlHurt is not handed the round's flight, but the
+      // shooter's eye is a far better origin than the bone's centre for the same reason the snap above exists: it is
+      // what puts the decal where the bullet crossed her skin. The RIG is passed as the surface because the host is a
+      // bone, and a bone has no geometry - her meshes are its siblings.
+      const _e=new THREE.Vector3(player.pos.x,player.pos.y+EYE,player.pos.z);
+      const _d=new THREE.Vector3(px-_e.x,py-_e.y,pz-_e.z);
+      if(_d.lengthSq()<1e-8) _d.set(0,0,1);
+      _d.normalize();
+      bloodImpact(px,py,pz,{x:_d.x,y:_d.y,z:_d.z},_b,GIRL.rig.height||13.5,GIRL.rig.group); } }catch(e){}
   spawnParticles(px,py,pz,part==='Head'?0xff3020:0x8a1010,part==='Head'?16:10,2,0.6);
   if(part==='Head') flashName('headshot');
   // She is told in thirds rather than with a health bar: a bar over a creature this size is either tiny at
