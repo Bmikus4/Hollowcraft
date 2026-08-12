@@ -6783,6 +6783,21 @@ function _ensureOcean3(){
         '  if(_luv.x>0.0 && _luv.x<1.0 && _luv.y>0.0 && _luv.y<1.0 && texture2D(uLandTex,_luv).r > 0.5) discard;\n');
   };
   _ocean3.material.needsUpdate=true;
+  // ---- THE REFLECTION PASS MUST NOT TOUCH THE SKY (Ben 08-12: sky on load, then grey, and pure black at night) ----
+  // Water re-renders the whole scene from a mirrored camera that sits BELOW the water looking up. That second render
+  // runs every object's onBeforeRender again with that camera, and the sky is raymarched from camera-derived uniforms
+  // — so the last write before the frame is presented is the mirrored one, and the dome paints fog grey by day and
+  // black at night. The symptom's timing is the proof: correct on the first frames, wrong from the moment the ocean
+  // starts drawing. The dome is hidden for the duration of the mirror pass, which costs the sky in the REFLECTION and
+  // keeps it in the world. Getting it into the reflection as well means giving it uniforms that do not come from the
+  // live camera, which is its own job.
+  const _obr=_ocean3.onBeforeRender.bind(_ocean3);
+  _ocean3.onBeforeRender=function(renderer, scene_, camera_){
+    const sv=skyDome.visible, sa=renderer.shadowMap.autoUpdate;
+    skyDome.visible=false; renderer.shadowMap.autoUpdate=false;
+    try{ _obr(renderer, scene_, camera_); }
+    finally{ skyDome.visible=sv; renderer.shadowMap.autoUpdate=sa; }
+  };
   // ABOVE the voxel surface by a hair. Same height and the two z-fight across the whole sea; this way the example's
   // plane simply wins wherever both exist, and no chunk mesh has to be found and hidden as it streams in.
   _ocean3.position.y=(CFG.SEA + 1 - WATER_SURF_DROP) + 0.02;
@@ -6802,7 +6817,11 @@ function _o3Mask(){
     // ">= sea", not "> sea", and that one character is the last block of shoreline. A cell holds water only where the
     // ground is BELOW sea level, so a column whose ground stands exactly at it is beach — with "> sea" it counted as
     // ocean and the plane ran one block up onto the sand.
-    for(let i=0;i<m.W;i++){ m.data[j*m.W+i] = surfaceH(ox+i*m.STEP, wz) >= sea ? 255 : 0; } }
+    // "sea + 1", so the sea runs ONE BLOCK further inland than the mask strictly allows (Ben 08-12: "the edges which
+    // water connects to land has gaps, extend by one block"). A mask sampled at block centres cannot land exactly on
+    // the shoreline a voxel edge draws, and erring outward hides the seam under the beach while erring inward leaves
+    // a gap you can see through. This is the same edge that "> sea" clipped and ">= sea" only half-fixed.
+    for(let i=0;i<m.W;i++){ m.data[j*m.W+i] = surfaceH(ox+i*m.STEP, wz) >= sea+1 ? 255 : 0; } }
   m.ox=ox; m.oz=oz; m.tex.needsUpdate=true;
   u.uLandOrigin.value.set(ox,oz); u.uLandSpan.value=span;
 }
@@ -13732,6 +13751,7 @@ function refreshHotbar(){ for(let i=0;i<HOT_N;i++){ const d=hotbarSlots[i], s=in
     const db=d.querySelector('.durbar'); const it=s?ITEMS[s.id]:null;                       // show a green→red wear bar for damaged tools
     if(it&&it.tool){ const cur=(s.dur==null?it.tool.dur:s.dur), f=clamp(cur/it.tool.dur,0,1); db.style.display=f<1?'block':'none'; db.style.width=(42*f).toFixed(0)+'px'; db.style.background='hsl('+(f*115).toFixed(0)+',80%,45%)'; } else db.style.display='none'; }
   if(typeof refreshOffSlot==='function') refreshOffSlot();
+  if(typeof warmPrimaries==='function') warmPrimaries();   // a gun that has just reached a primary slot gets built off the swap path
   hotSense(); }
 // EACH GROUP FADES ON WHAT CHANGED IN IT, NOT ON ANY REFRESH. refreshHotbar is called from ninety-odd places — every
 // pickup, every round fired, every tick that wears a tool — so waking on the call itself would flash the whole bar at
@@ -21777,6 +21797,20 @@ function attachGunHand(mesh, side, opts){
   f.userData._noBB=1;
   mesh.add(f); mesh.userData[_slot]=f; applyViewFog(f);
   return f; }
+// THE FIRST TIME YOU RAISE A GUN, IT IS BUILT — and that build is 14-82ms depending on the model
+// (bench/tmp-swaptime.mjs: AR-15 82, revolver 54, then ~1ms for every switch after). Five frames of stall lands exactly
+// when the player pressed a number to get a gun up, which is Ben 08-12: "guns in a a secondary slot take a second to
+// switch between". glbBuild caches per model, so the cure is to pay it BEFORE the swap: anything that reaches a primary
+// slot gets built once on a timer and thrown away, and the swap that follows finds the cache warm.
+// Guns only, and once per id: the two primaries are where every firearm lives (slotAccepts refuses one anywhere else),
+// and a build-and-discard on every refreshHotbar would be worse than the stall it removes.
+const _viewWarmed=new Set();
+function warmPrimaries(){ if(typeof ITEMS==='undefined') return;
+  for(let i=0;i<HOT_PRIMARY;i++){ const s=inv[i]; if(!s||_viewWarmed.has(s.id)) continue;
+    const it=ITEMS[s.id]; if(!it||!it.gun||!GLB_GUNS[s.id]) continue;
+    _viewWarmed.add(s.id);
+    const id=s.id;
+    setTimeout(()=>{ try{ const m=buildGlbGun(id,it.dot,it.suppressed); if(m) _disposeView(m); }catch(e){} },0); } }
 function setViewItem(id){ if(view.id===id)return; view.id=id;
   if(view.mesh){ view.group.remove(view.mesh); _disposeView(view.mesh); view.mesh=null; }
   if(!id||!ITEMS[id]){ view.mesh=buildFist(); view.group.add(view.mesh); applyViewFog(view.mesh); return; }   // empty hand → a real fist you punch with
@@ -23131,12 +23165,12 @@ function _traceBullet(o,d,bolt,rev,sup,sg,vo){
       spawnParticles(px,py,pz,blockColor(b),9,1.7,0.5); addBulletHole(fx,fy,fz,nx,ny,nz);
       shotFixture(qx,qy,qz,b,d);   // a lantern goes out, a hanging lamp or a chime is knocked swinging (see below)
       return true; }
-    if(_wretchRayHit(px,py,pz,d,bolt,rev,sup,sg)){ hitMarker(); return true; }   // eyes, wings, then body — resolved against whichever LIVE creature this point is inside, primary or Horrific (see _wretchRayHit)
+    if(_wretchRayHit(px,py,pz,d,bolt,rev,sup,sg)){ bloodImpact(px,py,pz,d,wretch.group||null); hitMarker(); return true; }   // eyes, wings, then body — resolved against whichever LIVE creature this point is inside, primary or Horrific (see _wretchRayHit)
     for(let bi=0;bi<skyBirds.length;bi++){ const b=skyBirds[bi]; if(b.dead)continue; const bp=b.m.position, br=0.9*b.m.scale.x;   // SKY BIRDS die to gunfire (Ben 07-20) — generous sphere, they're small and far
       const dxb=px-bp.x, dyb=py-bp.y, dzb=pz-bp.z; if(dxb*dxb+dyb*dyb+dzb*dzb < br*br){ b.dead=true; b.vy=1.5; b.spin=(Math.random()-0.5)*7; hitMarker();
         spawnParticles(bp.x,bp.y,bp.z,0x191920,14,2.2,0.9); flashName('bird down'); return true; } }
     let an=null; for(const a of animals){ if(a.dead)continue; const hh=(ANIMALS[a.type]?ANIMALS[a.type].h:1)*1.15, dxa=px-a.x, dza=pz-a.z, dya=py-a.y; const rr=hh>1.3?0.9:0.5; if(dxa*dxa+dza*dza < rr && dya>-0.25 && dya<hh+0.4){ an=a; break; } }   // vertical CAPSULE, radius scaled up for big-bodied animals (deer/sheep bodies reached well past the old 0.65 cylinder — center-mass shots whiffed)
-    if(an){ hurtAnimal(an,animDmg); spawnParticles(px,py,pz,0xcc2018,8,1.6,0.5); hitMarker(); return true; }   // blood burst only — no lingering wound decal (Ben 07-21)
+    if(an){ hurtAnimal(an,animDmg); spawnParticles(px,py,pz,0xcc2018,8,1.6,0.5); bloodImpact(px,py,pz,d,an.mesh); hitMarker(); return true; }   // the wound rides an.mesh for three minutes and throws spatter at the blocks behind it (Ben 08-12, reversing the 07-21 removal)
     if(NET.on && !NET.host){ for(const _k in _netAnimals){ const _e=_netAnimals[_k]; const _dx=px-_e.x,_dz=pz-_e.z,_dy=py-_e.y;   // GUEST: the real animals[] is empty here → hit the host's mirrored animals and request the damage
       if(_dx*_dx+_dz*_dz<0.9 && _dy>-0.25 && _dy<2.2){ const _n=+String(_k).replace(/^n/,''); if(_n===_n)netSend({t:'han',n:_n,v:animDmg}); spawnParticles(px,py,pz,0xcc2018,8,1.6,0.5); hitMarker(); return true; } } } }
   // Out of range, or a clean miss, or the ray left the world: either way this bullet is finished.
@@ -29070,6 +29104,153 @@ function bloodAssetTex(){
       t.colorSpace=THREE.SRGBColorSpace; t.anisotropy=4; _bloodImg.push(t); } }
   return _bloodImg[(Math.random()*_bloodImg.length)|0]; }
 // =====================================================================
+//  BLOOD FX - the spatter thrown onto nearby block faces, and the wound that rides a creature
+// =====================================================================
+// Ben 08-12 supplied three sources: a splatter clip "for mapping onto block faces when nearby an impact", a still of
+// bullet holes for "the point of impact (must be clipped out)", and a drip clip whose blood "will place the video on
+// that point of impact, and drip blood downward". The wound pair "must be mapped onto the actual meshs of characters,
+// flat on thier faces, and should not move from them until after 3 minutes".
+//
+// SPRITE SHEETS, NOT VIDEO. tools/blood-video.py bakes assets/blood/{splatter,drip,impact}.png plus an fx.json of the
+// grid. A VideoTexture is one decode per element and every decal sharing an element shows the SAME frame, so ten
+// splats would animate in lockstep and ten elements would be ten decoders inside the frame budget. A sheet is one
+// upload and each decal keeps its own cursor, which is how the muzzle flash already works.
+//
+// THE FRAME LIVES IN THE GEOMETRY'S UVs, not in a uniform. Every decal is four vertices of its own, so advancing a
+// frame rewrites eight floats - and that means ONE shared material for all of them, whatever frame each is on. A
+// per-decal uniform would need a material per decal, and a per-instance attribute would rule out the thing that makes
+// the wound work at all, which is being a CHILD of the creature's mesh.
+//
+// RIDING THE MESH IS THE WHOLE TRICK, and it is cheap here because these creatures are rigid box hierarchies rather
+// than skinned meshes. A decal parented to the part it hit inherits every animation that part has for free: no bone
+// weights, no per-frame reprojection, and it cannot slide off, which is what "should not move from them" demands.
+const BLOOD_LIFE=180;                          // seconds a wound stays on a creature - Ben's three minutes, exactly
+const BLOOD_FADE=3;                            // ...and the last three of them fade it out, so it does not pop
+const BLOOD_MAX=64;                            // live decals, oldest first out. The cap IS the budget.
+const _bloodFX={ tex:{}, mat:{}, meta:null, live:[], ready:false, dead:false };
+function bloodFxInit(){
+  if(_bloodFX.ready || _bloodFX.dead) return _bloodFX.ready;
+  const TL=new THREE.TextureLoader();
+  for(const n of ['splatter','drip','impact']){
+    const t=TL.load('./assets/blood/'+n+'.png', undefined, undefined, ()=>{ _bloodFX.dead=true; });
+    t.colorSpace=THREE.SRGBColorSpace; t.anisotropy=4; _bloodFX.tex[n]=t;
+    // LAMBERT, NOT BASIC: blood on a wall at midnight must be as dark as the wall. vertexColors carries the per-decal
+    // fade - a four-component colour attribute multiplies diffuse INCLUDING alpha, so one material can fade each
+    // decal on its own. depthWrite off and the same depth pull addBulletHole uses, so a decal never loses the z-fight
+    // to the surface it lies on, even point-blank or through a scope.
+    _bloodFX.mat[n]=new THREE.MeshLambertMaterial({ map:t, transparent:true, depthWrite:false, vertexColors:true,
+      side:THREE.DoubleSide, alphaTest:0.02, polygonOffset:true, polygonOffsetFactor:-4, polygonOffsetUnits:-4 });
+  }
+  // The grid is whatever the bake produced; a hardcoded 6x5 here would silently mis-slice the sheet the day the tool
+  // is re-run with a different one. These defaults are only what today's bake made, in case the fetch is refused.
+  _bloodFX.meta={ splatter:{cols:6,rows:5,cell:[144,102]}, drip:{cols:6,rows:5,cell:[46,192]} };
+  fetch('./assets/blood/fx.json').then(r=>r.json()).then(j=>{ if(j&&j.splatter&&j.drip) _bloodFX.meta=j; }).catch(function(){});
+  _bloodFX.ready=true; return true;
+}
+// One cell of a sheet, written into a quad's own uv attribute. PlaneGeometry's four vertices run top-left, top-right,
+// bottom-left, bottom-right, which is the order these are set in.
+function _bloodFrame(mesh,i){
+  const M=mesh.userData._bl; if(!M||!M.cols) return;
+  const c=M.cols, r=M.rows, du=1/c, dv=1/r;
+  const u0=(i%c)*du, v1=1-((i/c|0))*dv;
+  const uv=mesh.geometry.attributes.uv;
+  uv.setXY(0,u0,v1); uv.setXY(1,u0+du,v1); uv.setXY(2,u0,v1-dv); uv.setXY(3,u0+du,v1-dv); uv.needsUpdate=true;
+  M.frame=i;
+}
+function _bloodQuad(kind,w,h,anim){
+  const g=new THREE.PlaneGeometry(w,h);
+  g.setAttribute('color',new THREE.BufferAttribute(new Float32Array([1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1]),4));
+  const m=new THREE.Mesh(g,_bloodFX.mat[kind]);
+  m.renderOrder=4; m.frustumCulled=false;
+  const meta=(anim===false)?{cols:1,rows:1}:(_bloodFX.meta[kind]||{cols:1,rows:1});
+  m.userData._bl={cols:meta.cols,rows:meta.rows,frames:meta.cols*meta.rows,frame:-1};
+  _bloodFrame(m,0);
+  return m;
+}
+function _bloodTrack(mesh,dur){
+  _bloodFX.live.push({m:mesh,t:0,dur:dur||0});
+  while(_bloodFX.live.length>BLOOD_MAX){ const o=_bloodFX.live.shift(); if(o.m.parent)o.m.parent.remove(o.m); o.m.geometry.dispose(); }
+}
+// Advance every live decal, hold the last frame once the clip is spent, fade the last seconds, drop it at three
+// minutes. Frames are only rewritten when the index actually changes, so a decal holding its finished stain costs one
+// comparison a frame.
+function updateBloodFx(dt){
+  const L=_bloodFX.live;
+  for(let i=L.length-1;i>=0;i--){ const d=L[i]; d.t+=dt;
+    const M=d.m.userData._bl;
+    if(d.dur>0 && M && M.frames>1){ const f=Math.min(M.frames-1, (d.t/d.dur*M.frames)|0); if(f!==M.frame) _bloodFrame(d.m,f); }
+    if(d.t>BLOOD_LIFE-BLOOD_FADE){
+      const a=Math.max(0,(BLOOD_LIFE-d.t)/BLOOD_FADE), c=d.m.geometry.attributes.color;
+      for(let v=0;v<4;v++) c.setW(v,a); c.needsUpdate=true; }
+    if(d.t>=BLOOD_LIFE){ if(d.m.parent)d.m.parent.remove(d.m); d.m.geometry.dispose(); L.splice(i,1); } }
+}
+// A BLOCK FACE NEAR THE IMPACT. The world is voxels, so this is a short march rather than a raycast: step until a
+// solid cell is entered, and the face is whichever axis that step crossed.
+function _bloodNearFace(x,y,z,dx,dy,dz,maxD){
+  const L=Math.hypot(dx,dy,dz)||1; dx/=L; dy/=L; dz/=L;
+  let px=Math.floor(x), py=Math.floor(y), pz=Math.floor(z);
+  const S=0.12;
+  for(let t=S;t<=maxD;t+=S){
+    const nx2=Math.floor(x+dx*t), ny2=Math.floor(y+dy*t), nz2=Math.floor(z+dz*t);
+    if(nx2===px && ny2===py && nz2===pz) continue;
+    if(solidAt(nx2,ny2,nz2)){
+      const n=(nx2!==px)?[nx2>px?-1:1,0,0] : (ny2!==py)?[0,ny2>py?-1:1,0] : [0,0,nz2>pz?-1:1];
+      return { x:x+dx*t, y:y+dy*t, z:z+dz*t, n:n };
+    }
+    px=nx2; py=ny2; pz=nz2;
+  }
+  return null;
+}
+// THE ONE ENTRY POINT. host = the Object3D to hang the wound on (a creature's mesh), or null for a hit that only
+// throws spatter. dir = the round's flight, so the wound faces back down it and the spatter carries on along it.
+function bloodImpact(x,y,z,dir,host){
+  if(!bloodFxInit()||_bloodFX.dead) return;
+  try{
+    if(host){
+      const g=new THREE.Group();
+      const n=new THREE.Vector3(-((dir&&dir.x)||0),-((dir&&dir.y)||0),-((dir&&dir.z)||0));
+      if(n.lengthSq()<1e-8) n.set(0,0,1);
+      n.normalize();
+      host.updateWorldMatrix(true,false);
+      const q=new THREE.Quaternion(); host.getWorldQuaternion(q); q.invert();
+      const ln=n.clone().applyQuaternion(q).normalize();                    // the face normal in the host's own space
+      const lup=new THREE.Vector3(0,1,0).applyQuaternion(q);                // and which way is DOWN, for the drip
+      const up=lup.clone().sub(ln.clone().multiplyScalar(lup.dot(ln)));
+      if(up.lengthSq()<1e-6) up.set(0,1,0); else up.normalize();
+      const right=new THREE.Vector3().crossVectors(up,ln).normalize();
+      g.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right,up,ln));
+      g.position.copy(host.worldToLocal(new THREE.Vector3(x,y,z))).add(ln.clone().multiplyScalar(0.02));
+      host.add(g);
+      const mk=_bloodQuad('impact',0.30,0.30,false);                        // one still, so no animation
+      g.add(mk); _bloodTrack(mk,0);
+      // The drip hangs BELOW the mark on the same plane and grows downward over four seconds. Its sheet cell is 1:4
+      // (the clip is a vertical streak), so the quad takes that aspect and its top edge sits at the wound.
+      const dm=_bloodFX.meta.drip||{cell:[46,192]}, dw=0.17, dh=dw*(dm.cell[1]/dm.cell[0]);
+      const dr=_bloodQuad('drip',dw,dh);
+      dr.position.set(0,-dh/2,0.002); g.add(dr); _bloodTrack(dr,4.0);
+    }
+    // THE SPATTER, onto whatever block faces are close enough to catch it. Down and outward from the wound, and along
+    // the round's flight - never back at the shooter, so it lands where the bullet was going.
+    const sm=_bloodFX.meta.splatter||{cell:[144,102]}, sar=sm.cell[1]/sm.cell[0];
+    const dx=(dir&&dir.x)||0, dy=(dir&&dir.y)||0, dz=(dir&&dir.z)||0;
+    const DIRS=[[dx,dy,dz],[0,-1,0],[dx*0.6-0.5,-0.7,dz*0.6+0.3],[dx*0.6+0.5,-0.7,dz*0.6-0.3]];
+    let hits=0;
+    for(let i=0;i<DIRS.length;i++){
+      if(hits>=2) break;                                                    // two faces is a spray; four is a paint job
+      const d=DIRS[i]; if(!d[0]&&!d[1]&&!d[2]) continue;
+      const f=_bloodNearFace(x,y,z,d[0],d[1],d[2],2.6);
+      if(!f) continue;
+      const w=0.85+Math.random()*0.5, q=_bloodQuad('splatter',w,w/sar);
+      q.position.set(f.x+f.n[0]*0.03, f.y+f.n[1]*0.03, f.z+f.n[2]*0.03);
+      q.lookAt(q.position.x+f.n[0], q.position.y+f.n[1], q.position.z+f.n[2]);
+      // A spatter on a FLOOR has no up, so it is spun - two hits on one floor are not the same picture twice. A WALL
+      // keeps its orientation, because its drips have to run downward and a rotated one runs them sideways.
+      if(f.n[1]!==0) q.rotateZ(Math.random()*6.283);
+      scene.add(q); _bloodTrack(q,1.2); hits++;
+    }
+  }catch(e){}
+}
+// =====================================================================
 //  GROUND MARKS - footprints and blood (Ben 08-04: "add animal and player + monster footsteps that can be seen on the ground,
 //  and blood trails. optimize both of them for gameplay")
 // =====================================================================
@@ -31694,6 +31875,7 @@ function addBulletHole(px,py,pz,nx,ny,nz){ try{
   _bholes.push({m,t:clock.elapsedTime}); if(_bholes.length>100){ const o=_bholes.shift(); scene.remove(o.m); } }catch(e){} }   // HARD CAP: at most 100 bullet holes in the world at once — oldest gives way (Ben 07-21)
 // MOB bullet holes were REMOVED (Ben 07-21) — creatures take blood-burst particles on hit but never a lingering wound decal.
 function updateBlockFx(dt){
+  updateBloodFx(dt);   // before the chest-lid early return below, or blood would only age while a chest was opening
   { const now=clock.elapsedTime; while(_bholes.length && now-_bholes[0].t>120){ const o=_bholes.shift(); scene.remove(o.m); } }   // surface (terrain) holes age out at 120s — mob wound decals removed (Ben 07-21)
   if(!chestLid||!chestLidAnim.active)return; chestLidAnim.t+=dt*3.4*chestLidAnim.dir; const t=clamp(chestLidAnim.t,0,1); const e=t*t*(3-2*t); chestLid.rotation.x=-1.35*e;
   if(chestLidAnim.dir<0&&t<=0){ chestLid.visible=false; chestLidAnim.active=false; _lidRestore(); } if(chestLidAnim.dir>0&&t>=1) chestLidAnim.active=false; }
@@ -37470,6 +37652,60 @@ window.__hc={
   objTick(id){ try{ const o=OBJECTIVES.find(x=>x.id===id); if(!o) return {err:'no such objective: '+id}; objComplete(o); objPanel(); return objNextIdx(); }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: the 12 gauge's forend, in its own local z. The rack is the one part of that gun's reload that is visible,
   // and the only way to prove it happened is to watch this number move while a reload runs.
+  // QA/bench: every live blood decal - what it is, whose mesh it hangs on, which frame it is showing, and how long it
+  // has left. "The blood sticks to the creature" is a claim about PARENTAGE, and a screenshot of a stationary animal
+  // cannot tell a decal that rides the mesh from one that happens to be next to it.
+  bloodState(){ try{ if(typeof _bloodFX==='undefined') return {err:'no blood fx'};
+      const out={ live:_bloodFX.live.length, ready:!!_bloodFX.ready, dead:!!_bloodFX.dead, meta:_bloodFX.meta, decals:[] };
+      for(const d of _bloodFX.live){ const M=d.m.userData._bl||{}, w=new THREE.Vector3();
+        d.m.getWorldPosition(w);
+        let root=d.m, depth=0; while(root.parent && root.parent!==scene){ root=root.parent; depth++; }
+        out.decals.push({ kind:(d.m.material===_bloodFX.mat.impact)?'impact':(d.m.material===_bloodFX.mat.drip)?'drip':'splatter',
+          t:+d.t.toFixed(2), dur:d.dur, frame:M.frame, frames:M.frames,
+          onScene:(root===d.m||root.parent===scene)&&depth===0, parentDepth:depth,
+          world:[+w.x.toFixed(2),+w.y.toFixed(2),+w.z.toFixed(2)],
+          alpha:+d.m.geometry.attributes.color.getW(0).toFixed(2) }); }
+      return out; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: shoot the nearest animal from where the player stands, which is the whole path - ray, hit, wound, spatter.
+  bloodShootAnimal(){ try{
+      // NOT THE NEAREST ONE. Jesus is unkillable and is often the closest thing to spawn, and at eleven metres a ray
+      // can be eaten by a tuft of grass, so this picks a killable animal and walks the player to arm's length of it.
+      let best=null,bd=1e9;
+      for(const a of animals){ if(a.dead||a.type==='jesus')continue; const dd=Math.hypot(a.x-player.pos.x,a.z-player.pos.z); if(dd<bd){bd=dd;best=a;} }
+      if(!best) return {err:'no killable animal alive'};
+      const h=(ANIMALS[best.type]?ANIMALS[best.type].h:1)*0.55;
+      const ux=Math.sign(Math.random()-0.5)||1;
+      player.pos.set(best.x+2.4*ux, best.y, best.z);
+      player.yaw=Math.atan2(-(best.x-player.pos.x),-(best.z-player.pos.z));
+      player.pitch=Math.atan2((best.y+h)-(player.pos.y+EYE), Math.hypot(best.x-player.pos.x,best.z-player.pos.z));
+      locked=true; const before=_bloodFX.live.length; const ok=!!fireGun();
+      this._bloodHost=best;
+      return { animal:best.type, dist:2.4, fired:ok, hp:best.hp, decalsBefore:before, decalsAfter:_bloodFX.live.length,
+               meshChildren:best.mesh?best.mesh.children.length:null }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: THE test for "it does not move from them". Move the creature and report how far each decal travelled.
+  // A decal merely placed in the world stays put; one parented to the mesh travels exactly as far as the mesh did.
+  bloodRide(dx,dz){ try{ const a=this._bloodHost; if(!a||!a.mesh) return {err:'shoot an animal first'};
+      const pos=k=>_bloodFX.live.map(d=>{ const w=new THREE.Vector3(); d.m.getWorldPosition(w);
+        return { kind:(d.m.material===_bloodFX.mat.impact)?'impact':(d.m.material===_bloodFX.mat.drip)?'drip':'splatter',
+                 x:+w.x.toFixed(2), z:+w.z.toFixed(2) }; });
+      const b4=pos();
+      dx=dx==null?3:dx; dz=dz==null?2:dz;
+      a.x+=dx; a.z+=dz; a.mesh.position.set(a.x,a.y,a.z); a.mesh.updateMatrixWorld(true);
+      const af=pos();
+      return { moved:dx+','+dz, decals:b4.map((p,i)=>({ kind:p.kind,
+        travelled:af[i]?+Math.hypot(af[i].x-p.x,af[i].z-p.z).toFixed(2):null })) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: the FX alone, with no shooting in the way - place a wound on the nearest creature and spatter behind it.
+  bloodPlace(){ try{ let best=null,bd=1e9;
+      for(const a of animals){ if(a.dead)continue; const dd=Math.hypot(a.x-player.pos.x,a.z-player.pos.z); if(dd<bd){bd=dd;best=a;} }
+      if(!best) return {err:'no animal'};
+      const h=(ANIMALS[best.type]?ANIMALS[best.type].h:1)*0.55;
+      const dx=best.x-player.pos.x, dz=best.z-player.pos.z, L=Math.hypot(dx,dz)||1;
+      bloodImpact(best.x-dx/L*0.35, best.y+h, best.z-dz/L*0.35, {x:dx/L,y:0,z:dz/L}, best.mesh);
+      this._bloodHost=best;
+      return { on:best.type, live:_bloodFX.live.length, ready:!!_bloodFX.ready, dead:!!_bloodFX.dead }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   pumpState(){ try{ return +((view.pumpT||0)).toFixed(3); }catch(e){ return null; } },   // QA: seconds left in the pump cycle — the shotgun's rate limit, read as a number
   pumpZ(){ try{ const M=view.mesh&&view.mesh.userData; return (M&&M.pump)?+M.pump.position.z.toFixed(4):null; }catch(e){ return null; } },
   set(p){ Object.assign(wretch, p||{}); return wretch.state; },
