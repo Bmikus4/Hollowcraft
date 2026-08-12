@@ -21,6 +21,7 @@ try{
   console.log(JSON.stringify(await p.evaluate(()=>[...document.querySelectorAll('#griditems .gitem')].map(t=>{
     const im=t.querySelector('.gimg').style.backgroundImage; return {id:t._st.id, len:im.length, kind:im.slice(0,26)}; })),null,1));
   const b=await p.evaluate(()=>{ const r=document.querySelector('#invui>.panel').getBoundingClientRect(); return {x:r.x,y:r.y,w:r.width,h:r.height}; });
-  await p.screenshot({path:path.join(OUT,'grid-crop.png'),clip:{x:Math.max(0,b.x-10),y:Math.max(0,b.y-10),width:b.w+20,height:b.h+20}});
+  console.log('card', JSON.stringify(b), 'viewport', JSON.stringify(await p.evaluate(()=>({w:innerWidth,h:innerHeight}))));
+  await p.screenshot({path:path.join(OUT,'grid-crop.png')});
   await br.close();
 } finally { try{ server.kill(); }catch(e){} }
