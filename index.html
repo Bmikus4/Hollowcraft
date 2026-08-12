@@ -577,8 +577,8 @@
   #gridwrap{ max-height:calc(58vh / var(--uiz)); overflow-y:auto; overflow-x:hidden; padding:0 6px; }
   #gridinv{ position:relative; }
   #gridbed, #griditems{ position:absolute; inset:0; }
-  .gcell{ position:absolute; width:44px; height:44px; box-sizing:border-box; border:10px solid transparent;
-    border-image:url('assets/ui/hcell.png') 15 / 10px / 0 stretch; background:rgba(7,9,6,.62); opacity:.72; }
+  .gcell{ position:absolute; width:50px; height:50px; box-sizing:border-box; border:12px solid transparent;
+    border-image:url('assets/ui/hcell.png') 15 / 12px / 0 stretch; background:rgba(7,9,6,.62); opacity:.72; }
   /* AN OCCUPIED CELL IS LIGHTER THAN AN EMPTY ONE, as it is in Ben's mockup. Not decoration: every gun in this game is
      dark metal, and a dark model on a dark plate is a tile that looks empty. The warm plate is what the silhouette
      reads against. */
@@ -2727,6 +2727,41 @@ function paintTile(name, fn){
     const o = (y*TILE+x)*4;
     d[o]=clamp(c[0]|0,0,255); d[o+1]=clamp(c[1]|0,0,255); d[o+2]=clamp(c[2]|0,0,255);
     d[o+3]=c[3]===undefined?255:clamp(c[3]|0,0,255);
+  }
+  // ---- ALPHA DILATION, and it is why thin cutouts go black at distance ----
+  // A transparent texel in these tiles is written [0,0,0,0] — transparent AND black. That is invisible at mip 0, where
+  // the alpha test discards it, and it is a disaster in every mip below: generateMipmaps averages RGB and alpha
+  // together, so a two-texel kelp stalk in a sixteen-texel tile averages one part olive to seven parts BLACK while its
+  // alpha stays above the cutoff. The fragment survives the test wearing a colour that is mostly the transparent
+  // background. The thinner the geometry the darker it goes, which is exactly Ben 08-12: "kelp is still showing black
+  // through the water", "its just the top tips" — a tip is the thinnest part of the strand. Item 9 on the backlog
+  // (canopy black seen through the leaves) is the same bug wearing leaves.
+  // The fix is to bleed the nearest opaque COLOUR outward into the transparent texels while leaving every alpha byte
+  // exactly as it was. Mip 0 is therefore bit-identical and the alpha test cannot notice; only what the mips average
+  // to changes, and now it averages colour with colour.
+  if(!(typeof Q!=='undefined' && Q.get('nodilate'))){
+    const A=(o)=>d[o+3];
+    let filled=new Uint8Array(TILE*TILE);
+    for(let i=0;i<TILE*TILE;i++) filled[i]= A(i*4)>0 ?1:0;
+    let any=filled.some(v=>v), all=filled.every(v=>v);
+    if(any && !all){
+      for(let pass=0; pass<TILE && !all; pass++){
+        const next=filled.slice(); all=true;
+        for(let y=0;y<TILE;y++) for(let x=0;x<TILE;x++){
+          const i=y*TILE+x; if(filled[i]) continue;
+          let r=0,g=0,b=0,n=0;
+          for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){
+            if(!dx&&!dy) continue; const xx=x+dx, yy=y+dy;
+            if(xx<0||xx>=TILE||yy<0||yy>=TILE) continue;
+            const j=yy*TILE+xx; if(!filled[j]) continue;
+            const o=j*4; r+=d[o]; g+=d[o+1]; b+=d[o+2]; n++;
+          }
+          if(n){ const o=i*4; d[o]=(r/n)|0; d[o+1]=(g/n)|0; d[o+2]=(b/n)|0; next[i]=1; }   // alpha untouched: still transparent, now coloured
+          else all=false;
+        }
+        filled=next;
+      }
+    }
   }
   actx.putImageData(img, tx, ty);
   return idx;
@@ -5003,12 +5038,7 @@ function foliageMesh(c){
   const P=[], NM=[], UVB=[], TL=[], SK=[], WIND=[], CAN=[];
   const cx0=c.cx*CK, cz0=c.cz*CK;
   const g=(lx,ly,lz)=>c.blocks[idx(lx,ly,lz)];
-  // skyTop is OPTIONAL and defaults to sky, so every caller that does not pass it is bit-identical. It exists for kelp:
-  // a strand is up to five blocks tall and took ONE sky sample, at its holdfast, which is the darkest cell in the
-  // column. The tip then renders as if it were on the seabed while sitting just under the surface — and the tip is the
-  // only part of a strand you can see, because the water's own absorption hides everything deeper. That is Ben 08-12,
-  // "kelp is still showing black through the water", "its just the top tips".
-  const quad=(x,y,z,ax,az,tile,sky,wind,hh,nrm,skyTop)=>{
+  const quad=(x,y,z,ax,az,tile,sky,wind,hh,nrm)=>{
     // one billboard quad from (x,z) along (ax,az) diagonal, height hh (1 for normal cross blocks, 2 for tall2 grass)
     const hw=0.5, H=hh||1;
     const corners=[[x-ax*hw,y,z-az*hw],[x+ax*hw,y,z+az*hw],[x+ax*hw,y+H,z+az*hw],[x-ax*hw,y+H,z-az*hw]];
@@ -5188,6 +5218,9 @@ function foliageMesh(c){
     // NEGATIVE wind is the kelp FLAG, read by sign in the injected vertex shader. It rides the existing aWind
     // attribute rather than adding a second one, because a new attribute would have to be threaded through every
     // other user of foliageMat for a single bit. Magnitude still means the same thing it always did.
+    // NOT A SKY-ACCESS FAULT, checked 08-12 and written down so it is not re-derived: water is opaque:false, so it never
+    // enters htop, so every cell in a water column reads sky access 1 by the column rule. Sampling the tip instead of the
+    // holdfast returns the same number and any interpolation between them is inert. Kelp is FULLY LIT already.
     quad(lx+0.5+jx, sy+1, lz+0.5+jz, 0.85, 0.85, tile, sky, -KELP_SWAY*hh, hh);
     quad(lx+0.5+jx, sy+1, lz+0.5+jz, 0.85,-0.85, tile, sky, -KELP_SWAY*hh, hh);
   }
@@ -11460,7 +11493,11 @@ function invRemove(id,n){ for(let i=0;i<INV_N&&n>0;i++){ const s=inv[i]; if(s&&s
 //  2. SIZE IS DERIVED, THEN OVERRIDDEN. itemSize() answers from the item's own flags — a block is 1x1, a tool is 1x2, a
 //     gun by its class — and ITEM_SIZE names the exceptions. Three hundred items do not need three hundred entries.
 //  3. ONE ICON RULE, NO PER-ITEM TABLE (see iconSideURL, further down with the other icon bakes).
-const CELL=44;                       // one grid cell, in css px before --uiz
+// ONE GRID CELL IS ONE HOTBAR SLOT (Ben 08-12: "make inventory slots a little bit bigger, to match exactly with
+// the 5 hud items"). 44 against the bar's 50 read as two different systems stacked, which is the whole reason the
+// eye kept checking whether they lined up. This number and .slot's width are the same measurement and have to move
+// together — .gcell below carries the same 12px border and the same 15-slice of hcell.png for the same reason.
+const CELL=50;                       // one grid cell, in css px before --uiz — matches .slot exactly
 const GRID_W=8;                      // 8 wide always; capacity is a COUNT OF CELLS, and the block wraps at 8
 // CAPACITY IS A SUM OF WHAT YOU ARE WEARING (Ben 08-11: "the player should start with 8 slots, pockets take up 6,
 // hands 2... leggings, chestplate both increase by 4 each. backpack adds 16, but there are 3 tiers of backpack, so
@@ -36859,9 +36896,13 @@ window.__hc={
       // pointing at what the player is facing.
       let best=null; for(const [a,lab] of CMP_MARKS){ const d=Math.abs(((a-b+540)%360)-180); if(!best||d<best.off) best={lab,off:+d.toFixed(2),at:a}; }
       const box=_cmp.wrap.getBoundingClientRect();
+      // WHY it is hidden, not just that it is: the ribbon now has four separate doors (no compass carried, not started,
+      // the intro, being grabbed) and a probe that reports one number cannot tell them apart.
+      const why={ opacity:+(_cmp.wrap.style.opacity||0), carried:hasCompass(), started:!!started,
+                  intro:!!(typeof intro!=='undefined'&&intro.active), bound:!!(player.grabbed||player.tied) };
       return { yawDeg:+(player.yaw*180/Math.PI).toFixed(2), bearing:+b.toFixed(2), nearest:best,
                ppd:CMP_PPD, box:{ cx:Math.round(box.left+box.width/2), top:Math.round(box.top), w:Math.round(box.width), vh:innerHeight },
-               centred:Math.abs(box.left+box.width/2-innerWidth/2)<2 }; }
+               centred:Math.abs(box.left+box.width/2-innerWidth/2)<2, why }; }
     catch(e){ return {err:String(e.message||e)}; } },
   placeFacing(item, yaw){ try{
       const px=Math.floor(player.pos.x), py=Math.floor(player.pos.y), pz=Math.floor(player.pos.z);
