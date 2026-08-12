@@ -52,7 +52,78 @@ async function imageTex(g, buf, bin, imgIdx){
 
 // Meshes whose only purpose is to be dropped. Ben: "no shoes" — the shoes are one node, so barefoot is
 // one omission rather than a texture edit. Named by node name because that is what the file carries.
-const DROP = new Set(['Low-heeled mules']);
+// Her outfit joins them (Ben 08-12: "append some new clothes on her, after you made her clothes invisible"):
+// the file's shorts, tee and bag are never built, and NEW garments are cut from her own body below.
+const DROP = new Set(['Low-heeled mules', 'Jean shorts', 'T-Shirt', 'Shoulder Bag']);
+
+// ---- the new outfit ---------------------------------------------------------------------------------
+// CLOTHES CUT FROM THE BODY THEY GO ON. There is no second asset here and no modelling: a garment is the
+// patch of HER OWN SURFACE it would cover, copied, pushed a few millimetres out along its normals and given
+// its own material. Everything that usually makes clothing hard is then free — it fits exactly, it carries
+// her real skin weights so it deforms with every pose the rig can reach, it needs no UVs of its own, and it
+// cannot clip through her because it IS her, offset.
+//
+// A patch is (a height band) ∩ (a set of bones it may hang from). The band alone is not enough: at chest
+// height her upper arms are in the same slice as her ribs, so a band-only top comes with sleeves whether it
+// wants them or not. Dominant bone is what separates a vest from a t-shirt, and it is exact rather than a
+// guess about widths.
+//
+// The bands are the FILE'S OWN, read off the meshes being replaced (Jean shorts 0.791-1.020, T-Shirt
+// 0.973-1.391): the artist already decided where a waist and a neckline sit on this body, and taking those
+// numbers means the new outfit lands where the old one did instead of where I would have guessed.
+const TORSO = new Set(['spine', 'spine.001', 'spine.002', 'spine.003', 'spine.004', 'breast.L', 'breast.R']);
+// spine.001 is in the HIPS set for a reason a screenshot showed: the waistband is where a garment's edge is
+// most read, and leaving out the lower belly (which that bone owns) cut the shorts off in a ragged line
+// halfway up her hip. A waistband has to end on a horizontal, so the bone set has to reach past it.
+const HIPS  = new Set(['spine', 'spine.001', 'pelvis.L', 'pelvis.R', 'thigh.L', 'thigh.R']);
+const OUTFIT = [
+  // A vest, cut at the file's own neckline and hem. 0.006 of a 1.67-unit body is about 5cm at her scale:
+  // enough that it never z-fights with the skin under it, thin enough to read as cloth and not armour.
+  { name: 'Vest',   y: [0.985, 1.345], bones: TORSO, colour: 0x2f3a33, off: 0.006 },
+  // Shorts, ending mid-thigh rather than at the file's 0.791 — hers were a hem at the hip, and a giant read
+  // from below wants a garment with a visible leg to it. The waist overlaps the vest's hem by 0.035 so no
+  // strip of skin can show between them at any pose; a gap there is the one seam a viewer always finds.
+  { name: 'Shorts', y: [0.700, 1.020], bones: HIPS,  colour: 0x23262b, off: 0.007 },
+];
+// One garment's geometry, in the same shape the loader's own meshes arrive in. A triangle is kept only if
+// ALL THREE of its corners pass — a partly-kept triangle is a spike from the hem to wherever the third
+// vertex was — and the kept vertices are re-indexed, so a garment carries only the vertices it uses.
+function cutGarment(m, spec, jointNames){
+  const n = m.pos.length / 3, keep = new Int32Array(n).fill(-1);
+  const nor = m.nor;
+  let kept = 0;
+  for (let i = 0; i < n; i++){
+    const y = m.pos[i * 3 + 1];
+    if (y < spec.y[0] || y > spec.y[1]) continue;
+    // The dominant joint, not any joint: a vertex on the shoulder seam is 60% spine and 40% arm, and it
+    // belongs to the garment. Reading the heaviest of the four is the whole test.
+    let bi = 0, bw = -1;
+    for (let k = 0; k < 4; k++){ const w = m.sw[i * 4 + k]; if (w > bw){ bw = w; bi = m.si[i * 4 + k]; } }
+    if (!spec.bones.has(jointNames[bi])) continue;
+    keep[i] = kept++;
+  }
+  if (!kept) return null;
+  const pos = new Float32Array(kept * 3), nrm = new Float32Array(kept * 3);
+  const si = new Uint16Array(kept * 4), sw = new Float32Array(kept * 4);
+  for (let i = 0; i < n; i++){
+    const j = keep[i]; if (j < 0) continue;
+    const nx = nor ? nor[i * 3] : 0, ny = nor ? nor[i * 3 + 1] : 0, nz = nor ? nor[i * 3 + 2] : 0;
+    pos[j * 3]     = m.pos[i * 3]     + nx * spec.off;
+    pos[j * 3 + 1] = m.pos[i * 3 + 1] + ny * spec.off;
+    pos[j * 3 + 2] = m.pos[i * 3 + 2] + nz * spec.off;
+    nrm[j * 3] = nx; nrm[j * 3 + 1] = ny; nrm[j * 3 + 2] = nz;
+    for (let k = 0; k < 4; k++){ si[j * 4 + k] = m.si[i * 4 + k]; sw[j * 4 + k] = m.sw[i * 4 + k]; }
+  }
+  const src = m.idx, out = [];
+  if (src){ for (let t = 0; t < src.length; t += 3){
+      const a = keep[src[t]], b = keep[src[t + 1]], c = keep[src[t + 2]];
+      if (a >= 0 && b >= 0 && c >= 0) out.push(a, b, c); } }
+  else { for (let t = 0; t < n; t += 3){
+      const a = keep[t], b = keep[t + 1], c = keep[t + 2];
+      if (a >= 0 && b >= 0 && c >= 0) out.push(a, b, c); } }
+  if (!out.length) return null;
+  return { pos, nor: nrm, si, sw, idx: kept > 65535 ? new Uint32Array(out) : new Uint16Array(out) };
+}
 
 export function giantessLoaded(){ return !!TPL; }
 
@@ -94,6 +165,9 @@ export async function giantessLoad(base){
       }
       const skin = g.skins[0];
       TPL = { g, mats, meshes, joints: skin.joints.slice(),
+              // skinIndex is an index into skin.joints, not into nodes — the garment cutter reads bone NAMES
+              // off it, and going through the wrong table dresses her arms in her shorts.
+              jointNames: skin.joints.map(i => ((g.nodes[i] && g.nodes[i].name) || '').trim()),
               ibm: acc(g, buf, bin, skin.inverseBindMatrices),
               roots: g.scenes[g.scene || 0].nodes.slice() };
       return true;
@@ -162,6 +236,30 @@ export function giantessBuild(scale){
     // Bind matrix IDENTITY, explicitly. glTF skinning is defined in skin space, and bind()'s default is
     // the mesh's matrixWorld — which is whatever the parent chain happened to be when the mesh was added,
     // so the scale set on the group below would otherwise be applied to her twice.
+    sm.bind(skeleton, new THREE.Matrix4());
+    built.push(sm);
+  }
+  // THE NEW OUTFIT, cut from the body that was just built. It goes on here rather than in the loader because
+  // it is geometry per instance like everything else in this function, and it goes on AFTER the loop so a
+  // garment is never a source for another garment.
+  const body = TPL.meshes.find(m => m.name === 'Body');
+  if (body) for (const spec of OUTFIT){
+    const cut = cutGarment(body, spec, TPL.jointNames || []);
+    if (!cut) continue;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(cut.pos, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(cut.nor, 3));
+    geo.setAttribute('skinIndex', new THREE.BufferAttribute(cut.si, 4));
+    geo.setAttribute('skinWeight', new THREE.BufferAttribute(cut.sw, 4));
+    geo.setIndex(new THREE.BufferAttribute(cut.idx, 1));
+    // DoubleSide: a garment cut from a closed body is an open shell, and the hem, the neckline and the leg
+    // openings are all edges you can see the inside of on a body this size.
+    const mat = new THREE.MeshLambertMaterial({ color: new THREE.Color(spec.colour), side: THREE.DoubleSide });
+    const sm = new THREE.SkinnedMesh(geo, mat);
+    sm.name = spec.name;
+    sm.castShadow = true; sm.receiveShadow = true;
+    sm.frustumCulled = false;
+    skinParent.add(sm);
     sm.bind(skeleton, new THREE.Matrix4());
     built.push(sm);
   }
@@ -724,9 +822,15 @@ export function giantessProbe(rig){
   const p = new THREE.Vector3(), l = new THREE.Vector3(), r = new THREE.Vector3();
   rig.group.getWorldPosition(p);
   giantessBonePos(rig, 'foot.L', l); giantessBonePos(rig, 'foot.R', r);
+  const worn = new Set(OUTFIT.map(o => o.name));
   return { bones: rig.bones.length, meshes: rig.meshes.length,
            mapped: rig.meshes.filter(m => m.material.map).length,
            names: rig.meshes.map(m => m.name),
+           // The new outfit: how much of her each garment covers, and whether it is skinned to HER skeleton —
+           // a garment on its own skeleton would sit in the air where she was standing when it was built.
+           outfit: rig.meshes.filter(m => worn.has(m.name)).map(m => ({
+             name: m.name, tris: m.geometry.index ? m.geometry.index.count / 3 : 0,
+             bound: m.skeleton === rig.skeleton && !!m.geometry.getAttribute('skinWeight') })),
            height: +(box.max.y - box.min.y).toFixed(3),
            origin: [+p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2)],
            footL: [+l.x.toFixed(2), +l.y.toFixed(2), +l.z.toFixed(2)],
