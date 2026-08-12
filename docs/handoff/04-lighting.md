@@ -12,7 +12,18 @@ That last sentence is the architecture and it is right. The full spec is
 `docs/ONE-LIGHT-WATER-HORIZON-PLAN.md` §1 — read it when you start, and read §1.1's table of the five
 lighting paths, which is the actual bug.
 
-## Step 1 — per-corner sky access. SHIPPED (`2b42e7a`), then TURNED OFF.
+## Step 1 — per-corner sky access. SHIPPED, TURNED OFF, AND BACK ON AS OF 08-12 (`11ba56c`).
+
+**Read the section below for the mechanism, but its conclusion is out of date.** The cost that got
+it disabled - a night-canopy crop reading pure black 0.889% -> 3.145% - does not reproduce at any
+vantage that contains the fault: a wood at noon over two bearings gives 0.107% -> 0.053%, and a
+lantern in a night wood gives isolated black 2.377% -> 1.915%. Both say it REDUCES the speckle.
+The theory that justified the disable - corner averaging pushing fragments to exactly zero, where a
+scale cannot lift them - was tested directly and is inert (`be81139`); those fragments are not at
+float zero. The regression net is at its documented baseline with it on. `_SKY_SMOOTH = 0` reverts.
+
+## The original note, kept for the mechanism and the measurements
+
 
 **What it does.** `aSky` was a 4-bit scalar carried PER FACE, so `vSky` arrived in steps of 1/15 and,
 being face-wide on a merged greedy quad, read as **whole blocks** differing from their neighbours —

@@ -1,10 +1,33 @@
 # Hollowcraft — handoff. Read this file and nothing else first.
 
-Written 2026-08-11, late. Everything described here is pushed to `origin/main`.
+Rewritten 2026-08-12. Everything described here is committed. **Check `git log origin/main..HEAD`
+before you start** — the other session pushes constantly and twice today HEAD was unbuildable.
 
-**This document is an index, not a briefing.** Each task below names the ONE file to read when you
-start that task. Do not read them all. They are long, they contradict each other where the work has
-moved on, and reading them together is how a session burns half its context before touching code.
+**This document is an index, not a briefing.** Each task names the ONE file to read when you start
+that task. Do not read them all.
+
+---
+
+## BEFORE YOUR FIRST EDIT, AND BEFORE EVERY COMMIT
+
+```
+node --experimental-vm-modules bench/syntax-check.mjs
+node bench/assert-imports.mjs
+```
+
+Both take milliseconds and open no browser. The second one is new today and it exists because
+**production served a build that did not run at all**: `index.html` was committed importing
+`giantessDeathFall` from a module that was still uncommitted on disk. An ES module that fails to
+LINK never executes a statement — no `__hc`, no `startGame`, no watchdog, and the menu sits on the
+key art for ever. It reads exactly like a loading bug and is not one. It has now happened **twice
+in one day**, so assume it will happen again.
+
+`assert-imports` reads `git show HEAD:` by default, NOT the files on disk. That is the whole point:
+every other harness boots the dev server, which serves the working tree, where the module is
+present and fine. Only git or a browser pointed at the deploy can see the break.
+
+**Always read `docs/handoff/00-ground-rules.md` before your first edit.** Short, and every line is a
+fault that has already cost a session.
 
 ---
 
@@ -12,58 +35,79 @@ moved on, and reading them together is how a session burns half its context befo
 
 | # | task | read when you start it | state |
 |---|---|---|---|
-| 1 | **The game never loads for Ben** | `docs/handoff/01-load-hang.md` | **START HERE.** Not reproduced headless. |
-| 2 | Black texels everywhere + matted surfaces | `docs/handoff/02-black-texels.md` | Not reproduced. Needs Ben's vantage. |
-| 3 | The black band on the far water | `docs/handoff/03-water.md` | Isolated to 76% of the reflection term. |
-| 4 | One lighting model, steps 2-5 | `docs/handoff/04-lighting.md` | Step 1 shipped but OFF. Step 2 reverted. |
-| 5 | Water rebuild / horizon / fog+DoF | `docs/ONE-LIGHT-WATER-HORIZON-PLAN.md` §2-4 | Spec'd, not started. |
+| 1 | **Black texels / "textures don't show in dark areas"** | `docs/handoff/02-black-texels.md` | **START HERE.** Fix measured, shipped OFF, needs the guard run. |
+| 2 | Water: the black band on the far water | `docs/handoff/03-water.md` | Detector built and NOT YET RUN — one bench run forks it. |
+| 3 | Water: the actual rebuild | `docs/ONE-LIGHT-WATER-HORIZON-PLAN.md` §2 | Not started. Ben's biggest open ask. |
+| 4 | One lighting model, steps 2-5 | `docs/handoff/04-lighting.md` | Step 1 SHIPPED ON. Step 2 reverted, read before retrying. |
+| 5 | Horizon, fog + DoF | `docs/ONE-LIGHT-WATER-HORIZON-PLAN.md` §3-4 | Not started. |
 
-**Always read `docs/handoff/00-ground-rules.md` before your first edit.** It is short and every line
-of it is a fault that has already cost this project a session. The shared checkout will bite you.
-
-Ben's standing priorities: *"cohesion and beauty are your two main goals"*, and *"hyperrealistic"*,
-which he has defined as *"it fits in with our existing lighting"*. He does not want status documents,
-completion reports, or emoji. Two lines and the numbers.
+Ben's standing priorities: *"cohesion and beauty are your two main goals"*, *"hyperrealistic"* means
+*"it fits in with our existing lighting"*. **His current order, verbatim (08-12): lighting,
+texturing and water now — the FPS pass is later.** No status documents, no completion reports, no
+emoji. Two lines and the numbers.
 
 ---
 
-## WHAT IS TRUE RIGHT NOW
+## WHAT CHANGED TODAY
 
-- **Per-corner sky access is OFF** (`_SKY_SMOOTH = 0`). It shipped on in `2b42e7a` and was turned off
-  the same evening. It is measured NOT to cause the black texels. See task 4.
-- **The `hcLight()` extraction is REVERTED.** It was written, never compiled, never measured, and sat
-  in the shared checkout while Ben played. See task 4 for the design finding that survived it.
-- **Water's two procedural textures are OFF** behind dials (`__hc.waterRefl({streak:1, fine:1})`
-  restores them), and vertical bars on water columns are fixed. See task 3.
-- **The regression net was blind until `ca430c3`** and every "green" reading before that was taken off
-  a JPEG. The real baselines are in `docs/handoff/00-ground-rules.md`. Do not trust any number in
-  `fleet/resume/Hollowcraft-Lighting.md`, which predates the fix.
+- **Task 1 of the old handoff — "the game never loads" — is SOLVED and it was never a loading bug.**
+  It was the unresolved import above. Everything the old handoff said about the loading gate, the
+  streaming budget and `_playAt` was chasing the wrong thing. Production now boots in 6.0 s, 9/9
+  chunks, gate-released, no page errors.
+- **Per-corner sky access is ON** (`_SKY_SMOOTH = 1`, `11ba56c`). The cost it was disabled for did
+  not reproduce at any vantage containing the fault. Regression net at documented baseline.
+- **The world is no longer rendered behind the opaque loading plate** (`a6f6638`). Small win, ~0.6 s
+  and a much tighter spread; it does NOT fix a slow machine.
+- **Both texel floors are measured to be actively harmful to texture** and a replacement is built
+  and dialled off. This is task 1 above.
 
-`fleet/resume/Hollowcraft-Lighting.md` is now HISTORY. Its §4 (the logic harness) is still the best
-thing written about how to decide anything here and is reproduced in the ground rules. Its numbers are
-not.
+## THE STANDING NUMBERS
+
+Regression net, real baselines, all confirmed today with per-corner sky ON:
+
+```
+assert-cave-black      15/18
+assert-unlit-black      9/11     (flaky: the foliage check has read both 0.87% and 3.074%)
+assert-daylight-black    6/6
+assert-lit-chroma        6/6
+```
+
+The two `unlit-black` failures are pre-existing. One is worth knowing: *"a sealed room reads the
+same at noon as at midnight"* — noon 7.37 vs night 3.18. **The day is reaching an enclosed space
+that by construction has no sky access.** Nobody has chased it and it is exactly the class of
+inconsistency task 4 exists to remove.
 
 ---
 
 ## THE BACKLOG, EVERYTHING OPEN
 
-Items 1-5 are the tasks above. The rest:
-
 | # | item | state |
 |---|---|---|
-| 6 | Black band on far water | task 3 — measured, not fixed |
-| 7 | Two coloured lights in one chunk | `buildLightTexture` stores ONE channel + a per-chunk dominant tint, so the weaker light's pool is drawn in the stronger one's hue. Deliberate trade: per-cell RGB is 37 MB at rd 8. **BLOCKED on Ben's cave to aim at.** |
-| 8 | Residual canopy black | alpha cutouts showing unlit space through leaves. Needs geometry, not a shader term. Reached from a new direction by per-corner sky (task 4). |
-| 9 | Forest perf | 12.4 ms of the forest's 13.9 is scene draw, 1019k triangles vs the shore's 266k. Alpha-tested leaf-leaf faces are the suspect. **Gates the planar-reflection decision in the water rebuild.** |
-| 10 | Ben has never judged | the sun arc, the skylight flood. All shipped, none judged. (Water reflections he has now seen and likes.) |
-| 11 | The play path has NO bench coverage | every harness boots `?debug=1`, which sets `started` itself and never goes near `startGame`. This is why task 1 exists and why the menu plate blinded the whole net for a day. |
-| 12 | `assets/models/`, `src/models/`, `tools/models/` are untracked | the model pack from `a4c89b3`. Confirm this is intended before anyone clones this repo. |
+| 6 | Water rebuild | task 3 — the big one, unstarted |
+| 7 | Slow machines reach the world only by watchdog | at 6x CPU throttle the gate never releases; the watchdog fires at `LOAD_MAX_MS` and hands over terrain with no trees. What it waits on is the MESHER — `worldMeshed` tracks the gate's 3x3 exactly, so nothing else competes. Render distance is NOT the lever (rd 12 changes the load path by nothing; the gate waits on `LOAD_READY_R`). |
+| 8 | Two coloured lights in one chunk | one channel + a per-chunk dominant tint. **BLOCKED on Ben's cave to aim at.** |
+| 9 | Residual canopy black | alpha cutouts showing unlit space through leaves. Needs geometry, not a shader term. |
+| 10 | Forest perf | 12.4 ms of the forest's 13.9 is scene draw, 1019k triangles vs the shore's 266k. **Gates the planar-reflection decision in the water rebuild.** Ben says the FPS pass is later — this is the exception, because task 3 depends on it. |
+| 11 | Ben has never judged | the sun arc, the skylight flood, and now per-corner sky. |
+| 12 | Desktop executable | asked about 08-12. Answer given: no help for lighting/texture/water/load, real wins for vsync uncapping, build ambiguity, tab throttling and Steam. Do it before the FPS pass, not now. |
+| 13 | `_chunksReadyAround(r)` ignores its argument | it hardcodes a 3x3. `LOAD_READY_R = 4` is a dead constant and tuning it does nothing. |
 
 ---
 
-## THE FOUR GUARDS
+## THE TRAPS LEARNED TODAY — these are not in the old ground rules
 
-`assert-cave-black` · `assert-unlit-black` · `assert-daylight-black` · `assert-lit-chroma`.
-
-Their real baselines, and the reason five checks fail, are in `docs/handoff/00-ground-rules.md`.
-Get them on the parent commit before you attribute a failure to your own work.
+1. **Blocked benchmark runs on this box measure the cooling fan.** The identical build measured
+   8.9 s and 13.4 s twenty minutes apart, three times the size of the effect being chased. Every
+   comparison must be INTERLEAVED A/B/A/B inside one session, which usually means adding a runtime
+   dial so both sides exist in one build. Repeat the baseline row LAST and quote its agreement as
+   the noise floor.
+2. **A uniform that is a `{ value: number }` is severed by three's `UniformsUtils.clone`** when a
+   material is built from a ShaderLib entry — objects and arrays copy by reference, numbers by
+   value. A scalar dial will read completely inert and look like a wrong hypothesis. Back it with a
+   `Float32Array`; `_hcAux` is a vec4 with three spare slots for exactly this.
+3. **Look at the frame before reading a statistic off it**, still. A midnight-wood A/B looked
+   decisive and was worthless: the frame was 94% near-black, so it measured an unlit night rather
+   than a lit surface. The speckle sits on a LIT surface by definition.
+4. **`git show HEAD:` and the dev server are different programs.** The dev server serves the working
+   tree. Anything about what Ben or a deploy sees must come from git or from the deployed URL —
+   `bench/tmp-prod-boot.mjs` drives the real play path against production.

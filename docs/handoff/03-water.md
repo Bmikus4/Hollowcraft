@@ -61,6 +61,26 @@ returns NaN, and the reasoning fit the signature perfectly. A `dot(R,R) > 1e-12`
 degenerate here. The guard is left in the source with a comment saying exactly this, so it is not
 credited with fixing anything.
 
+### THE DETECTOR IS BUILT AND HAS NOT BEEN RUN (2026-08-12)
+
+`__hc.waterNan(1)` paints any water fragment whose FINAL colour is non-finite or negative magenta.
+The uniform is `uNanDbg`, ships at 0, and costs one comparison per water pixel when off. It is
+written as `!(x >= 0.0)` rather than with `isnan()`, which is unavailable in GLSL ES 1.0 and
+unreliable under fast-math; the negated comparison is true for NaN AND for negatives, and both
+reach the framebuffer as black.
+
+Run it interleaved from the existing harness, which takes arbitrary JS per row - no new bench
+needed and the seawall vantage is already correct:
+
+```
+node bench/tmp-texel-day.mjs "0.030/0,0.030/0/__hc.waterNan(1)"
+```
+
+The seawall reproduces at pure black 1.579% with isolated black 1.579% - i.e. EVERY black pixel
+has a lit neighbour, which is the NaN signature and not an unlit surface. Confirmed again on 08-12.
+
+### What the run means
+
 ### The next step, which is one bench run
 
 Put a **non-finite / negative detector** on the FINAL water fragment colour:
