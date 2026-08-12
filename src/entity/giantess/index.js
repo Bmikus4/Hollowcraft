@@ -52,7 +52,7 @@ async function imageTex(g, buf, bin, imgIdx){
 
 // Meshes whose only purpose is to be dropped. Ben: "no shoes" — the shoes are one node, so barefoot is
 // one omission rather than a texture edit. Named by node name because that is what the file carries.
-const DROP = new Set(['Low-heeled mules']);
+const DROP = new Set(['Low-heeled mules', 'Jean shorts', 'T-Shirt', 'Shoulder Bag']);
 
 export function giantessLoaded(){ return !!TPL; }
 
