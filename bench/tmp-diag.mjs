@@ -20,7 +20,7 @@ await page.waitForTimeout(9000);
 const IDS = (process.env.IDS || 'avocado,pizza,radio,hunting_knife,bayonet,frying_pan,tent,wooden_torch,dock_long,water_bottle,apple,ar15').split(',');
 console.log(JSON.stringify(await page.evaluate(ids => {
   const out = {};
-  for (const id of ids){ try { __hc.hold(id); out[id]=__hc.viewDump(); } catch (e){ out[id] = 'THREW ' + String(e.message).slice(0,60); } }
+  for (const id of ids){ try { out[id]=__hc.wornPack(id); } catch (e){ out[id] = 'THREW ' + String(e.message).slice(0,60); } }
   out._dock = __hc.dockInfo();
   const mp=__hc.modelPack(); out._missing = (mp.missing||[]).length + ": " + (mp.missing||[]).slice(0,6).join(",");
   return out;
