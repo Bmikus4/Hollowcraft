@@ -104,29 +104,27 @@ try {
   check('her hips rise and fall as the loaded leg straightens', gait[2].hipRise > 0.05 && gait[2].hipRise < 1.5, gait[2].hipRise + ' blocks');
   check('the swing foot clears the stance foot', gait[2].swingClear > 0.5, gait[2].swingClear + ' blocks of clearance');
 
-  // ---- 6. THE EGG, which is half of what was asked for and was not covered here at first ------------
-  // Ben: "dont see the egg". The item was correct all along; /give stopped putting anything in the five-slot
-  // bar when the inventory became a bag-first grid, so nothing an egg-shaped check does through /give proves
-  // it works. These three go through the doors a player actually uses.
-  // CREATIVE FIRST: the C menu will not open for a survival player, so the check read "among 0 items" and
-  // said nothing about the egg.
+  // ---- 6. COMMAND ONLY, NO EGG (Ben 08-12) ---------------------------------------------------------
+  // She had a spawn egg and it is gone. Both halves are checked, because "removed" is the easy half to get
+  // wrong: an item left defined but never listed is still obtainable by /give, and a creature whose only
+  // door was the egg becomes unspawnable the moment the item goes.
   await page.evaluate(`__hc.girlOff(); __hc.cmdRun('/gamemode creative');`);
-  const eggs = await page.evaluate(`(()=>{ window.dispatchEvent(new KeyboardEvent('keydown',{code:'KeyC'}));
+  const gone = await page.evaluate(`(()=>{ window.dispatchEvent(new KeyboardEvent('keydown',{code:'KeyC'}));
     const el=document.getElementById('creative'); const cells=el?[...el.querySelectorAll('div[title]')].map(d=>d.title):[];
     window.dispatchEvent(new KeyboardEvent('keydown',{code:'KeyC'}));
-    return { n:cells.length, has:cells.includes('Giantess Spawn Egg') }; })()`);
-  check('her egg is in the creative menu', eggs.has === true, 'among ' + eggs.n + ' items');
+    return { n:cells.length, eggs:cells.filter(t=>/Spawn Egg/.test(t)).length, girl:cells.some(t=>/Giantess/i.test(t)),
+             give:String(__hc.cmdRun('/give egg_giantess 1').out) }; })()`);
+  check('no giantess egg in the creative menu', gone.girl === false, gone.eggs + ' spawn eggs among ' + gone.n + ' items');
+  check('the egg item does not exist at all', /no such item/.test(gone.give), gone.give.slice(0, 60));
   const cmd = await page.evaluate(`__hc.cmdRun('/gamemode survival'); __hc.cmdRun('/spawn giantess')`);
-  check('/spawn knows the creature', /spawned/.test(String(cmd.out)), String(cmd.out).slice(0, 60));
-  await page.evaluate(`__hc.girlOff();`);
-  // GIVEN, NOT PLANTED: the egg has to arrive in the five-slot bar, because an egg that lands in the bag is
-  // the bug Ben reported. hold() would put it there by force and prove nothing.
-  const bar = await page.evaluate(`(()=>{ __hc.cmdRun('/give egg_giantess 1'); return __hc.bar(); })()`);
-  check('a given egg lands in the hotbar, not the bag', !!(bar.slots || []).find(s => s && s.id === 'egg_giantess'), JSON.stringify(bar.slots));
-  const egg = await page.evaluate(`(()=>{ const h=__hc.hold('egg_giantess'); __hc.useHeld(); return h; })()`);
   await sleep(400);
-  const after = await page.evaluate(`__hc.girlState()`);
-  check('right-clicking the egg spawns her', after.active === true, 'held ' + egg.held + ' -> ' + after.state + ' at ' + after.dist + ' blocks');
+  const spawned = await page.evaluate(`__hc.girlState()`);
+  check('/spawn is her only door, and it works', /spawned/.test(String(cmd.out)) && spawned.active === true,
+    String(cmd.out).slice(0, 48) + ' -> ' + spawned.state);
+  // The hotbar-first fill stays pinned here with an ordinary item: it was found through her egg, it applies
+  // to every item in the game, and nothing else in bench/ covers it.
+  const bar = await page.evaluate(`(()=>{ __hc.cmdRun('/give torch 1'); return __hc.bar(); })()`);
+  check('a given item lands in the hotbar, not the bag', !!(bar.slots || []).find(s => s && s.id === 'torch'), JSON.stringify(bar.slots));
 
   // ---- 7. SHE CAN BE KILLED (Ben 08-11) ------------------------------------------------------------
   // Through the real bullet door (girlRayHit), aimed at bone world positions, so this exercises the cylinder
