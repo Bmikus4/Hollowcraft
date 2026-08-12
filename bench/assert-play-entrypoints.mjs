@@ -41,6 +41,7 @@ const ENTRIES = arg('entries', 'mb-solo,mb-continue,mb-creative-btn,mb-host').sp
 // 12 (625 chunks), and the loading gate has to mesh into whatever it finds.
 const RD = arg('rd', '');
 const QUALITY = arg('quality', '');
+const QS = arg('qs', '');   // extra query string appended to the URL, e.g. --qs=drawload=1 for the A-side of the draw A/B
 const NEEDS_SAVE = new Set(['mb-continue', 'mb-host']);   // the two that call readSave()
 
 function findBrowser() {
@@ -64,7 +65,7 @@ const PROBE = `(()=>{ try{
            watchdog: !!ls.watchdog, started: !!ls.started, initialReady: !!ls.initialReady,
            faded: !!(bk && bk.className||'').includes('go'),
            blackOp: b ? +(+b.opacity).toFixed(2) : null,
-           loadDisp: l ? l.display : 'MISSING',
+           loadDisp: l ? l.display : 'MISSING', loadOp: l ? +(+l.opacity).toFixed(2) : null, mesh9: ls.mesh9 || '?', miss: ls.miss||'', worldMeshed: ls.worldMeshed, remesh: ls.remesh,
            err: (document.getElementById('err')||{}).textContent || '' };
 }catch(e){ return { probeErr: String(e.message||e) }; } })()`;
 
@@ -86,7 +87,7 @@ async function run(entry, saveJson) {
   // what a slow machine actually experiences, and ee268ba was found this way.
   if (CPU > 1) { const cdp = await ctx.newCDPSession(page); await cdp.send('Emulation.setCPUThrottlingRate', { rate: CPU }); }
 
-  await page.goto(BASE + '/index.html', { waitUntil: 'load', timeout: 180000 });
+  await page.goto(BASE + '/index.html' + (QS ? '?' + QS : ''), { waitUntil: 'load', timeout: 180000 });
   await sleep(CPU > 1 ? 9000 : 4000);   // let the menu build
 
   const present = await page.evaluate(`(()=>{ const e=document.getElementById(${JSON.stringify(entry)});
@@ -102,14 +103,14 @@ async function run(entry, saveJson) {
     s = await page.evaluate(PROBE);
     if (s.armed && armedAt === null) armedAt = Date.now() - t0;
     if (s.faded && fadedAt === null) fadedAt = Date.now() - t0;
-    const line = `armed=${s.armed} faded=${s.faded} blackOp=${s.blackOp} circleDone=${s.circleDone} load=${s.loadDisp}`;
+    const line = `mesh9=${s.mesh9} world=${s.worldMeshed} circleDone=${s.circleDone} load=${s.loadDisp}/op${s.loadOp} miss[${s.miss}]`;
     if (line !== last) { console.log(`    +${((Date.now() - t0) / 1000).toFixed(0)}s  ${line}`); last = line; }
-    if (s.circleDone && s.loadDisp === 'none') break;
+    if (s.circleDone && (s.loadOp === 0 || s.loadDisp === 'none')) break;
   }
   const ms = Date.now() - t0;
   await page.screenshot({ path: path.join(ROOT, `bench/results/entry-${entry}-cpu${CPU}-rd${RD || 'def'}.png`) });
   await browser.close();
-  return { entry, armedAt, fadedAt, loaded: !!(s.circleDone && s.loadDisp === 'none'), ms,
+  return { entry, armedAt, fadedAt, loaded: !!(s.circleDone && (s.loadOp === 0 || s.loadDisp === 'none')), ms,
            watchdog: s.watchdog, err: s.err, errs: [...new Set(errs)].slice(0, 6) };
 }
 
@@ -130,7 +131,7 @@ async function run(entry, saveJson) {
       await page.goto(BASE + '/index.html', { waitUntil: 'load', timeout: 180000 });
       await sleep(4000);
       await page.evaluate(`document.getElementById('mb-solo').click()`);
-      for (let i = 0; i < 60; i++) { await sleep(1000); const s = await page.evaluate(PROBE); if (s.circleDone && s.loadDisp === 'none') break; }
+      for (let i = 0; i < 60; i++) { await sleep(1000); const s = await page.evaluate(PROBE); if (s.circleDone && (s.loadOp === 0 || s.loadDisp === 'none')) break; }
       saveJson = await page.evaluate(`(()=>{ try{ if(typeof __hc!=='undefined' && __hc.save) __hc.save(); }catch(e){}
         try{ return localStorage.getItem('hollowcraft_save'); }catch(e){ return null; } })()`);
       await browser.close();
