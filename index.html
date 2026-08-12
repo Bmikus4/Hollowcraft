@@ -21952,7 +21952,10 @@ const OFFHAND_SWAY=1.20;   // gun sway multiplier while the offhand slot holds a
 // The breath underneath is always on, at a fixed small amplitude, so standing still never freezes the hands solid —
 // and it is where E11's breath and low-health tremor go, since they are the same term with a different gain.
 const HAND_ADS_KEEP=0.18;                          // Q2: an aimed weapon keeps 15-20% of hip amplitude
-const HAND_KICK=0.30, HAND_K=140, HAND_D=13;       // footfall impulse, then omega 11.8 rad/s at damping 0.55 — rings down over about half a second, so a sprint stride never fully settles and a walk almost does
+// MORE OF IT (Ben 2026-08-12: "guns need to sway more when running strafing jumping"). The spring's shape is untouched —
+// omega and damping still ring down over about half a second, which is what makes a sprint stride never quite settle —
+// only the impulses that feed it are bigger: the footfall by a quarter, and the inertia gains below by a third.
+const HAND_KICK=0.38, HAND_K=140, HAND_D=13;       // footfall impulse, then omega 11.8 rad/s at damping 0.55 — rings down over about half a second, so a sprint stride never fully settles and a walk almost does
 const HAND_IDLE_Y=0.0045, HAND_IDLE_X=0.0035;      // breathing, deliberately subtle: about a fifth of a footfall
 // ---- THE HANDS LAG THE BODY (Ben 08-11: "when jumping around hands and items have no physics, jumping should bounce
 //      the hand, strafing should do the same") ----
@@ -21968,7 +21971,7 @@ const HAND_IDLE_Y=0.0045, HAND_IDLE_X=0.0035;      // breathing, deliberately su
 // GAINS ARE SET AGAINST HAND_KICK, which is the walk everyone has already signed off: a jump (Δv≈8) lands ~0.44, half
 // again a footfall's 0.30, and a strafe up to speed (Δv≈4.6) sums ~0.25, just under one. The clamp is for teleports and
 // respawns, which zero the velocity in one frame — a 16 m/s fall arrested by a respawn is not a wrist flick.
-const HAND_LAG_Y=0.070, HAND_LAG_X=0.090, HAND_LAG_MAX=0.9;
+const HAND_LAG_Y=0.095, HAND_LAG_X=0.125, HAND_LAG_MAX=0.9;   // +35%: the jump, the landing and the strafe all read harder
 const _hand={ y:0, vy:0, x:0, vx:0, t:0, left:false, sx:0, svx:0, pvy:0, plat:0 };
 // Called FROM the footstep, never on a timer of its own. power carries the weight of the step (a sprint lands harder).
 function handFootfall(power){ power=power||1;
@@ -22158,9 +22161,15 @@ function updateCrosshair(dt, isGun){
   // MORE VOLATILE (Ben 08-05: "ALL iterations also need some more circle volatility"). Every term that opens the ring is bigger,
   // and it opens quicker: 0.14 s out against the same 0.5 s back, so the asymmetry that makes movement legible is sharper too.
   // These numbers are the shot cone as well as the drawing (see _xhSpread), so this costs accuracy in exactly the measure it shows.
+  // A STRAFE IS ITS OWN TERM (Ben 2026-08-12: "same goes for all of the aim circles" — the list being running, strafing
+  // and jumping). Speed alone could not see it: crabbing sideways at full tilt and running straight at full tilt are the
+  // same |v|, and one of them is a shooter fighting his own feet. Measured along the body's right vector, so it is a
+  // strafe whichever way you face, and turning on the spot cannot fake one.
+  const _rx=Math.cos(p.yaw), _rz=-Math.sin(p.yaw), lat=Math.abs(p.vel.x*_rx+p.vel.z*_rz);
   const move = XH_REST
-        + Math.min(1, spd/7.2)*14                    // walking opens it, sprinting opens it fully
-        + (p.onGround?0:12)                          // airborne: you have no business being accurate
+        + Math.min(1, spd/7.2)*18                    // walking opens it, sprinting opens it fully
+        + Math.min(1, lat/4.6)*7                     // and sideways costs more than the same speed forwards
+        + (p.onGround?0:16)                          // airborne: you have no business being accurate
         + (p.sneak?-5:0)                             // crouched and steady
         + kick*13;                                   // a swing throws it wide, then it recovers
   const rate = move>_xhCur ? 0.14 : 0.5;             // out fast, back slow — only the MOVEMENT ring is eased
@@ -22472,6 +22481,23 @@ function updateView(dt){ updateRecoil(dt);                                      
       aPx=swx*SWAY_POS; aPy=-dy + swy*SWAY_POS + b*0.12; aPz=(UD.adsZ!=null?UD.adsZ:optic.z); aRx=swy*SWAY_ROT; aRy=swx*SWAY_ROT; aRz=0; }   // adsZ: a per-model length of pull, so a long stock is not driven through the near plane
     view.group.position.set(hPx+(aPx-hPx)*e, hPy+(aPy-hPy)*e, hPz+(aPz-hPz)*e);
     view.group.rotation.set(hRx+(aRx-hRx)*e, hRy+(aRy-hRy)*e, hRz+(aRz-hRz)*e);
+    // SPRINTING CARRIES IT ACROSS THE CHEST (Ben 2026-08-12: "guns should cross the chest to the left when sprinting").
+    // A post-pass on the finished pose, not a fourth pose in the blend: it has to vanish the moment the gun comes up, so
+    // it is scaled by (1-e) as well as by its own latch — raising a sight while sprinting is aiming, and an aim that
+    // still carries a sprint cant is an aim that does not point where the sight says.
+    // Latched and eased at 6/s (~0.17s) rather than switched: the trigger is a boolean and the pose is not.
+    // ON THE GROUND ONLY, and above a real speed: holding shift against a wall is not a sprint, and the pose flicking on
+    // at the top of every jump is the thing that would make it read as a bug.
+    const wantSprint=(player.sprint && player.onGround && sp>3.0 && e<0.6) ? 1 : 0;
+    view.sprintT=(view.sprintT||0)+(wantSprint-(view.sprintT||0))*Math.min(1,dt*6);
+    const st=view.sprintT*(1-e);
+    if(st>0.001){
+      view.group.position.x += -0.20*st;    // to the left, across the body
+      view.group.position.y += -0.05*st;
+      view.group.position.z +=  0.06*st;    // and in toward the chest
+      view.group.rotation.y +=  0.60*st;    // +y swings a -z muzzle to the LEFT
+      view.group.rotation.z += -0.40*st;    // canted over the forearm
+      view.group.rotation.x += -0.16*st; }  // muzzle down, the way a gun is carried at a run
     // ===== HANDGUNS ARE HELD, NOT SHOULDERED (Ben 08-05) =====
     // "add a class of firearms called handguns, and put the python in it, handguns get held differently in the hands, mainly they
     // are held out from the handle, with no shouldering, and held from where the fist of a players hand would be."
@@ -23164,7 +23190,7 @@ function _traceBullet(o,d,bolt,rev,sup,sg,vo){
       if(!_pp || _pp.dead || _pp.tied) continue;
       if(Math.abs(px-_pp.x)<HW+0.2 && Math.abs(pz-_pp.z)<HW+0.2 && py>_pp.y-0.1 && py<_pp.y+PH+0.1){
         const _pkt={t:'dmg',to:+_pid,v:animDmg,c:(playerName||'another player')+' shot you',k:'bullet'};
-        bloodImpact(px,py,pz,d,(NET.avatars&&NET.avatars[_pid])||null);   // a peer bleeds like anything else — the wound hangs on their avatar, so it rides their walk (Ben 08-12: "players, animals, and creatures")
+        bloodImpact(px,py,pz,d,(NET.avatars&&NET.avatars[_pid])||null,PH);   // a peer bleeds like anything else — the wound hangs on their avatar, so it rides their walk (Ben 08-12: "players, animals, and creatures")
         _pvpLog++; _pvpLast=_pkt;                                                        // QA only (see __hc.pvpTest): the packet, not a flag
         netSend(_pkt);
         spawnParticles(px,py,pz,0xcc2018,10,1.8,0.5); hitMarker();
@@ -23208,12 +23234,12 @@ function _traceBullet(o,d,bolt,rev,sup,sg,vo){
       spawnParticles(px,py,pz,blockColor(b),9,1.7,0.5); addBulletHole(fx,fy,fz,nx,ny,nz);
       shotFixture(qx,qy,qz,b,d);   // a lantern goes out, a hanging lamp or a chime is knocked swinging (see below)
       return true; }
-    if(_wretchRayHit(px,py,pz,d,bolt,rev,sup,sg)){ bloodImpact(px,py,pz,d,wretch.group||null); hitMarker(); return true; }   // eyes, wings, then body — resolved against whichever LIVE creature this point is inside, primary or Horrific (see _wretchRayHit)
+    if(_wretchRayHit(px,py,pz,d,bolt,rev,sup,sg)){ bloodImpact(px,py,pz,d,wretch.group||null,2.4*((wretch.group&&wretch.group.scale.y)||1)); hitMarker(); return true; }   // eyes, wings, then body — resolved against whichever LIVE creature this point is inside, primary or Horrific (see _wretchRayHit)
     for(let bi=0;bi<skyBirds.length;bi++){ const b=skyBirds[bi]; if(b.dead)continue; const bp=b.m.position, br=0.9*b.m.scale.x;   // SKY BIRDS die to gunfire (Ben 07-20) — generous sphere, they're small and far
       const dxb=px-bp.x, dyb=py-bp.y, dzb=pz-bp.z; if(dxb*dxb+dyb*dyb+dzb*dzb < br*br){ b.dead=true; b.vy=1.5; b.spin=(Math.random()-0.5)*7; hitMarker();
         spawnParticles(bp.x,bp.y,bp.z,0x191920,14,2.2,0.9); flashName('bird down'); return true; } }
     let an=null; for(const a of animals){ if(a.dead)continue; const hh=(ANIMALS[a.type]?ANIMALS[a.type].h:1)*1.15, dxa=px-a.x, dza=pz-a.z, dya=py-a.y; const rr=hh>1.3?0.9:0.5; if(dxa*dxa+dza*dza < rr && dya>-0.25 && dya<hh+0.4){ an=a; break; } }   // vertical CAPSULE, radius scaled up for big-bodied animals (deer/sheep bodies reached well past the old 0.65 cylinder — center-mass shots whiffed)
-    if(an){ hurtAnimal(an,animDmg); spawnParticles(px,py,pz,0xcc2018,8,1.6,0.5); bloodImpact(px,py,pz,d,an.mesh); hitMarker(); return true; }   // the wound rides an.mesh for three minutes and throws spatter at the blocks behind it (Ben 08-12, reversing the 07-21 removal)
+    if(an){ hurtAnimal(an,animDmg); spawnParticles(px,py,pz,0xcc2018,8,1.6,0.5); bloodImpact(px,py,pz,d,an.mesh,(ANIMALS[an.type]&&ANIMALS[an.type].h)||1); hitMarker(); return true; }   // the wound rides an.mesh for three minutes and throws spatter at the blocks behind it (Ben 08-12, reversing the 07-21 removal)
     if(NET.on && !NET.host){ for(const _k in _netAnimals){ const _e=_netAnimals[_k]; const _dx=px-_e.x,_dz=pz-_e.z,_dy=py-_e.y;   // GUEST: the real animals[] is empty here → hit the host's mirrored animals and request the damage
       if(_dx*_dx+_dz*_dz<0.9 && _dy>-0.25 && _dy<2.2){ const _n=+String(_k).replace(/^n/,''); if(_n===_n)netSend({t:'han',n:_n,v:animDmg}); spawnParticles(px,py,pz,0xcc2018,8,1.6,0.5); hitMarker(); return true; } } } }
   // Out of range, or a clean miss, or the ray left the world: either way this bullet is finished.
@@ -29246,7 +29272,11 @@ function _bloodNearFace(x,y,z,dx,dy,dz,maxD){
 }
 // THE ONE ENTRY POINT. host = the Object3D to hang the wound on (a creature's mesh), or null for a hit that only
 // throws spatter. dir = the round's flight, so the wound faces back down it and the spatter carries on along it.
-function bloodImpact(x,y,z,dir,host){
+// size = the creature's height in blocks, and it is REQUIRED for a wound. A fixed 0.30 mark with a 0.7 drip is bigger
+// than a fox and a pinprick on a thirteen-block giantess, so on the small bodies the quad hung out past the silhouette
+// into open air — Ben 08-12: "blood can not appear off of a creatures model". Everything the wound measures is a
+// fraction of the body it is on, and the drip is additionally clamped so it cannot hang below the feet.
+function bloodImpact(x,y,z,dir,host,size){
   if(!bloodFxInit()||_bloodFX.dead) return;
   try{
     if(host){
@@ -29264,11 +29294,16 @@ function bloodImpact(x,y,z,dir,host){
       g.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right,up,ln));
       g.position.copy(host.worldToLocal(new THREE.Vector3(x,y,z))).add(ln.clone().multiplyScalar(0.02));
       host.add(g);
-      const mk=_bloodQuad('impact',0.30,0.30,false);                        // one still, so no animation
+      // 0.16 of the body's height: a 29 cm wound on a man, 11 cm on a fox, two blocks on the giantess. Floored so a
+      // snail's wound is still visible and capped so a boss does not wear a billboard.
+      const H=Math.max(0.2,size||1.8), mw=Math.min(1.6,Math.max(0.06,H*0.16));
+      const mk=_bloodQuad('impact',mw,mw,false);                            // one still, so no animation
       g.add(mk); _bloodTrack(mk,0);
-      // The drip hangs BELOW the mark on the same plane and grows downward over four seconds. Its sheet cell is 1:4
-      // (the clip is a vertical streak), so the quad takes that aspect and its top edge sits at the wound.
-      const dm=_bloodFX.meta.drip||{cell:[46,192]}, dw=0.17, dh=dw*(dm.cell[1]/dm.cell[0]);
+      // The drip hangs BELOW the mark on the same plane and grows downward over four seconds. Its sheet cell is a
+      // vertical streak, so the quad takes that aspect — but the LENGTH is capped at a third of the body, because a
+      // drip that runs past the feet is blood hanging in the air under an animal.
+      const dm=_bloodFX.meta.drip||{cell:[46,192]}, dw=mw*0.6;
+      const dh=Math.min(dw*(dm.cell[1]/dm.cell[0]), H*0.34);
       const dr=_bloodQuad('drip',dw,dh);
       dr.position.set(0,-dh/2,0.002); g.add(dr); _bloodTrack(dr,4.0);
     }
@@ -29283,7 +29318,7 @@ function bloodImpact(x,y,z,dir,host){
       const d=DIRS[i]; if(!d[0]&&!d[1]&&!d[2]) continue;
       const f=_bloodNearFace(x,y,z,d[0],d[1],d[2],2.6);
       if(!f) continue;
-      const w=0.85+Math.random()*0.5, q=_bloodQuad('splatter',w,w/sar);
+      const w=(0.85+Math.random()*0.5)*Math.min(2.2,Math.max(0.55,(size||1.8)/1.8)), q=_bloodQuad('splatter',w,w/sar);
       q.position.set(f.x+f.n[0]*0.03, f.y+f.n[1]*0.03, f.z+f.n[2]*0.03);
       q.lookAt(q.position.x+f.n[0], q.position.y+f.n[1], q.position.z+f.n[2]);
       // A spatter on a FLOOR has no up, so it is spun - two hits on one floor are not the same picture twice. A WALL
@@ -30555,7 +30590,13 @@ let _girlGroup=null;
 // one cycle and reading how far the sole actually travels (giantessStep), because that is the only number
 // that makes the phase rate match the ground speed — and a foot that slides is the single most obvious tell
 // of a fake giant. The hand-set 5.0 that used to live here was 30% wrong and every step scraped.
+const _GIRL_ON = Q.get('girl')==='1';
+let _girlForce=false;
 function girlSpawn(x,z){
+  // OFF, 2026-08-12, Ben's instruction while the sky fault is being chased: she spawns on her own at load and the sky
+  // goes with her, so she is the variable to remove. "?girl=1" spawns her again, and __hc.girl(x,z) is unaffected —
+  // this gates the ambient spawn, not the hook a harness or the console uses.
+  if(!_GIRL_ON && !_girlForce){ return false; }
   if(!giantessLoaded()){ flashName('she is not here yet'); return false; }
   if(!GIRL.rig){ GIRL.rig=giantessBuild(GIRL_SCALE); if(!GIRL.rig){ flashName('she did not come together'); return false; }
     _girlGroup=GIRL.rig.group; _girlGroup.rotation.order='YXZ'; scene.add(_girlGroup); }   // YXZ: yaw first, so the death pitch tips her forward whichever way she is facing (XYZ would tip her sideways)
@@ -30622,6 +30663,21 @@ function girlHurt(dmg,px,py,pz,part){
   GIRL.hp-=dmg; GIRL.hurtN++;
   GIRL.flinch=Math.min(1,(GIRL.flinch||0)+ (part==='Head'?0.9:0.5));
   GIRL.flinchSide=(px-GIRL.x)*Math.cos(GIRL.yaw)-(pz-GIRL.z)*Math.sin(GIRL.yaw)>0?1:-1;
+  // BLOOD ON HER, AND ON THE BONE RATHER THAN THE MESH (Ben 08-12: "blood isnt appearing on the giantesses cloth
+  // meshs or body"). Every route that damages her comes through here — rifle, melee — so this is the only place it
+  // needs to be, and girlHurt already carries the part name giantessHit resolved.
+  //
+  // SHE IS SKINNED, WHICH IS WHY THE HOST IS rig.bone[part]. Parenting to one of her meshes would follow that mesh's
+  // object transform, and a skinned mesh's transform does not move when the skeleton does — the wound would hang in
+  // the air where she was standing. A bone moves, so a decal on the bone moves with the limb. It does not follow the
+  // soft deformation of the skin, which for a bullet hole on a thigh is not a difference anyone can see.
+  //
+  // Reading GIRL.rig.bone is deliberate: her module is another session's, and hooking here needs nothing added to it.
+  try{ const _b=(GIRL.rig&&GIRL.rig.bone&&part)?GIRL.rig.bone[part]:null;
+    if(_b){ const _c=new THREE.Vector3(); _b.getWorldPosition(_c);
+      // No bullet direction reaches this far, and on a body this size the outward normal is better anyway: the wound
+      // faces away from the limb's axis, so it lies on her rather than at an angle through her.
+      bloodImpact(px,py,pz,{x:_c.x-px,y:_c.y-py,z:_c.z-pz},_b,GIRL.rig.height||13.5); } }catch(e){}
   spawnParticles(px,py,pz,part==='Head'?0xff3020:0x8a1010,part==='Head'?16:10,2,0.6);
   if(part==='Head') flashName('headshot');
   // She is told in thirds rather than with a health bar: a bar over a creature this size is either tiny at
@@ -32555,7 +32611,7 @@ _audioFrame=(dt)=>{ if(!AC)return;
   else if(player.onGround && sp>0.6 && locked){ stepAcc+=sp*dt; const gap=player.sprint?1.5:2.1; if(stepAcc>gap){ stepAcc=0; sfxStep(); emitNoise(player.pos.x,player.pos.y,player.pos.z, (player.sprint?1.0:player.sneak?0.18:0.55)*(player.hunger<7?1.4:1));
     // THE HANDS ARE KICKED BY THE SAME EVENT AS THE SOUND (#66a). Not a parallel bob on its own clock — this line IS
     // the sync, and a sneak lands softer because the step is softer, without a second rule saying so.
-    if(typeof handFootfall==='function') handFootfall(player.sprint?1.25:player.sneak?0.45:1);
+    if(typeof handFootfall==='function') handFootfall(player.sprint?1.55:player.sneak?0.45:1);   // a sprint lands harder still (Ben 08-12)
     // A PRINT ON THE SAME STRIDE AS THE SOUND. Riding the audio's accumulator rather than a second clock is what keeps the mark
     // under the foot that made it: one cadence, so a sprint prints as often as it is heard, and the left/right offset alternates.
     if(typeof footMark==='function'){ const rx=Math.cos(player.yaw)*(player._footL?0.16:-0.16), rz=-Math.sin(player.yaw)*(player._footL?0.16:-0.16);
@@ -33566,7 +33622,7 @@ window.__hc={
   // her height, her bones, whether the three PNG maps actually bound, and where each foot is in the world.
   // A 13-block model is exactly the case a screenshot cannot answer: the frame is full of thigh.
   girl(d){ try{ const dir=lookDir(), dd=d==null?12:d, x=player.pos.x+dir.x*dd, z=player.pos.z+dir.z*dd;
-      const ok=girlSpawn(x,z); return { ok, loaded:giantessLoaded(), state:GIRL.state, probe:ok?giantessProbe(GIRL.rig):null }; }catch(e){ return {err:String(e.message||e)}; } },
+      _girlForce=true; const ok=girlSpawn(x,z); _girlForce=false; return { ok, loaded:giantessLoaded(), state:GIRL.state, probe:ok?giantessProbe(GIRL.rig):null }; }catch(e){ return {err:String(e.message||e)}; } },
   girlState(){ try{ if(!GIRL.rig) return { active:false, loaded:giantessLoaded() };
       // `loaded` is reported in BOTH branches now: the shader warm builds her rig on the loading screen, so
       // "has the GLB arrived" can no longer be inferred from the absence of a rig — anything asking that
@@ -37741,6 +37797,19 @@ window.__hc={
     catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: THE test for "it does not move from them". Move the creature and report how far each decal travelled.
   // A decal merely placed in the world stays put; one parented to the mesh travels exactly as far as the mesh did.
+  // QA/bench: the giantess version of bloodRide. Her wound hangs on a bone, so the test is whether ROTATING that bone
+  // carries it — a decal on one of her meshes would not move, because a skinned mesh's own transform never does.
+  bloodBoneRide(){ try{ if(!GIRL.rig||!GIRL.rig.bone) return {err:'no rig'};
+      const pos=()=>_bloodFX.live.filter(d=>{ let o=d.m; while(o.parent&&o.parent!==scene)o=o.parent; return o!==d.m; })
+        .map(d=>{ const w=new THREE.Vector3(); d.m.getWorldPosition(w); return w; });
+      const b4=pos(); if(!b4.length) return {err:'no wound is parented to anything'};
+      let moved=0;
+      for(const n in GIRL.rig.bone){ const b=GIRL.rig.bone[n]; if(!b) continue; b.rotation.z+=0.35; moved++; }
+      GIRL.rig.group.updateMatrixWorld(true);
+      const af=pos();
+      return { bonesTurned:moved, wounds:b4.length,
+        travelled:b4.map((v,i)=>af[i]?+v.distanceTo(af[i]).toFixed(2):null) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   bloodRide(dx,dz){ try{
       // THE HOST IS DERIVED FROM THE DECALS, not remembered from the last call. Remembering it made this test lie:
       // two probes each set it, so the second one moved an animal that had nothing attached, every decal reported
@@ -38105,7 +38174,13 @@ window.__hc={
   // recomputing it, so what is measured is the drift the player sees. adsT must be driven first or every source is zero.
   swayMag(){ try{ return { offhand:armor[EQ_OFF]?armor[EQ_OFF].id:null, mult:OFFHAND_SWAY,
       x:+(view.swayX||0).toFixed(6), y:+(view.swayY||0).toFixed(6),
-      mag:+Math.hypot(view.swayX||0,view.swayY||0).toFixed(6) }; }catch(e){ return {err:String(e.message||e)}; } },
+      mag:+Math.hypot(view.swayX||0,view.swayY||0).toFixed(6),
+      // The sprint carry, and the pose it produced: latch, then where the gun actually ended up. A boolean says the
+      // trigger fired; only the transform says the gun crossed the chest.
+      sprintT:+(view.sprintT||0).toFixed(3), sprint:!!player.sprint, onGround:!!player.onGround,
+      pose:{ x:+view.group.position.x.toFixed(3), y:+view.group.position.y.toFixed(3), z:+view.group.position.z.toFixed(3),
+             ry:+view.group.rotation.y.toFixed(3), rz:+view.group.rotation.z.toFixed(3) },
+      hands:{ kick:HAND_KICK, lagY:HAND_LAG_Y, lagX:HAND_LAG_X } }; }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: pin the sway to a fixed value (null clears). Pass two numbers to hold the drift still while the pose is read.
   swayPin(x,y){ try{ _swayPin=(x==null)?null:{x:+x||0,y:+y||0}; return _swayPin; }catch(e){ return {err:String(e.message||e)}; } },
   // THE HAND SPRING'S OWN STATE, so "jumping bounces the hand" is a number and not a feeling. y/x are the walk spring
