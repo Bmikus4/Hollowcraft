@@ -99,20 +99,30 @@ function metrics(png, box){
   };
 
   // Interleaved off/on/off at two clocks and two bearings — never blocked (the cooling fan).
-  for(const [tname,t] of [['dusk',0.46],['noon',0.25]]){
+  // HC_CLOCKS overrides them.
+  // DO NOT RUN THIS AT MIDNIGHT AND BELIEVE THE ANSWER. It was tried (HC_CLOCKS=night:0.75) to settle the 0.889% ->
+  // 3.145% night-canopy reading that got per-corner sky turned off, and the frame came back 94% near-black: a wood at
+  // midnight with no lamp in shot is legitimately dark, so pureBlack 6.514 -> 5.825 is measuring how much of an unlit
+  // frame is exactly zero rather than nearly zero. It is not the speckle, which by definition sits on a LIT surface.
+  // The night vantage that does contain the fault is bench/tmp-lightpool-speckle.mjs - a lantern in a night wood.
+  const CLOCKS=(process.env.HC_CLOCKS||'dusk:0.46,noon:0.25').split(',').map(s=>{ const p=s.split(':'); return [p[0], Number(p[1])]; });
+  for(const [tname,t] of CLOCKS){
     for(const [bname,b] of [['b0',0],['b2',2.1]]){
       await run(0, t, b, `${tname}-${bname}-off`);
       await run(1, t, b, `${tname}-${bname}-on`);
     }
   }
-  await run(0, 0.46, 0, 'dusk-b0-off-again');
+  // The baseline row REPEATED LAST, at whatever the first clock was, so thermal drift over the table is visible
+  // rather than folded into the last configuration that happened to run.
+  await run(0, CLOCKS[0][1], 0, `${CLOCKS[0][0]}-b0-off-again`);
 
   console.log('');
   const g=t=>rows.find(r=>r.tag===t);
-  const nf=Math.abs(g('dusk-b0-off').m.isoBlack - g('dusk-b0-off-again').m.isoBlack);
-  console.log(`  NOISE FLOOR (off vs off again): isoBlack ${nf.toFixed(3)}  pureBlack ${Math.abs(g('dusk-b0-off').m.pureBlack-g('dusk-b0-off-again').m.pureBlack).toFixed(3)}`);
+  const B0=`${CLOCKS[0][0]}-b0-off`, BA=`${CLOCKS[0][0]}-b0-off-again`;   // the repeated row, whatever clock ran first
+  const nf=Math.abs(g(B0).m.isoBlack - g(BA).m.isoBlack);
+  console.log(`  NOISE FLOOR (off vs off again): isoBlack ${nf.toFixed(3)}  pureBlack ${Math.abs(g(B0).m.pureBlack-g(BA).m.pureBlack).toFixed(3)}`);
   console.log('  per-corner sky OFF -> ON, in a wood:');
-  for(const [tname] of [['dusk'],['noon']]) for(const bname of ['b0','b2']){
+  for(const [tname] of CLOCKS.map(c=>[c[0]])) for(const bname of ['b0','b2']){
     const o=g(`${tname}-${bname}-off`), n=g(`${tname}-${bname}-on`); if(!o||!n) continue;
     console.log(`    ${tname}/${bname}  pureBlack ${o.m.pureBlack} -> ${n.m.pureBlack}   isoBlack ${o.m.isoBlack} -> ${n.m.isoBlack}   texSD ${o.m.texSD} -> ${n.m.texSD}   med ${o.m.med} -> ${n.m.med}`);
   }
