@@ -44,7 +44,13 @@ function ok(l,c,g){ checks++; if(!c)fails++; console.log('  '+(c?'ok  ':'FAIL')+
 
     console.log('\n[the bar is five and the bag is the rest]');
     const shape=await page.evaluate(()=>window.__hc.gridState());
-    ok('hotbar is five slots',   shape.hotN===5, shape.hotN);
+    ok('the bar is seven slots', shape.hotN===7, shape.hotN);
+    // TWO PRIMARIES, FIVE THAT REFUSE A FIREARM. The cap of two readily-equipped guns is not a counter anywhere;
+    // it is the shape of the slots, so the only way to check it is to ask the slots.
+    const hot=await page.evaluate(()=>window.__hc.hotRule());
+    ok('two slots take a firearm', JSON.stringify(hot.accepts)===JSON.stringify([true,true,false,false,false,false,false]), hot.accepts);
+    ok('a third gun stays off the bar', hot.gunsOnBar===2, hot);
+    ok('and goes in the bag instead',   hot.thirdGunInBag===1 && hot.thirdGunLeft===0, hot);
     ok('grid is 8 wide',         shape.w===8, shape.w);
     ok('six pockets to start',   shape.cap===6, {cap:shape.cap, rows:shape.h});
     ok('sizes come off the table', JSON.stringify(shape.sizes)===JSON.stringify({ar15:[2,4],stim_syringe:[1,2],rifle_ammo:[1,1],cobble:[1,1]}), shape.sizes);
