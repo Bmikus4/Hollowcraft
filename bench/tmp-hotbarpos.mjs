@@ -47,11 +47,29 @@ const open = await page.evaluate(async () => {
 });
 
 const fade = await page.evaluate(async () => {
-  const hb = document.getElementById('hotbar'); const op = () => +getComputedStyle(hb).opacity;
-  __hc.giveItem('stick', 1); await new Promise(r => setTimeout(r, 700)); const awake = op();
-  await new Promise(r => setTimeout(r, 5000)); const idle = op();
-  __hc.giveItem('stick', 1); await new Promise(r => setTimeout(r, 700));
-  return { awake, idle, woke: op() };
+  const R = el => { const b = el.getBoundingClientRect(); return { x: b.left, y: b.top, w: b.width, h: b.height, r: b.right, b: b.bottom }; };
+  const hb = document.getElementById('hotbar'), hl = document.getElementById('hotleft');
+  const op = e => +getComputedStyle(e).opacity, sleep = ms => new Promise(r => setTimeout(r, ms));
+  const out = { left: R(hl), bar: R(hb), leftCells: hl.querySelectorAll('.slot').length, barCells: hb.querySelectorAll('.slot').length };
+  __hc.giveItem('stick', 1); await sleep(700); out.awake = op(hb); out.awakeL = op(hl);
+  await sleep(5000); out.idle = op(hb); out.idleL = op(hl);
+  // An item change only wakes the group it LANDS in, and invAdd tops up an existing stack anywhere before it fills an
+  // empty cell — so this clears a bar slot AND gives an id the player is not already carrying.
+  // Write into one of the FIVE and let the next paint notice. giveItem cannot be aimed: invAdd fills the first empty
+  // slot from zero, and slots 0-1 are the primaries, so a plain give often lands in the other group entirely.
+  __hc.qSet('inv', 5, 'iron_ingot', 1); await sleep(150);
+  out.gave = JSON.stringify(__hc.giveItem('stick', 1)); await sleep(700);
+  out.woke = op(hb); out.wokeL = op(hl);
+  out.slot6 = JSON.stringify(__hc.qGet('inv', 5));
+  // Ben's case: both down, then swap primaries only. The five must stay down.
+  await sleep(5000);
+  out.bothDown = [op(hb), op(hl)];
+  __hc.sel(0); await sleep(300); __hc.sel(1); await sleep(600);
+  out.afterPrimSwap = { bar: op(hb), left: op(hl) };
+  await sleep(5000); __hc.sel(4); await sleep(600);
+  out.afterGeneralPick = { bar: op(hb), left: op(hl) };
+  out.barAfter = R(hb);
+  return out;
 });
 
 let pass = 0, fail = 0;
@@ -59,8 +77,14 @@ const t = (name, ok, got) => { (ok ? pass++ : fail++); console.log((ok ? 'PASS  
 const near = (a, c, tol = 2) => Math.abs(a - c) <= tol;
 // --- the bar, inventory shut
 t('bar sits in the top third', shut.hb.y < shut.vh / 3, 'top=' + shut.hb.y.toFixed(0));
-t('bar clears the compass ribbon', shut.cmp && shut.hb.y >= shut.cmp.b, 'hb=' + shut.hb.y.toFixed(0) + ' cmp.bottom=' + (shut.cmp ? shut.cmp.b.toFixed(0) : '-'));
-t('five cells, keyed 3-7', shut.n === 5 && shut.nums === '34567', 'n=' + shut.n + ' nums=' + shut.nums);
+t('the nav ribbon is at the bottom', shut.cmp && shut.cmp.y > shut.vh * 0.8, 'cmp.top=' + (shut.cmp ? shut.cmp.y.toFixed(0) : '-') + ' vh=' + shut.vh);
+t('nothing shares the bar row', shut.cmp && shut.cmp.y > shut.hb.b, 'hb.bottom=' + shut.hb.b.toFixed(0) + ' cmp.top=' + (shut.cmp ? shut.cmp.y.toFixed(0) : '-'));
+t('five cells in the bar, keyed 3-7', shut.n === 5 && shut.nums === '34567', 'n=' + shut.n + ' nums=' + shut.nums);
+t('two primaries left of the bar', fade.leftCells === 3 && fade.left.r <= fade.bar.x - 8,
+  'left cells(incl offhand)=' + fade.leftCells + ' left.right=' + fade.left.r.toFixed(0) + ' bar.left=' + fade.bar.x.toFixed(0));
+t('the primaries share the bar row', near(fade.left.y, fade.bar.y, 2), 'left.y=' + fade.left.y.toFixed(0) + ' bar.y=' + fade.bar.y.toFixed(0));
+t('the five never move', near(fade.barAfter.x, fade.bar.x, 1) && near(fade.barAfter.w, fade.bar.w, 1),
+  'before=' + fade.bar.x.toFixed(0) + '/' + fade.bar.w.toFixed(0) + ' after=' + fade.barAfter.x.toFixed(0) + '/' + fade.barAfter.w.toFixed(0));
 // --- the bar, inventory open: same pixels
 t('the open bar stands on the shut bar', near(open.ihot.y, shut.hb.y, 3) && near(open.ihot.x, shut.hb.x, 3) && near(open.ihot.w, shut.hb.w, 3),
   'open=' + [open.ihot.x, open.ihot.y, open.ihot.w].map(n => n.toFixed(0)) + ' shut=' + [shut.hb.x, shut.hb.y, shut.hb.w].map(n => n.toFixed(0)));
@@ -73,8 +97,8 @@ t('and back when it closes', open.hudBack !== 'none' && near(open.hbAfter.y, shu
 t('the line sits between the bar and the grid', open.rule.y >= open.ihot.b - 1 && open.rule.b <= open.grid.y + 1,
   'ihot.b=' + open.ihot.b.toFixed(0) + ' rule=' + open.rule.y.toFixed(0) + '-' + open.rule.b.toFixed(0) + ' grid=' + open.grid.y.toFixed(0));
 t('the line is thin', open.rule.h <= 10 && open.rule.h > 0, 'h=' + open.rule.h.toFixed(1));
-t('bar and grid read as one column', Math.abs((open.ihot.x + open.ihot.w / 2) - (open.grid.x + open.grid.w / 2)) < 4,
-  'bar mid=' + (open.ihot.x + open.ihot.w / 2).toFixed(0) + ' grid mid=' + (open.grid.x + open.grid.w / 2).toFixed(0));
+t('the grid is exactly under the bar', Math.abs((open.ihot.x + open.ihot.w / 2) - (open.grid.x + open.grid.w / 2)) <= 0.5,
+  'bar mid=' + (open.ihot.x + open.ihot.w / 2).toFixed(1) + ' grid mid=' + (open.grid.x + open.grid.w / 2).toFixed(1));
 // --- no clothing slots
 t('no clothing slots anywhere', open.armorCells === 2, 'armor cells=' + open.armorCells + ' idx=' + open.armorIdx);
 t('the two spec slots are the ones left', open.armorIdx === '4,5', 'idx=' + open.armorIdx);
@@ -96,7 +120,12 @@ t('the X closes it', open.popClosed === 'none', 'display=' + open.popClosed);
 // --- the idle fade
 t('bar is up when just used', fade.awake > 0.95, 'opacity=' + fade.awake);
 t('bar fades after a beat idle', fade.idle < 0.05, 'opacity=' + fade.idle);
-t('and comes back on an item change', fade.woke > 0.95, 'opacity=' + fade.woke);
+t('and comes back when an item lands in it', fade.woke > 0.95,
+  'opacity=' + fade.woke + ' slot6=' + fade.slot6);
+t('both groups go down on their own', fade.bothDown[0] < 0.05 && fade.bothDown[1] < 0.05, 'bar/left=' + fade.bothDown);
+t('swapping primaries does NOT raise the five', fade.afterPrimSwap.bar < 0.05 && fade.afterPrimSwap.left > 0.95,
+  'bar=' + fade.afterPrimSwap.bar + ' left=' + fade.afterPrimSwap.left);
+t('selecting a general slot raises the five', fade.afterGeneralPick.bar > 0.95, 'bar=' + fade.afterGeneralPick.bar);
 t('no page errors', errs.length === 0, errs.join(' | '));
 console.log(pass + '/' + (pass + fail));
 await b.close(); server.kill();

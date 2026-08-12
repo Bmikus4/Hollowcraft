@@ -20,7 +20,9 @@ try{
   await p.evaluate(()=>window.__hc.gridFillPacked(['ar15','stim_syringe','rifle_ammo','cobble','revolver','wooden_spear','iron_helmet']));
   await p.evaluate(()=>{ __hc.giveItem('revolver',1); __hc.giveItem('torch',6); __hc.equipHat&&__hc.equipHat('iron_helmet'); __hc.eqUI&&__hc.eqUI('close'); });
   await sleep(900);
-  await p.screenshot({path:path.join(OUT,'inv-hud.png'), clip:{x:400,y:0,width:480,height:180}});
+  await p.evaluate(()=>__hc.sel(4));   // wake the five as well: the two groups fade separately, so a plain shot catches one
+  await sleep(400);
+  await p.screenshot({path:path.join(OUT,'inv-hud.png'), clip:{x:330,y:20,width:520,height:120}});
   await p.evaluate(()=>window.__hc.openInv()); await sleep(1200);
   await p.screenshot({path:path.join(OUT,'inv-open.png')});
   await p.evaluate(()=>document.getElementById('craftbtn').click()); await sleep(500);

@@ -74,7 +74,8 @@ function ok(label, cond, got){ checks++; if(!cond)fails++; console.log('  '+(con
       ok('yaw '+String(yaw).padStart(4)+' reads '+want, c.nearest.lab===want && c.nearest.off<0.01, {bearing:c.bearing, lab:c.nearest.lab, off:c.nearest.off}); }
     const centred=await page.evaluate(()=>window.__hc.hudCompass(0));
     ok('ribbon is centred',     centred.centred===true, centred.box);
-    ok('ribbon is at the top',  centred.box.top<40, centred.box.top);
+    // BOTTOM, not top (Ben 2026-08-12: "move the nav bar to the bottom of the viewport") — the hotbar took the top.
+    ok('ribbon is at the bottom', centred.box.top > centred.box.vh - 60, {top:centred.box.top, vh:centred.box.vh});
     // TURNING RIGHT MOVES THE RIBBON LEFT. In this engine turning right lowers yaw (east is -90), so north's offset
     // from the index must go negative. A mirrored conversion passes every label check above and fails this one.
     const drift=await page.evaluate(()=>{ const a=window.__hc.hudCompass(0).bearing, b=window.__hc.hudCompass(-20).bearing; return {a,b}; });
