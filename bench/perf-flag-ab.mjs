@@ -92,6 +92,10 @@ const med = a => { const s=a.slice().sort((x,y)=>x-y); return s.length%2 ? s[(s.
                  portalMs:(p.ms&&p.ms.brPortal)||0, drawMs:(p.ms&&p.ms.draw)||0,
                  draws:i.calls, progs:i.progs, progsCompiled:p.progsCompiledInWindow, point:L.point,
                  gpuTotal:g.total, gpuPre:g.pre, gpuScene:g.scene, gpuComposer:g.composer, gpuOk:g.ok,
+                 // WAS THE THING BEING PRICED ACTUALLY RUNNING? volPass.enabled needs air AND a light that earns a
+                 // shaft, neither of which the --onjs string can promise: at a site with no qualifying light both
+                 // sides render the identical frame and the harness reports a confident zero for a pass it never ran.
+                 volOn:(()=>{ try{ const v=__hc.vol(); return (v&&typeof v==='object')?(v.on?v.lights:0):null; }catch(e){ return null; } })(),
                  flag:__hcPERF.flags()[${JSON.stringify(FLAG)}] }; })()`);
       if(site.move) await page.evaluate(`window.__census.stop()`);
       if(site.teardown) await run(site.teardown);
@@ -109,7 +113,7 @@ const med = a => { const s=a.slice().sort((x,y)=>x-y); return s.length%2 ? s[(s.
       else           { b = await one(ON);  a = await one(OFF); }
       if(p===0){ console.log(`warm-up pair discarded (A ${a.median} ms, B ${b.median} ms — first-encounter compiles land here)`); continue; }
       A.push(a); B.push(b);
-      console.log(`pair ${p}: A ${String(a.median).padStart(7)} ms (p99 ${String(a.p99).padStart(6)}, max ${String(a.max).padStart(8)}, >16.6 ${String(a.over16).padStart(3)})  ->  B ${String(b.median).padStart(7)} ms (p99 ${String(b.p99).padStart(6)}, max ${String(b.max).padStart(8)}, >16.6 ${String(b.over16).padStart(3)})   delta ${(b.median-a.median>=0?'+':'')}${(b.median-a.median).toFixed(3)}   gpu ${a.gpuTotal}->${b.gpuTotal}   portalMs ${a.portalMs}->${b.portalMs}   progs+ ${a.progsCompiled}->${b.progsCompiled}   lights ${a.point}->${b.point}`);
+      console.log(`pair ${p}: A ${String(a.median).padStart(7)} ms (p99 ${String(a.p99).padStart(6)}, max ${String(a.max).padStart(8)}, >16.6 ${String(a.over16).padStart(3)})  ->  B ${String(b.median).padStart(7)} ms (p99 ${String(b.p99).padStart(6)}, max ${String(b.max).padStart(8)}, >16.6 ${String(b.over16).padStart(3)})   delta ${(b.median-a.median>=0?'+':'')}${(b.median-a.median).toFixed(3)}   gpu ${a.gpuTotal}->${b.gpuTotal}   portalMs ${a.portalMs}->${b.portalMs}   progs+ ${a.progsCompiled}->${b.progsCompiled}   lights ${a.point}->${b.point}   volLights ${a.volOn}->${b.volOn}`);
     }
     const d = k => A.map((a,i)=>B[i][k]-a[k]);
     const dMed=d('median'), wins=dMed.filter(x=>x<0).length;
@@ -119,11 +123,19 @@ const med = a => { const s=a.slice().sort((x,y)=>x-y); return s.length%2 ? s[(s.
       pairedMaxDelta:+med(d('max')).toFixed(2), pairedOver16Delta:med(d('over16')),
       pairedPortalMsDelta:+med(d('portalMs')).toFixed(3), pairedCompileDelta:med(d('progsCompiled')),
       pairedGpuDelta:+med(d('gpuTotal')).toFixed(3), aGpu:med(A.map(r=>r.gpuTotal)), bGpu:med(B.map(r=>r.gpuTotal)),
+      // THE COMPOSER TIMER IS THE ONE THAT CAN SEE A FULLSCREEN PASS. gpuTotal carries the whole scene, whose own
+      // variance at a streaming site is several milliseconds - wider than any post pass costs - so pricing a post
+      // effect off the total is asking a question the instrument cannot answer. The stage timers were already being
+      // collected here and thrown away at the print.
+      pairedComposerDelta:+med(d('gpuComposer')).toFixed(3), aComposer:med(A.map(r=>r.gpuComposer)), bComposer:med(B.map(r=>r.gpuComposer)),
+      pairedSceneDelta:+med(d('gpuScene')).toFixed(3),
+      composerPerPair:d('gpuComposer').map(x=>+x.toFixed(3)),
       aDraws:med(A.map(r=>r.draws)), bDraws:med(B.map(r=>r.draws)), label:LABEL,
       perPair:dMed.map(x=>+x.toFixed(3)), signTest:`${wins}/${dMed.length} pairs faster with the flag ON` };
     fs.writeFileSync(path.join(OUT,`perf-flag-ab-${(arg('tag',FLAG)).replace(/[^\w.-]/g,'_')}-${SITE}.json`), JSON.stringify(out,null,2));
     console.log(`\n${FLAG} at ${SITE}:  ${out.aMedian} -> ${out.bMedian} ms   paired median ${out.pairedMedianDelta>0?'+':''}${out.pairedMedianDelta} ms, p99 ${out.pairedP99Delta>0?'+':''}${out.pairedP99Delta}, max ${out.pairedMaxDelta>0?'+':''}${out.pairedMaxDelta}, frames>16.6 ${out.pairedOver16Delta>0?'+':''}${out.pairedOver16Delta}`);
     console.log(`${out.signTest}   per-pair [${out.perPair.join(', ')}]   portal scope ${out.pairedPortalMsDelta} ms   extra compiles ${out.pairedCompileDelta}`);
     console.log(`gpu ${out.aGpu} -> ${out.bGpu} ms (paired ${out.pairedGpuDelta>0?'+':''}${out.pairedGpuDelta})   draws ${out.aDraws} -> ${out.bDraws}`);
+    console.log(`gpu composer ${out.aComposer} -> ${out.bComposer} ms (paired ${out.pairedComposerDelta>0?'+':''}${out.pairedComposerDelta}, scene ${out.pairedSceneDelta>0?'+':''}${out.pairedSceneDelta})   per-pair [${out.composerPerPair.join(', ')}]`);
   } finally { try{ if(browser) await browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }
 })().catch(e=>{ console.error(e); process.exit(1); });
