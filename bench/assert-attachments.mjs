@@ -59,6 +59,11 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
 
     const sup=await p.evaluate("__hc.attFit('muzzle','suppressor')"); await sleep(300);
     T('two slots are worn at once', sup.fitted.length===2, sup.fitted.map(f=>f.slot));
+    // TEXTURED, not flat paint (Ben: "attatchments textured and fitted per gun"). They go through _glbGunStyle, the
+    // same treatment the gun's own metal gets, so every mesh in a fitted piece must carry a map.
+    // Glass is the exception and it is deliberate: _glbGunStyle hands a lens a colour and a specular and no
+    // photograph, because a metal texture on a sight window is exactly what an optic must not have.
+    T('a fitted attachment is textured', sup.fitted.every(f=>f.meshes>0 && f.mapped>0 && f.mapped>=f.meshes-1), sup.fitted.map(f=>[f.id,f.mapped,f.meshes]));
     T('the can is out at the muzzle', sup.fitted.some(f=>f.slot==='muzzle' && f.pos[2] < -0.3), sup.fitted);
 
     // PER INSTANCE. The second rifle is a different stack of the same id: it must come up bare.
@@ -109,6 +114,22 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     // is the trap this pose is written around — so the bound is the guard's size, not zero.
     T('the pose does not reach into z itself', Math.abs(d(rest,held,'z'))<0.12, {dz:d(rest,held,'z')});
     T('it lets go when the screen closes', back.attT<0.1, {attT:back.attT});
+
+    // EVERY GUN, NOT JUST THE ONE WITH AN AUTHORED MOUNT. The rail plane is derived from each gun's own rear-sight
+    // root, so this is the check that the derivation holds across the rack: an optic that lands under the receiver
+    // line or a metre down the barrel is a mount that needs authoring, and this names which gun.
+    const guns=(await p.evaluate("__hc.attProbe()")).guns||[];
+    const bad=[];
+    for(const gid of guns){
+      const r=await p.evaluate(g=>{ __hc.hold(g); const a=__hc.attFit('optic','red_dot'); return JSON.parse(JSON.stringify({g, m:a.mount||null, f:a.fitted||[], len:a.len})); }, gid);
+      const opt=r.f.find(f=>f.slot==='optic');
+      if(!opt){ if(r.m) bad.push({g:gid, why:'no optic built'}); continue; }
+      const y=opt.pos[1], z=opt.pos[2];
+      if(!(y>0.0 && y<0.40)) bad.push({g:gid, why:'rail height', y});
+      else if(Math.abs(z)>Math.max(0.9,(r.len||0.8)*1.3)) bad.push({g:gid, why:'along the barrel', z});
+    }
+    console.log('rack', guns.length, 'guns; bad:', JSON.stringify(bad));
+    T('an optic lands on the rail of every gun that can take one', bad.length===0, bad);
 
     T('zero page errors', errs.length===0, errs.slice(0,2));
     console.log(fails? fails+' FAILURE(S)':'ALL PASS');
