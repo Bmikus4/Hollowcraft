@@ -49,6 +49,11 @@ function classify(fn, line){
   if(/\bshaped\(|\bshapeless\(/.test(line)) return 'craft';
   if(/spawnDrop\(/.test(line))              return 'drop';
   if(/lootChest\(|loot:|pool/i.test(line))  return 'loot';
+  // A TABLE IS A SOURCE EVEN WHEN THE LINE IS JUST A LIST OF NAMES. The gun pools are a const holding arrays of
+  // ids, so nothing on the line says "loot" and twenty-five guns read as unobtainable — while Ben's own words are
+  // that guns are found. The enclosing name is what carries the meaning there.
+  if(/POOL|LOOT|CHEST|CACHE|STASH/i.test(fn||''))  return 'loot';
+  if(/DROPS?$|_DROP/i.test(fn||''))                return 'drop';
   if(/\bdrop:\s*'/.test(line))              return 'mine';       // a block that gives this item when broken
   if(/defItem\(|^ITEMS\./.test(line.trim()))return 'def';
   if(/itemModel|setViewItem|_sigModel|icon|MODEL_ITEM_BUILDERS/.test(line)) return 'model';
@@ -77,7 +82,7 @@ function waitHttp(u,t=20000){ return new Promise((res,rej)=>{ const t0=Date.now(
 function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Google/Chrome/Application/chrome.exe']) if(fs.existsSync(p)) return p; throw new Error('no browser'); }
 
 (async()=>{
-  let live=null, flags=null;
+  let live=null, flags=null, gunSourced=new Set();
   if(!STATIC_ONLY){
     const { chromium }=await import('playwright-core');
     const port=await freePort();
@@ -93,6 +98,11 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
       await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:420000});
       await page.evaluate(`__hc.lock(true); __hc.cmdRun('/gamemode creative');`);
       flags=await page.evaluate(`__hc.itemIds()`);
+      // THE GUN POOLS, SIMULATED RATHER THAN READ. gunLoot() runs the real picker over every pool and reports which
+      // ids actually came out — so a gun listed in a pool the picker can never reach is not counted as obtainable,
+      // which a scan of the table would have got wrong in the generous direction.
+      try{ const gl=await page.evaluate(`__hc.gunLoot(300)`); if(gl&&gl.covered) gunSourced=new Set(gl.covered);
+           if(gl&&gl.missing&&gl.missing.length) console.log('  in a gun pool but never picked: '+gl.missing.join(' ')); }catch(e){}
       if(flags && !flags.err){ ids=new Set(Object.keys(flags)); console.log(`  ${ids.size} items in the live table (the source scan alone finds ${SRC.match(/defItem\(/g).length} defItem calls)`); }
       // BATCHED, because 250 items at one round trip each is minutes of waiting for numbers that are all read off
       // the same frame anyway. heldSig needs the item actually HELD, and __hc.hold mints a fresh stack every call.
@@ -133,6 +143,7 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     // engine unless the block names a different drop. Without this rule the audit reported gravel, mud and every
     // leaf as unobtainable, which is true of no voxel game ever written and would have buried the real finding.
     const src=[...r.kinds].filter(k=>SOURCEY.has(k)); if(F.block!=null && !src.includes('mine')) src.push('mine');
+    if(gunSourced.has(id) && !src.includes('loot')) src.push('loot');
     return { id, name:F.name||id, hidden:(F.extra||[]).includes('hidden'), kinds:[...r.kinds], src, act,
              inert: act.length===0 && !r.kinds.has('code'),
              world:L?L.world:null, held:L?L.held:null,
