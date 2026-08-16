@@ -121,14 +121,20 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
   // WHAT MAKES AN ITEM INERT, in one place so the list can be argued with: no flag any dispatch tests, and no
   // mention outside its own definition and the model dispatches. A block item places, a tool has a tool field, a
   // food eats, a gun fires — those are read. An item with none of them is one you can hold and do nothing with.
-  const ACTIVE=['block','tool','food','drink','gun','spear','att','book','bible','backrooms','atlas','syringe','ghost','nvg','flashlight','stairs','roof','axial','turn','heal'];
+  // COSMETIC KEYS ARE NOT AN ACTION. Everything else the item carries is, because somebody set it deliberately and
+  // some dispatch tests it — which is the whole reason the flag list is read off the item rather than written here.
+  const COSMETIC=new Set(['hidden','icon','name','max','id','model','tint','col','desc']);
   const rows=[...ids].sort().map(id=>{
-    const r=rec[id]; const kinds=[...r.kinds];
-    const src=kinds.filter(k=>SOURCEY.has(k));
+    const r=rec[id];
     const L=live&&live[id], F=flags&&flags[id]||{};
-    const act=ACTIVE.filter(k=>F[k]!=null);
-    return { id, name:F.name||id, hidden:!!F.hidden, kinds, src, act,
-             inert: act.length===0 && !kinds.has('code'),
+    const act=[]; if(F.block!=null)act.push('place'); if(F.tool!=null)act.push('tool'); if(F.food!=null)act.push('food');
+    for(const k of (F.extra||[])) if(!COSMETIC.has(k)) act.push(k);
+    // A BLOCK ITEM HAS A SOURCE BY CONSTRUCTION: breaking the block gives it back, which is the default in this
+    // engine unless the block names a different drop. Without this rule the audit reported gravel, mud and every
+    // leaf as unobtainable, which is true of no voxel game ever written and would have buried the real finding.
+    const src=[...r.kinds].filter(k=>SOURCEY.has(k)); if(F.block!=null && !src.includes('mine')) src.push('mine');
+    return { id, name:F.name||id, hidden:(F.extra||[]).includes('hidden'), kinds:[...r.kinds], src, act,
+             inert: act.length===0 && !r.kinds.has('code'),
              world:L?L.world:null, held:L?L.held:null,
              mentions:r.mentions };
   });
