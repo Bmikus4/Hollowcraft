@@ -16212,6 +16212,16 @@ function netMsg(m){
   else if(m.t==='tree'){ NET.applying=true; beginBulk(); try{ treeFall(m.x,m.y,m.z,true); }catch(e){} finally{ endBulk(); } NET.applying=false; }   // remote tree-fall (no drops — they arrive separately); bulk-coalesced like the local path
   else if(m.t==='drop'){ NET.applying=true; try{ spawnDrop(m.i,m.n,m.x,m.y,m.z,m.d,m.did,(m.u!=null||m.a||m.g!=null)?{uid:m.u,att:m.a,mag:m.g}:null); }catch(e){} NET.applying=false; }             // shared floating item
   else if(m.t==='dpick'){ removeDropById(m.did); }                                                                                        // someone collected it
+  // WHERE A DROPPED BODY ACTUALLY CAME TO REST. Now that a drop is a rigid body it cannot be replicated by its spawn
+  // alone: spawnDrop takes its impulse AND its tumble from Math.random(), so two clients simulating the same drop
+  // land it in two places at two angles. The alternative was making the throw deterministic from the shared did,
+  // and it was rejected because the divergence would only move rather than vanish — a bounce sequence off streamed
+  // terrain is not reproducible across machines even from the same seed.
+  // SO THE THROWER IS THE AUTHORITY, and only for the FINAL transform. Every client simulates its own copy so the
+  // item is alive the moment it appears; when the owner's copy settles it says where, and everyone snaps to that.
+  else if(m.t==='drst'){ for(const d of drops){ if(d.did!==m.did) continue;
+      d.x=m.x; d.y=m.y; d.z=m.z; if(m.q) d.quat.set(m.q[0],m.q[1],m.q[2],m.q[3]);
+      d.rest=true; d.vx=d.vy=d.vz=0; if(d.av) d.av.set(0,0,0); break; } }
   else if(m.t==='chest'){ if(m.k&&Array.isArray(m.c)&&!localChests.has(m.k)){ chests[m.k]=m.c; if(openUI==='chest'&&curChestKey===m.k){ curChest=chests[m.k]; renderInvUI(); } } }   // co-op: a teammate updated a PLAYER-PLACED chest (loot chests never sync)
   else if(m.t==='an'){ if(!NET.host) NET.anet=m.a; }                                                                                       // host → animal snapshot
   else if(m.t==='w'){ if(m.owner!==NET.id) NET.wnet=m; if(m.owner!=null)wretch.owner=m.owner; }
@@ -21972,9 +21982,10 @@ function spawnDrop(id,n,x,y,z,delay,did,st){ if(!ITEMS[id])return; n=n||1;
   // THE STATE TRAVELS WITH THE DROP. A gun on the floor is a specific gun — its brand, its attachments, its
   // loaded magazine — and a teammate who picks it up gets the stack THEIR client builds. Broadcasting only the
   // item id means the rifle you threw across the room arrives in their hands stripped.
-  if(did==null && NET.on){ did=netDropSeq(); netDrop(did,id,n,x,y,z,delay,st); }                                          // co-op: give it a shared id + broadcast (unless this IS a remote drop)
+  let _mine=false;
+  if(did==null && NET.on){ did=netDropSeq(); netDrop(did,id,n,x,y,z,delay,st); _mine=true; }                             // co-op: give it a shared id + broadcast (unless this IS a remote drop)
   const d={mesh:m,x,y,z,vx:Math.cos(a)*1.5,vy:2.2+Math.random()*1.4,vz:Math.sin(a)*1.5,age:0,rest:false,id,n,delay:(delay==null?0.5:delay),did:did||0,
-    half:_half, quat:new THREE.Quaternion(), av:new THREE.Vector3((Math.random()-0.5)*7,(Math.random()-0.5)*7,(Math.random()-0.5)*7)};
+    half:_half, mine:_mine, quat:new THREE.Quaternion(), av:new THREE.Vector3((Math.random()-0.5)*7,(Math.random()-0.5)*7,(Math.random()-0.5)*7)};
   // A TUMBLE, NOT A SPIN. The old drop turned on y forever at a constant rate, which is what "little floating items"
   // means; this one is thrown with a real angular velocity that drag and the first contact take out of it.
   d.quat.setFromEuler(new THREE.Euler(Math.random()*6.283,Math.random()*6.283,Math.random()*6.283));
@@ -22077,6 +22088,12 @@ function _dropStep(d,dt){
     if(typeof _dropRested==='function') _dropRested(d); }
   if(d.y<-8){ d.rest=true; d.vy=0; }                       // fell out of the world — do not simulate it forever
 }
+// The owner of a drop is the client that minted its did. Only that client's settle is broadcast; a guest that
+// happens to settle its own copy first stays quiet, or two clients would fight over the same body.
+function _dropRested(d){
+  if(!d.mine || !NET.on || !d.did || NET.applying) return;
+  netSend({ t:'drst', did:d.did, x:+d.x.toFixed(3), y:+d.y.toFixed(3), z:+d.z.toFixed(3),
+            q:[+d.quat.x.toFixed(4),+d.quat.y.toFixed(4),+d.quat.z.toFixed(4),+d.quat.w.toFixed(4)] }); }
 const _dtmp=new THREE.Vector3();
 // ---- WHAT IS UNDER THE CROSSHAIR (Ben 08-16: "when the player moves thier cursor over them, they should be
 // highlighted") ----
@@ -32733,28 +32750,24 @@ const _volRej={dim:0,parked:0,far:0,behind:0,near:1e9};   // why each pool light
 // which is exactly how this became soft orange discs the first time. Air reads as air because there is a lot of it and
 // each piece is small, so the count went up and the sprite stayed a speck. One draw call either way.
 const MOTE_N=900, MOTE_R=18;
-let _motePts=null, _moteMat=null, _moteOn=true, _moteLive=0, _moteErr=null, _moteLastT=0;
-const _moteS=[];   // {x,y,z, vx,vy,vz, ph}
-function _moteSeat(s, cx, cy, cz){
-  const a=Math.random()*6.283, r=MOTE_R*Math.cbrt(Math.random());   // cbrt: uniform in VOLUME, or every mote sits on the shell
-  const el=Math.acos(2*Math.random()-1);
-  s.x=cx+Math.sin(el)*Math.cos(a)*r; s.y=cy+Math.cos(el)*r*0.7; s.z=cz+Math.sin(el)*Math.sin(a)*r;
-  s.vx=(Math.random()-0.5)*0.14; s.vy=(Math.random()-0.5)*0.05-0.012; s.vz=(Math.random()-0.5)*0.14;
-  s.ph=Math.random()*6.283;
-}
+let _motePts=null, _moteMat=null, _moteOn=true, _moteLive=0, _moteErr=null;
+// NOTHING MOVES ON THE CPU. The first version drifted 900 particles in a JS loop and re-uploaded the position buffer
+// every frame, and it cost 1.16 ms - measured, 5 of 5 pairs, more than the volumetric pass it exists to decorate, for
+// dust. The offsets are baked once and the cloud is WRAPPED around the camera in the vertex shader instead: each mote's
+// position is its fixed offset plus a drift, taken modulo the box, so as the player walks the field re-enters on the
+// far side by arithmetic. There is no seating, no recycling and no buffer upload, the per-frame CPU work is one uniform,
+// and the visible behaviour is the one the loop was written to produce.
 function updateMotes(){
-  // Its own dt off the clock: this is called from the light-pool pass, which has no dt in scope, and threading one down
-  // to it would mean touching a function that has nothing else to do with dust. Clamped because a frame that took a
-  // second (a chunk flush, a tab returning) would otherwise teleport every mote out of its box in one step.
-  const now=(typeof clock!=='undefined')?clock.elapsedTime:0;
-  const dt=Math.min(0.1, Math.max(0, now-_moteLastT)); _moteLastT=now;
   const live = _moteOn && volPass && volPass.enabled;
   if(!_motePts){
     if(!live) return;                                        // nothing is built until there is a beam to put dust in
     const g=new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MOTE_N*3),3));
-    g.setAttribute('aSeed', new THREE.BufferAttribute(new Float32Array(MOTE_N),1));
-    const sd=g.getAttribute('aSeed'); for(let i=0;i<MOTE_N;i++) sd.setX(i, Math.random());
+    // position is an OFFSET from the camera, not a world point: uniform in the box, filled once and never written again.
+    const P=new Float32Array(MOTE_N*3), S=new Float32Array(MOTE_N);
+    for(let i=0;i<MOTE_N;i++){ P[i*3]=(Math.random()*2-1)*MOTE_R; P[i*3+1]=(Math.random()*2-1)*MOTE_R*0.75; P[i*3+2]=(Math.random()*2-1)*MOTE_R; S[i]=Math.random(); }
+    g.setAttribute('position', new THREE.BufferAttribute(P,3));
+    g.setAttribute('aSeed', new THREE.BufferAttribute(S,1));
+    g.boundingSphere=new THREE.Sphere(new THREE.Vector3(), 1e6);   // the real positions are computed in the shader, so a fitted bound would cull the cloud
     const u=volPass.uniforms;
     _moteMat=new THREE.ShaderMaterial({
       // THE SHARED OBJECTS. Not copies of the values - the same {value:...} the pass reads, by reference.
@@ -32762,17 +32775,24 @@ function updateMotes(){
                  // 2.6 doubled the luminance of a lit dungeon crop (15.2 to 35.8). Dust you notice instead of the room
                  // is set dressing that has taken over the shot; the gain is set so the beam still reads as the light
                  // and the motes as what is floating in it.
-                 uGain:{value:1.7}, uSize:{value:2.4}, uT:{value:0} },
+                 uGain:{value:1.7}, uSize:{value:2.4}, uT:{value:0}, uR:{value:new THREE.Vector3(MOTE_R, MOTE_R*0.75, MOTE_R)} },
       transparent:true, depthWrite:false, blending:THREE.AdditiveBlending, fog:false,
       vertexShader:[
       'uniform vec3 uVLPos[3]; uniform vec3 uVLCol[3]; uniform float uVLI[3]; uniform vec3 uCamPos;',
-      'uniform float uGain, uSize, uT; attribute float aSeed; varying vec3 vLit;',
+      'uniform float uGain, uSize, uT; uniform vec3 uR; attribute float aSeed; varying vec3 vLit;',
       'void main(){',
-      '  vec4 mv=modelViewMatrix*vec4(position,1.0);',
-      '  float dcam=length(position-uCamPos);',
+      // THE WRAP IS WHAT MAKES THIS FREE. `position` is a fixed offset in the box; adding the drift and taking it modulo
+      // the box size puts every mote back inside a box centred on the camera, so walking forward brings dust in ahead of
+      // you and retires it behind without a single particle being re-seated. mod() of a negative is still positive in
+      // GLSL, which is the only reason the +uR before it is enough.
+      '  vec3 drift=vec3(sin(uT*0.55+aSeed*31.4)*0.9, -uT*0.05, cos(uT*0.47+aSeed*17.7)*0.9);',
+      '  vec3 rel=mod(position+drift+uR, 2.0*uR)-uR;',
+      '  vec3 wp=uCamPos+rel;',
+      '  vec4 mv=viewMatrix*vec4(wp,1.0);',
+      '  float dcam=length(rel);',
       // The same in-scatter the pass marches, evaluated once at the particle instead of along a ray: inverse-square
       // with the same 0.25 softening, and the same forward-phase shape about the eye-to-mote direction.
-      '  vec3 eye=(position-uCamPos)/max(dcam,1e-3);',
+      '  vec3 eye=rel/max(dcam,1e-3);',
       '  vec3 acc=vec3(0.0);',
       '  for(int l=0;l<3;l++){',
       '    if(uVLI[l]<=0.0) continue;',
@@ -32782,7 +32802,7 @@ function updateMotes(){
       // lamp itself and the speck flares. Measured: with 0.25 two readings of the same lit room came out 35.8 and 20.5,
       // a 15-level disagreement caused entirely by which motes happened to be drifting near the light that frame -
       // which is a flicker you would see, not merely a bench that will not settle.
-      '    vec3 dl=uVLPos[l]-position; float d2=dot(dl,dl)+1.0;',
+      '    vec3 dl=uVLPos[l]-wp; float d2=dot(dl,dl)+1.0;',
       '    float ph=0.65+0.35*max(0.0, dot(eye, dl*inversesqrt(d2)));',
       '    acc+=uVLCol[l]*(uVLI[l]/d2)*ph;',
       '  }',
@@ -32808,20 +32828,11 @@ function updateMotes(){
       '}'].join('\n')
     });
     _motePts=new THREE.Points(g,_moteMat); _motePts.frustumCulled=false; _motePts.renderOrder=6; scene.add(_motePts);
-    for(let i=0;i<MOTE_N;i++){ const s={x:0,y:0,z:0,vx:0,vy:0,vz:0,ph:0}; _moteSeat(s, camera.position.x, camera.position.y, camera.position.z); _moteS.push(s); }
   }
   _motePts.visible=live;
   if(!live){ _moteLive=0; return; }
-  _moteMat.uniforms.uT.value=clock.elapsedTime;
-  const cx=camera.position.x, cy=camera.position.y, cz=camera.position.z;
-  const pos=_motePts.geometry.getAttribute('position');
-  for(let i=0;i<MOTE_N;i++){ const s=_moteS[i];
-    s.x+=s.vx*dt; s.y+=s.vy*dt; s.z+=s.vz*dt;
-    s.x+=Math.sin(clock.elapsedTime*0.6+s.ph)*dt*0.09;        // the drift of air in a room, not a fall
-    if(Math.abs(s.x-cx)>MOTE_R || Math.abs(s.z-cz)>MOTE_R || Math.abs(s.y-cy)>MOTE_R*0.75) _moteSeat(s,cx,cy,cz);
-    pos.setXYZ(i, s.x, s.y, s.z);
-  }
-  pos.needsUpdate=true; _moteLive=MOTE_N;
+  _moteMat.uniforms.uT.value=clock.elapsedTime;   // the whole per-frame cost: one float. uCamPos is the pass's own uniform and is already written.
+  _moteLive=MOTE_N;
 }
 // ---- CONTACT SHADOWS: everything alive is joined to the ground it stands on ----------------------------------------------
 // Plan §4 item 11. Creatures cast shadow-map shadows only, and only inside the 46-block frustum; beyond that a deer stands on a
