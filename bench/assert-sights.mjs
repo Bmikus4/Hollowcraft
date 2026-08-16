@@ -60,6 +60,22 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     const off=rows.filter(r=>Math.abs(r.front[0])>120||Math.abs(r.front[1])>120||Math.abs(r.rear[0])>120||Math.abs(r.rear[1])>120);
     T('both roots are near the crosshair at full aim', off.length===0, off.map(r=>[r.id,r.front,r.rear]));
     T('every gun actually draws sight elements', rows.every(r=>r.parts>0), rows.filter(r=>!r.parts).map(r=>r.id));
+    // AND EACH ELEMENT STANDS ON THE GUN. Level, near the crosshair and consistent with each other is not the same
+    // as attached: the whole assembly can float above the receiver and pass all three.
+    const gnd=[];
+    for(const r of rows){ const g=await p.evaluate(i=>__hc.sightGrounded(i), r.id); gnd.push(Object.assign({id:r.id},g)); }
+    for(const g of gnd) console.log(g.id.padEnd(16), 'parts', g.parts, 'floating', g.floating, JSON.stringify(g.els));
+    // AN ASSEMBLY, NOT AN ELEMENT. The AR's two front WINGS report no hit at all while the post between them is
+    // sunk 11 mm into metal — they stand on the same tower, and the ray beneath them is passing through one of the
+    // vents in that model's handguard. Judging each element alone would call that a floating sight; judging the
+    // assembly asks the question that matters, which is whether the thing the eye lines up is attached to the gun.
+    const airborne=gnd.filter(g=>{
+      const solid=(g.els||[]).filter(e=>e.gap!==null && e.gap<0.03).length;
+      return solid===0;                                  // nothing in the whole sight is touching the gun
+    });
+    T('every gun has its sights attached to it', airborne.length===0, airborne.map(g=>[g.id,g.els]));
+    const anyFloat=gnd.filter(g=>(g.els||[]).some(e=>e.gap!==null && e.gap>0.03));
+    T('and no element stands proud of the metal by more than 3 cm', anyFloat.length===0, anyFloat.map(g=>[g.id,g.els]));
     T('zero page errors', errs.length===0, errs.slice(0,2));
     console.log(fails? fails+' FAILURE(S)':'ALL PASS');
     await b.close();
