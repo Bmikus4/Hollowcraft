@@ -40,6 +40,7 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
       await page.evaluate(`__hc.freezeT(0); __hc.setTime(${t})`); await sleep(900); await page.evaluate(`__hc.setTime(${t})`); await sleep(400);
       const f=path.join(OUT,`o3probe-${when}.png`); await page.screenshot({path:f}); console.log('   ->',path.basename(f));
     }
+    console.log('  diag', await page.evaluate('__hc.cmdRun("/diag")'));
     console.log('  logs:\n   '+(logs.length?logs.join('\n   '):'(none)'));
   } finally { try{ if(browser) await browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }
 })().catch(e=>{ console.error(e); process.exit(1); });
