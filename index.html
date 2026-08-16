@@ -5548,6 +5548,15 @@ const _uFolNight={ value:new THREE.Color(0.006,0.008,0.014) };
 // exposure (vSky), so a canopy top under the open sky catches the sky and a leaf walled inside a trunk cluster or under
 // a rock overhang stays exactly as black as it is now. Gated on (1-uDay), so daylight is bit-identical.
 // __hc.folAmb(n) is the dial; 0 is the pre-dial build.
+// AND IT IS CUBED AND CAPPED, WHICH IS THE WHOLE OF BEN'S WHITE FOLIAGE. The first version gated on (1-day), which is
+// still 0.25 at dusk, and in display space that put roughly +0.23 - about sixty levels of 255 - on top of a canopy the
+// low sun was already lighting. Measured at the dusk vantage with everything else held: the lit canopy read luminance
+// 130.5 at saturation 0.078, and with this term alone switched off it read 70.4 at 0.395. It was not the fog (worth 3.6
+// luminance), not the key light (halving it moved 3.8) and not the leaf transmission (0.7, inside the noise) - it was
+// this, and it shipped as the fix for leaves not rendering at night.
+// Two gates now, and either alone would be enough. The cube takes it to 0.016 of itself at dusk and leaves it at 1.0 at
+// midnight, so the night behaviour is untouched. And it is scaled by how dark the fragment ALREADY is, so a lit leaf
+// cannot be lifted at any hour - which is the structural half: no future change to the day ramp can bring this back.
 // AND THE NUMBER IS DISPLAY-REFERRED, WHICH IS WHY THE FIRST BRACKET LOOKED INERT. This injection sits on
 // <fog_fragment>, and three runs <tonemapping_fragment> and <colorspace_fragment> BEFORE it — so gl_FragColor here is
 // already sRGB-encoded 0..1, not linear light. A term of 0.008 is two levels of 255 and nothing else: swept 0/0.06/
@@ -5666,7 +5675,7 @@ function injectAtlas(mat, opts={}){
         // silhouette of whatever colour the target is. 0.72 leaves better than a quarter of the leaf's own lit colour at
         // every distance, so a fogged night wood still reads as leaves. Daylight is untouched: the term is gated on
         // (1-uDayF) and is exactly zero at noon.
-        '\n{ float _nt=1.0-uDayF; gl_FragColor.rgb=mix(gl_FragColor.rgb, uFolNight, clamp(fogFactor*_nt*0.72,0.0,1.0));\n  gl_FragColor.rgb += uFolNight*uFolAmb*_nt*clamp(vSky,0.0,1.0); }':''))
+        '\n{ float _nt=1.0-uDayF; gl_FragColor.rgb=mix(gl_FragColor.rgb, uFolNight, clamp(fogFactor*_nt*0.72,0.0,1.0));\n  float _na=_nt*_nt*_nt; float _nl2=dot(gl_FragColor.rgb, vec3(0.2126,0.7152,0.0722)); gl_FragColor.rgb += uFolNight*uFolAmb*_na*clamp(vSky,0.0,1.0)*(1.0-clamp(_nl2*2.2,0.0,1.0)); }':''))
       // THE SHADED SIDE OF A LEAF IS STILL GREEN (Ben 08-05: "make the un-lit side of foliage look not solid black"). These quads
       // are DoubleSide, so one of every crossed pair faces away from the sun; with N·L negative that face keeps only ambient and
       // goes to black, and a blade of grass turns into a black slit. Real foliage does not do this because it is thin enough to
@@ -15698,7 +15707,7 @@ function netMsg(m){
   else if(m.t==='peerLeave'){ removeAvatar(m.id); delete NET.peers[m.id]; if(wretch.owner===m.id) wretch.owner=NET.hostId; }
   else if(m.t==='p'){ NET.peers[m.id]=m; ensureAvatar(m.id); const a=NET.avatars[m.id]; if(a){ a.tx=m.x; a.ty=m.y; a.tz=m.z; a.tyaw=m.yaw||0; a.tpitch=m.pitch||0; a.tied=!!m.tied; a.dead=!!m.dead; a.po=m.po|0; if(a.pack) a.pack.visible=!!m.pk;
     if(m.nm!==a.nm){ a.nm=m.nm; if(a.tag)a.g.remove(a.tag); a.tag=nameTag(m.nm); a.g.add(a.tag); }                          // nametag (server-set text, rendered locally)
-    if(m.held!==a.held){ a.held=m.held; setAvatarHeld(a,m.held); }                                                        // held item shown in their hand
+    if(m.held!==a.held || (m.at||null)!==(a.at||null)){ a.held=m.held; a.at=m.at||null; setAvatarHeld(a,m.held,a.at); }   // held item shown in their hand, wearing whatever is fitted to it
     if((m.ch||null)!==(a.ch||null)) setAvatarChest(a,m.ch||null); } }                                                     // …and the chestplate on their body
   else if(m.t==='b'){ NET.applying=true; try{ setBlockWorld(m.x,m.y,m.z,m.b,true); }catch(e){} NET.applying=false; }                       // remote block edit
   else if(m.t==='bb'){ NET.applying=true; beginBulk(); try{ for(const e of m.e) setBlockWorld(e[0],e[1],e[2],e[3],true); }catch(err){} finally{ endBulk(); } NET.applying=false; }   // remote block-edit BATCH (one frame's burst)
@@ -15781,8 +15790,12 @@ function removeAvatar(id){ const a=NET.avatars[id]; if(a){ avatarGroup.remove(a.
 // disagreeing about what they are wearing. Its torso is 0.50 across with its top at 1.50, which is not the paperdoll body's
 // 0.42/1.62, so the fit is computed against this model's own box.
 function setAvatarChest(a,id){ if(!a) return; a.ch=id||null; _wornShellShow(a, id?_wornShellOn(a,a.g,id,WORN_TORSO_PEER):null); }
-function setAvatarHeld(a,id){ if(a.heldMesh){ a.hand.remove(a.heldMesh); _disposeView(a.heldMesh); a.heldMesh=null; }   // render a peer's held item in their hand
-  if(!id||!ITEMS[id])return; const it=ITEMS[id]; let m; try{ m=itemModel(id); }catch(e){ return; }
+function setAvatarHeld(a,id,at){ if(a.heldMesh){ a.hand.remove(a.heldMesh); _disposeView(a.heldMesh); a.heldMesh=null; }   // render a peer's held item in their hand
+  if(!id||!ITEMS[id])return; const it=ITEMS[id]; let m;
+  // ATTACHMENTS COME OVER THE WIRE AS A STRING (see netUpdate) and are rebuilt into the same fitter the owner
+  // uses, so a peer's rifle wears the optic its owner bolted on rather than a bare model.
+  const A={}; if(at) for(const kv of String(at).split('|')){ const i=kv.indexOf(':'); if(i>0) A[kv.slice(0,i)]=kv.slice(i+1); }
+  try{ m=(it.gun&&typeof GLB_GUNS!=='undefined'&&GLB_GUNS[id]&&at)?(buildGlbGun(id,it.dot,it.suppressed,A)||itemModel(id)):itemModel(id); }catch(e){ return; }
   const w=new THREE.Group(); w.add(m);                                                                          // wrapper carries the per-type grip pose (the arm points forward-down while holding)
   // IT POINTS AWAY FROM THE BODY, NOT AT IT (Ben 08-04: "they are flipped towards the player not away from the player"). Every
   // item model is authored for the VIEWMODEL, where forward is -z because that is where the camera looks. The body is built
@@ -15821,10 +15834,15 @@ function netUpdate(dt){ if(!NET.on)return;
   netFlushQueues();   // batched block-edit/drop bursts + late-join sync pages
   NET.sendAcc+=dt; if(NET.sendAcc>0.05){ NET.sendAcc=0; const s=inv[selSlot];
     // rounded (2cm / ~0.06deg — invisible) + send-on-change with a 0.5s heartbeat: idle players stop flooding the relay, packets ~40% smaller
-    const px=+player.pos.x.toFixed(2),py=+player.pos.y.toFixed(2),pz=+player.pos.z.toFixed(2),yaw=+player.yaw.toFixed(3),pit=+player.pitch.toFixed(3),held=s?s.id:null,tied=!!player.tied,dead=!!player.dead,po=(player.prone?2:player.sneak?1:0),pk=!!(armor[EQ_PACK]&&PACK_SLOTS[armor[EQ_PACK].id]!=null),ch=(armor[1]&&WORN_SHELL[armor[1].id])?armor[1].id:null;
-    const moved = px!==NET._lx||py!==NET._ly||pz!==NET._lz||yaw!==NET._lyaw||pit!==NET._lpit||held!==NET._lheld||tied!==NET._ltied||dead!==NET._ldead||po!==NET._lpo||pk!==NET._lpk||ch!==NET._lch;   // pk and ch in the CHANGE test, not just the payload: without it, putting the pack or the cuirass on only reaches peers on the next 0.5s heartbeat
-    if(moved || (NET._hb=(NET._hb|0)+1)>=10){ NET._hb=0; NET._lx=px;NET._ly=py;NET._lz=pz;NET._lyaw=yaw;NET._lpit=pit;NET._lheld=held;NET._ltied=tied;NET._ldead=dead;NET._lpo=po;NET._lpk=pk;NET._lch=ch;
-      netSend({t:'p',x:px,y:py,z:pz,yaw,pitch:pit,held,nm:playerName,tied,dead,po,pk,ch}); } }   // po: posture (0 stand / 1 crouch / 2 prone) — a crawling peer must not read as standing
+    const px=+player.pos.x.toFixed(2),py=+player.pos.y.toFixed(2),pz=+player.pos.z.toFixed(2),yaw=+player.yaw.toFixed(3),pit=+player.pitch.toFixed(3),held=s?s.id:null,tied=!!player.tied,dead=!!player.dead,po=(player.prone?2:player.sneak?1:0),pk=!!(armor[EQ_PACK]&&PACK_SLOTS[armor[EQ_PACK].id]!=null),ch=(armor[1]&&WORN_SHELL[armor[1].id])?armor[1].id:null,
+      // WHAT THE HELD GUN IS WEARING. A peer's gun is built from an item id alone, so a fitted optic or can was
+      // invisible to everyone but its owner — a rifle with a scope on it looked bare in a teammate's hands. Sent
+      // as a short string ('optic:red_dot|muzzle:suppressor') rather than an object because it also has to be
+      // COMPARABLE for the send-on-change test below, and comparing objects there would send every frame.
+      at=(s&&ITEMS[s.id]&&ITEMS[s.id].gun&&typeof attOf==='function')?Object.entries(attOf(s)||{}).map(e=>e[0]+':'+e[1]).sort().join('|')||null:null;
+    const moved = px!==NET._lx||py!==NET._ly||pz!==NET._lz||yaw!==NET._lyaw||pit!==NET._lpit||held!==NET._lheld||at!==NET._lat||tied!==NET._ltied||dead!==NET._ldead||po!==NET._lpo||pk!==NET._lpk||ch!==NET._lch;   // pk and ch in the CHANGE test, not just the payload: without it, putting the pack or the cuirass on only reaches peers on the next 0.5s heartbeat
+    if(moved || (NET._hb=(NET._hb|0)+1)>=10){ NET._hb=0; NET._lx=px;NET._ly=py;NET._lz=pz;NET._lyaw=yaw;NET._lpit=pit;NET._lheld=held;NET._lat=at;NET._ltied=tied;NET._ldead=dead;NET._lpo=po;NET._lpk=pk;NET._lch=ch;
+      netSend({t:'p',x:px,y:py,z:pz,yaw,pitch:pit,held,at,nm:playerName,tied,dead,po,pk,ch}); } }   // po: posture (0 stand / 1 crouch / 2 prone) — a crawling peer must not read as standing
   if(NET.host){ NET.tAcc=(NET.tAcc||0)+dt; if(NET.tAcc>1){ NET.tAcc=0; netSend({t:'time',tm:worldTime,rt:+((typeof weather!=='undefined'&&weather.rainTgt)||0).toFixed(2),ft:+((typeof weather!=='undefined'&&weather.fogTgt)||0).toFixed(2)}); } }   // day/night + weather targets → guests lerp
   for(const id in NET.avatars){ const a=NET.avatars[id], k=Math.min(1,dt*12);
     a.g.position.x+=(a.tx-a.g.position.x)*k; a.g.position.y+=(a.ty-a.g.position.y)*k; a.g.position.z+=(a.tz-a.g.position.z)*k; a.g.rotation.y=a.tyaw+Math.PI; a.g.visible=!a.dead;   // +π: the model's front (held-arm side) was pointing opposite the look direction → it rendered backward
@@ -35968,6 +35986,15 @@ window.__hc={
       GRID.items=GRID.items.filter(g=>g!==stack);
       return { before, saved:row?row.att:null, savedMag:row?row.mag:null }; }
     catch(e){ return {err:String(e.message||e)}; } },
+  // CO-OP, FROM A HARNESS. Replication cannot be tested from one page: the thing under test is what crosses the
+  // wire. These two let a bench open two real clients against the local relay and ask one of them what it built for
+  // the other — mpConnect joins the same websocket the menu would, mpPeers reports each avatar as it was RECEIVED.
+  mpConnect(url){ try{ netConnect(url||('ws://'+location.host)); return {url:NET._url}; }catch(e){ return {err:String(e.message||e)}; } },
+  mpPeers(){ try{ const out=[];
+      for(const id in (NET.avatars||{})){ const a=NET.avatars[id], w=[];
+        a.heldMesh&&a.heldMesh.traverse(o=>{ if(o.userData&&o.userData.att) w.push(o.userData.att); });
+        out.push({ id, held:a.held||null, at:a.at||null, wearing:w, mesh:!!a.heldMesh }); }
+      return { on:!!NET.on, n:out.length, peers:out }; }catch(e){ return {err:String(e.message||e)}; } },
   // WHICH WAY IS THIS GUN POINTING IN THE HAND? Ben 08-12 reported "some guns are sideways" and never named one,
   // and the two places that could mean are answered differently: sideways in the inventory TILE is the icon bake's
   // orientation, sideways in the HAND is a model-axis or a `rot` problem. This answers the second, for every gun at
