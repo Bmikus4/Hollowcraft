@@ -224,6 +224,13 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     T('the T key itself opens the screen', openedByKey===true, {openedByKey});
     T('T closes it again', closedByKey===false, {closedByKey});
 
+    // A GUN IN THE BAG KEEPS WHAT IS BOLTED TO IT. The hotbar always did — `inv` is serialised whole — but the bag
+    // is written as a named field list, so a stack put away lost its attachments and its loaded rounds on reload.
+    await p.evaluate("__hc.hold('ar15')"); await sleep(400);
+    const trip=await p.evaluate("__hc.attSaveTrip()");
+    console.log('save', JSON.stringify(trip));
+    T('a bagged gun keeps its attachments through a save', trip.saved && trip.saved.optic==='red_dot' && trip.saved.muzzle==='suppressor', trip);
+
     T('zero page errors', errs.length===0, errs.slice(0,2));
     console.log(fails? fails+' FAILURE(S)':'ALL PASS');
     await b.close();

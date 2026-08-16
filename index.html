@@ -11296,7 +11296,7 @@ hlMesh.visible=false; scene.add(hlMesh);
 // =====================================================================
 //  DAY / NIGHT + SUN/MOON KEY LIGHT (texel-snapped shadow fit)
 // =====================================================================
-let worldTime = CFG.DAY_LEN*0.30, _dayCount=0; let _dayLock=null;   // __hc.dayLock — the clock hold, see updateSky   // start morning; _dayCount = how many full cycles have passed (see updateSky)
+let worldTime = CFG.DAY_LEN*0.30, _dayCount=0; let _keyMul=1; let _dayLock=null;   // __hc.dayLock — the clock hold, see updateSky   // start morning; _dayCount = how many full cycles have passed (see updateSky)
 if(Q.get('t')) worldTime=+Q.get('t');
 const _sunDir=new THREE.Vector3(), _keyDir=new THREE.Vector3(), _tmp=new THREE.Vector3();
 // floor = the key light's minimum height above the player as a fraction of its distance, i.e. how low it may rake (0.45
@@ -11372,7 +11372,7 @@ function updateSky(dt){
     // elevation wide, taking it to a fifth of its value at the flip itself. The swing still happens, in near-darkness, where
     // there is no shadow left to see moving. Shadow casting is already off in that window, which is what makes it invisible.
     const _fl=Math.exp(-Math.pow((elev+0.1)/0.055,2.0));                             // 1 at the flip, ~0 a tenth of an elevation away
-    sunLight.intensity=lerp(0.42,3.4,day)*(1.0-0.80*_fl); }                          // DARKNESS-FIRST night: moon 0.55→0.42 (Ben 07-21) so distant bare-stone peaks stop catching pale moonlight and reading GREY on the night horizon; near ground stays readable via the hemi ground-fill, not the moon (was 0.9→0.55)
+    sunLight.intensity=lerp(0.42,3.4,day)*(1.0-0.80*_fl)*_keyMul; }   // _keyMul is QA only (__hc.keyMul): the A/B that separates a key-light blowout from a leaf-transmission one                          // DARKNESS-FIRST night: moon 0.55→0.42 (Ben 07-21) so distant bare-stone peaks stop catching pale moonlight and reading GREY on the night horizon; near ground stays readable via the hemi ground-fill, not the moon (was 0.9→0.55)
   hemi.intensity=lerp(0.24,0.62,day);                                                // pre-hunt baseline (the "dark faces" were the vSky/htop bug, fixed at source — no fill band-aid needed)
   // WHAT COLOUR THE SHADOWS ARE. The hemisphere's intensity ramped with the day but its COLOUR never moved off 0x2a3350 — a
   // dark desaturated navy, at noon as at midnight — so every surface the sun could not reach was lit grey. Outdoors that is
@@ -12744,7 +12744,10 @@ function saveGame(){
     selSlot, inv, armor, backpackStore, edits, chests, localChests:[...localChests], furnaces, campfires, screens, craters,
     // The grid is written as plain data rather than as the live objects: a stack carries only what a reload needs to
     // put it back in the same cell the same way round.
-    grid: GRID.items.map(g=>({id:g.id,n:g.n,uid:g.uid,dur:g.dur,x:g.x,y:g.y,rot:g.rot})),
+    // att AND mag TRAVEL WITH THE STACK. The bag is written as plain data with a named field list, and a gun put
+    // away in it lost both its fitted attachments and its loaded rounds on reload — the hotbar never did, because
+    // `inv` is serialised whole. Anything the stack carries as state belongs in this list.
+    grid: GRID.items.map(g=>({id:g.id,n:g.n,uid:g.uid,dur:g.dur,x:g.x,y:g.y,rot:g.rot,att:g.att,mag:g.mag})),
     drops: drops.filter(d=>d&&!d.dead).slice(0,150).map(d=>({id:d.id,n:d.n,x:+d.x.toFixed(2),y:+d.y.toFixed(2),z:+d.z.toFixed(2)})),
     horror:{ nightsSurvived:HORROR.nightsSurvived, tier:HORROR.tier, menace:HORROR.menace, monkWrath:HORROR.monkWrath|0, hwPending:HORROR.hwPending|0 } };
   try{ localStorage.setItem(SAVE_KEY, JSON.stringify(s)); }
@@ -12782,7 +12785,7 @@ function applySave(s){
   // is now five, so slots 5..35 have nowhere to be and would simply vanish. They are poured into the grid instead, in
   // the order they were held, and the flat tail is cleared so nothing reads it again.
   GRID.items=[];
-  if(s.grid) for(const g of s.grid){ const st={id:g.id,n:g.n,uid:g.uid,dur:g.dur,x:g.x|0,y:g.y|0,rot:g.rot?1:0};
+  if(s.grid) for(const g of s.grid){ const st={id:g.id,n:g.n,uid:g.uid,dur:g.dur,x:g.x|0,y:g.y|0,rot:g.rot?1:0,att:g.att,mag:g.mag};
     if(!gridFits(st.x,st.y,...stackSize(st),st)) gridPlace(st); GRID.items.push(st); }
   for(let i=HOT_N;i<INV_N;i++){ const t=inv[i]; if(t){ gridAdd(t.id,t.n,t.uid,t.dur); inv[i]=null; } }
   gridReflow();
@@ -35952,6 +35955,19 @@ window.__hc={
       const u=icon3DURL(id); delete _icon3D[id]; if(was) ICON_FILES.add(id);
       return (typeof u==='string'&&u.slice(0,10)==='data:image')?u:null; }catch(e){ return null; } },
   iconList(){ try{ return Object.keys(ITEMS).filter(i=>!ITEMS[i].hidden); }catch(e){ return []; } },
+  // QA: does a fitted gun survive being put in the bag, saved and reloaded? Fits an optic, moves the stack into the
+  // grid, runs the real save and the real restore, and reports what the stack came back with.
+  attSaveTrip(){ try{ const s=heldSlot(); if(!s||!ITEMS[s.id]||!ITEMS[s.id].gun) return {err:'hold a gun'};
+      attSet(s,'optic','red_dot'); attSet(s,'muzzle','suppressor');
+      const stack={id:s.id,n:1,uid:s.uid,att:s.att,mag:s.mag,x:0,y:0,rot:0};
+      GRID.items.push(stack);
+      const before=JSON.parse(JSON.stringify(stack.att||{}));
+      if(!saveGame()) return {err:'save refused'};
+      const raw=readSave(); if(!raw) return {err:'no save'};
+      const row=(raw.grid||[]).find(g=>g.id===s.id&&g.uid===stack.uid);
+      GRID.items=GRID.items.filter(g=>g!==stack);
+      return { before, saved:row?row.att:null, savedMag:row?row.mag:null }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   // WHICH WAY IS THIS GUN POINTING IN THE HAND? Ben 08-12 reported "some guns are sideways" and never named one,
   // and the two places that could mean are answered differently: sideways in the inventory TILE is the icon bake's
   // orientation, sideways in the HAND is a model-axis or a `rot` problem. This answers the second, for every gun at
@@ -40464,6 +40480,8 @@ window.__hc={
     return { holes:_bholes.length, bx, by, bz, px:+px.toFixed(2), py:+py.toFixed(2), pz:+pz.toFixed(2), face }; },
   // QA/bench: hold the world clock at a fraction of the day, or release it with null. The day advances every frame
   // and dusk light changes fast enough that an A/B across two shots measures the sunset rather than the change.
+  // QA/bench: scale the key light without touching its colour or its ramp. 1 is the shipped build.
+  keyMul(v){ try{ if(v!=null) _keyMul=+v; return { keyMul:_keyMul, intensity:+sunLight.intensity.toFixed(3) }; }catch(e){ return String(e.message||e); } },
   dayLock(f){ try{ _dayLock=(f==null?null:+f); if(_dayLock!=null) worldTime=CFG.DAY_LEN*_dayLock;
     return { locked:_dayLock, day:+globalU.uDay.value.toFixed(3) }; }catch(e){ return String(e.message||e); } },
   setTime(frac){ worldTime=CFG.DAY_LEN*frac; return +globalU.uDay.value.toFixed(3); },   // QA: jump the clock. 0 = SUNRISE, 0.25 = noon, 0.5 = sunset, 0.75 = midnight — the sun is (cos,sin) of the fraction, so it is on the horizon at 0 and at 0.5. (The old note here said 0=midnight and it is wrong; it cost an hour of reading a scheduler that was right.)
