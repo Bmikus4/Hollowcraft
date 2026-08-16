@@ -25,13 +25,20 @@ const fb=()=>['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Progra
   const say=(ok,msg)=>{ console.log((ok?'ok   ':'FAIL ')+msg); if(!ok) bad++; };
   try{
     const base='http://127.0.0.1:'+port; await waitHttp(base+'/index.html');
-    b=await chromium.launch({executablePath:fb(),headless:true,args:['--enable-gpu','--use-angle=d3d11','--mute-audio']});
+    // --autoplay-policy=no-user-gesture-required is what turns this from a plumbing test into a sound test. An AudioContext
+    // normally needs a click, so a headless run could only ever prove the creature ASKED for a sound; with the flag the graph is
+    // really built and `dropped` becomes meaningful. --mute-audio stays: the nodes are constructed, nothing reaches a speaker.
+    b=await chromium.launch({executablePath:fb(),headless:true,args:['--enable-gpu','--use-angle=d3d11','--mute-audio','--autoplay-policy=no-user-gesture-required']});
     const pg=await (await b.newContext({viewport:{width:900,height:600}})).newPage();
     pg.on('pageerror',e=>console.log('PAGEERROR:',String(e.message||e).slice(0,160)));
     await pg.goto(base+'/index.html?debug=1&rd=10',{waitUntil:'load',timeout:90000});
     await pg.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',null,{timeout:90000});
     await pg.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null,{timeout:90000});
     await sleep(3500); const ev=s=>pg.evaluate(s);
+    // A REAL CLICK, because the browser flag is not what gates the AudioContext — the game builds it in its own gesture
+    // handler. Without this the audio assertions below can only prove the creature ASKED for a sound.
+    try{ await pg.mouse.click(450,300); }catch(e){}
+    await sleep(600);
     await ev('__hc.qaLocked(true)'); await ev('__hc.setTime(0.75)');
 
     const watch=async(polls,label)=>{
@@ -54,6 +61,7 @@ const fb=()=>['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Progra
 
     // 1. SOFT GROUND — it must come up, and the blow must land.
     console.log('\n[1] on soft ground');
+    await ev('__hc.burAudio(true)');
     console.log('  spawn '+JSON.stringify(await ev('__hc.burrower(9)')));
     const soft=await watch(90,'soft');
     say(soft.surfaced>0, 'it comes up through soft ground ('+soft.surfaced+' polls surfacing or reared)');
@@ -68,6 +76,17 @@ const fb=()=>['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Progra
     say(hard.surfaced===0, 'it cannot come up through a floor you laid ('+hard.surfaced+' polls surfacing)');
     say(hard.dmg<=0, 'and it takes nothing from a player who is standing on one ('+hard.dmg+' health)');
     say(hard.minDist<8, 'it is still there and still closing, it simply cannot open the ground ('+hard.minDist.toFixed(2)+' blocks)');
+
+    // 2b. IT MAKES ITS OWN NOISE. This creature's whole channel is sound, and it shipped mute: the dig was routed to a voice
+    //     type that had been cut from the game and returned on the first line, so every call site looked right and nothing was
+    //     ever heard. `dropped` is asks minus sounds actually built, and it is the only number that would have caught that.
+    const au=await ev('__hc.burAudio()');
+    console.log('  audio '+JSON.stringify(au));
+    say((au.req.dig||0)>0, 'it asks for a dig sound while it is under the ground ('+(au.req.dig||0)+' asks)');
+    say((au.req.surface||0)>0, 'and for the ground opening when it comes up ('+(au.req.surface||0)+')');
+    say((au.req.cry||0)>0, 'and for a cry of its own rather than the Wretch shriek ('+(au.req.cry||0)+')');
+    if(au.noAC>0) console.log('  NOTE: no AudioContext in a headless run ('+au.noAC+' silent asks) - this proves the plumbing, NOT the sound.');
+    else say(au.dropped===0, 'nothing it asked for was dropped on the way to the graph ('+au.dropped+' dropped)');
 
     // 3. IT COSTS THE WORLD NO LIGHT. The Horrific Wretch fork took a slot and never gave it back.
     const L=await ev('__hc.burrower()');
