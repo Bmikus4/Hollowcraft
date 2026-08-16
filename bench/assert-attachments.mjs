@@ -240,6 +240,12 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     T('the third-person body holds the gun', tps.held==='ar15', tps);
     T('and it wears the fitted optic', (tps.wearing||[]).indexOf('red_dot')>=0, tps);
 
+    // AN ATTACHMENT OFF A GUN IS STILL AN OBJECT — in the bag, on the ground, as a crafting result. iconBox reports
+    // what the icon bake framed, so a placeholder glyph and a real model are told apart by their part count.
+    const box=await p.evaluate("__hc.iconBox(['red_dot','suppressor','foregrip'])");
+    console.log('att icons', JSON.stringify(box));
+    T('each attachment item has a real model', box.every(b=>b.parts&&b.parts.length>0&&Math.max.apply(null,b.box)>0.05), box);
+
     T('zero page errors', errs.length===0, errs.slice(0,2));
     console.log(fails? fails+' FAILURE(S)':'ALL PASS');
     await b.close();
