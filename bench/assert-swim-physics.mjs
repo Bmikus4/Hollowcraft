@@ -74,6 +74,25 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     check('SPRINT SPEEDS YOU UP UNDERWATER, and by a real margin', fast.v>slow.v*1.4, `${fast.v} against ${slow.v}`);
     check('sprint settles near sqrt(5.32/1.10) = 2.20 m/s', Math.abs(fast.v-2.20)<0.5, `${fast.v}`);
 
+    // ---- 1b. THE POSTURE AND ITS HITBOX ----
+    // The pose is only half of it. A horizontal body that keeps a standing capsule is a body you can shoot in the
+    // head while it lies flat, so the hitbox is asserted next to the flag rather than trusted to follow it.
+    await dive();
+    const still=await page.evaluate(`__hc.swimProbe()`);
+    check('floating without pushing is NOT swimming', still.swimming===false, `swimming ${still.swimming}`);
+    check('and it keeps the standing hitbox', still.bodyH>1.4, `bodyH ${still.bodyH}`);
+    await page.evaluate(`__hc.cam({yaw:0,pitch:0}); __hc.swimPush(0,1,false)`); await sleep(700);
+    const mv=await page.evaluate(`__hc.swimProbe()`);
+    console.log(`  swimming ${mv.swimming}  phase ${mv.swimPh}  bodyH ${mv.bodyH}`);
+    check('pushing through the water IS swimming', mv.swimming===true, `swimming ${mv.swimming}`);
+    check('THE HITBOX FOLLOWS THE POSTURE', mv.bodyH<0.9, `bodyH ${mv.bodyH} against a standing ${still.bodyH}`);
+    await sleep(500);
+    const mv2=await page.evaluate(`__hc.swimProbe()`);
+    check('the stroke phase advances while swimming', mv2.swimPh>mv.swimPh, `${mv.swimPh} -> ${mv2.swimPh}`);
+    await page.evaluate(`__hc.swimStop()`); await sleep(600);
+    const after=await page.evaluate(`__hc.swimProbe()`);
+    check('and stopping puts the standing hitbox back', after.swimming===false && after.bodyH>1.4, `swimming ${after.swimming} bodyH ${after.bodyH}`);
+
     // ---- 2. MOMENTUM: entering fast is different from entering slow ----
     // THE CHECK THE OLD CODE CANNOT PASS. Under the clamp both entries read the same speed within two frames;
     // under drag the fast one is still faster a moment later. Both start from the same place with no input held,
