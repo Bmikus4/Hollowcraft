@@ -208,6 +208,22 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
       "return ids.map(i=>({i, item:!!__hc.itemInfo(i)}));})()");
     T('every attachment seeded into loot is a real item', loot.every(x=>x.item), loot.filter(x=>!x.item));
 
+    // THROUGH THE REAL KEYBOARD, not the probe. Everything above drives attUIKey directly, which cannot catch the
+    // one thing the key handler owns: whether T reaches the screen at all, and whether it still reaches the console
+    // it used to open. Both are keydown-order questions, and only a real key event asks them.
+    await p.evaluate("__hc.hold('ar15'); __hc.attOpen(false); __hc.lock(true)"); await sleep(300);
+    await p.keyboard.press('KeyT'); await sleep(400);
+    const openedByKey=await p.evaluate("__hc.attProbe().ui");
+    await p.keyboard.press('KeyT'); await sleep(400);
+    const closedByKey=await p.evaluate("__hc.attProbe().ui");
+    await p.keyboard.press('Slash'); await sleep(400);
+    const consoleUp=await p.evaluate("(()=>{const e=document.getElementById('cmdline')||document.querySelector('#cmd,#console');"+
+      "return !!(e&&getComputedStyle(e).display!=='none');})()");
+    await p.keyboard.press('Escape'); await sleep(300);
+    console.log('keys', JSON.stringify({openedByKey, closedByKey, consoleUp}));
+    T('the T key itself opens the screen', openedByKey===true, {openedByKey});
+    T('T closes it again', closedByKey===false, {closedByKey});
+
     T('zero page errors', errs.length===0, errs.slice(0,2));
     console.log(fails? fails+' FAILURE(S)':'ALL PASS');
     await b.close();
