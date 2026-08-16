@@ -24,13 +24,13 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     if(M.err){ console.log('ERR '+M.err); return; }
     const A=M.atts;
     console.log(`\n${M.guns} guns, ${A.length} attachments, slots: ${M.slots.join(' ')}\n`);
-    console.log('gun                 modelled rail(auth) muzzle | '+A.map(a=>a.slice(0,6).padEnd(6)).join(' ')+' | n');
+    console.log('gun                 modelled rail(auth) muzzle forend | '+A.map(a=>a.slice(0,6).padEnd(6)).join(' ')+' | n');
     console.log('-'.repeat(150));
     for(const r of M.rows){
       console.log(r.gun.padEnd(20)+
         String(r.modelled?'yes':'NO').padEnd(9)+
         String(r.rail?(r.authoredRail?'yes(auth)':'yes(sight)'):'NO').padEnd(11)+
-        String(r.muzzle?'yes':'NO').padEnd(7)+'| '+
+        String(r.muzzle?'yes':'NO').padEnd(7)+String(r.forend.toFixed(2)+(r.authoredGrip?'*':' ')).padEnd(7)+'| '+
         A.map(a=>(r.fits[a]?'  Y   ':'  .   ')).join(' ')+' | '+r.n);
     }
     // The three summaries Ben asked for, as counts rather than an impression.
@@ -45,7 +45,10 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     // WITHIN REASON: the question is whether a revolver refuses a foregrip.
     const rev=M.rows.filter(r=>/revolver|snub|sawn|pistol|flare/.test(r.gun));
     console.log('\n  "within reason" spot check — should a pistol take an underbarrel foregrip?');
-    for(const r of rev) console.log(`    ${r.gun.padEnd(18)} foregrip ${r.fits.foregrip?'ACCEPTED':'refused'}   red_dot ${r.fits.red_dot?'accepted':'refused'}   suppressor ${r.fits.suppressor?'accepted':'refused'}`);
+    for(const r of rev) console.log(`    ${r.gun.padEnd(18)} forend ${r.forend.toFixed(2)}  foregrip ${r.fits.foregrip?'ACCEPTED':'refused'} ${r.why.foregrip?'('+r.why.foregrip+')':''}   red_dot ${r.fits.red_dot?'accepted':'refused'}   suppressor ${r.fits.suppressor?'accepted':'refused'}`);
+    const fe=M.rows.filter(r=>r.modelled).map(r=>({g:r.gun,f:r.forend})).sort((a,b)=>a.f-b.f);
+    console.log('\n  forend length, sorted — the threshold must sit in a GAP, not through a crowd:');
+    console.log('    '+fe.map(x=>x.g+' '+x.f.toFixed(2)).join('\n    '));
     fs.writeFileSync(path.join(ROOT,'bench','results','att-matrix.json'), JSON.stringify(M,null,1));
   }catch(e){ console.log('  ERROR: '+(e&&e.message||e)); }
   finally{ try{ if(browser) await browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }
