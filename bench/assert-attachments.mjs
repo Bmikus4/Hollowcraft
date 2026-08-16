@@ -289,6 +289,15 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     T('a thrown gun is picked up again', toss.picked===true, toss);
     T('and it still wears what was fitted to it', toss.after && toss.after.optic==='red_dot' && toss.after.muzzle==='suppressor', toss);
 
+    // A STORAGE CHEST. The bag lost attachments because it is written as a named field list; a chest stores whole
+    // stack objects and the co-op sync sends the whole array, so it should carry them — but the bag "should" have
+    // too, and did not.
+    await p.evaluate("__hc.hold('ar15')"); await sleep(400);
+    const chest=await p.evaluate("__hc.attChestTrip()");
+    console.log('chest', JSON.stringify(chest));
+    T('a chest keeps a gun through a save', chest.saved && chest.saved.optic==='holo_sight' && chest.saved.muzzle==='suppressor', chest);
+    T('and it keeps the gun identity with it', chest.uid!=null, chest);
+
     T('zero page errors', errs.length===0, errs.slice(0,2));
     console.log(fails? fails+' FAILURE(S)':'ALL PASS');
     await b.close();
