@@ -46,16 +46,30 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
       await sleep(2500); await page.evaluate(`__hc.setTime(0.25)`); await sleep(500);
       const f=path.join(OUT,`cdist-${tag}.png`); await page.screenshot({path:f});
       const buf=fs.readFileSync(f).toString('base64');
+      // THE CROP FINDS THE CANOPY INSTEAD OF ASSUMING IT. A fixed box measured sky at one distance and the inside of a
+      // trunk cluster at another in two earlier runs of this harness, and reported saturation off both. Here the sky's
+      // own mean is read from the top of the frame, each column is walked down to the first row clearly darker than it
+      // — the treeline edge — and the forty rows under that edge are the sample. It follows the stand down toward the
+      // horizon as the camera pulls back, which is the whole point of the comparison.
       const s=await page.evaluate(`(async()=>{ const im=new Image(); im.src='data:image/png;base64,${buf}';
         await im.decode(); const c=document.createElement('canvas'); c.width=im.width; c.height=im.height;
         const g=c.getContext('2d'); g.drawImage(im,0,0);
-        const d=g.getImageData(440,250,400,240).data; let sat=0,grn=0,lum=0,n=0;
-        for(let i=0;i<d.length;i+=4){ const r=d[i],gg=d[i+1],b=d[i+2];
-          const mx=Math.max(r,gg,b), mn=Math.min(r,gg,b);
-          sat += mx>0?(mx-mn)/mx:0; grn += gg-(r+b)/2; lum += 0.2126*r+0.7152*gg+0.0722*b; n++; }
-        return { sat:+(sat/n).toFixed(3), green:+(grn/n).toFixed(1), lum:+(lum/n).toFixed(1) }; })()`);
+        const W=im.width, H=im.height, d=g.getImageData(0,0,W,H).data;
+        const L=(i)=>0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2];
+        let sky=0,sn=0; for(let y=20;y<90;y++) for(let x=200;x<W-200;x+=3){ sky+=L((y*W+x)*4); sn++; }
+        sky/=sn;
+        let sat=0,grn=0,lum=0,n=0,cols=0;
+        for(let x=200;x<W-200;x+=2){
+          let edge=-1;
+          for(let y=100;y<H-120;y++){ if(L((y*W+x)*4) < sky-28){ edge=y; break; } }
+          if(edge<0) continue; cols++;
+          for(let y=edge+2;y<edge+42;y++){ const i=(y*W+x)*4, r=d[i],gg=d[i+1],b=d[i+2];
+            const mx=Math.max(r,gg,b), mn=Math.min(r,gg,b);
+            sat += mx>0?(mx-mn)/mx:0; grn += gg-(r+b)/2; lum += L(i); n++; } }
+        return { sat:+(sat/Math.max(1,n)).toFixed(3), green:+(grn/Math.max(1,n)).toFixed(1),
+                 lum:+(lum/Math.max(1,n)).toFixed(1), sky:+sky.toFixed(1), cols }; })()`);
       const fi=await page.evaluate(`__hc.fogInfo()`);
-      console.log(`    ${tag}  dist ${dist}  fogmul ${fogmul}   sat ${s.sat}  green ${s.green}  lum ${s.lum}   fogReach ${fi.reach.toFixed(0)} fogLum ${fi.colorLum.toFixed(3)}`);
+      console.log(`    ${tag}  dist ${dist}  fogmul ${fogmul}   sat ${s.sat}  green ${s.green}  lum ${s.lum}  sky ${s.sky} cols ${s.cols}   fogReach ${fi.reach.toFixed(0)} fogLum ${fi.colorLum.toFixed(3)}`);
       return s;
     };
     await shoot('near-60', 60, 1.0);
