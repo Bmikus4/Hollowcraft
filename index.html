@@ -5332,6 +5332,10 @@ const _cloudShadowTex = (()=>{
   t.magFilter=THREE.LinearFilter; t.generateMipmaps=true; t.needsUpdate=true; return t; })();
 // QA ONLY: when non-null this pins the shader clock (see where globalU.uTime is driven, and __hc.freezeT).
 let _pinT = null;
+// EYE ADAPTATION STATE. `cur` is the exposure being driven; lo/hi are the ends of the range that
+// bench/assert-daylight-black.mjs proves a black-pixel ceiling at, so adaptation cannot wander outside a measured
+// frame. on:false is the pre-feature build to the digit.
+const ADAPT={ on:true, cur:1.05, want:1.05, lo:0.92, hi:1.30, inT:2.2, outT:0.45 };
 const globalU = {
   uCloudTex:{ value:_cloudShadowTex },
   // Strength, set per frame in updateSky from the live cloud cover and the sun's own elevation. 0 disables the whole term, which
@@ -16640,6 +16644,27 @@ function loop(){ try{
   // are the last animated terms in the chain: with only the scene clock pinned, two frames that ought to be identical
   // still differed by about a level, which is the same order as the effects a harness is trying to measure. Pinning
   // one and not the other is what left assert-water-reflect's control at 0.9 instead of 0.
+  // ---- EYE ADAPTATION (Ben: eye adaptation plus a time-of-day grade) ----
+  // A PROXY FOR SCENE LUMINANCE, NOT A READBACK. Reading the frame back to average it is a pipeline stall every frame
+  // for a number that changes slowly, and this game already knows the two things that actually move a player's pupils:
+  // whether the sun is up, and whether they are under a roof. fogEnclosure() is the same 9-column sky test the fog
+  // uses (1 = a sealed room, 0 = open sky), so walking into a cave at noon is a real drop in delivered light and the
+  // eye follows it.
+  //   THE TWO SPEEDS ARE NOT THE SAME, because eyes are not. Coming into the dark takes seconds (rod adaptation);
+  // being blinded on the way out is instant, and a game that lags there feels broken rather than realistic. 1/2.2 s
+  // in, 1/0.45 s out.
+  //   CLAMPED INSIDE THE GUARD'S SWEEP. bench/assert-daylight-black.mjs proves the black-pixel ceiling at 0.80, 1.05
+  // and 1.35, so adaptation may not leave that range — adaptation is exactly the control that can manufacture the
+  // crushed pixels Ben's precondition forbids, and this is what keeps it provable.
+  if(typeof ADAPT!=='undefined' && ADAPT.on && !player.dead){
+    const encl=(typeof fogEnclosure==='function')?clamp(fogEnclosure(),0,1):0;
+    const dayF=globalU.uDay.value;
+    const dark=Math.max(1-dayF, encl*0.85);                      // night, or a roof, or both
+    const want=clamp(ADAPT.lo + (ADAPT.hi-ADAPT.lo)*dark, ADAPT.lo, ADAPT.hi);
+    const k=1-Math.exp(-dt/((want>ADAPT.cur)?ADAPT.inT:ADAPT.outT));
+    ADAPT.cur += (want-ADAPT.cur)*k; ADAPT.want=want;
+    if(!weather.flash) renderer.toneMappingExposure=+ADAPT.cur.toFixed(4);
+  }
   if(gradePass){ gradePass.uniforms.uTime.value=(_pinT!=null)?_pinT:clock.elapsedTime; gradePass.uniforms.uDark.value=1-globalU.uDay.value; gradePass.uniforms.uWhiteVoid.value=(typeof VOID!=='undefined'&&VOID.on)?(VOID.whiteout==null?1:VOID.whiteout):0; }   // grain+vignette rise as it darkens; PURE white glow on the initial void switch, then FADES to standard as the fractal zooms in (VOID.whiteout ramp)
   // THE OCCLUSION RADIUS IS A WORLD SIZE, so its pixel size has to be re-derived whenever the projection changes.
   // Per frame rather than on a resize event: camera.fov is animated by aiming down sights, so a resize hook would
@@ -37027,6 +37052,15 @@ window.__hc={
       if(o&&o.amt!=null) u.uDayToe.value=Math.max(0,Math.min(0.9,+o.amt));
       if(o&&o.knee!=null) u.uDayKnee.value=Math.max(0.02,Math.min(0.9,+o.knee));
       return { amt:+u.uDayToe.value.toFixed(3), knee:+u.uDayKnee.value.toFixed(3) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // EYE ADAPTATION, as a dial and a readout. `want` is where the eye is heading, `cur` where it is — the two differ
+  // for exactly as long as the adaptation takes, which is the thing to look at when it feels wrong.
+  adapt(o){ try{ if(o){ for(const k of ['on','lo','hi','inT','outT']) if(o[k]!=null) ADAPT[k]=(k==='on')?!!o[k]:+o[k];
+        if(o.on===false) renderer.toneMappingExposure=1.05; }
+      return { on:ADAPT.on, cur:+ADAPT.cur.toFixed(3), want:+ADAPT.want.toFixed(3), lo:ADAPT.lo, hi:ADAPT.hi,
+               inT:ADAPT.inT, outT:ADAPT.outT, exposure:+renderer.toneMappingExposure.toFixed(3),
+               enclosed:(typeof fogEnclosure==='function')?+fogEnclosure().toFixed(2):null,
+               day:+globalU.uDay.value.toFixed(2) }; }
     catch(e){ return {err:String(e.message||e)}; } },
   // THE FRAME'S EXPOSURE, as a dial. The daylight black guard has to run at BOTH ends of whatever range eye
   // adaptation will move this through, not only at the shipped 1.05: adaptation can manufacture exactly the crushed
