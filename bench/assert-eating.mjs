@@ -69,7 +69,10 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     const cancels=[
       ['changing slot',    `__hc.sel&&__hc.sel(3)`],
       ['taking damage',    `__hc.hurt?__hc.hurt(1):(typeof damage==='function'&&damage(1,'bench'))`],
-      ['dying',            `__hc.kill&&__hc.kill()`],
+      // __hc.kill does not exist, and a missing hook inside a .catch() is a check that silently measures nothing:
+      // the first version of this row reported "dying does not end the meal" when nothing had died. hurt() with a
+      // fatal number goes through the same damage path the game uses.
+      ['dying',            `__hc.hurt(999)`],
     ];
     for(const [name,js] of cancels){
       await page.evaluate(`(()=>{ try{ __hc.cmdRun('/gamemode survival'); }catch(e){} })()`);
