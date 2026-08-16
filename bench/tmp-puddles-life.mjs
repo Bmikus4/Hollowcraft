@@ -90,6 +90,26 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     check('the puddle update threw nothing', !filled.err, String(filled.err));
     check('sites were found in the ground here', filled.sites>0, `sites ${filled.sites}`);
     check('rain filled them and they DREW', filled.drawn>0, `drawn ${filled.drawn} quads, meanFill ${filled.meanFill}`);
+    // ARE THEY VISIBLE? Counters cannot answer this and neither can a screenshot whose vantage keeps landing in a
+    // birch wood. Twenty quads drew for weeks while every puddle rendered 0.94 of a block underground, and the numbers
+    // were identical to the numbers now. So: toggle them against themselves and read a fixed crop, on/off/on, exactly
+    // as the motes were settled. A change under the drift floor means the player cannot see them, whatever drew.
+    let _pn=0;
+    const crop=async(tag)=>{ await sleep(700);
+      const p=path.join(OUT,'pud-'+tag+'-'+(_pn++)+'.png'); await page.screenshot({path:p});
+      const b64=fs.readFileSync(p).toString('base64');
+      return await page.evaluate(`(async()=>{ const im=new Image(); im.src='data:image/png;base64,${b64}';
+        await im.decode(); const c=document.createElement('canvas'); c.width=im.width; c.height=im.height;
+        const g=c.getContext('2d'); g.drawImage(im,0,0); const d=g.getImageData(200,360,880,340).data;
+        let s=0,n=0; for(let i=0;i<d.length;i+=4){ s+=0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2]; n++; }
+        return +(s/n).toFixed(3); })()`); };
+    const v1=await crop('on'); await page.evaluate(`__hc.puddles(0)`);
+    const v0=await crop('off'); await page.evaluate(`__hc.puddles(1)`);
+    const v2=await crop('on2');
+    const vDrift=Math.abs(v2-v1), vChange=Math.abs(((v1+v2)/2)-v0);
+    console.log(`  VISIBLE  ground crop on ${v1}  off ${v0}  on-again ${v2}   change ${vChange.toFixed(3)}  drift ${vDrift.toFixed(3)}`);
+    check('the puddles change the ground you are looking at', vChange>Math.max(0.05,vDrift), `change ${vChange.toFixed(3)} vs drift ${vDrift.toFixed(3)}`);
+
     const f1=path.join(OUT,'puddles-wet.png'); await page.screenshot({path:f1}); console.log('   ->',path.basename(f1));
     // Everything past this point is about WET ground. Measuring a cost or a dry with nothing drawn is how the first
     // run of this bench produced four confident numbers and a passing drying curve out of an empty field.
