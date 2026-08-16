@@ -64,7 +64,21 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     }
     if(!found){ console.log('\n  NO GROUND HERE HOLDS WATER - refusing to report a cost or a drying curve for puddles that do not exist.'); process.exit(1); }
     for(let i=0;i<40;i++){ const f=await page.evaluate(`__hc.fill()`); if(f&&f.meshed>=f.want) break; await sleep(400); }
-    await page.evaluate(`__hc.cam({yaw:0.7, pitch:-0.55}); __hc.pinScene();`);
+
+    // ---- TAKE THE VANTAGE BEFORE A DROP FALLS, and do not move again ----
+    // THE SCAN IS KEYED TO THE PLAYER. _pudSiteScan rebuilds the site list whenever he has moved sixteen blocks, so
+    // filling the puddles and THEN walking to a camera position throws the filled sites away and replaces them with
+    // dry ones around the new spot. That is exactly what the previous run did: it filled five sites, teleported to
+    // photograph them, and then priced the pass and timed a 90-second dry against a set that had just been reseeded to
+    // zero - a drying curve that read 0.000 at every sample because nothing had ever been wet at that position.
+    // Standing off the puddle also has to happen here rather than later: teleporting onto a site's own column buried
+    // the eye inside a birch trunk once already.
+    const seed=(found.at&&found.at[0])||null;
+    if(seed){ await page.evaluate(`__hc.tpAt(${seed.x}+6.5, ${seed.y}+5, ${seed.z}+6.5)`); await sleep(1500);
+      await page.evaluate(`__hc.cam({yaw:${Math.atan2(-6.5,-6.5)}, pitch:-0.62}); __hc.pinScene();`); await sleep(1200); }
+    const here=await page.evaluate(`__hc.puddles()`);
+    console.log(`  vantage at the seed site ${seed?seed.x+','+seed.y+','+seed.z:'(none)'}  -> ${here.sites} sites in range from here`);
+    if(!(here.sites>0)){ console.log('\n  THE VANTAGE HAS NO SITES IN RANGE - refusing to measure puddles the camera cannot see.'); process.exit(1); }
 
     // ---- FILL ----
     await page.evaluate(`__hc.cmdRun('/weather storm 1')`);
@@ -76,14 +90,6 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     check('the puddle update threw nothing', !filled.err, String(filled.err));
     check('sites were found in the ground here', filled.sites>0, `sites ${filled.sites}`);
     check('rain filled them and they DREW', filled.drawn>0, `drawn ${filled.drawn} quads, meanFill ${filled.meanFill}`);
-    // STAND OFF THE PUDDLE AND LOOK AT IT. Teleporting to the site's own column put the eye inside a birch trunk and
-    // the frame that was supposed to judge wet ground was half bark - and the cost windows were then measured on that
-    // frame. Back off six blocks, get above it, and aim down at the wettest one.
-    const wet=filled.at&&filled.at[0];
-    if(wet){ await page.evaluate(`__hc.tpAt(${wet.x}+6.5, ${wet.y}+5, ${wet.z}+6.5)`); await sleep(900);
-      const yaw=Math.atan2(-(6.5),-(6.5));
-      await page.evaluate(`__hc.cam({yaw:${yaw}, pitch:-0.62}); __hc.pinScene();`); await sleep(1200);
-      console.log(`  vantage 6 blocks off and 5 up from the wettest site at ${wet.x},${wet.y},${wet.z} (fill ${wet.fill})`); }
     const f1=path.join(OUT,'puddles-wet.png'); await page.screenshot({path:f1}); console.log('   ->',path.basename(f1));
     // Everything past this point is about WET ground. Measuring a cost or a dry with nothing drawn is how the first
     // run of this bench produced four confident numbers and a passing drying curve out of an empty field.
