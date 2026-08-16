@@ -21904,13 +21904,30 @@ function gridIconURL(id){ const it=ITEMS[id];
   return iconURL(id); }
 const _dropGeo=new THREE.BoxGeometry(0.26,0.26,0.26);
 function spawnDrop(id,n,x,y,z,delay,did,st){ if(!ITEMS[id])return; n=n||1;
-  const m=itemModel(id); m.scale.multiplyScalar((ITEMS[id]&&ITEMS[id].gun)?1.5:0.5); m.traverse(o=>{ if(o.isMesh)o.castShadow=true; }); dropGroup.add(m);   // drops render as their actual 3D model; guns (rifle) drop at 3x the normal drop scale so they read as a real weapon on the ground
+  const _mdl=itemModel(id); _mdl.scale.multiplyScalar((ITEMS[id]&&ITEMS[id].gun)?1.5:0.5); _mdl.traverse(o=>{ if(o.isMesh)o.castShadow=true; });   // drops render as their actual 3D model; guns (rifle) drop at 3x the normal drop scale so they read as a real weapon on the ground
+  // ---- A DROP IS A RIGID BODY, SO ITS ORIGIN HAS TO BE ITS CENTRE (Ben 08-16: "I want items to drop as actual
+  // physics objects in the world ... they should have collisions") ----
+  // itemModel returns whatever origin each builder chose — a gun's is its grip, a block's is a corner — and a body
+  // whose origin is not its centre cannot rest ON a surface or be picked against its own volume: every rotation
+  // swings it out of its own collider. So the model is re-hung inside a pivot at the centre of its VISIBLE box, and
+  // from here `d.x/y/z` IS the collider centre and `d.half` its half extents.
+  // _visBox rather than Box3.setFromObject, for the reason that function records: every gun carries a hidden
+  // muzzle-flash quad, and counting it gives the AR-15 a 0.44-wide box around a gun 0.06 wide.
+  const m=new THREE.Group(); m.add(_mdl);
+  { const bb=_visBox(_mdl), sz=bb.getSize(new THREE.Vector3()), c=bb.getCenter(new THREE.Vector3());
+    _mdl.position.sub(c);
+    var _half={ x:Math.max(0.045,sz.x/2), y:Math.max(0.045,sz.y/2), z:Math.max(0.045,sz.z/2) }; }   // a floor of 4.5 cm: a flat card has no thickness to collide with or to pick against
+  dropGroup.add(m);
   const a=Math.random()*6.283;   // pop out of the block with a little random impulse
   // THE STATE TRAVELS WITH THE DROP. A gun on the floor is a specific gun — its brand, its attachments, its
   // loaded magazine — and a teammate who picks it up gets the stack THEIR client builds. Broadcasting only the
   // item id means the rifle you threw across the room arrives in their hands stripped.
   if(did==null && NET.on){ did=netDropSeq(); netDrop(did,id,n,x,y,z,delay,st); }                                          // co-op: give it a shared id + broadcast (unless this IS a remote drop)
-  const d={mesh:m,x,y,z,vx:Math.cos(a)*1.5,vy:2.2+Math.random()*1.4,vz:Math.sin(a)*1.5,age:0,rest:false,id,n,delay:(delay==null?0.5:delay),did:did||0};
+  const d={mesh:m,x,y,z,vx:Math.cos(a)*1.5,vy:2.2+Math.random()*1.4,vz:Math.sin(a)*1.5,age:0,rest:false,id,n,delay:(delay==null?0.5:delay),did:did||0,
+    half:_half, quat:new THREE.Quaternion(), av:new THREE.Vector3((Math.random()-0.5)*7,(Math.random()-0.5)*7,(Math.random()-0.5)*7)};
+  // A TUMBLE, NOT A SPIN. The old drop turned on y forever at a constant rate, which is what "little floating items"
+  // means; this one is thrown with a real angular velocity that drag and the first contact take out of it.
+  d.quat.setFromEuler(new THREE.Euler(Math.random()*6.283,Math.random()*6.283,Math.random()*6.283));
   const bl=(ITEMS[id].block!=null)?blockLight[ITEMS[id].block]:0;                                                            // a dropped torch/lantern/candle still glows on the ground
   if(bl>0){ d.glow=bl; }   // glow via the shared glowPool (a PointLight per dropped torch recompiled every lit material AND stacked unbounded fragment cost)
   // Whatever the stack was carrying rides the drop itself, on the client that threw it AND on every client that
@@ -21918,14 +21935,77 @@ function spawnDrop(id,n,x,y,z,delay,did,st){ if(!ITEMS[id])return; n=n||1;
   if(st){ if(st.uid!=null)d.uid=st.uid; if(st.att)d.att=Object.assign({},st.att); if(st.mag!=null)d.mag=st.mag; }
   drops.push(d);
   if(drops.length>200){ const o=drops.shift(); dropGroup.remove(o.mesh); _disposeView(o.mesh); } }
+// ---- A DROPPED ITEM AS A RIGID BODY ----
+// Ben, 08-16: "they should have collisions ... I dont want them to just drop as little floating items."
+//
+// AN ORIENTED BOX AGAINST THE VOXEL GRID, not a physics engine. The whole problem is one box against axis-aligned
+// cells, which is the case where a general solver buys nothing: the world extent of an OBB on any world axis is
+// |R|·h — three dot products — so the swept test, the resolution and the resting height are all the same three
+// numbers. An engine would also want a fixed timestep and a broadphase for objects that spend 99% of their life
+// asleep on the floor.
+//
+// THE THREE THINGS THAT MAKE IT READ AS A REAL OBJECT, in the order they matter:
+//   · it rests ON the surface. The resting height is the box's own extent at its own settled orientation, so a
+//     rifle lying flat sits lower than one propped on its magazine, and neither is sunk into the block.
+//   · it settles at an orientation. An item that lands keeps tumbling until friction takes it, then SNAPS to the
+//     nearest lie — the nearest 90° in pitch and roll, free yaw — because a dropped object comes to rest on a face
+//     and a box that stops at 37° of roll reads as a stuck animation rather than as a thing on the ground.
+//   · it does not spin forever. That was the old look and it is the thing Ben named.
+const _dq=new THREE.Quaternion(), _dm=new THREE.Matrix4(), _de=new THREE.Euler();
+function _dropExt(d,ax){                                   // the box's half-extent along one WORLD axis
+  const e=_dm.elements, h=d.half;                          // column-major: e[ax], e[4+ax], e[8+ax] is the row for that axis
+  return Math.abs(e[ax])*h.x + Math.abs(e[4+ax])*h.y + Math.abs(e[8+ax])*h.z; }
+function _dropSolid(x,y,z){ const b=Math.floor(y); if(b<0) return true; return solidAt(Math.floor(x),b,Math.floor(z)); }
+// Overlap of the box's world-AABB with the grid, resolved one axis at a time against the axis it moved on. Corner
+// sampling rather than an exact OBB-vs-cell test: at these sizes the box spans one or two cells, so the corners plus
+// the face centres are the surface, and an exact test would cost more than the artefact it removes.
+function _dropHit(d,ex,ey,ez){
+  for(let sx=-1;sx<=1;sx++) for(let sy=-1;sy<=1;sy++) for(let sz=-1;sz<=1;sz++){
+    if(!sx&&!sy&&!sz) continue;
+    if(_dropSolid(d.x+sx*ex, d.y+sy*ey, d.z+sz*ez)) return true; }
+  return false; }
+function _dropStep(d,dt){
+  if(dt>0.05) dt=0.05;                                     // a long frame must not tunnel a body through a floor
+  d.vy-=18*dt;                                             // heavier than the old 14: a dropped object falls, it does not float down
+  _dm.makeRotationFromQuaternion(d.quat);
+  const ex=_dropExt(d,0), ey=_dropExt(d,1), ez=_dropExt(d,2);
+  // ONE AXIS AT A TIME, each resolved against the movement that caused it. Resolving all three from one overlap
+  // test is what makes a body slide along a wall it should have stopped against.
+  const px=d.x, py=d.y, pz=d.z;
+  d.x+=d.vx*dt; if(_dropHit(d,ex,ey,ez)){ d.x=px; d.vx*=-0.28; d.av.multiplyScalar(0.6); }
+  d.z+=d.vz*dt; if(_dropHit(d,ex,ey,ez)){ d.z=pz; d.vz*=-0.28; d.av.multiplyScalar(0.6); }
+  d.y+=d.vy*dt;
+  let landed=false;
+  if(_dropHit(d,ex,ey,ez)){
+    d.y=py;
+    if(d.vy<0){                                            // came down onto something: sit exactly on top of it
+      const by=Math.floor(d.y-ey);
+      d.y=(by<0?0:by+1)+ey;
+      d.vy*=-0.22; if(Math.abs(d.vy)<1.2) d.vy=0;          // one small bounce, then it stays down
+      d.vx*=0.55; d.vz*=0.55; d.av.multiplyScalar(0.45); landed=true;
+    } else d.vy=0;                                         // clipped a ceiling on the way up
+  }
+  d.vx*=Math.pow(0.12,dt); d.vz*=Math.pow(0.12,dt);        // air/ground drag, frame-rate independent
+  d.av.multiplyScalar(Math.pow(landed?0.02:0.35,dt));
+  if(d.av.lengthSq()>1e-6){                                // integrate the tumble
+    const w=d.av.length(); _dq.setFromAxisAngle(_dtmp.copy(d.av).multiplyScalar(1/w), w*dt); d.quat.premultiply(_dq).normalize(); }
+  // ASLEEP, AND THEN IT SNAPS TO A LIE. The settle test is on the body's own motion, not on a timer, so a rifle
+  // still rolling down a slope is not declared at rest because half a second passed.
+  if(landed && Math.abs(d.vy)<0.05 && Math.hypot(d.vx,d.vz)<0.12 && d.av.length()<0.9){
+    _de.setFromQuaternion(d.quat,'YXZ');                   // YAW FIRST so the snap can leave it alone: which way an
+    const q=Math.PI/2;                                     // object came to rest facing is not something to quantise
+    _de.x=Math.round(_de.x/q)*q; _de.z=Math.round(_de.z/q)*q;
+    d.quat.setFromEuler(_de);
+    _dm.makeRotationFromQuaternion(d.quat);
+    d.y=Math.floor(d.y-_dropExt(d,1)+0.001)+1+_dropExt(d,1);   // re-seat: the snapped lie has a different height
+    d.rest=true; d.vx=d.vy=d.vz=0; d.av.set(0,0,0);
+    if(typeof _dropRested==='function') _dropRested(d); }
+  if(d.y<-8){ d.rest=true; d.vy=0; }                       // fell out of the world — do not simulate it forever
+}
+const _dtmp=new THREE.Vector3();
 function removeDropById(did){ for(let i=drops.length-1;i>=0;i--){ if(drops[i].did===did){ const o=drops[i]; dropGroup.remove(o.mesh); _disposeView(o.mesh); drops.splice(i,1); } } }
 function updateDrops(dt){ for(let i=drops.length-1;i>=0;i--){ const d=drops[i]; d.age+=dt;
-    if(!d.rest){ d.vy-=14*dt; d.x+=d.vx*dt; d.y+=d.vy*dt; d.z+=d.vz*dt; d.vx*=0.86; d.vz*=0.86;
-      // rest on the FIRST solid block directly beneath the item — NOT groundYAt (that returns the topmost
-      // SURFACE height, which teleported anything mined in a cave/mine straight up to the surface). Local floor works at any depth.
-      const bx=Math.floor(d.x), bz=Math.floor(d.z), by=Math.floor(d.y-0.14);
-      if(by<=0){ d.y=1.13; d.rest=true; d.vy=0; }
-      else if(solidAt(bx,by,bz)){ d.y=by+1+0.13; d.rest=true; d.vy=0; } }
+    if(!d.rest) _dropStep(d,dt);
     // DROPS OF THE SAME THING MERGE (Ben's backlog item 30: "dropped stackable items merge when close together"). Mining a seam or
     // emptying a chest leaves a heap of separate entities on one block, each with its own mesh, its own bob and its own pickup — and
     // the drop list is capped at 200, so a big heap silently shifts older drops out of the world.
@@ -21949,8 +22029,10 @@ function updateDrops(dt){ for(let i=drops.length-1;i>=0;i--){ const d=drops[i]; 
           dropGroup.remove(d.mesh); _disposeView(d.mesh); drops.splice(i,1); }
         break; }
       if(d.n<=0) continue; }
-    const bob=d.rest?Math.sin((clock.elapsedTime+i)*2)*0.06:0;
-    d.mesh.position.set(d.x,d.y+bob,d.z); d.mesh.rotation.y+=dt*1.6;                          // hover-bob + slow spin
+    // NO BOB AND NO SPIN. A settled item lies where it landed at the angle it landed — that is the whole of Ben's
+    // "I dont want them to just drop as little floating items", and a hover-bob is the one thing that cannot be
+    // true of an object with a collider resting on a surface.
+    d.mesh.position.set(d.x,d.y,d.z); d.mesh.quaternion.copy(d.quat);
     if(d.glow) glowCand(d.x, d.y+0.25, d.z, d.glow>=15?15:10, 9, d.glow>=15?0xffe6b4:0xffb060);   // dropped light source glows (pooled)
     const pdx=player.pos.x-d.x, pdy=(player.pos.y+0.8)-d.y, pdz=player.pos.z-d.z, pd=Math.hypot(pdx,pdy,pdz);
     if(d.age>d.delay && pd<1.6){ if(pd>0.45){ const s=Math.min(1,dt*9); d.x+=pdx*s; d.y+=pdy*s; d.z+=pdz*s; }   // magnet toward player (after its pickup delay)
@@ -32545,7 +32627,10 @@ function updateMotes(){
     _moteMat=new THREE.ShaderMaterial({
       // THE SHARED OBJECTS. Not copies of the values - the same {value:...} the pass reads, by reference.
       uniforms:{ uVLPos:u.uVLPos, uVLCol:u.uVLCol, uVLI:u.uVLI, uCamPos:u.uCamPos,
-                 uGain:{value:2.6}, uSize:{value:2.4}, uT:{value:0} },
+                 // 2.6 doubled the luminance of a lit dungeon crop (15.2 to 35.8). Dust you notice instead of the room
+                 // is set dressing that has taken over the shot; the gain is set so the beam still reads as the light
+                 // and the motes as what is floating in it.
+                 uGain:{value:1.0}, uSize:{value:2.4}, uT:{value:0} },
       transparent:true, depthWrite:false, blending:THREE.AdditiveBlending, fog:false,
       vertexShader:[
       'uniform vec3 uVLPos[3]; uniform vec3 uVLCol[3]; uniform float uVLI[3]; uniform vec3 uCamPos;',
@@ -32559,16 +32644,27 @@ function updateMotes(){
       '  vec3 acc=vec3(0.0);',
       '  for(int l=0;l<3;l++){',
       '    if(uVLI[l]<=0.0) continue;',
-      '    vec3 dl=uVLPos[l]-position; float d2=dot(dl,dl)+0.25;',
+      // A PARTICLE NEEDS MORE SOFTENING THAN A RAY SAMPLE DOES. The pass uses 0.25 because a march takes many samples
+      // along a ray and one of them landing next to the lamp is averaged away by the others. A mote is a single sample
+      // with a sprite attached, so at a tenth of a block from a lantern 1/(d2+0.25) is four times the intensity at the
+      // lamp itself and the speck flares. Measured: with 0.25 two readings of the same lit room came out 35.8 and 20.5,
+      // a 15-level disagreement caused entirely by which motes happened to be drifting near the light that frame -
+      // which is a flicker you would see, not merely a bench that will not settle.
+      '    vec3 dl=uVLPos[l]-position; float d2=dot(dl,dl)+1.0;',
       '    float ph=0.65+0.35*max(0.0, dot(eye, dl*inversesqrt(d2)));',
       '    acc+=uVLCol[l]*(uVLI[l]/d2)*ph;',
       '  }',
       // A slow twinkle per particle, because real dust turns as it falls and catches the light in flashes. It is a
       // modulation of the light term, never an addition to it - a mote outside every beam stays exactly black.
       '  acc*=uGain*(0.72+0.28*sin(uT*1.7+aSeed*31.4));',
-      '  vLit=min(acc, vec3(1.6));',
+      '  vLit=min(acc, vec3(0.7));',   // dust catches the light; it is not a light. The clamp is what stops a near mote reading as a spark.
       '  gl_Position=projectionMatrix*mv;',
-      '  gl_PointSize=uSize*(1.0+2.0/max(1.0,dcam))*(300.0/max(1.0,-mv.z));',
+      // CLAMPED, and the clamp is the whole difference between dust and bokeh. Perspective point size has no upper
+      // bound, so a mote a block from the eye was drawn as a 300 px disc: the first frame of this was soft orange
+      // circles the size of a fist floating over the shot, which reads as a dirty lens, not as air. Dust is a speck -
+      // a few pixels at arm's length and one pixel across the room - and the near ones are held down by the ceiling
+      // rather than faded out, because a mote that fades as it approaches is a mote that vanishes when you walk into it.
+      '  gl_PointSize=clamp(uSize*(240.0/max(1.0,-mv.z)), 1.0, 5.0);',
       '}'].join('\n'),
       fragmentShader:[
       'precision mediump float; varying vec3 vLit;',
