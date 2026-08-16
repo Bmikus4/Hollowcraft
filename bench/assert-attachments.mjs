@@ -246,6 +246,15 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     console.log('att icons', JSON.stringify(box));
     T('each attachment item has a real model', box.every(b=>b.parts&&b.parts.length>0&&Math.max.apply(null,b.box)>0.05), box);
 
+    // A BOLTED-ON SCOPE MAGNIFIES LESS THAN A SNIPER'S. The zoom value is saved once and shared between them, so
+    // the floor has to hold at the render as well as at the scroll wheel.
+    const zoom=await p.evaluate("(()=>{__hc.hold('hunting_rifle'); __hc.scopeZoom(-20); const bolt=__hc.scopeState().scopeFov;"+
+      "__hc.hold('ar15'); __hc.attFit('optic','optic_scope'); const fitted=__hc.scopeState().scopeFov;"+
+      "__hc.attFit('optic',null); return {bolt, fitted};})()");
+    console.log('zoom', JSON.stringify(zoom));
+    T('the sniper still reaches its own ceiling', zoom.bolt<=1.5, zoom);
+    T('a fitted scope is capped below it', zoom.fitted>=4.0, zoom);
+
     T('zero page errors', errs.length===0, errs.slice(0,2));
     console.log(fails? fails+' FAILURE(S)':'ALL PASS');
     await b.close();
