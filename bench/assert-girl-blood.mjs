@@ -51,7 +51,7 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     T('the surface snap hit her skin', w.snap && w.snap.hit===true, w.snap);
     T('the snap read her POSED skin (skinned mesh)', !!(w.snap&&w.snap.skinned), w.snap);
     T('every mark lies ON her skin', w.offSkin===0, {offSkin:w.offSkin, gaps:w.wounds.filter(x=>x.kind==='mark').map(x=>x.gap)});
-    T('no mark is a crater — under 32 cm on a 13.5-block body', w.maxW>0 && w.maxW<=0.32, {maxW:w.maxW});
+    T('marks are Ben 2.5x size — 60-80 cm on a 13.5-block body', w.maxW>=0.55 && w.maxW<=0.80, {maxW:w.maxW});
     T('the hole has a dark backing quad', w.marks>=PARTS.length*2, {marks:w.marks});
     T('the drips lie on her too', w.offSkinAll===0, {offSkinAll:w.offSkinAll, drips:w.wounds.filter(x=>x.kind==='drip').map(x=>x.gap)});
 
