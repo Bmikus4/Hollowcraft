@@ -56,6 +56,16 @@ async function boot(b, base, tag){
         T('her rig is being posed on the guest, not standing in bind pose', moved>0.02, {moved:+moved.toFixed(3)});
       } else console.log('note: girlTrace unavailable on the guest, rig motion not asserted');
     }
+    // A GUEST'S BULLETS HAVE TO REACH HER. Her HP is the owner's number, so a guest that subtracts locally watches
+    // the wound heal on the next tick — the shot has to be sent to whoever owns her.
+    const hp0=(await A.evaluate("__hc.girlState()")).hp;
+    await B.evaluate("__hc.girlShoot('spine.003',4)"); await sleep(1200);
+    const hp1=(await A.evaluate("__hc.girlState()")).hp;
+    const hpG=(await B.evaluate("__hc.girlState()")).hp;
+    console.log('hp host', hp0, '->', hp1, ' guest sees', hpG);
+    T('a guest shot takes health off her on the owner', hp1 < hp0, {before:hp0, after:hp1});
+    T('and the guest is shown the same health', Math.abs(hpG-hp1) <= 60, {guest:hpG, host:hp1});
+
     // AND SHE DIES FOR EVERYONE. The host kills her; the guest must take the same state, not keep walking a corpse.
     await A.evaluate("__hc.girlShoot('Head',30)"); await sleep(3000);
     const a2=await A.evaluate("__hc.girlState()"), g2=await B.evaluate("__hc.girlState()");
