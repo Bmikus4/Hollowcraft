@@ -37,6 +37,13 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
       T(id+': the magazine travels during the reload', r.magTravel>0.02, {travel:r.magTravel});
       T(id+': it comes back to where it started', r.magReturn<0.005, {off:r.magReturn});
     }
+    // AND THE REVOLVER'S DRUM. Its cylinder numbers were measured for the loaded chambers already, so the carve is
+    // those same bounds — the reload swings it out on the crane rather than sliding the whole gun sideways.
+    const rev=await p.evaluate("__hc.reloadParts('revolver')");
+    console.log('revolver', JSON.stringify(rev));
+    T('the revolver has a carved cylinder', rev.cyl===true, rev);
+    T('the cylinder swings out during the reload', rev.cylTravel>0.02, {travel:rev.cylTravel});
+
     T('zero page errors', errs.length===0, errs.slice(0,2));
     console.log(fails? fails+' FAILURE(S)':'ALL PASS');
     await b.close();

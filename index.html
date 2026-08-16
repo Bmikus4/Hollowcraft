@@ -6819,27 +6819,40 @@ function _openH(wx,wz){
   return Math.min(elev, CFG.SEA+34);                // a coast, not a range
 }
 let _cpLastX=1e9, _cpLastZ=1e9, _cpLastRD=-1; let _cpMs=0;
+// The scheduled rebuild: which bands are still owed, and the ORIGIN they are all owed from. Sampling a band from the
+// live camera two frames after the rebuild was scheduled would put three rows of one mask at three different places.
+let _cpPend=[], _cpOx=0, _cpOz=0, _cpOWall=160;
 function _coastPineMask(){
   const px=camera.position.x, pz=camera.position.z, wall=CFG.RENDER_DIST*CK;
   // Recomputed on MOVEMENT, not on a schedule: the mask is a function of where you stand and how far you see, and at
-  // the horizon 24 blocks of parallax is under a pixel. 192 azimuths x 3 bands x 6 samples is ~3500 heightfield calls —
-  // a few milliseconds once every couple of hundred blocks, and a stutter every frame.
-  if(Math.abs(px-_cpLastX)+Math.abs(pz-_cpLastZ) < 24 && CFG.RENDER_DIST===_cpLastRD) return;
-  _cpLastX=px; _cpLastZ=pz; _cpLastRD=CFG.RENDER_DIST;
+  // the horizon 24 blocks of parallax is under a pixel.
+  // AND ONE BAND PER FRAME, WHICH IS THE DIFFERENCE BETWEEN A COST AND A HITCH. Whole, this is 384 azimuths x 3 bands
+  // x 6 heightfield samples plus a five-tap blur, and it measured 5.84 / 6.27 / 7.00 ms (min/median/max over ten forced
+  // builds, bench/tmp-pines-cost.mjs) — about one whole frame of a 140 fps budget, landing on the frame you happen to
+  // cross 24 blocks. Split across three frames it is a third of that and nothing is dropped: the bands are sampled from
+  // the origin recorded when the rebuild was SCHEDULED, not from wherever the camera has walked to by the frame a band
+  // comes up, so the three rows still describe one place. Two frames of lag on a backdrop at four render walls is
+  // invisible; a 7 ms stall while walking is not.
+  if(!_cpPend.length){
+    if(Math.abs(px-_cpLastX)+Math.abs(pz-_cpLastZ) < 24 && CFG.RENDER_DIST===_cpLastRD) return;
+    _cpLastX=px; _cpLastZ=pz; _cpLastRD=CFG.RENDER_DIST;
+    _cpOx=px; _cpOz=pz; _cpOWall=wall;
+    _cpPend=[0,1,2];
+  }
   const _cpT0=performance.now();
   const SEA=CFG.SEA;
-  for(let b=0;b<3;b++){
+  { const b=_cpPend.shift();
     // THE RADIAL WINDOW IS SHORT, AND THAT IS WHAT MAKES A COASTLINE. At d0*0.16 the six samples of the far band spanned
     // seven hundred blocks of radius, so each azimuth averaged a different swath of continent and neighbouring cells had
     // nothing to do with each other: the horizon came out as isolated pale columns one mask cell wide, standing alone
     // (bench/results/cp-shore-noon.png, before). A fixed 22-block step samples a BAND at that distance, so adjacent
     // azimuths see the same headland and the silhouette is continuous.
-    const d0=wall*_CP_BAND[b], step=(b===0?26:22);
+    const d0=_cpOWall*_CP_BAND[b], step=(b===0?26:22);
     for(let i=0;i<_CPN;i++){
       const az=(i/_CPN)*6.2831853-3.14159265, dx=Math.cos(az), dz=Math.sin(az);
       let forest=0, hSum=0, hN=0;
       for(let k=0;k<6;k++){
-        const r=d0-step*1.5+step*k, x=px+dx*r, z=pz+dz*r;
+        const r=d0-step*1.5+step*k, x=_cpOx+dx*r, z=_cpOz+dz*r;
         // The NEAR band reads the REAL island, so the backdrop lines up with the forest whose edge you can actually see
         // at the wall; the far bands read the open continent, which is the coast that is supposed to be out past
         // everything. The same tree-capability gate isGrassSurface applies to real pines: above the beach, below the
@@ -22239,6 +22252,11 @@ function buildGlbGun(key,dot,suppressed,att){
   // mag out of the one-piece mesh. magRange is the placement pass's own landmark for it; it is widened by 0.05 in x
   // because the derived range is the widest SLAB it found and a real magazine has a floorplate wider than its body,
   // and it takes everything BELOW the receiver line so the box catches the whole thing and no receiver metal.
+  // THE CYLINDER, for the same reason: the revolver's reload swings a crane out and spins a drum that was welded
+  // into the frame. The three numbers were already measured off the mesh for the loaded chambers (spec.cyl), so the
+  // carve is those bounds — the drum's own x span, and a radius around the bore that leaves the topstrap and the
+  // trigger guard behind.
+  if(spec.cyl) parts.push({name:'cyl',box:_glbBox(spec.cyl.rear,P.boreY-spec.cyl.wall,-spec.cyl.wall,spec.cyl.front,P.boreY+spec.cyl.wall,spec.cyl.wall)});
   if(!spec.pump && P.magRange && P.magRange.top!=null)
     parts.push({name:'mag',box:_glbBox(P.magRange.from-0.05,-99,-99,P.magRange.to+0.05,P.magRange.top,99)});
   if(spec.scope&&P.glassRange){
@@ -22475,6 +22493,7 @@ function buildGlbGun(key,dot,suppressed,att){
   if(sub.pump){ UD.pump=sub.pump; UD.pumpZ=sub.pump.position.z; }
   // Published the way the pump is: the animation moves these directly and needs the rest position to return to.
   if(sub.mag){ UD.mag=sub.mag; UD.magY=sub.mag.position.y; UD.magRx=sub.mag.rotation.x; }
+  if(sub.cyl){ UD.cyl=sub.cyl; UD.cylX=sub.cyl.position.x; }
   const flash=buildMuzzleFlash(spec.cal); flash.renderOrder=8; flash.userData.base=suppressed?spec.flash*0.55:spec.flash;
   flash.position.set(0,boreG,suppressed?spec.muzzleZ-spec.can[1]-0.01:spec.muzzleZ-0.01);
   flash.scale.setScalar(suppressed?spec.flashS*0.6:spec.flashS); flash.visible=false; g.add(flash); UD.flash=flash;
@@ -35866,13 +35885,15 @@ window.__hc={
   reloadParts(id){ try{ if(id){ inv[selSlot]={id,n:1}; refreshHotbar(); setViewItem(id); }
       const M=view.mesh&&view.mesh.userData; if(!M) return {err:'nothing held'};
       const has={mag:!!M.mag, pump:!!M.pump, bolt:!!M.bolt, cyl:!!M.cyl};
-      if(!M.mag) return Object.assign({id:view.id},has,{magTravel:0,magReturn:0});
-      const y0=M.mag.position.y; let peak=0;
+      if(!M.mag && !M.cyl) return Object.assign({id:view.id},has,{magTravel:0,cylTravel:0,magReturn:0});
+      const y0=M.mag?M.mag.position.y:0, x0=M.cyl?M.cyl.position.x:0; let peak=0, cpeak=0;
       view.reloadDur=1.0; view.reloadT=1.0; view._rlOff=false;
       for(let i=0;i<60;i++){ view.reloadT=Math.max(0,1.0-i/59); updateView(1/60);
-        peak=Math.max(peak,Math.abs(M.mag.position.y-y0)); }
+        if(M.mag) peak=Math.max(peak,Math.abs(M.mag.position.y-y0));
+        if(M.cyl) cpeak=Math.max(cpeak,Math.abs(M.cyl.position.x-x0)); }
       view.reloadT=0; updateView(1/60);
-      return Object.assign({id:view.id},has,{ magTravel:+peak.toFixed(4), magReturn:+Math.abs(M.mag.position.y-y0).toFixed(4) }); }
+      return Object.assign({id:view.id},has,{ magTravel:+peak.toFixed(4), cylTravel:+cpeak.toFixed(4),
+        magReturn:+Math.abs((M.mag?M.mag.position.y:0)-y0).toFixed(4) }); }
     catch(e){ return {err:String(e.message||e)}; } },
   // IS THE HELD ITEM IN FRAME, AND IS THE HAND ON IT? A screenshot is how a held pose gets judged and it is the one
   // thing a bench cannot read. This projects the held mesh's corners to screen space and reports the fraction of the
