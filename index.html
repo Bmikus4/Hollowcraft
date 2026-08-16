@@ -11708,6 +11708,7 @@ function respawn(){ const h=surfaceH(spawnX,spawnZ); player.pos.set(spawnX+0.5,h
 // tagged explicitly, and that fixes a second thing nobody had noticed: a shield in the offhand was cutting starvation,
 // thirst, drowning and fall damage by its block fraction.
 function damage(n,cause,kind){ if(player.creative||player.dead)return;
+  if(typeof _eatCancel==='function' && EAT.active) _eatCancel('you are hit — the meal is dropped');   // being hit mid-bite ends the meal with no effect and no food spent
   player.noDmgT=0;                                                                        // the 60s untouched-clock that gates natural regen restarts on ANY hit
   const def=(typeof armorDefense==='function')?armorDefense():0;                          // leather set (7) → ~28% off
   if(def>0){ n=n*(1-Math.min(0.8,def*0.04));
@@ -16247,7 +16248,7 @@ function netMsg(m){
   else if(m.t==='time'){ if(!NET.host){ if(m.tm!=null)worldTime=m.tm; if(typeof weather!=='undefined'){ if(m.rt!=null)weather.rainTgt=m.rt; if(m.ft!=null)weather.fogTgt=m.ft; } } }   // host clock (1Hz) + weather targets → guests lerp toward them
 
   else if(m.t==='peerLeave'){ removeAvatar(m.id); delete NET.peers[m.id]; if(wretch.owner===m.id) wretch.owner=NET.hostId; }
-  else if(m.t==='p'){ NET.peers[m.id]=m; ensureAvatar(m.id); const a=NET.avatars[m.id]; if(a){ a.tx=m.x; a.ty=m.y; a.tz=m.z; a.tyaw=m.yaw||0; a.tpitch=m.pitch||0; a.tied=!!m.tied; a.dead=!!m.dead; a.po=m.po|0; if(a.pack) a.pack.visible=!!m.pk;
+  else if(m.t==='p'){ NET.peers[m.id]=m; ensureAvatar(m.id); const a=NET.avatars[m.id]; if(a){ a.tx=m.x; a.ty=m.y; a.tz=m.z; a.tyaw=m.yaw||0; a.tpitch=m.pitch||0; a.tied=!!m.tied; a.dead=!!m.dead; a.po=m.po|0; a.ea=+m.ea||0; if(a.pack) a.pack.visible=!!m.pk;
     if(m.nm!==a.nm){ a.nm=m.nm; if(a.tag)a.g.remove(a.tag); a.tag=nameTag(m.nm); a.g.add(a.tag); }                          // nametag (server-set text, rendered locally)
     if(m.held!==a.held || (m.at||null)!==(a.at||null)){ a.held=m.held; a.at=m.at||null; setAvatarHeld(a,m.held,a.at); }   // held item shown in their hand, wearing whatever is fitted to it
     if((m.ch||null)!==(a.ch||null)) setAvatarChest(a,m.ch||null); } }                                                     // …and the chestplate on their body
@@ -16410,7 +16411,11 @@ function netUpdate(dt){ if(!NET.on)return;
       at=(typeof attStr==='function')?attStr(s):null;
     const moved = px!==NET._lx||py!==NET._ly||pz!==NET._lz||yaw!==NET._lyaw||pit!==NET._lpit||held!==NET._lheld||at!==NET._lat||tied!==NET._ltied||dead!==NET._ldead||po!==NET._lpo||pk!==NET._lpk||ch!==NET._lch;   // pk and ch in the CHANGE test, not just the payload: without it, putting the pack or the cuirass on only reaches peers on the next 0.5s heartbeat
     if(moved || (NET._hb=(NET._hb|0)+1)>=10){ NET._hb=0; NET._lx=px;NET._ly=py;NET._lz=pz;NET._lyaw=yaw;NET._lpit=pit;NET._lheld=held;NET._lat=at;NET._ltied=tied;NET._ldead=dead;NET._lpo=po;NET._lpk=pk;NET._lch=ch;
-      netSend({t:'p',x:px,y:py,z:pz,yaw,pitch:pit,held,at,nm:playerName,tied,dead,po,pk,ch}); } }   // po: posture (0 stand / 1 crouch / 2 prone) — a crawling peer must not read as standing
+      // `ea` = how far through a meal this player is, 0 when not eating. A FIELD ON THE EXISTING PLAYER PACKET
+      // rather than a new message type: 'p' is already in ALLOWED and already sent every tick, so a peer's meal
+      // costs one number and cannot be the next message that vanishes with both ends reporting success.
+      netSend({t:'p',x:px,y:py,z:pz,yaw,pitch:pit,held,at,nm:playerName,tied,dead,po,pk,ch,
+               ea:(typeof EAT!=='undefined'&&EAT.active)?+Math.min(1,EAT.t/Math.max(0.001,EAT.dur)).toFixed(2):0}); } }   // po: posture (0 stand / 1 crouch / 2 prone) — a crawling peer must not read as standing
   if(NET.host){ NET.tAcc=(NET.tAcc||0)+dt; if(NET.tAcc>1){ NET.tAcc=0; netSend({t:'time',tm:worldTime,rt:+((typeof weather!=='undefined'&&weather.rainTgt)||0).toFixed(2),ft:+((typeof weather!=='undefined'&&weather.fogTgt)||0).toFixed(2)}); } }   // day/night + weather targets → guests lerp
   for(const id in NET.avatars){ const a=NET.avatars[id], k=Math.min(1,dt*12);
     a.g.position.x+=(a.tx-a.g.position.x)*k; a.g.position.y+=(a.ty-a.g.position.y)*k; a.g.position.z+=(a.tz-a.g.position.z)*k; a.g.rotation.y=a.tyaw+Math.PI; a.g.visible=!a.dead;   // +π: the model's front (held-arm side) was pointing opposite the look direction → it rendered backward
@@ -16434,6 +16439,15 @@ function netUpdate(dt){ if(!NET.on)return;
       a.armL.rotation.x=a.armL.rotation.x*_k-1.15*a.proneT; a.armR.rotation.x=a.armR.rotation.x*_k-1.15*a.proneT;
       }
     else if(a.g.rotation.x) a.g.rotation.x=0;
+    // A PEER EATING. The wire carries a phase, not a pose, and the arm is re-solved HERE on the receiver's own rig —
+    // the giantess pattern, and the only one that survives two clients whose avatars are not the same size. Eased
+    // like the postures above because it arrives in packet-sized steps.
+    // The bite is re-derived from the phase rather than sent: three bites over the meal is a rule both ends know,
+    // so sending it would be sending something already agreed, at 20 Hz.
+    a.eatT=(a.eatT||0)+(((a.ea>0)?1:0)-(a.eatT||0))*Math.min(1,dt*10);
+    if(a.eatT>0.001){ const _b=Math.sin(Math.PI*Math.min(1,((a.ea||0)*3)%1)), _j=_b*_b*_b;
+      a.armR.rotation.x = a.armR.rotation.x*(1-a.eatT) + (-1.95-0.22*_j)*a.eatT;   // forearm up to the face
+      a.armR.rotation.z = (a.armR.rotation.z||0)*(1-a.eatT) + 0.42*a.eatT; }       // elbow out, hand across the mouth
     // The head is set LAST, and the prone lift belongs here rather than in the block above: this line runs after it and
     // would otherwise overwrite the lift, leaving a prone peer's face in the dirt.
     if(a.head) a.head.rotation.x=clamp(-(a.tpitch||0),-0.7,0.7)-1.15*(a.proneT||0); }
@@ -16696,7 +16710,7 @@ function loop(){ try{
   T.end(TID.input);
   T.begin(TID.fx); applyWaterFog(); T.end(TID.fx);
   T.begin(TID.entities); T.begin(TID.props);
-  updateDrops(dt); updateDropPick(); updateSpears(dt); updateStuckSpears(dt); updateParticles(dt); updateBubbles(dt); updateEmbers(dt); updateShells(dt); updateView(dt); if(typeof updateWings==='function')updateWings(dt); updateWatchers(dt); checkNotes(dt); updateSkyBirds(dt); updateFireflies(dt); updateLampHalos(dt); updateContactShadows(dt); updateLeaves(dt); if(typeof updateDungeonBugs==='function')updateDungeonBugs(dt);  // floating items, thrown/stuck spears, particles, ejected shell casings, held viewmodel, angel wings, watching-eyes, notes, sky birds, dungeon arachnids
+  updateDrops(dt); updateDropPick(); updateEat(dt); updateSpears(dt); updateStuckSpears(dt); updateParticles(dt); updateBubbles(dt); updateEmbers(dt); updateShells(dt); updateView(dt); if(typeof updateWings==='function')updateWings(dt); updateWatchers(dt); checkNotes(dt); updateSkyBirds(dt); updateFireflies(dt); updateLampHalos(dt); updateContactShadows(dt); updateLeaves(dt); if(typeof updateDungeonBugs==='function')updateDungeonBugs(dt);  // floating items, thrown/stuck spears, particles, ejected shell casings, held viewmodel, angel wings, watching-eyes, notes, sky birds, dungeon arachnids
   netUpdate(dt);                                                             // co-op: send my transform, interpolate peers, host broadcasts the Wretch/time
   T.end(TID.props); T.end(TID.entities);
   T.begin(TID.audio); updateAudio(dt); T.end(TID.audio);
@@ -25279,6 +25293,26 @@ function updateView(dt){ updateRecoil(dt);                                      
       // children of the thing being folded. Published for the probe, which is how the bench tells a fold from a sweep.
       view.sprintFold=st; }
     else view.sprintFold=0;
+    // ---- THE MEAL, IN THE HAND (Ben 08-16: the item comes to the mouth and bites happen) ----
+    // Authored on the same seam as the sprint fold and in the same terms — offsets ADDED after the pose lerp — so
+    // the two compose instead of fighting, and so this is one place to look when a hand is somewhere unexpected.
+    // NO Z, for T3's reason: nearPlaneClear owns that axis and shoves the whole item forward the moment its rearmost
+    // corner enters camera.near, so a pull-toward-the-face authored in z comes back as the guard undoing it. The
+    // rise is x and y — inboard toward the centre line and UP toward the mouth, which is also what an arm doing this
+    // actually does.
+    if(EAT.active){
+      const _ep=Math.min(1,EAT.t/Math.max(0.001,EAT.dur));
+      const _rise=Math.min(1,EAT.t/0.28);                                        // it comes up quickly, then stays up
+      // THE BITE IS A JAB, not a wobble: a short forward-and-back on the rise curve, three of them, sharp in and
+      // slower out. sin(pi*x)^3 is the cheapest shape that lands hard and recovers soft.
+      const _b=Math.sin(Math.PI*Math.min(1,(EAT.t%(EAT.dur/3))/(EAT.dur/3)));
+      const _jab=_b*_b*_b*_rise;
+      view.group.position.x += -0.11*_rise;
+      view.group.position.y +=  0.16*_rise + 0.035*_jab;
+      view.group.rotation.z +=  0.55*_rise;                                      // wrist rolled over, the way a hand holds food to the face
+      view.group.rotation.x += -0.30*_rise - 0.18*_jab;
+      view.eatT=_ep; }
+    else view.eatT=0;
     // THE INSPECT CARRY — the attach screen's own pose (Ben 08-12: "the current running animation for held guns,
     // brings them closer to the chest ... it is the perfect animation for that attatchment system"). These are that
     // animation's numbers, from eb5919d, given to the screen it was assigned to: brought across to the LEFT and
@@ -38787,6 +38821,14 @@ window.__hc={
                    ing:r.shaped?[...new Set(Object.values(r.key))]:[...new Set(r.ing)],
                    pat:r.pat||null }); }
       return { n:out.length, recipes:out }; }catch(e){ return {err:String(e.message||e)}; } },
+  // THE MEAL. `t` against `dur` is what makes "the effect lands at the END" checkable: a harness reads hunger while
+  // t is short of dur and it must not have moved, and reads it again after and it must have.
+  eatProbe(){ try{ return { active:EAT.active, id:EAT.id, slot:EAT.slot, t:+EAT.t.toFixed(3), dur:EAT.dur,
+      bites:EAT.bites, viewT:+(view.eatT||0).toFixed(3),
+      hunger:+player.hunger.toFixed(2), sat:+(player.sat||0).toFixed(2), health:+player.health.toFixed(2),
+      held:heldSlot()?{id:heldSlot().id,n:heldSlot().n}:null }; }catch(e){ return {err:String(e.message||e)}; } },
+  eatStart(){ try{ const s=heldSlot(); if(!s) return {err:'holding nothing'}; const it=ITEMS[s.id];
+      if(!it||!it.food) return {err:s.id+' is not food'}; eat(s,it); return { started:EAT.active, id:EAT.id, dur:EAT.dur }; }catch(e){ return {err:String(e.message||e)}; } },
   toolSig(id){ try{ return _sigModel(itemModel(id)); }catch(e){ return {err:String(e.message||e)}; } },
   heldSig(){ try{ const s=_sigModel(view.mesh); s.id=view.id; return s; }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: the SURFACE of what is in your hands, per part. _sigModel counts meshes and material TYPES, which cannot tell a
