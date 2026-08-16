@@ -156,7 +156,15 @@ const TOL=0.05;   // percent of the crop, same unit and same size as the dayligh
       console.log(`  ${h.tag.padEnd(5)} off ${JSON.stringify(ctl)}`);
       console.log(`  ${h.tag.padEnd(5)} on  ${JSON.stringify(on)}`);
       check(`${h.tag}: the grade does not add isolated black`, on.isoBlack<=ctl.isoBlack+TOL, `${on.isoBlack}% against ${ctl.isoBlack}% + ${TOL}`);
-      check(`${h.tag}: the grade does not add contiguous black`, on.pureBlack<=ctl.pureBlack+TOL, `${on.pureBlack}% against ${ctl.pureBlack}% + ${TOL}`);
+      // CONTIGUOUS BLACK IS TWO DIFFERENT THINGS AND ONLY ONE OF THEM IS A BUG — the same distinction
+      // assert-daylight-black had to make for the canopy. By day it is the artefact and the day anchor is inert
+      // anyway, so it is held tight. At midnight it is a SHADOW, and Ben asked for it in those words: "if no light
+      // reaches an area at all, it should be completely dark". The night anchor carries 0.03 more curve than the day
+      // one and that is exactly what deepens a night shadow, so a tight ceiling here would be a ceiling on the
+      // feature. It stays as a RUNAWAY guard — a midnight frame going black by a third is a fault whatever was asked
+      // for — and isoBlack above is what actually holds the artefact at bay, unchanged.
+      const cap = h.tag==='night' ? ctl.pureBlack+3.0 : ctl.pureBlack+TOL;
+      check(`${h.tag}: the grade does not add ${h.tag==='night'?'runaway':'contiguous'} black`, on.pureBlack<=cap, `${on.pureBlack}% against ${cap.toFixed(3)}%`);
       // AND IT MUST DO SOMETHING. A grade that is safe because it is inert passes every check above this one; the two
       // frames have to differ in the direction the anchor says, or the feature is a comment.
       if(h.tag==='noon') check('noon is untouched, which is the point of the day anchor', Math.abs(on.warmth-ctl.warmth)<0.0015 && Math.abs(on.med-ctl.med)<0.6, `warmth ${on.warmth}/${ctl.warmth}  med ${on.med}/${ctl.med}`);
