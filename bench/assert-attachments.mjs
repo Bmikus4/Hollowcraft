@@ -281,6 +281,14 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     console.log('offhand', JSON.stringify(off));
     T('a gun in the left hand wears its attachments', off && off.fitted && off.fitted.indexOf('red_dot')>=0, off);
 
+    // THROWN AND PICKED BACK UP. A pickup builds a NEW stack, so everything the old one carried — the uid, the
+    // attachments, the loaded magazine — was dropped on the floor with it and left there.
+    await p.evaluate("__hc.hold('ar15')"); await sleep(400);
+    const toss=await p.evaluate("__hc.attTossTrip()");
+    console.log('toss', JSON.stringify(toss));
+    T('a thrown gun is picked up again', toss.picked===true, toss);
+    T('and it still wears what was fitted to it', toss.after && toss.after.optic==='red_dot' && toss.after.muzzle==='suppressor', toss);
+
     T('zero page errors', errs.length===0, errs.slice(0,2));
     console.log(fails? fails+' FAILURE(S)':'ALL PASS');
     await b.close();
