@@ -3603,6 +3603,24 @@ function plainsAt(wx,wz){
 // Is there water within two blocks of this column? Pure heightfield — surfaceH is cached, so this is four to eight
 // map reads, and it runs once per column at generation and never again. Two blocks and not one because a bank one
 // block wide is a line, not a bank.
+// IS THIS INLAND WATER, OR IS IT THE SEA? (Ben 08-16: "mud should spawn at the base of rivers and lakes".)
+// The generator has no lake concept - inland water is wherever the terrain dips under CFG.SEA and fills, which is what
+// a river carve does deliberately and what a hollow in the plains does by accident. So the question is not "is this a
+// lake" but "is this water the ocean", and the honest test is the island falloff the terrain itself is shaped by:
+// `isle` is 1 inside the landmass and reaches 0 past the ring, and the ocean is the part where it has fallen away.
+// Recomputed here rather than exported from surfaceH because surfaceH is memoised by column and returns only a height -
+// and a second, differently-written version of this test would drift from the first one the moment either is tuned.
+function _isleAt(wx,wz){ const idist=Math.hypot(wx-ISLE_X, wz-ISLE_Z); return 1-smooth(ISLE_R-ISLE_EDGE, ISLE_R, idist); }
+function _inlandBed(wx,wz,h){
+  if(h>=CFG.SEA) return false;                       // not under water at all: this is a bank, and the bank rule owns it
+  // A river channel, by the same field and threshold the bank rule uses, so the bed and its banks cannot disagree about
+  // where the river is. Rivers reach the coast, so the river test alone would run mud out into the surf - hence it is
+  // still gated on being inside the landmass.
+  if(Math.abs(_riverField(wx,wz))<0.075 && _isleAt(wx,wz)>0.55) return true;
+  // A pond or a hollow: deep inside the island, where the falloff has taken nothing away, any column under the sea line
+  // is water that is not the ocean. 0.995 rather than 1 because smooth() approaches its limit asymptotically.
+  return _isleAt(wx,wz)>0.995;
+}
 function _wetNear(wx,wz){
   for(let r=1;r<=2;r++)
     for(let k=0;k<8;k++){ const th=k*0.7854;
@@ -3814,6 +3832,17 @@ function genColumn(c, lx, lz){
       }
       else if (y<h) b=BID.dirt;
       else if(onTrail) b=BID.dirt;                                    // surface selection by altitude
+      // THE BED OF A RIVER OR A LAKE IS MUD, and it must be asked BEFORE `beach`, which claims everything at or under
+      // SEA+1 for sand and was therefore laying a sand floor under every river in the world.
+      // A ONE-BLOCK SKIN: only the surface column becomes mud, and the dirt and stone under it are untouched. Mud that
+      // goes down would be invisible until dug and costs a test on every buried block.
+      // BED ONLY, NOT BANK. The bank already has its own mud rule below (h<=SEA+3 near water, or the river field up to
+      // SEA+6), so this is the half that was missing rather than a second opinion about the same columns - and because
+      // the two meet at the waterline there is no band or ring to draw: the bed runs under the water, the bank rule
+      // carries the same block up out of it, and the join is where the water surface happens to cut them.
+      // NOT THE SEA. _inlandBed gates on the island falloff, so the ocean floor keeps its sand and the shelf and
+      // slant-path work that reads it (5450444) is untouched.
+      else if(_inlandBed(wx,wz,h)) b=BID.mud;
       else if(beach) b=BID.sand;
       // MUD IS WHERE THE WATER IS, and the test is the terrain, not a noise field: a column within two blocks of
       // something wet, low enough to be in the flood of it. Rivers carve to CFG.SEA-3, so their banks qualify by
@@ -39424,6 +39453,25 @@ window.__hc={
       const dy=gy-(player.pos.y+EYE), L=Math.hypot(cx+0.5-player.pos.x, dy, cz+0.5-player.pos.z)||1;
       player.pitch=clamp(Math.asin(dy/L),-1.2,1.2);
       return { name, id, x:cx, z:cz, gy, laid:(2*R+1)*(2*R+1) }; }catch(e){ return {err:String(e.message||e)}; } },
+  // WHAT IS ACTUALLY UNDER THE WATER? Reads the LOADED WORLD with getBlock, not the generator predicate - asserting
+  // that _inlandBed returns what _inlandBed returns would prove nothing about the blocks a player digs. For every
+  // column in range that has water at the sea line, it walks down to the first non-water block and records what it is,
+  // grouped by whether the column is inland (river/lake) or ocean. A screenshot of one riverbank cannot answer this;
+  // the share across hundreds of tiles can.
+  bedCensus(r,step){ try{ const R=r||60, ST=step||1, P={x:Math.round(player.pos.x), z:Math.round(player.pos.z)};
+    const G={inland:{mud:0,sand:0,other:0,n:0}, ocean:{mud:0,sand:0,other:0,n:0}}, miss=[];
+    for(let dx=-R;dx<=R;dx+=ST)for(let dz=-R;dz<=R;dz+=ST){ const x=P.x+dx, z=P.z+dz;
+      if(getBlock(x, CFG.SEA, z)!==WATER) continue;                 // no water column here
+      let y=CFG.SEA, b=WATER;
+      while(y>0 && (b=getBlock(x,y,z))===WATER) y--;                // down to the first thing that is not water
+      if(b===AIR||b===undefined) continue;                          // unstreamed or a cave under the water: not a bed
+      const g = _inlandBed(x,z,surfaceH(x,z)) ? G.inland : G.ocean;
+      g.n++;
+      if(b===BID.mud) g.mud++; else if(b===BID.sand) g.sand++; else { g.other++; if(miss.length<6) miss.push({x,z,y,b,name:B[b]?B[b].name:'?'}); }
+    }
+    const pct=o=>o.n?+(100*o.mud/o.n).toFixed(1):null;
+    return { inland:G.inland, ocean:G.ocean, inlandMudPct:pct(G.inland), oceanMudPct:pct(G.ocean), sampled:G.inland.n+G.ocean.n, notMudOrSand:miss }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   // MUD: how much of the island is it, and is it where the water is? Reads the GENERATOR (surfaceH + the same wet test
   // genColumn uses), not the loaded chunks, so the answer does not depend on what has streamed in.
   mudCensus(r,step){ const R=r||120, ST=step||2, P={x:Math.round(player.pos.x), z:Math.round(player.pos.z)};
