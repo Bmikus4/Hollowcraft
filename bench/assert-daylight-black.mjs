@@ -180,7 +180,10 @@ const TOL=0.05;   // in PERCENT of the crop — 0.05% of a 1000x560 crop is roug
     // THE SWEEP. Both vantages, every exposure, same crop and same three-shot median as the baseline rows above.
     const sweep=[];
     for(const e of EXPO){
-      await page.evaluate(`__hc.exposure(${e})`); await sleep(500);
+      // ADAPTATION OFF FOR THE SWEEP. It drives toneMappingExposure every frame, so with it running the three stops
+      // all measured the ADAPTED exposure and the sweep silently stopped being a sweep — 0.336 / 0.334 / 0.319 for
+      // three settings a factor of 1.7 apart was the tell.
+      await page.evaluate(`__hc.adapt&&__hc.adapt({on:false}); __hc.exposure(${e})`); await sleep(500);
       const o=await vantage(`open-e${String(e).replace('.','')}`, SX+0.5, gy+7, SZ+14.5, Math.PI, -0.40);
       const c=await vantage(`canopy-e${String(e).replace('.','')}`, spot.x+0.5, spot.g+1.7, spot.z+0.5, Math.PI*0.5, -0.22);
       sweep.push({e,o,c});
@@ -188,7 +191,7 @@ const TOL=0.05;   // in PERCENT of the crop — 0.05% of a 1000x560 crop is roug
       check(`open at exposure ${e}: no isolated black`, o.isoBlack<=BASE.open.isoBlack+TOL, `${o.isoBlack}% against ${BASE.open.isoBlack+TOL}%`);
       check(`canopy at exposure ${e}: no runaway black`, c.pureBlack<=BASE.canopy.pureBlack+TOL, `${c.pureBlack}% against ${BASE.canopy.pureBlack+TOL}%`);
     }
-    await page.evaluate(`__hc.exposure()`);
+    await page.evaluate(`__hc.exposure(); __hc.adapt&&__hc.adapt({on:true});`);
     console.log('  exposure sweep — open pureBlack: '+sweep.map(r=>r.e+':'+r.o.pureBlack+'%').join('  '));
     console.log('  exposure sweep — canopy med:     '+sweep.map(r=>r.e+':'+r.c.med).join('  '));
     for(const [tag,r] of [['open',open],['canopy',canopy]]){
