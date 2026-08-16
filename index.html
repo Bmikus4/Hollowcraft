@@ -641,6 +641,15 @@
   .v-water  .vlab{ background-image:url('assets/ui/buff_potion.png'); }
   .v-stam   .vlab{ background-image:url('assets/ui/icon_steps.png'); }
   .v-armor  .vlab{ background-image:url('assets/ui/icon_shield.png'); }
+  /* THE VOICE METER, sized into the same family: narrower than health, wider than the shield, so it reads as the
+     top of the stack rather than as a sixth vital of equal weight. No new artwork — buff_bolt is the closest thing
+     in the pack to a live signal, and inventing an icon was not part of the ask. */
+  .v-voice  .vtrack{ width:150px; height:9px; }
+  .v-voice  .vlab{ width:14px; height:14px; opacity:.75; background-image:url('assets/ui/buff_bolt.png'); }
+  /* Not granted, refused, or no device: the row stays visible and goes quiet rather than vanishing. A meter that
+     disappears when the mic is refused looks like a bug; one that sits dark says the microphone is not running. */
+  .v-voice.voff .vlab{ opacity:.28; filter:grayscale(1) drop-shadow(0 1px 3px rgba(0,0,0,.9)); }
+  .v-voice.voff .vtrack{ opacity:.4; }
   .vtrack{ width:186px; height:15px; border:none; border-radius:0; overflow:hidden;
     background:url('assets/ui/bar_red_bed.png') center/100% 100% no-repeat; box-shadow:none; }
   .v-food  .vtrack{ background-image:url('assets/ui/bar_gold_bed.png'); }
@@ -13899,7 +13908,10 @@ function buildMenuVisuals(){ const host=document.getElementById('set-panel'); if
   buildSettingsRows(el,'menu'); }
 applyFps(); applyMind(); applyHud(); buildPauseSettings(); buildMenuVisuals();
 document.getElementById('respawnbtn').addEventListener('click',()=>{ respawn(); requestLock(); });
-document.addEventListener('pointerlockchange',()=>{ locked=document.pointerLockElement===canvas; if(locked){ pause.style.display='none'; audioResume&&audioResume(); }
+// THE GRANT RIDES THE POINTER LOCK, which is the first real user gesture in every path into the game and the one
+// moment a browser will accept a microphone request from. Asking at load is refused outright in some browsers and
+// prompts before the player has seen the game in the rest of them.
+document.addEventListener('pointerlockchange',()=>{ locked=document.pointerLockElement===canvas; if(locked){ pause.style.display='none'; audioResume&&audioResume(); voiceInit&&voiceInit(); }
   // AT A MONITOR, ESCAPE IS A STEP BACK FROM THE SCREEN (Ben 08-04: "esc once lets you move the mouse and type in an ID"). The
   // browser hands Escape to us only as a lost pointer lock, so this is where that gesture arrives; the pause menu must not eat
   // it, and the second Escape — the one that leaves — is handled by the ID box's own key handler.
@@ -15198,7 +15210,66 @@ function mmLandmarks(){ const L=[{x:spawnX+22.5,z:spawnZ-13.5,t:'cabin'},{x:spaw
 //
 //  The colours are the ring's own, carried over deliberately: deep sea blue, dark ochre, old blood, the stamina hue
 //  sweep. They were tuned to Ben's "darker, richer colors" (08-05) and the shape changing does not change that.
-const VITALS=[ {k:'health', lab:'health'}, {k:'food', lab:'food'}, {k:'water', lab:'water'},
+// ---- IN-GAME VOICE (Ben 08-16: "in game voip for multiplayer, and singleplayer. mic always on nomatter what, with
+// a sound meter in the bottom left above the existing health, stamina water and food bars") ----
+//
+// SINGLEPLAYER IS THE HALF THAT GETS SKIPPED, and it is a real feature rather than a stepping stone: alone in the
+// world, the mic is live and the bar moves when you speak. That is capture and a meter, with no network anywhere
+// near it — which is also why it is built first, since it makes the HUD half judgeable before any transport exists.
+//
+// "ALWAYS ON NO MATTER WHAT" MEANS ALWAYS ON ONCE GRANTED. A browser will not hand over a microphone without a
+// permission grant and a secure context, and nothing in this file can change that. What it CAN mean, and what this
+// does, is: asked for once at the first gesture, never muted by default, and NO PUSH-TO-TALK KEY — the thing the
+// instruction specifically said not to quietly add because it was easier. If the grant is refused or there is no
+// device, the game carries on and the meter says so instead of the feature failing silently.
+//
+// THE ANALYSER IS NEVER CONNECTED TO THE DESTINATION. Routing your own microphone to your own speakers is a howl,
+// and it is the first thing that happens to anyone who wires this up by connecting the graph end to end.
+const VOICE={ state:'idle', level:0, peak:0, rms:0, ctx:null, stream:null, an:null, buf:null, err:null, asked:false, frames:0 };
+function voiceInit(){
+  if(VOICE.asked) return;                                          // one prompt, not one per gesture
+  VOICE.asked=true;
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){ VOICE.state='unsupported'; VOICE.err='no getUserMedia (insecure context?)'; return; }
+  navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false})
+    .then(st=>{
+      VOICE.stream=st;
+      const AC2=window.AudioContext||window.webkitAudioContext;
+      VOICE.ctx=(typeof AC!=='undefined'&&AC)?AC:new AC2();        // share the game's own context when there is one — a second context is a second output device as far as the OS is concerned
+      const src=VOICE.ctx.createMediaStreamSource(st);
+      const an=VOICE.ctx.createAnalyser(); an.fftSize=512; an.smoothingTimeConstant=0.2;
+      src.connect(an);                                             // and NOWHERE else. See above.
+      VOICE.an=an; VOICE.buf=new Float32Array(an.fftSize);
+      VOICE.state='live';
+    })
+    .catch(e=>{ const n=String(e&&e.name||e);
+      VOICE.state=(n==='NotAllowedError'||n==='SecurityError')?'denied':(n==='NotFoundError'||n==='DevicesNotFoundError')?'nodevice':'error';
+      VOICE.err=n; });
+}
+// THE METER RISES FAST AND FALLS SLOW, which is what every meter ever built does and for a reason: a bar that
+// tracks RMS honestly in both directions flickers at syllable rate and cannot be read. The attack is nearly
+// instant so a word registers; the release is about a third of a second so the bar shows that you are talking
+// rather than strobing on each vowel.
+function voiceTick(dt){
+  if(VOICE.state!=='live' || !VOICE.an) return;
+  VOICE.an.getFloatTimeDomainData(VOICE.buf);
+  let s=0; for(let i=0;i<VOICE.buf.length;i++){ const v=VOICE.buf[i]; s+=v*v; }
+  const rms=Math.sqrt(s/VOICE.buf.length);
+  VOICE.rms=rms; VOICE.frames++;
+  // -60 dB to 0 dB mapped onto the bar. A linear RMS bar spends its whole life in the bottom eighth, because speech
+  // is quiet and a meter is a log instrument.
+  const db=20*Math.log10(Math.max(rms,1e-7));
+  const lv=Math.max(0,Math.min(1,(db+60)/60));
+  VOICE.level += (lv-VOICE.level) * Math.min(1, dt*(lv>VOICE.level?40:3.2));
+  if(lv>VOICE.peak) VOICE.peak=lv; else VOICE.peak=Math.max(VOICE.level, VOICE.peak-dt*0.55);
+}
+// THE ROW IS PART OF THE VITALS STACK, not an overlay beside it. Ben asked for it "above the existing health,
+// stamina water and food bars", and joining the array is what makes it inherit the group's typography, spacing,
+// opacity, the hurt shake and the hide-on-inventory rule — a separately positioned panel would have to re-implement
+// every one of those and would drift from them the first time one changed. First in the array is the top row.
+// The glyph is buff_bolt because there is no microphone asset in assets/ui and inventing one is not this job; a
+// bolt reads as a live signal, which is what the row is.
+const VITALS=[ {k:'voice', lab:'voice'},
+               {k:'health', lab:'health'}, {k:'food', lab:'food'}, {k:'water', lab:'water'},
                {k:'stam', lab:'stamina'}, {k:'armor', lab:'shield'} ];
 let _vit=null;
 function buildVitals(){ if(_vit) return;
@@ -15235,6 +15306,18 @@ function updateVitals(dt){ if(!_vit) buildVitals();
   _mmStam += (st-_mmStam)*Math.min(1, dt*6); const shown=Math.abs(_mmStam-st)<0.004?st:_mmStam;
   const hue=105*Math.pow(shown,0.85);
   const hcol=_mmHurt>0?'#d8402c':(hp<0.25?((Math.sin(clock.elapsedTime*4)*0.5+0.5)>0.5?'#c02020':'#4e0a0a'):'#8e1717');
+  // THE VOICE ROW. Its fill is the smoothed level and its colour is the level too — green while you are talking,
+  // amber as you approach the top, red where a real encoder would be clipping. The state classes are written only on
+  // change, like every other row here, because this panel's whole design is that it costs nothing on a still frame.
+  { const R=_vit.rows.voice;
+    if(R){ const live=(typeof VOICE!=='undefined' && VOICE.state==='live');
+      const off=!live;
+      if(R.lastOff!==off){ R.lastOff=off; R.row.classList.toggle('voff', off); }
+      const lv=live?VOICE.level:0;
+      const w=(lv*100).toFixed(1)+'%';
+      if(w!==R.last){ R.last=w; R.fill.style.width=w; }
+      const col=lv>0.86?'#c8402c':(lv>0.62?'#c8912c':'#4e8f3e');
+      if(col!==R.lastCol){ R.lastCol=col; R.fill.style.background=col; } } }
   const set=(k,f,col)=>{ const R=_vit.rows[k]; if(!R) return; const w=(f*100).toFixed(1)+'%';
     if(w!==R.last){ R.last=w; R.fill.style.width=w; }                      // style writes only on change: five bars, five strings compared
     if(col!==R.lastCol){ R.lastCol=col; R.fill.style.background=col; } };
@@ -16861,7 +16944,7 @@ function loop(){ try{
   if(USE_SKYCUBE){ let da=Math.abs(worldTime-_skyBakeAng); if(da>CFG.DAY_LEN*0.5)da=CFG.DAY_LEN-da; if(!_skyBaked || da>CFG.DAY_LEN*0.0005){ _skyBakeAng=worldTime; _skyBaked=true; bakeSky(); } }   // rebake ~3x/sec → the sky gradient shifts smoothly through dawn/dusk instead of stepping
   else skyDome.position.copy(camera.position);
   T.end(TID.sky);
-  T.begin(TID.hud); updateHighlight(); updateBars(); updateVitals(dt); updateCompass(dt); hotIdleTick(dt); T.end(TID.hud);
+  T.begin(TID.hud); updateHighlight(); updateBars(); voiceTick(dt); updateVitals(dt); updateCompass(dt); hotIdleTick(dt); T.end(TID.hud);
   // `fx`, and updatePortal is the reason it is worth a scope of its own: the overworld Void Door renders the cosmos to a
   // render target from HERE, outside TID.draw, so a program linked for that pass has always been charged to `misc`.
   T.begin(TID.fx);
@@ -39162,6 +39245,18 @@ window.__hc={
   // running up a beach, because the run-up also decides where you land and how deep.
   setVel(x,y,z){ try{ if(x!=null)player.vel.x=+x; if(y!=null)player.vel.y=+y; if(z!=null)player.vel.z=+z;
       return { vx:+player.vel.x.toFixed(3), vy:+player.vel.y.toFixed(3), vz:+player.vel.z.toFixed(3) }; }catch(e){ return {err:String(e.message||e)}; } },
+  // THE MIC, IN NUMBERS. "Is the meter moving" is not a thing to verify by listening: state says whether capture is
+  // running, frames says the analyser is actually being read, and rms/level are what the bar is drawn from.
+  voiceProbe(){ try{ const R=_vit&&_vit.rows&&_vit.rows.voice;
+      return { state:VOICE.state, err:VOICE.err, asked:VOICE.asked, frames:VOICE.frames,
+               rms:+VOICE.rms.toFixed(5), level:+VOICE.level.toFixed(4), peak:+VOICE.peak.toFixed(4),
+               ctx:VOICE.ctx?VOICE.ctx.state:null,
+               // THE ROW IS PART OF THE VITALS STACK, so the check that it is in the right place is the check that it
+               // is in the same parent as the health bar and is the FIRST child of it.
+               row:!!R, rowFirst:!!(R&&R.row&&R.row.parentNode&&R.row.parentNode.firstChild===R.row),
+               rowWidth:R?R.fill.style.width:null, rowOff:!!(R&&R.row.classList.contains('voff')) };
+    }catch(e){ return {err:String(e.message||e)}; } },
+  voiceAsk(){ try{ VOICE.asked=false; voiceInit(); return { state:VOICE.state }; }catch(e){ return {err:String(e.message||e)}; } },
   setHunger(n){ try{ if(n!=null) player.hunger=Math.max(0,Math.min(20,+n)); if(player.sat>player.hunger)player.sat=player.hunger;
       return { hunger:player.hunger, sat:player.sat }; }catch(e){ return {err:String(e.message||e)}; } },
   eatStart(){ try{ const s=heldSlot(); if(!s) return {err:'holding nothing'}; const it=ITEMS[s.id];
