@@ -7086,7 +7086,7 @@ function _ensureOcean3(){
     // there was no sun on the water at all with the reflection dead: no target, no glint.
     // TWO LOBES, because one cannot be both. The tight core is the disc's own image; the wide sheen is the long track a
     // low sun lays toward the eye. Ben 08-12 asked for bright sun reflections and this is where they live.
-    uMirDbg:{value:0}, uBroad:{value:0.30}, uSpecExp:{value:220.0}, uSpecGain:{value:5.5}, uWideExp:{value:14.0}, uWideGain:{value:0.55},
+    uMirDbg:{value:0}, uShallow:{value:new THREE.Color(0.055,0.175,0.190)}, uBroad:{value:0.30}, uSpecExp:{value:220.0}, uSpecGain:{value:5.5}, uWideExp:{value:14.0}, uWideGain:{value:0.55},
     // THE NIGHT WASH THE LAND AND THE OLD WATER TAKE. Same vec4s, by reference, so the sea desaturates into scotopic
     // night with everything else instead of holding its daylight chroma after dark.
     uScotG:{value:_scotG}, uScotH:{value:_scotH} };
@@ -7098,6 +7098,7 @@ function _ensureOcean3(){
         ['uniform sampler2D uLandTex; uniform vec2 uLandOrigin; uniform float uLandSpan, uSeaY, uLandBias;',
          'uniform vec3 uHorizonC, uZenithC, uSunColU, uSunDirW;',
          'uniform float uDayF, uSkyDim, uReflSharp, uMirror, uBroad, uSpecExp, uSpecGain, uWideExp, uWideGain, uMirDbg;',
+         'uniform vec3 uShallow;',
          // uScotG/uScotH are NOT declared here and must not be: line ~1202 appends them to
          // THREE.ShaderChunk.lights_pars_begin, this material is lights:true and includes that chunk, and a second
          // declaration is a redefinition error that fails the whole program. That is what took the sea AND the sky out
@@ -7154,12 +7155,25 @@ function _ensureOcean3(){
          // The body the water sinks toward with depth is waterColor, which is already the hour's own sea colour; over a
          // shelf the scatter term keeps most of its brightness and the seabed shows through the alpha below.
          'vec3 _o3Body = mix( uBroad * diffuseLight + scatter, waterColor * (0.35 + 0.65 * uSkyDim), _o3Ab * 0.85 );',
+         // THE SHELF IS WATER, NOT A FILM OVER SAND. Depth gave the shallows their transparency, and with it the whole
+         // shelf came out the colour of the seabed - a pale lagoon of wet sand rather than sea. The example's material
+         // has no in-scatter of its own, so this is the term it is missing: a shallow tint strongest where the water is
+         // thinnest and gone by the time the body colour has taken over, scaled by the hour so it cannot light the sea
+         // at night.
+         '_o3Body += uShallow * (1.0-_o3Ab) * uDayF;',
          // THE REFLECTION HAS TO BE SEEN, and Fresnel alone does not show it. Looking down at water a few dozen blocks
          // away, theta is near 1 and the example's rf0 puts the mirror at 30% against a lit body colour and a seabed
          // showing through the alpha, which is why the island's reflection measured as nothing in the frame while the
          // mirror target itself held a clean upside-down island (bench/results/skyrefl-mirror-raw.png). The weight is
          // biased up and floored so the sea carries its surroundings at every angle a player actually looks from.
-         'float _o3W = clamp(reflectance*1.55 + 0.14, 0.0, 1.0);',
+         // THE MIRROR'S WEIGHT IS ANGLE-SHAPED, and the flat boost that made the reflection visible also flooded the
+         // shallows: the example's rf0 is 0.3, which is ten times water's real normal-incidence reflectance, so looking
+         // DOWN at a shelf the surface was already 30% sky before the boost and 60% after - a pale film over the sand
+         // whatever the shallow tint underneath it did. Fresnel is recomputed at 0.06 and then boosted, so a steep look
+         // shows the bottom (0.15) and a grazing one still goes to a full mirror, which is where the reflected land the
+         // player actually notices lives.
+         'float _o3F0 = 0.06;',
+         'float _o3W = clamp((_o3F0 + (1.0-_o3F0)*pow(1.0-theta, 5.0))*1.6 + 0.05, 0.0, 1.0);',
          'vec3 albedo = mix( _o3Body * getShadowMask(), _o3Refl, _o3W );',
          'albedo += (specularLight + _o3Wide) * (0.35 + 0.65 * _o3W);'].join('\n'))
       .replace('gl_FragColor = vec4( outgoingLight, alpha );',
@@ -23540,6 +23554,26 @@ function updateView(dt){ updateRecoil(dt);                                      
       // children of the thing being folded. Published for the probe, which is how the bench tells a fold from a sweep.
       view.sprintFold=st; }
     else view.sprintFold=0;
+    // THE INSPECT CARRY — the attach screen's own pose (Ben 08-12: "the current running animation for held guns,
+    // brings them closer to the chest ... it is the perfect animation for that attatchment system"). These are that
+    // animation's numbers, from eb5919d, given to the screen it was assigned to: brought across to the LEFT and
+    // canted over the forearm, so the gun is turned toward the player and its rail faces them while they fit
+    // something to it. A sweep, deliberately — the sprint pose above is a fold, and the two must not converge.
+    //   Z IS LEFT OUT of it (nearPlaneClear answers a pull toward the chest by shoving the gun forward again), so
+    // the depth is carried by the yaw and the drop, which is what the original did anyway.
+    //   Same seam and same (1-e) scaling as the fold: a post-pass on the finished pose rather than a fourth pose in
+    // the blend, so nothing has to be re-tuned to accommodate it and it cannot fight the raise.
+    const wantAtt=(openUI==='att')?1:0;
+    view.attT=(view.attT||0)+(wantAtt-(view.attT||0))*Math.min(1,dt*6);
+    const at=view.attT*(1-e);
+    if(at>0.001){
+      view.group.position.x += -0.20*at;    // across to the left, in front of the chest
+      view.group.position.y += -0.05*at;
+      view.group.rotation.y +=  0.60*at;    // +y swings a -z muzzle LEFT: the gun turns to face the player
+      view.group.rotation.z += -0.40*at;    // canted over the forearm
+      view.group.rotation.x += -0.16*at;    // muzzle down
+      view.attPose=at; }
+    else view.attPose=0;
     // ===== HANDGUNS ARE HELD, NOT SHOULDERED (Ben 08-05) =====
     // "add a class of firearms called handguns, and put the python in it, handguns get held differently in the hands, mainly they
     // are held out from the handle, with no shouldering, and held from where the fist of a players hand would be."
@@ -39697,6 +39731,7 @@ window.__hc={
       // The sprint carry, and the pose it produced: latch, then where the gun actually ended up. A boolean says the
       // trigger fired; only the transform says the gun crossed the chest.
       sprintT:+(view.sprintT||0).toFixed(3), sprint:!!player.sprint, onGround:!!player.onGround,
+      attT:+(view.attT||0).toFixed(3), attPose:+(view.attPose||0).toFixed(3), ui:openUI,
       pose:{ x:+view.group.position.x.toFixed(3), y:+view.group.position.y.toFixed(3), z:+view.group.position.z.toFixed(3),
              rx:+view.group.rotation.x.toFixed(3), ry:+view.group.rotation.y.toFixed(3), rz:+view.group.rotation.z.toFixed(3) },
       hands:{ kick:HAND_KICK, lagY:HAND_LAG_Y, lagX:HAND_LAG_X } }; }catch(e){ return {err:String(e.message||e)}; } },

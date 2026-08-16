@@ -90,6 +90,26 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     T('BACKSPACE clears from the screen', ui.afterBack && !ui.afterBack.optic, ui.afterBack);
     T('it closes again', ui.closed===false, ui);
 
+    // THE INSPECT CARRY. Ben assigned the cross-chest animation to this screen, and a sweep reads differently from
+    // the sprint FOLD in exactly one way that can be measured: the yaw moves more than the pitch. Comparing |dry|
+    // against |drx| is how assert-sprint-carry tells them apart, and the same test says this is not that.
+    await p.evaluate("__hc.hold('ar15')"); await sleep(400);
+    const rest=await p.evaluate("__hc.swayMag()");
+    await p.evaluate("__hc.attOpen(true)");
+    await sleep(900);
+    const held=await p.evaluate("__hc.swayMag()");
+    await p.evaluate("__hc.attOpen(false)"); await sleep(900);
+    const back=await p.evaluate("__hc.swayMag()");
+    const d=(a,b,k)=>+(b.pose[k]-a.pose[k]).toFixed(3);
+    console.log('carry', JSON.stringify({rest:rest.pose, held:held.pose, attT:held.attT}));
+    T('the carry latches while the screen is open', held.attT>0.9, {attT:held.attT});
+    T('the gun comes across to the left', d(rest,held,'x')<-0.10, {dx:d(rest,held,'x')});
+    T('it is a SWEEP, not the sprint fold', Math.abs(d(rest,held,'ry'))>Math.abs(d(rest,held,'rx')), {dry:d(rest,held,'ry'), drx:d(rest,held,'rx')});
+    // The pose authors NO z. What z does move is nearPlaneClear's own correction answering the new rotation, which
+    // is the trap this pose is written around — so the bound is the guard's size, not zero.
+    T('the pose does not reach into z itself', Math.abs(d(rest,held,'z'))<0.12, {dz:d(rest,held,'z')});
+    T('it lets go when the screen closes', back.attT<0.1, {attT:back.attT});
+
     T('zero page errors', errs.length===0, errs.slice(0,2));
     console.log(fails? fails+' FAILURE(S)':'ALL PASS');
     await b.close();
