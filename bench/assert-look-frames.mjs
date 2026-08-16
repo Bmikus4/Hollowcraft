@@ -73,7 +73,6 @@ function brightCount(f,crop,level){
     await page.evaluate(`__hc.tpAt(${SX+0.5},${gy+1.6},${SZ+2.6}); __hc.cam({yaw:${Math.PI}, pitch:-0.55})`);
     for(let i=0;i<20;i++){ const f=await page.evaluate(`__hc.fill()`); if(f&&f.meshed>=f.want) break; await sleep(400); }
     await sleep(1200);
-    const empty=path.join(OUT,'look-drop-none.png'); await page.screenshot({path:empty});
     await page.evaluate(`__hc.dropSpawn('ak', ${SX+0.5}, ${gy+1.2}, ${SZ+0.5})`);
     await sleep(4000);
     const D=await page.evaluate(`__hc.dropPhys()`);
@@ -84,17 +83,21 @@ function brightCount(f,crop,level){
       await page.evaluate(`__hc.cam({yaw:${yaw}, pitch:${pitch}})`); await sleep(500); }
     const laid=path.join(OUT,'look-drop-rest.png'); await page.screenshot({path:laid});
     const CROP=[0.28,0.72,0.30,0.78];
+    // THE CONTROL IS THE SAME CAMERA WITH THE ITEM TAKEN AWAY, and getting that wrong is what the first run of this
+    // file did: it shot the empty view BEFORE aiming at the drop, so the diff was 77% of the crop and what it had
+    // measured was the camera turning. The item is removed and the frame retaken from the identical transform, so
+    // the only thing that differs between the two pictures is the rifle.
+    const P0=await page.evaluate(`__hc.dropPhys()`);
+    await page.evaluate(`__hc.dropClear()`); await sleep(500);
+    const empty=path.join(OUT,'look-drop-none.png'); await page.screenshot({path:empty});
     const seen=diffCount(empty,laid,CROP,30);
     console.log(`  the item against the empty view: ${seen.px} px changed (${seen.pct}%), mean diff ${seen.meanDiff}`);
     // IT IS ON SCREEN AND IT IS AN OBJECT, not a speck. A rifle at two blocks fills a real part of the crop; a
     // hovering sprite the size of a coin would pass a "something changed" check and fail this one.
-    check('THE DROPPED RIFLE IS VISIBLY THERE', seen.pct>0.35, `${seen.pct}% of the crop`);
+    check('THE DROPPED RIFLE IS VISIBLY THERE', seen.pct>0.35 && seen.pct<25, `${seen.pct}% of the crop`);
     // ---- AND THE HIGHLIGHT READS ----
-    const P1=await page.evaluate(`__hc.dropPhys()`);
-    check('the crosshair is on it', !!P1.picked, JSON.stringify(P1.picked));
+    check('the crosshair is on it', !!P0.picked, JSON.stringify(P0.picked));
     const gold=brightCount(laid,CROP,150);
-    await page.evaluate(`__hc.cam({yaw:${Math.PI*0.4}})`); await sleep(400);
-    const away=path.join(OUT,'look-drop-away.png'); await page.screenshot({path:away});
     console.log(`  outline pixels while picked: ${gold.px} (${gold.pct}% of crop)`);
     check('the highlight puts pale gold on the screen', gold.px>40, `${gold.px} px`);
 
