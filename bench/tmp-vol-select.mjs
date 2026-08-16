@@ -56,7 +56,22 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
       if(!v.chosen || !v.chosen.length){ bad++; console.log('      <== NOTHING SELECTED with a lantern in reach - the positive case FAILS'); } }
     const dun=await page.evaluate(`(()=>{ try{ const d=__hc.dungeon&&__hc.dungeon(); return d&&d.pos?d.pos:null; }catch(e){ return null; } })()`);
     if(dun){ await page.evaluate(`__hc.tpAt(${dun.x}, ${dun.y}+2, ${dun.z}); __hc.fog(0)`); for(let i=0;i<40;i++){ const f=await page.evaluate('__hc.fill()'); if(f&&f.meshed>=f.want) break; await sleep(400); }
-      await sleep(3000); await check('dungeon interior (streamed)'); }
+      await sleep(3000); const dv=await check('dungeon interior (streamed)');
+      // AND DOES THE BEAM ACTUALLY DRAW? The selection can be perfect and the pass still contribute nothing, so the
+      // last rows are the pass toggled against itself in the room it was written for.
+      console.log('    vol', JSON.stringify(await page.evaluate('__hc.vol()')));
+      const shot=async(tag)=>{ const f=path.join(ROOT,'bench','results','vol-'+tag+'.png'); await page.screenshot({path:f});
+        const buf=fs.readFileSync(f).toString('base64');
+        return await page.evaluate(`(async()=>{ const im=new Image(); im.src='data:image/png;base64,${buf}';
+          await im.decode(); const c=document.createElement('canvas'); c.width=im.width; c.height=im.height;
+          const g=c.getContext('2d'); g.drawImage(im,0,0); const d=g.getImageData(340,180,600,360).data;
+          let s=0,n=0; for(let i=0;i<d.length;i+=4){ s+=0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2]; n++; }
+          return +(s/n).toFixed(2); })()`); };
+      await page.evaluate('__hc.vol(1)'); await sleep(1200); const onL=await shot('on');
+      await page.evaluate('__hc.vol(0)'); await sleep(1200); const offL=await shot('off');
+      await page.evaluate('__hc.vol(1)'); await sleep(1200); const on2L=await shot('on2');
+      console.log('    beam: on '+onL+'  off '+offL+'  on-again '+on2L+'   contribution '+(onL-offL).toFixed(2)+'  noise '+Math.abs(onL-on2L).toFixed(2));
+    }
     else console.log('    dungeon: no __hc hook for its position, skipped');
     console.log(bad? `\n  ${bad} rows BROKE the rule` : `\n  every row obeyed the budget, the range and the intensity floor`);
   } finally { try{ if(browser) await browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }
