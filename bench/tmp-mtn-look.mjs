@@ -46,6 +46,10 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
         for(let i=0;i<d.length;i+=4) px.push(0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2]);
         return px; })()`); };
     console.log('  mtn', JSON.stringify(await page.evaluate(`__hc.mtn()`)));
+    // THE HOUR IS A PARAMETER NOW: dusk and dawn are where a white cap could become the pale slab this horizon keeps
+    // growing, since the snow line is at its lowest and the light at its warmest.
+    const T=+(process.argv[3]||0.28);
+    await page.evaluate(`__hc.dayLock(${T})`); await sleep(2500);
     const on=await grab('on');
     await page.evaluate(`__hc.mtn(0)`); await sleep(900);
     const off=await grab('off');
