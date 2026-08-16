@@ -10897,6 +10897,9 @@ function assignPointLights(){
   // would be scoring last frame's positions and intensities.
   try{ _volPick(); }catch(e){}
   try{ updateVolPass(); }catch(e){}
+  // AFTER updateVolPass, never before: the motes read volPass.enabled and the uniforms it has just written, so running
+  // them first would light this frame's dust from last frame's lights - visible as a lag whenever the chosen set changes.
+  try{ updateMotes(); }catch(e){ if(!_moteErr){ _moteErr=String(e&&e.message||e); console.error("motes:", e); } }   // the error is KEPT, not swallowed - a silent catch round a per-frame update is how the volumetric pass looked like a dead shader
   // held torch/lantern lights the player's surroundings — EITHER HAND (Ben: "lighting should emit from off hand lighting").
   // This read inv[selSlot] alone, so a torch moved to the offhand went dark: it was drawn in the left fist, lit as a
   // viewmodel, and threw nothing into the world. The brighter of the two hands wins rather than the two summing, because
@@ -17925,6 +17928,7 @@ function tenPlace(t){
 function updateTenant(dt){
   const t=wretch, cam=(typeof huntCam!=='undefined'&&huntCam)?huntCam:camera.position;
   t.phase+=dt;
+  t._ticks=(t._ticks||0)+1;
   const dx=cam.x-t.pos.x, dz=cam.z-t.pos.z; t.dist=Math.hypot(dx,dz);
   if(!tenInside()){ tenRetire(); return; }                                  // you went outside. That is the escape, and it is total.
   const watched=meekWatched(t);
@@ -17950,7 +17954,7 @@ function updateTenant(dt){
   // Unwatched → it is simply somewhere else the next time you look. It never travels in view, so relocation is the whole motion
   // model: no path, no gait, nothing to catch mid-stride.
   t._moveT=(t._moveT||0)-dt;
-  if(t._moveT<=0){ t._moveT=1.6+Math.random()*1.8; if(tenPlace(t)){ t.state='MOVED'; t._moves=(t._moves||0)+1; } }
+  if(t._moveT<=0){ t._moveT=1.6+Math.random()*1.8; if(tenPlace(t)){ t.state='MOVED'; t._moves=(t._moves||0)+1; } else t._placeFail=(t._placeFail||0)+1; }
   placeWretch(dt,false);
 }
 function tenantTick(dt){
@@ -32438,6 +32442,100 @@ function _volPick(){
 }
 const _volFwd=new THREE.Vector3();
 const _volRej={dim:0,parked:0,far:0,behind:0,near:1e9};   // why each pool light lost, for __hc.volLights()
+// =====================================================================
+//  MOTES — the airborne particulate that makes a beam read as air (Ben's item 7)
+// =====================================================================
+// "a beam with nothing in it is a gradient; a beam with motes in it is air." The whole value of this is that it lights
+// from the SAME term the volumetric pass does, so a mote brightens where the beam is bright and disappears where there
+// is no beam. That is not a thing to reimplement carefully and keep in sync - the material is handed the volumetric
+// pass's own uniform OBJECTS, so there is literally one set of light positions, colours and intensities in the frame
+// and the two cannot drift apart. If the beam moves to another lantern, the motes move with it in the same frame.
+//
+// THEY HAVE NO AMBIENT TERM AT ALL. A dust particle with a base brightness is visible in an unlit room, which is the
+// one thing that would make this read as noise on the screen rather than as air: outside a beam these are black, and
+// black on an additive material is nothing. That also means the whole system is free to leave switched on - where the
+// volumetric pass has no lights, the motes contribute exactly zero.
+//
+// SEATED IN A BOX AROUND THE CAMERA, not in the world. Dust is everywhere; what matters is that some of it is where
+// you are looking, and a mote that leaves the box is re-seated on the far side rather than allocated. Count and radius
+// are fixed, so this is one draw call and one buffer that never resizes.
+const MOTE_N=260, MOTE_R=18;
+let _motePts=null, _moteMat=null, _moteOn=true, _moteLive=0, _moteErr=null, _moteLastT=0;
+const _moteS=[];   // {x,y,z, vx,vy,vz, ph}
+function _moteSeat(s, cx, cy, cz){
+  const a=Math.random()*6.283, r=MOTE_R*Math.cbrt(Math.random());   // cbrt: uniform in VOLUME, or every mote sits on the shell
+  const el=Math.acos(2*Math.random()-1);
+  s.x=cx+Math.sin(el)*Math.cos(a)*r; s.y=cy+Math.cos(el)*r*0.7; s.z=cz+Math.sin(el)*Math.sin(a)*r;
+  s.vx=(Math.random()-0.5)*0.14; s.vy=(Math.random()-0.5)*0.05-0.012; s.vz=(Math.random()-0.5)*0.14;
+  s.ph=Math.random()*6.283;
+}
+function updateMotes(){
+  // Its own dt off the clock: this is called from the light-pool pass, which has no dt in scope, and threading one down
+  // to it would mean touching a function that has nothing else to do with dust. Clamped because a frame that took a
+  // second (a chunk flush, a tab returning) would otherwise teleport every mote out of its box in one step.
+  const now=(typeof clock!=='undefined')?clock.elapsedTime:0;
+  const dt=Math.min(0.1, Math.max(0, now-_moteLastT)); _moteLastT=now;
+  const live = _moteOn && volPass && volPass.enabled;
+  if(!_motePts){
+    if(!live) return;                                        // nothing is built until there is a beam to put dust in
+    const g=new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MOTE_N*3),3));
+    g.setAttribute('aSeed', new THREE.BufferAttribute(new Float32Array(MOTE_N),1));
+    const sd=g.getAttribute('aSeed'); for(let i=0;i<MOTE_N;i++) sd.setX(i, Math.random());
+    const u=volPass.uniforms;
+    _moteMat=new THREE.ShaderMaterial({
+      // THE SHARED OBJECTS. Not copies of the values - the same {value:...} the pass reads, by reference.
+      uniforms:{ uVLPos:u.uVLPos, uVLCol:u.uVLCol, uVLI:u.uVLI, uCamPos:u.uCamPos,
+                 uGain:{value:2.6}, uSize:{value:2.4}, uT:{value:0} },
+      transparent:true, depthWrite:false, blending:THREE.AdditiveBlending, fog:false,
+      vertexShader:[
+      'uniform vec3 uVLPos[3]; uniform vec3 uVLCol[3]; uniform float uVLI[3]; uniform vec3 uCamPos;',
+      'uniform float uGain, uSize, uT; attribute float aSeed; varying vec3 vLit;',
+      'void main(){',
+      '  vec4 mv=modelViewMatrix*vec4(position,1.0);',
+      '  float dcam=length(position-uCamPos);',
+      // The same in-scatter the pass marches, evaluated once at the particle instead of along a ray: inverse-square
+      // with the same 0.25 softening, and the same forward-phase shape about the eye-to-mote direction.
+      '  vec3 eye=(position-uCamPos)/max(dcam,1e-3);',
+      '  vec3 acc=vec3(0.0);',
+      '  for(int l=0;l<3;l++){',
+      '    if(uVLI[l]<=0.0) continue;',
+      '    vec3 dl=uVLPos[l]-position; float d2=dot(dl,dl)+0.25;',
+      '    float ph=0.65+0.35*max(0.0, dot(eye, dl*inversesqrt(d2)));',
+      '    acc+=uVLCol[l]*(uVLI[l]/d2)*ph;',
+      '  }',
+      // A slow twinkle per particle, because real dust turns as it falls and catches the light in flashes. It is a
+      // modulation of the light term, never an addition to it - a mote outside every beam stays exactly black.
+      '  acc*=uGain*(0.72+0.28*sin(uT*1.7+aSeed*31.4));',
+      '  vLit=min(acc, vec3(1.6));',
+      '  gl_Position=projectionMatrix*mv;',
+      '  gl_PointSize=uSize*(1.0+2.0/max(1.0,dcam))*(300.0/max(1.0,-mv.z));',
+      '}'].join('\n'),
+      fragmentShader:[
+      'precision mediump float; varying vec3 vLit;',
+      'void main(){',
+      '  vec2 c=gl_PointCoord-0.5; float r=dot(c,c);',
+      '  if(r>0.25) discard;',
+      '  float a=1.0-r*4.0;',                                 // soft round grain; a square dust speck reads as a dead pixel
+      '  gl_FragColor=vec4(vLit*a*a, 1.0);',
+      '}'].join('\n')
+    });
+    _motePts=new THREE.Points(g,_moteMat); _motePts.frustumCulled=false; _motePts.renderOrder=6; scene.add(_motePts);
+    for(let i=0;i<MOTE_N;i++){ const s={x:0,y:0,z:0,vx:0,vy:0,vz:0,ph:0}; _moteSeat(s, camera.position.x, camera.position.y, camera.position.z); _moteS.push(s); }
+  }
+  _motePts.visible=live;
+  if(!live){ _moteLive=0; return; }
+  _moteMat.uniforms.uT.value=clock.elapsedTime;
+  const cx=camera.position.x, cy=camera.position.y, cz=camera.position.z;
+  const pos=_motePts.geometry.getAttribute('position');
+  for(let i=0;i<MOTE_N;i++){ const s=_moteS[i];
+    s.x+=s.vx*dt; s.y+=s.vy*dt; s.z+=s.vz*dt;
+    s.x+=Math.sin(clock.elapsedTime*0.6+s.ph)*dt*0.09;        // the drift of air in a room, not a fall
+    if(Math.abs(s.x-cx)>MOTE_R || Math.abs(s.z-cz)>MOTE_R || Math.abs(s.y-cy)>MOTE_R*0.75) _moteSeat(s,cx,cy,cz);
+    pos.setXYZ(i, s.x, s.y, s.z);
+  }
+  pos.needsUpdate=true; _moteLive=MOTE_N;
+}
 // ---- CONTACT SHADOWS: everything alive is joined to the ground it stands on ----------------------------------------------
 // Plan §4 item 11. Creatures cast shadow-map shadows only, and only inside the 46-block frustum; beyond that a deer stands on a
 // hillside with nothing under it and reads as a sticker. What sells contact is small and local — the dark patch right at the feet —
@@ -39516,7 +39614,8 @@ window.__hc={
       if(!TENANT) return {alive:false, inside:tenInside()};
       return { alive:!!TENANT.active, inside:tenInside(), state:TENANT.state, dist:+(TENANT.dist||0).toFixed(2),
                watched:TENANT.active?meekWatched(TENANT):false, movedWhileWatched:(TENANT._badMove||0),
-               relocations:(TENANT._moves||0), playerHealth:+(player.health||0).toFixed(2),
+               relocations:(TENANT._moves||0), ticks:(TENANT._ticks||0), moveT:+(TENANT._moveT||0).toFixed(2),
+               placeFails:(TENANT._placeFail||0), playerHealth:+(player.health||0).toFixed(2),
                lightSlots:(typeof pointPool!=='undefined')?pointPool.length:null }; }
     catch(e){ return {err:String(e.message||e)}; } },
   // QA: seal the player into a box of stone so the interior gate can be reached from open ground. Without it the creature
@@ -41581,6 +41680,17 @@ window.__hc={
     catch(e){ return String(e.message||e); } },
   rainRoof(){ try{ return { drawn:_rainDrawn, roofed:_rainRoofed, total:RAIN_N,
       roofedPct:+(100*_rainRoofed/Math.max(1,RAIN_N)).toFixed(1), raining:!!weather.raining, rain:+weather.rain.toFixed(2) }; }
+    catch(e){ return String(e.message||e); } },
+  // QA/bench: the motes, and the dials that decide whether they read as air or as noise. on/off is how the beam and the
+  // dust are measured TOGETHER - the pair is the point of item 7, so they get one A/B and not two.
+  motes(v,o){ try{ if(v!=null) _moteOn=!!v;
+    if(o&&_moteMat){ if(o.gain!=null) _moteMat.uniforms.uGain.value=+o.gain; if(o.size!=null) _moteMat.uniforms.uSize.value=+o.size; }
+    return { err:_moteErr, on:_moteOn, built:!!_motePts, drawing:!!(_motePts&&_motePts.visible), n:MOTE_N, live:_moteLive, r:MOTE_R,
+             gain:_moteMat?_moteMat.uniforms.uGain.value:null, size:_moteMat?_moteMat.uniforms.uSize.value:null,
+             // PROOF THE TERM IS SHARED, not merely copied from the same place: if these are ever false the motes have
+             // their own light set and can light where the beam does not, which is the failure this design exists to rule out.
+             sharesPos:!!(_moteMat&&volPass&&_moteMat.uniforms.uVLPos===volPass.uniforms.uVLPos),
+             sharesI:!!(_moteMat&&volPass&&_moteMat.uniforms.uVLI===volPass.uniforms.uVLI) }; }
     catch(e){ return String(e.message||e); } },
   volLights(){ try{ return { budget:VOL_MAX, range:VOL_RANGE, minI:VOL_MIN_I, air:+_volAir().toFixed(3), why:_volWhy,
       pool:pointPool.length, rej:{ dim:_volRej.dim, parked:_volRej.parked, far:_volRej.far, behind:_volRej.behind,
