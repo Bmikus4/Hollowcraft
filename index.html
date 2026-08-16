@@ -11510,6 +11510,11 @@ function physics(dt){
   if(feetWet && !p._wasFeetWet && typeof sfxSplash==='function') sfxSplash(p.pos.x, p.pos.y+0.2, p.pos.z, 0.85);        // SPLASH the moment you step into any water
   if(feetWet && !p._wasFeetWet && p.vel.y<-4 && typeof spawnBubbles==='function') spawnBubbles(p.pos.x,p.pos.y+0.3,p.pos.z, 14, 0.55, 1.5);   // the air a body drags under with it — only on a real plunge, so wading in is silent
   p.wading=feetWet; p._wasFeetWet=feetWet; p._wasInWater=p.inWater;
+  // CLEARED HERE RATHER THAN IN AN else. The swim branch below sits in an if/else-if chain, so an else attached to
+  // it would detach the air and ground branches from it — and this also catches every path that leaves physics()
+  // early (grabbed, riding, seated), where a swimmer who is snatched out of the water would otherwise stay
+  // horizontal with a swimmer's hitbox for as long as the grab lasts.
+  if(!p.inWater){ p.swimming=false; p.swimPh=0; }
   // NO INPUT WHILE A MENU IS UP (Ben 08-04: "character should stop moving when in the inventory or pause menu"). Keys held when
   // the pointer unlocks stay held as far as the keys map is concerned, and with momentum a run now carries on for a fifth of a
   // second after that — so this kills the input AND the horizontal velocity outright, while gravity below still runs. Reading the
@@ -16092,6 +16097,22 @@ function updateTpsBody(dt){
   // angles, so a pose added before it is simply overwritten. Identical numbers to the peer path — one animation for
   // every food means one animation on every rig, and if these two ever drift the bug is that a meal looks different
   // to you than it does to the person watching you eat it.
+  // ---- SWIMMING, ON YOUR OWN BODY ----
+  // The body goes HORIZONTAL and the limbs run a front-crawl off the same phase the physics advances, so the stroke
+  // rate and the speed can never disagree — they are one number. Applied after the walk cycle for the reason the
+  // crouch and the knee-give both carry comments about: the cycle ASSIGNS these angles.
+  // The pitch is applied about the body's own right axis with the yaw left alone, which is what prone already does
+  // (see the peer block) — a swimmer must not be turned by being laid flat.
+  { const _sT=(player.swimming?1:0);
+    P.swimT=(P.swimT||0)+(_sT-(P.swimT||0))*Math.min(1,dt*6);
+    if(P.swimT>0.001){ const ph=player.swimPh||0, s1=Math.sin(ph*6.283), s2=Math.sin(ph*6.283+Math.PI);
+      if(P.g.rotation.order!=='YXZ') P.g.rotation.order='YXZ';
+      P.g.rotation.x = (P.g.rotation.x||0)*(1-P.swimT) + (Math.PI*0.42)*P.swimT;   // face-down, not quite flat: the head still looks ahead
+      P.g.position.y += 0.22*P.swimT;                                              // laid flat, the model's own origin would sink it
+      P.armL.rotation.x = P.armL.rotation.x*(1-P.swimT) + (-2.2 + s1*1.5)*P.swimT; // alternating crawl, arms opposed
+      P.armR.rotation.x = P.armR.rotation.x*(1-P.swimT) + (-2.2 + s2*1.5)*P.swimT;
+      P.legL.rotation.x = P.legL.rotation.x*(1-P.swimT) + (s2*0.42)*P.swimT;       // a flutter kick is small and fast
+      P.legR.rotation.x = P.legR.rotation.x*(1-P.swimT) + (s1*0.42)*P.swimT; } }
   { const _eT=(EAT.active?1:0);
     P.eatT=(P.eatT||0)+(_eT-(P.eatT||0))*Math.min(1,dt*10);
     if(P.eatT>0.001){ const _ph=EAT.active?Math.min(1,EAT.t/Math.max(0.001,EAT.dur)):1;
@@ -16336,7 +16357,7 @@ function netMsg(m){
   else if(m.t==='time'){ if(!NET.host){ if(m.tm!=null)worldTime=m.tm; if(typeof weather!=='undefined'){ if(m.rt!=null)weather.rainTgt=m.rt; if(m.ft!=null)weather.fogTgt=m.ft; } } }   // host clock (1Hz) + weather targets → guests lerp toward them
 
   else if(m.t==='peerLeave'){ removeAvatar(m.id); delete NET.peers[m.id]; if(wretch.owner===m.id) wretch.owner=NET.hostId; }
-  else if(m.t==='p'){ NET.peers[m.id]=m; ensureAvatar(m.id); const a=NET.avatars[m.id]; if(a){ a.tx=m.x; a.ty=m.y; a.tz=m.z; a.tyaw=m.yaw||0; a.tpitch=m.pitch||0; a.tied=!!m.tied; a.dead=!!m.dead; a.po=m.po|0; a.ea=+m.ea||0; if(a.pack) a.pack.visible=!!m.pk;
+  else if(m.t==='p'){ NET.peers[m.id]=m; ensureAvatar(m.id); const a=NET.avatars[m.id]; if(a){ a.tx=m.x; a.ty=m.y; a.tz=m.z; a.tyaw=m.yaw||0; a.tpitch=m.pitch||0; a.tied=!!m.tied; a.dead=!!m.dead; a.po=m.po|0; a.ea=+m.ea||0; a.sw=+m.sw||0; if(a.pack) a.pack.visible=!!m.pk;
     if(m.nm!==a.nm){ a.nm=m.nm; if(a.tag)a.g.remove(a.tag); a.tag=nameTag(m.nm); a.g.add(a.tag); }                          // nametag (server-set text, rendered locally)
     if(m.held!==a.held || (m.at||null)!==(a.at||null)){ a.held=m.held; a.at=m.at||null; setAvatarHeld(a,m.held,a.at); }   // held item shown in their hand, wearing whatever is fitted to it
     if((m.ch||null)!==(a.ch||null)) setAvatarChest(a,m.ch||null); } }                                                     // …and the chestplate on their body
@@ -16503,7 +16524,10 @@ function netUpdate(dt){ if(!NET.on)return;
       // rather than a new message type: 'p' is already in ALLOWED and already sent every tick, so a peer's meal
       // costs one number and cannot be the next message that vanishes with both ends reporting success.
       netSend({t:'p',x:px,y:py,z:pz,yaw,pitch:pit,held,at,nm:playerName,tied,dead,po,pk,ch,
-               ea:(typeof EAT!=='undefined'&&EAT.active)?+Math.min(1,EAT.t/Math.max(0.001,EAT.dur)).toFixed(2):0}); } }   // po: posture (0 stand / 1 crouch / 2 prone) — a crawling peer must not read as standing
+               ea:(typeof EAT!=='undefined'&&EAT.active)?+Math.min(1,EAT.t/Math.max(0.001,EAT.dur)).toFixed(2):0,
+               // `sw` = the swim phase, 0 when not swimming. The PHASE and not a pose, and not a stroke rate either:
+               // the receiver re-solves the limbs from it, so the wire cost of a swimming peer is one number.
+               sw:player.swimming?+((player.swimPh||0)%1).toFixed(3):0}); } }   // po: posture (0 stand / 1 crouch / 2 prone) — a crawling peer must not read as standing
   if(NET.host){ NET.tAcc=(NET.tAcc||0)+dt; if(NET.tAcc>1){ NET.tAcc=0; netSend({t:'time',tm:worldTime,rt:+((typeof weather!=='undefined'&&weather.rainTgt)||0).toFixed(2),ft:+((typeof weather!=='undefined'&&weather.fogTgt)||0).toFixed(2)}); } }   // day/night + weather targets → guests lerp
   for(const id in NET.avatars){ const a=NET.avatars[id], k=Math.min(1,dt*12);
     a.g.position.x+=(a.tx-a.g.position.x)*k; a.g.position.y+=(a.ty-a.g.position.y)*k; a.g.position.z+=(a.tz-a.g.position.z)*k; a.g.rotation.y=a.tyaw+Math.PI; a.g.visible=!a.dead;   // +π: the model's front (held-arm side) was pointing opposite the look direction → it rendered backward
@@ -16527,6 +16551,19 @@ function netUpdate(dt){ if(!NET.on)return;
       a.armL.rotation.x=a.armL.rotation.x*_k-1.15*a.proneT; a.armR.rotation.x=a.armR.rotation.x*_k-1.15*a.proneT;
       }
     else if(a.g.rotation.x) a.g.rotation.x=0;
+    // A PEER SWIMMING. Same shape as the eating pose and for the same reason: the wire carries a PHASE and the pose
+    // is re-solved on the receiver's own rig, which is the giantess pattern and the only one that survives two
+    // avatars that are not the same size. The numbers are the ones the local body uses, deliberately duplicated —
+    // if they drift, a swimmer looks different to himself than to the person swimming beside him.
+    a.swimT=(a.swimT||0)+(((a.sw>0)?1:0)-(a.swimT||0))*Math.min(1,dt*6);
+    if(a.swimT>0.001){ const ph=a.sw||0, s1=Math.sin(ph*6.283), s2=Math.sin(ph*6.283+Math.PI);
+      if(a.g.rotation.order!=='YXZ') a.g.rotation.order='YXZ';
+      a.g.rotation.x=(a.g.rotation.x||0)*(1-a.swimT) + (Math.PI*0.42)*a.swimT;
+      a.g.position.y += 0.22*a.swimT;
+      a.armL.rotation.x=a.armL.rotation.x*(1-a.swimT) + (-2.2 + s1*1.5)*a.swimT;
+      a.armR.rotation.x=a.armR.rotation.x*(1-a.swimT) + (-2.2 + s2*1.5)*a.swimT;
+      a.legL.rotation.x=a.legL.rotation.x*(1-a.swimT) + (s2*0.42)*a.swimT;
+      a.legR.rotation.x=a.legR.rotation.x*(1-a.swimT) + (s1*0.42)*a.swimT; }
     // A PEER EATING. The wire carries a phase, not a pose, and the arm is re-solved HERE on the receiver's own rig —
     // the giantess pattern, and the only one that survives two clients whose avatars are not the same size. Eased
     // like the postures above because it arrives in packet-sized steps.
