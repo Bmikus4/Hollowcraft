@@ -928,7 +928,7 @@ await Promise.race([
     // shiny, they should have hd metal textures", minus the rusty and diamond-plate strips he excluded). Three
     // finishes, chosen PER GUN below, because "shiny" is a property of a nickel revolver and not of an AK.
     _texLoad('blued','./assets/tex/metal-blued.jpg',true), _texLoad('nickel','./assets/tex/metal-nickel.jpg',true),
-    _texLoad('steel','./assets/tex/metal-steel.jpg',true) ]),
+    _texLoad('steel','./assets/tex/metal-steel.jpg',true), _texLoad('canvas','./assets/tex/canvas.jpg',true) ]),
   new Promise(r=>setTimeout(r,8000)),
 ]);
 // THE GIANTESS LOADS IN THE BACKGROUND, deliberately outside the race above. Her GLB is 8 MB — as much as
@@ -8785,7 +8785,7 @@ const VolLightShader={
   uniforms:{ tDiffuse:{value:null}, tDepth:{value:null}, uInvVP:{value:new THREE.Matrix4()},
     uCamPos:{value:new THREE.Vector3()}, uVLPos:{value:[new THREE.Vector3(),new THREE.Vector3(),new THREE.Vector3()]},
     uVLCol:{value:[new THREE.Vector3(),new THREE.Vector3(),new THREE.Vector3()]},
-    uVLI:{value:[0,0,0]}, uDensity:{value:0}, uStrength:{value:0.85}, uMaxDist:{value:34.0}, uSteps:{value:10.0} },
+    uVLI:{value:[0,0,0]}, uDensity:{value:0}, uStrength:{value:0.075}, uMaxDist:{value:34.0}, uSteps:{value:10.0} },
   vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
   fragmentShader:[
   'precision highp float; varying vec2 vUv;',
@@ -8819,10 +8819,16 @@ const VolLightShader={
   '      acc+=uVLCol[l]*att*ph;',
   '    }',
   '  }',
-  '  acc*=dt*uDensity*uStrength;',
+  // THE SCALE IS MEASURED, NOT CHOSEN, and the first value was a whiteout: at 0.85 the dungeon crop went from 15 to
+  // 244 of 255 - the pass drew a fog of light rather than a beam through fog. In-scatter per unit length carries a
+  // 1/4pi from the phase integral that this was missing, and the remainder is the scattering coefficient, which for
+  // air thin enough to see through is small. The clamp is the other half: inverse-square has no upper bound, so a
+  // camera pressed against a lantern would blow out however low the strength is set.
+  '  acc*=dt*uDensity*uStrength*0.0796;',
+  '  acc=min(acc, vec3(0.45));',
   '  gl_FragColor=vec4(src.rgb+acc, src.a);',
   '}'].join('\n') };
-let volPass=null;
+let volPass=null, _volWant=true;   // _volWant is the A/B switch: ShaderPass has no userData, and reading one threw inside the per-frame update, which silently disabled the whole pass
 // Wired per frame from the selection. The uniform arrays are fixed at three because the budget is three; a light that
 // is not chosen has its intensity written to zero rather than being removed, so the array never changes length and the
 // program never recompiles.
@@ -8831,7 +8837,7 @@ function updateVolPass(){
   const u=volPass.uniforms;
   const air=(typeof _volAir==='function')?_volAir():0;
   u.uDensity.value = air<=0.001 ? 0 : (0.02 + 0.16*air);
-  volPass.enabled = (volPass.userData.want!==false) && u.uDensity.value>0.0001 && _volSel.length>0;
+  volPass.enabled = _volWant && u.uDensity.value>0.0001 && _volSel.length>0;
   if(!volPass.enabled) return;
   u.uCamPos.value.copy(camera.position);
   camera.updateMatrixWorld();
@@ -20172,18 +20178,31 @@ function buildPlayerModel(){ const g=new THREE.Group();
   mk(0.20,0.14,0.30,shoe,0,-0.87,0.04,legL); mk(0.20,0.14,0.30,shoe,0,-0.87,0.04,legR); // feet (fwd), swinging with the leg they are on
   const hand=new THREE.Group(); hand.position.set(0,-0.80,0.04); armR.add(hand);      // the RIGHT fist — the main hand
   const handOff=new THREE.Group(); handOff.position.set(0,-0.80,0.04); armL.add(handOff);   // …and the left, for whatever is in the offhand
-  const lea=()=>new THREE.MeshLambertMaterial({color:0x7a4a24});
+  // ARMOUR IS TEXTURED, NOT PAINTED (Ben 08-16: "texture them, texture all armor"). Every piece was a flat Lambert
+  // box in one brown, tinted per item by the visibility pass — so an iron cuirass and a leather cap were the same
+  // surface in two colours. They take a real photograph now: the metal strip from Ben's own sheet for iron, the
+  // canvas strip for leather, both cut and made tileable offline by tools/gun-textures.py.
+  //   THE COLOUR STAYS ON TOP. The per-item tint (ITEMS[id].armor.col) multiplies the map, so nothing about which
+  // piece reads as which tier changes — the map adds grain and shading to a shape that had neither, and a tint over
+  // a photograph is still that tint.
+  //   repeat is per PIECE, not global: a boot is a fifth the size of a cuirass and one repeat setting across both
+  // gives a boot a single blurred texel and the cuirass a tiled grid.
+  const _armTex=(k)=>{ const t=GUN_TEX[k]; return t||null; };
+  const lea=(k,rep)=>{ const m=new THREE.MeshLambertMaterial({color:0x7a4a24, map:_armTex(k||'canvas')});
+    if(m.map){ m.map=m.map.clone(); m.map.needsUpdate=true; m.map.wrapS=m.map.wrapT=THREE.RepeatWrapping;
+      m.map.repeat.set(rep||2.2, rep||2.2); }
+    return m; };
   // ARMOUR THAT COVERS A LIMB RIDES THAT LIMB. A sleeve or a boot parented to the body group would stay behind when the limb
   // swings, so those pieces hang off the pivots and are listed in userData.extra: the visibility/tint pass walks the group AND
   // its extras, which is what keeps one armour piece one thing while its parts live on four different nodes.
-  const helm=new THREE.Group(); helm.position.y=-1.62; mk(0.36,0.36,0.38,lea(),0,1.86,0,helm); mk(0.40,0.06,0.42,lea(),0,1.70,0,helm); headG.add(helm);   // -1.62 cancels the pivot, so the absolute build heights still land where the paperdoll expects
-  const chest=new THREE.Group(); chest.userData.plate=mk(0.48,0.66,0.30,lea(),0,1.31,0,chest); g.add(chest);   // named: a pack chestplate hides this box and stands its own shell in its place (see _wornShellOn)
-  chest.userData.extra=[mk(0.19,0.42,0.21,lea(),0,-0.22,0,armL), mk(0.19,0.42,0.21,lea(),0,-0.22,0,armR)];
-  const legs=new THREE.Group(); mk(0.44,0.18,0.28,lea(),0,0.95,0,legs); g.add(legs);
-  legs.userData.extra=[mk(0.22,0.52,0.26,lea(),0,-0.32,0,legL), mk(0.22,0.52,0.26,lea(),0,-0.32,0,legR)];
+  const helm=new THREE.Group(); helm.position.y=-1.62; mk(0.38,0.38,0.40,lea('canvas',3.0),0,1.86,0,helm); mk(0.43,0.07,0.45,lea('canvas',3.0),0,1.70,0,helm); headG.add(helm);   // -1.62 cancels the pivot, so the absolute build heights still land where the paperdoll expects
+  const chest=new THREE.Group(); chest.userData.plate=mk(0.54,0.72,0.34,lea('canvas',2.0),0,1.30,0,chest); g.add(chest);   // named: a pack chestplate hides this box and stands its own shell in its place (see _wornShellOn)
+  chest.userData.extra=[mk(0.22,0.46,0.24,lea('canvas',2.4),0,-0.22,0,armL), mk(0.22,0.46,0.24,lea('canvas',2.4),0,-0.22,0,armR)];
+  const legs=new THREE.Group(); mk(0.48,0.20,0.31,lea('canvas',2.2),0,0.95,0,legs); g.add(legs);
+  legs.userData.extra=[mk(0.24,0.54,0.28,lea('canvas',2.4),0,-0.32,0,legL), mk(0.24,0.54,0.28,lea('canvas',2.4),0,-0.32,0,legR)];
   const boots=new THREE.Group(); g.add(boots);
-  boots.userData.extra=[mk(0.23,0.36,0.26,lea(),0,-0.74,0,legL), mk(0.23,0.36,0.26,lea(),0,-0.74,0,legR),
-                        mk(0.23,0.16,0.34,lea(),0,-0.86,0.05,legL), mk(0.23,0.16,0.34,lea(),0,-0.86,0.05,legR)];
+  boots.userData.extra=[mk(0.25,0.38,0.28,lea('canvas',3.0),0,-0.74,0,legL), mk(0.25,0.38,0.28,lea('canvas',3.0),0,-0.74,0,legR),
+                        mk(0.25,0.17,0.36,lea('canvas',3.0),0,-0.86,0.05,legL), mk(0.25,0.17,0.36,lea('canvas',3.0),0,-0.86,0.05,legR)];
   // THE BACKPACK, worn on the back. Parented to the model group at the torso's own height and BEHIND it (-z; the feet are
   // built at +z, so forward is +z and the back is negative). Built as a real bag rather than a box: a rounded leather
   // body, a flap that overhangs with a curled lip, two shoulder straps that pass over the shoulders and down the chest,
@@ -40791,11 +40810,11 @@ window.__hc={
   // QA/bench: the volumetric pass itself — on/off and its two dials. Off is the A/B; a beam has to be measurable
   // against its own absence like everything else on this horizon.
   vol(v,o){ try{ if(!volPass) return 'no pass (Low quality or ?norays)';
-      if(v!=null) volPass.userData.want=!!v;
+      if(v!=null) _volWant=!!v;
       if(o){ if(o.strength!=null) volPass.uniforms.uStrength.value=+o.strength;
              if(o.steps!=null) volPass.uniforms.uSteps.value=Math.max(2,Math.min(12,+o.steps));
              if(o.maxDist!=null) volPass.uniforms.uMaxDist.value=+o.maxDist; }
-      return { on:volPass.enabled, want:volPass.userData.want!==false, density:+volPass.uniforms.uDensity.value.toFixed(4),
+      return { on:volPass.enabled, want:_volWant, density:+volPass.uniforms.uDensity.value.toFixed(4),
                strength:volPass.uniforms.uStrength.value, steps:volPass.uniforms.uSteps.value,
                lights:_volSel.length }; }
     catch(e){ return String(e.message||e); } },
