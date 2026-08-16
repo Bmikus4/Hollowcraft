@@ -298,6 +298,20 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     T('a chest keeps a gun through a save', chest.saved && chest.saved.optic==='holo_sight' && chest.saved.muzzle==='suppressor', chest);
     T('and it keeps the gun identity with it', chest.uid!=null, chest);
 
+    // THE STRING IS BUILT ON CHANGE, NOT ON FRAME. The third-person body asks what the held gun is wearing every
+    // frame; before the cache that was four allocations per frame to answer a question that changes when somebody
+    // fits something.
+    await p.evaluate("__hc.hold('ar15'); __hc.attFit('optic','red_dot'); __hc.tpsProbe(true)"); await sleep(200);
+    const b0=(await p.evaluate("__hc.attStrBuilds()")).builds;
+    await sleep(1500);
+    const b1=(await p.evaluate("__hc.attStrBuilds()")).builds;
+    await p.evaluate("__hc.attFit('muzzle','suppressor')"); await sleep(200);
+    const b2=(await p.evaluate("__hc.attStrBuilds()")).builds;
+    await p.evaluate("__hc.tpsProbe(false); __hc.attFit('muzzle',null); __hc.attFit('optic',null)");
+    console.log('attStr builds', JSON.stringify({idle:b1-b0, onFit:b2-b1}));
+    T('idling ~90 frames rebuilds the string at most twice', (b1-b0)<=2, {idle:b1-b0});
+    T('fitting something rebuilds it', (b2-b1)>=1, {onFit:b2-b1});
+
     T('zero page errors', errs.length===0, errs.slice(0,2));
     console.log(fails? fails+' FAILURE(S)':'ALL PASS');
     await b.close();

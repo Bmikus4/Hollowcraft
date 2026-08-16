@@ -7196,6 +7196,13 @@ const mountainMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false,
   '    vec3 _hz=mix(uAir, col*(_aL/_cL), 0.35);',
   '    col=mix(col, _hz, haze);',
   '    col=min(col, uAir*0.85);',
+  // ...AND THE CAPS ARE THE ONE THING ALLOWED THROUGH IT (Ben: punch through the cloud). The clamp above is the rule
+  // that keeps this horizon honest - nothing on it may out-shine the air it is seen through - and it is exactly why the
+  // snow sat INSIDE the cloud band rather than standing against it. Snow is the one surface out there that genuinely is
+  // brighter than the haze in front of it, so it gets a bounded exemption: up to 12 per cent over the air, only where
+  // snowT is on, and only in proportion to the sun lighting it. Rock and treeline stay clamped, and at a low sun the
+  // exemption closes with the coverage gate, so the pale-band fault cannot come back through it at dusk.
+  '    col=mix(col, max(col, uAir*1.12), snowT*uSunUp);',
   // A DEBUG VIEW OF THE TERMS, because three reasoned fixes to the snow produced no cap and the next move is to LOOK
   // at the quantity rather than argue about it. 1 paints snowT red, 2 paints the fragment's own world height against
   // the snow line green, and both are written after the haze and the clamp so nothing downstream can eat them.
@@ -15725,7 +15732,7 @@ function updateTpsBody(dt){
   // AND IT WEARS WHAT YOU BOLTED TO IT. Your own third-person body goes through the same builder a peer's does, so
   // it needs the same attachment string — without it, the one player guaranteed to know a scope is fitted is the
   // one whose body renders without it.
-  const hat=(hs&&ITEMS[hid]&&ITEMS[hid].gun&&typeof attOf==='function')?(Object.entries(attOf(hs)||{}).map(e=>e[0]+':'+e[1]).sort().join('|')||null):null;
+  const hat=(typeof attStr==='function')?attStr(hs):null;
   if(P.held!==hid || (P._at||null)!==hat){ P.held=hid; P._at=hat; try{ setAvatarHeld(P,hid,hat); }catch(e){} }
   const oid=(armor[EQ_OFF]&&armor[EQ_OFF].id)||null;                            // BOTH HANDS (Ben 08-04): the offhand carries too
   if(P.offHeld!==oid){ P.offHeld=oid; try{ _tpsSetOff(P,oid); }catch(e){} }
@@ -16086,7 +16093,7 @@ function netUpdate(dt){ if(!NET.on)return;
       // invisible to everyone but its owner — a rifle with a scope on it looked bare in a teammate's hands. Sent
       // as a short string ('optic:red_dot|muzzle:suppressor') rather than an object because it also has to be
       // COMPARABLE for the send-on-change test below, and comparing objects there would send every frame.
-      at=(s&&ITEMS[s.id]&&ITEMS[s.id].gun&&typeof attOf==='function')?Object.entries(attOf(s)||{}).map(e=>e[0]+':'+e[1]).sort().join('|')||null:null;
+      at=(typeof attStr==='function')?attStr(s):null;
     const moved = px!==NET._lx||py!==NET._ly||pz!==NET._lz||yaw!==NET._lyaw||pit!==NET._lpit||held!==NET._lheld||at!==NET._lat||tied!==NET._ltied||dead!==NET._ldead||po!==NET._lpo||pk!==NET._lpk||ch!==NET._lch;   // pk and ch in the CHANGE test, not just the payload: without it, putting the pack or the cuirass on only reaches peers on the next 0.5s heartbeat
     if(moved || (NET._hb=(NET._hb|0)+1)>=10){ NET._hb=0; NET._lx=px;NET._ly=py;NET._lz=pz;NET._lyaw=yaw;NET._lpit=pit;NET._lheld=held;NET._lat=at;NET._ltied=tied;NET._ldead=dead;NET._lpo=po;NET._lpk=pk;NET._lch=ch;
       netSend({t:'p',x:px,y:py,z:pz,yaw,pitch:pit,held,at,nm:playerName,tied,dead,po,pk,ch}); } }   // po: posture (0 stand / 1 crouch / 2 prone) — a crawling peer must not read as standing
@@ -22580,7 +22587,20 @@ const GUNATT={};
 function attOf(slot){ if(!slot) return null; const k=gunKey(slot); if(!k) return null;
   if(GUNATT[k]==null) GUNATT[k]=(slot.att&&typeof slot.att==='object')?Object.assign({},slot.att):{};
   return GUNATT[k]; }
-function attSet(slot,which,id){ const a=attOf(slot); if(!a) return null;
+// THE WIRE STRING, BUILT ONCE PER CHANGE. Two callers need what a gun is wearing as a comparable string — the
+// player packet (20 Hz) and the third-person body (EVERY FRAME) — and both were building it with Object.entries,
+// a map, a sort and a join. That is four allocations a frame to answer a question whose answer changes when
+// somebody fits something, which is approximately never. attStamp is bumped by attSet, so the cache is invalidated
+// by the only thing that can invalidate it.
+let _attStamp=0, _attStrKey=null, _attStrVal=null, _attStrAt=-1, _attStrBuilds=0;
+function attStr(slot){ if(!slot||!ITEMS[slot.id]||!ITEMS[slot.id].gun) return null;
+  const k=gunKey(slot);
+  if(_attStrKey===k && _attStrAt===_attStamp) return _attStrVal;
+  const a=attOf(slot)||{}; let out='';
+  for(const s of ATT_SLOTS) if(a[s]) out+=(out?'|':'')+s+':'+a[s];
+  _attStrKey=k; _attStrAt=_attStamp; _attStrVal=out||null; _attStrBuilds++;
+  return _attStrVal; }
+function attSet(slot,which,id){ const a=attOf(slot); if(!a) return null; _attStamp++;
   if(id) a[which]=id; else delete a[which];
   slot.att=Object.assign({},a);                       // the stack remembers, so a save or a hand-off carries it
   return a; }
@@ -36343,6 +36363,9 @@ window.__hc={
       delete chests[key];
       return { before, saved:row?row.att:null, uid:row?row.uid:null, sync:JSON.stringify({t:'chest',k:key,c:arr}).length }; }
     catch(e){ return {err:String(e.message||e)}; } },
+  // QA: how many times the wire string was actually built. The third-person body asks for it every frame, so this
+  // is what says the cache is a cache and not a rebuild with extra steps.
+  attStrBuilds(){ try{ return { builds:_attStrBuilds, stamp:_attStamp, val:_attStrVal }; }catch(e){ return {err:String(e.message||e)}; } },
   // QA: throw whatever is in hand, through the same key the player uses.
   tossHeld(){ try{ const s=heldSlot(); if(!s) return {err:'nothing held'};
       tossOne(s.id,s.uid,s); s.n--; if(s.n<=0) inv[selSlot]=null; refreshHotbar(); setViewItem(inv[selSlot]?inv[selSlot].id:null);
