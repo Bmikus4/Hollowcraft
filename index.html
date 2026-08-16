@@ -7152,12 +7152,20 @@ const mountainMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false,
   // the projection: the fragment's own world height is the eye height plus its elevation times the range's distance,
   // compared against a line that still RISES with the sun the way a real one does across a day.
   '    float wy=uCamY+elev*dist;',
-  '    float snowY=mix(' + (CFG.SEA+150).toFixed(1) + ', ' + (CFG.SEA+188).toFixed(1) + ', uDay);',
+  // AND THE LINE IS SET FROM WHAT THE RANGE ACTUALLY REACHES, not from what its envelope allows. ridged()^1.35 rarely
+  // comes near its own ceiling, so a profile that CAN reach 334 above sea mostly delivers about 150 - and a snow line
+  // at 190 put the cap above every peak in the frame, which is why doubling the height still produced no snow.
+  '    float snowY=mix(' + (CFG.SEA+96).toFixed(1) + ', ' + (CFG.SEA+124).toFixed(1) + ', uDay);',
   '    float snowT=smoothstep(snowY-22.0, snowY+16.0, wy);',
   '    vec3 col=mix(uPine*1.15, uRock, smoothstep(0.34,0.52,t));',
-  '    col=mix(col, uSnow, snowT*smoothstep(0.15,0.5,uDay+0.15));',
+
   '    float per=0.80+0.34*mix(0.5, nz(az*(dist/18.0)), det);',    // face-to-face brightness across the range
   '    col*=per*uGain;',
+  // SNOW IS LAID AFTER THE GAIN, and that is the difference between a cap and a slightly paler rock. uGain is 0.62 and
+  // exists to sit a WOODED, rocky mass down into the scene; putting snow through it took a 0.62 white to 0.35 and then
+  // the haze took what was left, which is why three tries at the snow LINE changed nothing visible. Snow has its own
+  // exposure, still clamped under the air below like everything else on this horizon.
+  '    col=mix(col, uSnow*(0.72+0.28*uSunUp)*per, snowT*smoothstep(0.15,0.5,uDay+0.15));',
   // The same key light the coast pines take, resolved per azimuth: the flank facing the sun is lit, the one away is a
   // silhouette. A range is a bigger, flatter thing than a treeline, so the contrast is wider.
   '    float face=clamp(-dot(normalize(vec2(d.x,d.z)), uSunXZ), -1.0, 1.0);',
@@ -12521,6 +12529,10 @@ function invAdd(id,n){ n=n||1; const max=itMaxG(id);
 // Anything branded takes an empty slot as the object it already is; everything else keeps the old merging behaviour.
 // Returns true when the item was placed.
 function _offReturn(s){ if(!s) return true;
+  // attOf caches per uid, so a stack coming back with attachments has to seed that cache — otherwise the FIRST
+  // read after the pickup wins with whatever the map held when this uid was last seen (usually nothing, because
+  // the stack it came from was thrown away).
+  if(s.uid!=null && s.att && typeof GUNATT==='object') GUNATT['g'+s.uid]=Object.assign({},s.att);
   if(s.uid!=null){ for(let i=0;i<INV_N;i++) if(!inv[i]){ inv[i]=s; refreshHotbar(); if(openUI)renderInvUI(); return true; }
     return invAdd(s.id,s.n)<=0; }   // no empty slot: merging is better than destroying it, even at the cost of the brand
   return invAdd(s.id,s.n)<=0; }
@@ -13808,7 +13820,7 @@ addEventListener('keydown',e=>{ if(e.code==='Space')e.preventDefault();
     else if(player.creative){ applyCine(true); }                                   // applyCine flashes the CINEMATIC banner
     else { player.creative=true; flashName('creative'); }
     return; }
-  if(e.code==='KeyQ'){ const s=heldSlot(); if(s){ tossOne(s.id, s.uid);                                  // drop ONE of the held item, tossed forward, with a 1.8s no-pickup window
+  if(e.code==='KeyQ'){ const s=heldSlot(); if(s){ tossOne(s.id, s.uid, s);                                  // drop ONE of the held item, tossed forward, with a 1.8s no-pickup window
     s.n--; if(s.n<=0)inv[selSlot]=null; refreshHotbar(); } }
   // R = RELOAD; respawn only when neither hand holds a mag-fed gun. MAIN HAND FIRST, then the offhand on a second press
   // (Ben 08-03: "if both a main hand AND offhand gun, reload main hand gun first, when and if its loaded, then load the off
@@ -19516,14 +19528,28 @@ function slotEl(src,idx){ const d=document.createElement('div'); d.className='is
   return d; }
 // One item, tossed forward with a no-pickup window. Factored out of the KeyQ gameplay branch so the UI drop is the SAME
 // toss and cannot drift from it.
-function tossOne(id,uid){ const d=lookDir();
+function tossOne(id,uid,st){ const d=lookDir();
   spawnDrop(id,1, player.pos.x+d.x*0.6, player.pos.y+1.2, player.pos.z+d.z*0.6, 1.8);
-  const dr=drops[drops.length-1]; if(dr){ dr.vx=d.x*4.5; dr.vz=d.z*4.5; dr.vy=2.2; if(uid!=null)dr.uid=uid; } }
+  const dr=drops[drops.length-1]; if(dr){ dr.vx=d.x*4.5; dr.vz=d.z*4.5; dr.vy=2.2; if(uid!=null)dr.uid=uid;
+    // WHAT THE STACK CARRIED GOES WITH IT. A gun's attachments and its loaded magazine live on the stack, and a
+    // pickup builds a NEW stack — so dropping a fitted rifle and picking it up again quietly stripped it. The uid
+    // was already carried here for the same reason; att and mag are the rest of that state.
+    if(st){ if(st.att) dr.att=Object.assign({},st.att); if(st.mag!=null) dr.mag=st.mag; } } }
+// The stack that a pickup produced, stamped with what the dropped one was carrying. invAdd builds the stack itself
+// (bar first, then bag) and hands back only the remainder, so the way to find it is to look for the one stack of
+// that id that has no state on it yet — a gun is max:1, so it is always a fresh slot rather than a merge.
+function _restoreDropState(id,d){ if(!d || (!d.att && d.mag==null)) return;
+  const take=(st)=>{ if(!st||st.id!==id||st.att) return false;
+    if(d.uid!=null) st.uid=d.uid; if(d.att) st.att=Object.assign({},d.att); if(d.mag!=null) st.mag=d.mag;
+    if(typeof GUNATT==='object' && st.uid!=null && d.att) GUNATT['g'+st.uid]=Object.assign({},d.att);
+    return true; };
+  for(let i=0;i<inv.length;i++) if(take(inv[i])) return;
+  if(typeof GRID==='object'&&GRID&&GRID.items) for(let i=GRID.items.length-1;i>=0;i--) if(take(GRID.items[i])) return; }
 // Q with a container open: drop ONE from the hovered slot. Works for every source the UI shows — inventory, chest,
 // backpack, craft grid and the equip column — because they all route through getSlot/setSlot already.
 function dropHovered(){ const h=_hoverSlot; if(!h) return false;
   const st=getSlot(h.src,h.idx); if(!st) return false;
-  tossOne(st.id, st.uid); st.n--; if(st.n<=0) setSlot(h.src,h.idx,null);
+  tossOne(st.id, st.uid, st); st.n--; if(st.n<=0) setSlot(h.src,h.idx,null);
   updateCraftOut(); renderInvUI(); return true; }
 function getSlot(src,idx){ return src==='inv'?inv[idx]:src==='craft'?craftGrid[idx]:src==='chest'?(curChest?curChest[idx]:null):src==='armor'?armor[idx]:null; }
 function setSlot(src,idx,v){ if(src==='inv')inv[idx]=v; else if(src==='craft')craftGrid[idx]=v; else if(src==='chest'&&curChest){ curChest[idx]=v; if(NET.on&&curChestKey&&typeof localChests!=='undefined'&&!localChests.has(curChestKey)&&typeof netSend==='function')netSend({t:'chest',k:curChestKey,c:curChest}); } else if(src==='armor'){ armor[idx]=v; if(typeof updateArmorView==='function')updateArmorView();
@@ -21081,8 +21107,11 @@ function updateDrops(dt){ for(let i=drops.length-1;i>=0;i--){ const d=drops[i]; 
     if(d.glow) glowCand(d.x, d.y+0.25, d.z, d.glow>=15?15:10, 9, d.glow>=15?0xffe6b4:0xffb060);   // dropped light source glows (pooled)
     const pdx=player.pos.x-d.x, pdy=(player.pos.y+0.8)-d.y, pdz=player.pos.z-d.z, pd=Math.hypot(pdx,pdy,pdz);
     if(d.age>d.delay && pd<1.6){ if(pd>0.45){ const s=Math.min(1,dt*9); d.x+=pdx*s; d.y+=pdy*s; d.z+=pdz*s; }   // magnet toward player (after its pickup delay)
-      else if(d.uid!=null && inv.some((v,ix)=>!v&&ix<INV_N) && _offReturn({id:d.id,n:d.n,uid:d.uid})){ sfxPickup&&sfxPickup(); if(NET.on&&d.did)netSend({t:'dpick',did:d.did}); dropGroup.remove(d.mesh); _disposeView(d.mesh); drops.splice(i,1); continue; }   // a gun you dropped is the same gun when you pick it up, not a factory-fresh one
-      else { const left=invAdd(d.id,d.n); if(left<=0){ sfxPickup&&sfxPickup(); if(NET.on&&d.did)netSend({t:'dpick',did:d.did}); dropGroup.remove(d.mesh); _disposeView(d.mesh); drops.splice(i,1); continue; } else d.n=left; } }
+      // THE UID PATH REBUILDS THE STACK TOO, and it is the one a dropped GUN takes — a fresh object with the old
+      // brand on it. Handing it the att and the mag as well is what makes "the same gun when you pick it up"
+      // true of everything bolted to it, and not only of its identity.
+      else if(d.uid!=null && inv.some((v,ix)=>!v&&ix<INV_N) && _offReturn({id:d.id,n:d.n,uid:d.uid,att:d.att?Object.assign({},d.att):undefined,mag:d.mag})){ sfxPickup&&sfxPickup(); if(NET.on&&d.did)netSend({t:'dpick',did:d.did}); dropGroup.remove(d.mesh); _disposeView(d.mesh); drops.splice(i,1); continue; }   // a gun you dropped is the same gun when you pick it up, not a factory-fresh one
+      else { const left=invAdd(d.id,d.n); if(left<=0){ _restoreDropState(d.id,d); sfxPickup&&sfxPickup(); if(NET.on&&d.did)netSend({t:'dpick',did:d.did}); dropGroup.remove(d.mesh); _disposeView(d.mesh); drops.splice(i,1); continue; } else d.n=left; } }
     if(d.age>300){ dropGroup.remove(d.mesh); _disposeView(d.mesh); drops.splice(i,1); } } }   // despawn ~5min
 
 // ---- THROWN SPEARS (real 3D projectiles: gravity arc, oriented to travel, then STICK into whatever they hit) ----
@@ -36274,6 +36303,18 @@ window.__hc={
       if(id && !attFits(s.id,id)) return {err:id+' does not fit '+s.id};
       attSet(s,slot,id||null); setOffItem(null); setOffItem(s.id);
       return this.attProbe(); }catch(e){ return {err:String(e.message||e)}; } },
+  // QA: fit a gun, throw it, and pick it back up — the whole round trip, through the same tossOne and the same
+  // pickup branch a player uses. Reports what the stack came back with.
+  attTossTrip(){ try{ const s=heldSlot(); if(!s||!ITEMS[s.id]||!ITEMS[s.id].gun) return {err:'hold a gun'};
+      attSet(s,'optic','red_dot'); attSet(s,'muzzle','suppressor');
+      const id=s.id, before=JSON.parse(JSON.stringify(s.att||{}));
+      tossOne(id, s.uid, s); inv[selSlot]=null; refreshHotbar(); setViewItem(null);
+      const d=drops[drops.length-1]; if(!d) return {err:'nothing dropped'};
+      d.delay=0; d.x=player.pos.x; d.y=player.pos.y; d.z=player.pos.z;      // land it on the player so the pickup fires
+      for(let i=0;i<20;i++) updateDrops(1/30);
+      const back=inv.find(q=>q&&q.id===id) || (GRID.items||[]).find(q=>q&&q.id===id);
+      return { before, after:back?(back.att||null):null, picked:!!back }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   attFit(slot,id){ try{ const s=heldSlot(); if(!s) return {err:'nothing held'};
       if(id && !attFits(s.id,id)) return {err:id+' does not fit '+s.id};
       attSet(s,slot,id||null); view.id=null; setViewItem(s.id);
