@@ -41,7 +41,9 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     // live fault in the same page - and this bench exists to catch a GLSL error the syntax check cannot see.
     const foreign=[];
     page.on('console',m=>{ const t=m.text(); if(!/error|Error|ERROR|invalid|fail|WARNING/.test(t)) return;
-      (/motes:|Points|gl_Point|vLit|uVL|shader|SHADER|program|PROGRAM/.test(t) ? logs : foreign).push(t.slice(0,300)); });
+      // CASE-INSENSITIVE, because three.js says "THREE.WebGLProgram: Shader Error" - capital S, and a case-sensitive
+      // list of 'shader|SHADER' filed the one message this bench exists to catch under someone else's faults.
+      (/motes:|points|gl_point|vLit|uVL|shader|program|glsl|compile/i.test(t) ? logs : foreign).push(t.slice(0,300)); });
     page.on('pageerror',e=>logs.push('PAGEERROR: '+String(e.message||e).slice(0,300)));
     await page.goto(base+'/index.html?debug=1&rd=8',{waitUntil:'load',timeout:120000});
     await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:300000});
@@ -98,11 +100,17 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     check('and the mote cloud is actually drawing there', drawing===true, `drawing ${drawing}`);
 
     // ---- CLAIM 2: with no beam, the dust is exactly nothing. THE ONE THAT MATTERS.
+    // ON/OFF/ON here too, and its OWN noise floor. A two-point comparison read a 1.290 "leak" in a frame where
+    // __hc.motes().drawing was false on both sides - the cloud was not rendered at all, and the whole difference was
+    // the room drifting between two single samples (a torch flicker, a spider crossing). Claim 1 was already measured
+    // as a triple for that reason; measuring the control with a weaker instrument than the result is how a bench
+    // manufactures a failure it can then be "fixed" for.
     await page.evaluate(`__hc.vol(0); __hc.motes(1)`); const b1=await read("nobeam-on");
     await page.evaluate(`__hc.motes(0)`);              const b0=await read("nobeam-off");
-    const leak=Math.abs(b1-b0);
-    console.log(`  no beam   motes on ${b1}  off ${b0}   leak ${leak.toFixed(3)}   (must be under the ${noise.toFixed(3)} noise floor)`);
-    check('with no beam the dust contributes nothing', leak<=Math.max(0.05,noise), `leak ${leak.toFixed(3)}`);
+    await page.evaluate(`__hc.motes(1)`);              const b2=await read("nobeam-on2");
+    const bNoise=Math.abs(b2-b1), leak=Math.abs(((b1+b2)/2)-b0);
+    console.log(`  no beam   motes on ${b1}  off ${b0}  on-again ${b2}   leak ${leak.toFixed(3)}   (its own drift floor ${bNoise.toFixed(3)})`);
+    check('with no beam the dust contributes nothing', leak<=Math.max(0.05,bNoise), `leak ${leak.toFixed(3)} vs drift ${bNoise.toFixed(3)}`);
     const drawing2=await page.evaluate(`__hc.motes().drawing`);
     check('and the cloud is not even drawn without a pass', drawing2===false, `drawing ${drawing2}`);
 
