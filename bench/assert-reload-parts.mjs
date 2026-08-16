@@ -44,6 +44,13 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     T('the revolver has a carved cylinder', rev.cyl===true, rev);
     T('the cylinder swings out during the reload', rev.cylTravel>0.02, {travel:rev.cylTravel});
 
+    // AND THE BOLT. guns/sniper-rifle has no bolt handle modelled at all (tools/models/bolt-handle.mjs finds one
+    // lateral bulge on the whole rifle and it is the cheek rest), so one is built for it the way the irons are.
+    const blt=await p.evaluate("__hc.reloadParts('hunting_rifle')");
+    console.log('bolt', JSON.stringify(blt));
+    T('the bolt rifle has a bolt handle', blt.bolt===true, blt);
+    T('the bolt works during the reload', blt.boltTravel>0.05, {travel:blt.boltTravel});
+
     T('zero page errors', errs.length===0, errs.slice(0,2));
     console.log(fails? fails+' FAILURE(S)':'ALL PASS');
     await b.close();
