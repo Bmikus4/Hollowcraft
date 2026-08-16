@@ -16634,7 +16634,7 @@ function loop(){ try{
   T.end(TID.input);
   T.begin(TID.fx); applyWaterFog(); T.end(TID.fx);
   T.begin(TID.entities); T.begin(TID.props);
-  updateDrops(dt); updateSpears(dt); updateStuckSpears(dt); updateParticles(dt); updateBubbles(dt); updateEmbers(dt); updateShells(dt); updateView(dt); if(typeof updateWings==='function')updateWings(dt); updateWatchers(dt); checkNotes(dt); updateSkyBirds(dt); updateFireflies(dt); updateLampHalos(dt); updateContactShadows(dt); updateLeaves(dt); if(typeof updateDungeonBugs==='function')updateDungeonBugs(dt);  // floating items, thrown/stuck spears, particles, ejected shell casings, held viewmodel, angel wings, watching-eyes, notes, sky birds, dungeon arachnids
+  updateDrops(dt); updateDropPick(); updateSpears(dt); updateStuckSpears(dt); updateParticles(dt); updateBubbles(dt); updateEmbers(dt); updateShells(dt); updateView(dt); if(typeof updateWings==='function')updateWings(dt); updateWatchers(dt); checkNotes(dt); updateSkyBirds(dt); updateFireflies(dt); updateLampHalos(dt); updateContactShadows(dt); updateLeaves(dt); if(typeof updateDungeonBugs==='function')updateDungeonBugs(dt);  // floating items, thrown/stuck spears, particles, ejected shell casings, held viewmodel, angel wings, watching-eyes, notes, sky birds, dungeon arachnids
   netUpdate(dt);                                                             // co-op: send my transform, interpolate peers, host broadcasts the Wretch/time
   T.end(TID.props); T.end(TID.entities);
   T.begin(TID.audio); updateAudio(dt); T.end(TID.audio);
@@ -17065,12 +17065,18 @@ function fleshMatMake(opts){ opts=opts||{};
   m.onBeforeCompile=(sh)=>{
     sh.uniforms.uFleshScale={value:opts.scale||5.0}; sh.uniforms.uVein={value:opts.vein!=null?opts.vein:1.0};
     sh.uniforms.uNoir={value:opts.noir?1.0:0.0};
+    // HUE IS A UNIFORM NOW, BECAUSE THE PALETTE BELOW IS HARDCODED CRIMSON. The noir path already proved the only way to
+    // recolour this skin without destroying it: drain to luminance first, so every crevice, vein and blotch survives as a
+    // value difference, then tint. material.color cannot do it — multiplying crimson by grey gives dark red, and by zero
+    // gives a flat shape with no folds at all. uPale is how far to drain, uSkin is what to tint the drained value with.
+    sh.uniforms.uPale={value:opts.pale!=null?opts.pale:0.0};
+    sh.uniforms.uSkin={value:new THREE.Color(opts.skin!=null?opts.skin:0xffffff)};
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>', '#include <common>\nvarying vec3 vFleshP;')
       .replace('#include <begin_vertex>', '#include <begin_vertex>\n  vFleshP = position;');
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>', `#include <common>
-        varying vec3 vFleshP; uniform float uFleshScale; uniform float uVein; uniform float uNoir;
+        varying vec3 vFleshP; uniform float uFleshScale; uniform float uVein; uniform float uNoir; uniform float uPale; uniform vec3 uSkin;
         float _fh(vec3 p){ p=fract(p*0.3183099+0.1); p*=17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }   // sinless IQ hash — was fract(sin(dot..)): ~96 sin()/fragment on the shared flesh skin, gone. Same mottled look, no reference pattern to preserve.
         float _vn(vec3 p){ vec3 i=floor(p),f=fract(p); f=f*f*(3.0-2.0*f);
           return mix(mix(mix(_fh(i),_fh(i+vec3(1,0,0)),f.x),mix(_fh(i+vec3(0,1,0)),_fh(i+vec3(1,1,0)),f.x),f.y),
@@ -17098,6 +17104,10 @@ function fleshMatMake(opts){ opts=opts||{};
           // crevice/vein structure entirely at 0. Desaturating first keeps every fold and vein and only removes the hue.
           flesh = mix(flesh, vec3(dot(flesh, vec3(0.299,0.587,0.114))), uNoir);
           flesh *= mix(1.0, 0.42, uNoir);
+          // The forks. Drained to luminance and tinted, with the value lifted — the crimson palette sits at about 0.05 linear
+          // because blood is dark, and a grey skin at that value reads as a silhouette rather than a body.
+          { float L=dot(flesh, vec3(0.299,0.587,0.114));
+            flesh = mix(flesh, uSkin*(0.35+L*5.0), uPale); }
           diffuseColor.rgb *= flesh*1.7;
         }`);
   };
@@ -17688,6 +17698,22 @@ let _hwHold=false;
 //  Horrific Wretch fork stranded its eye light on death and never released the slot at all, so the
 //  world got darker the longer you played and nothing on screen said why. Nothing here holds a
 //  light: eyes are emissive material only, and being underground there is nothing to light anyway.
+// One material per creature, built once and cached. Each is an extra shader program compiled the first time that creature is
+// drawn, which is a one-frame hitch on its first spawn and the price of three creatures that do not all look like the Wretch.
+// The reference stills in assets/creature-ref are what these are aimed at: grey-green and earth-caked, wet pale grey, dry wax.
+const _kindSkin={};
+function kindSkinMat(kind){
+  if(_kindSkin[kind]) return _kindSkin[kind];
+  const S={ burrower:{pale:1.0, skin:0x6d6a54, shin:90,  spec:0x2a2a20, scale:5.5},   // earth in the folds, wet where it is not
+            meek:    {pale:1.0, skin:0x9aa0a2, shin:110, spec:0x3a3f40, scale:6.5},   // wet grey over ribs — the stills are shiny, not matte
+            tenant:  {pale:1.0, skin:0xbdb6a8, shin:22,  spec:0x1a1a18, scale:4.0} }[kind];  // dry, waxy, almost matte: it is not an animal
+  if(!S) return null;
+  return (_kindSkin[kind]=fleshMatMake(S));
+}
+function kindDress(inst, kind){
+  const m=kindSkinMat(kind); if(!m||!inst.group) return;
+  inst.group.traverse(o=>{ if(o.isMesh && o.material===wretchMat) o.material=m; });
+}
 const BUR_DEPTH=3.2;        // blocks below the surface. Deep enough that no part of the rig pokes through a hillside.
 const BUR_SPEED=6.4;        // faster than a walk, slower than the charge — it does not need speed, it needs to already be there
 const BUR_STRIKE_R=2.6;     // horizontal reach of the emergence
@@ -17707,6 +17733,7 @@ function spawnBurrower(dist){
     const built=buildWretch(); BUR.group=built.group; BUR.P=built.P;
     built.group.scale.multiplyScalar(0.9);                       // squatter than the Wretch: this thing digs, it does not stalk
     if(built.P.eyeMat){ built.P.eyeMat.color.setHex(0x1a1512); built.P.eyeMat.emissive=new THREE.Color(0x000000); }   // eyeless — no glow, no light
+    kindDress(BUR,'burrower');
     wretchExtra.push(BUR); }
   BUR.active=true; BUR.group.visible=false; BUR._sub=true; BUR._bst='DOWN'; BUR._bt=0; BUR._cool=0; BUR._life=0;
   BUR.crawl=1; BUR.state='SUBMERGED'; BUR.hp=900; BUR.pos.set(x, surfaceH(Math.floor(x),Math.floor(z))-BUR_DEPTH, z);
@@ -17796,6 +17823,7 @@ function spawnMeek(dist){
     const built=buildWretch(); m.group=built.group; m.P=built.P;
     built.group.scale.multiplyScalar(0.55);
     if(built.P.eyeMat){ built.P.eyeMat.color.setHex(0xd8d2c4); built.P.eyeMat.emissive=new THREE.Color(0x000000); }   // pale and flat: lit by your torch, never lighting itself
+    kindDress(m,'meek');
     MEEK.push(m); wretchExtra.push(m); }
   const d=Math.max(8,+dist||(16+Math.random()*16)), a=Math.random()*Math.PI*2;
   const x=player.pos.x+Math.cos(a)*d, z=player.pos.z+Math.sin(a)*d;
@@ -17904,6 +17932,7 @@ function spawnTenant(){
     const built=buildWretch(); TENANT.group=built.group; TENANT.P=built.P;
     built.group.scale.multiplyScalar(1.15);                     // taller than the Wretch and thin with it: it has to look wrong under a low beam
     if(built.P.eyeMat){ built.P.eyeMat.color.setHex(0x0a0a0a); built.P.eyeMat.emissive=new THREE.Color(0x000000); }
+    kindDress(TENANT,'tenant');
     wretchExtra.push(TENANT); }
   TENANT.active=true; TENANT.group.visible=true; TENANT.state='STAND'; TENANT.crawl=0; TENANT.hp=1400; TENANT._mvLast=null; TENANT._call=0;
   if(!tenPlace(TENANT)) { TENANT.pos.set(player.pos.x+TEN_HOLD, player.pos.y, player.pos.z); }
@@ -22003,6 +22032,59 @@ function _dropStep(d,dt){
   if(d.y<-8){ d.rest=true; d.vy=0; }                       // fell out of the world — do not simulate it forever
 }
 const _dtmp=new THREE.Vector3();
+// ---- WHAT IS UNDER THE CROSSHAIR (Ben 08-16: "when the player moves thier cursor over them, they should be
+// highlighted") ----
+// A REAL RAY AGAINST THE BODY'S OWN COLLIDER, AT ITS SETTLED ORIENTATION. The cheap version of this feature is a
+// screen-space distance to the item's projected centre, and it is wrong in exactly the cases that matter: a rifle
+// lying across your path is a long thin object, so its centre can be a metre from the crosshair while the barrel is
+// dead under it, and a small item behind a wall projects to the same pixel as one in front of it.
+// The test is done in the body's LOCAL space — the ray is rotated by the inverse of the drop's quaternion and then
+// it is a slab test against ±half, which is the same three numbers the physics already keeps.
+const _pkO=new THREE.Vector3(), _pkD=new THREE.Vector3(), _pkQ=new THREE.Quaternion();
+function _rayBox(ox,oy,oz,dx,dy,dz,h){
+  let t0=-1e9, t1=1e9;
+  const o=[ox,oy,oz], dd=[dx,dy,dz], hh=[h.x,h.y,h.z];
+  for(let i=0;i<3;i++){
+    if(Math.abs(dd[i])<1e-8){ if(Math.abs(o[i])>hh[i]) return -1; continue; }
+    const inv=1/dd[i]; let a=(-hh[i]-o[i])*inv, b=(hh[i]-o[i])*inv;
+    if(a>b){ const t=a; a=b; b=t; }
+    if(a>t0) t0=a; if(b<t1) t1=b;
+    if(t0>t1) return -1; }
+  return t0>0?t0:(t1>0?t1:-1); }
+// REACH IS DELIBERATELY SHORT. This is "the thing at my feet", not a laser designator: a long reach makes every
+// walk through a looted room a flicker of names, and the pickup magnet it sits beside is 1.6 blocks.
+const DROP_REACH=4.5;
+function dropPick(){
+  if(!drops.length) return null;
+  const d0=(typeof lookDir==='function')?lookDir():null; if(!d0) return null;
+  let best=null, bestT=DROP_REACH;
+  for(const d of drops){
+    if(!d.half) continue;
+    _pkO.set(camera.position.x-d.x, camera.position.y-d.y, camera.position.z-d.z);
+    _pkQ.copy(d.quat).invert();
+    _pkO.applyQuaternion(_pkQ);
+    _pkD.set(d0.x,d0.y,d0.z).applyQuaternion(_pkQ);
+    const t=_rayBox(_pkO.x,_pkO.y,_pkO.z,_pkD.x,_pkD.y,_pkD.z,d.half);
+    if(t>0 && t<bestT){ bestT=t; best=d; } }
+  return best?{drop:best,t:bestT}:null; }
+// ONE OUTLINE OBJECT, REUSED, AND NOTHING IS DONE TO THE ITEM'S OWN MATERIALS. Tinting the picked item is the
+// obvious implementation and it is a trap here: block items draw from the SHARED atlas material, so setting an
+// emissive on the thing under your crosshair would light every block of that type in the world.
+let _pickBox=null, _pickDrop=null;
+function updateDropPick(){
+  if(!_pickBox){
+    const g=new THREE.EdgesGeometry(new THREE.BoxGeometry(2,2,2));
+    _pickBox=new THREE.LineSegments(g,new THREE.LineBasicMaterial({color:0xffe9a8,transparent:true,opacity:0.9,depthTest:true}));
+    _pickBox.renderOrder=3; _pickBox.visible=false; scene.add(_pickBox); }
+  const p=(started && !player.dead && locked)?dropPick():null;
+  _pickDrop=p?p.drop:null;
+  if(!p){ _pickBox.visible=false; return; }
+  const d=p.drop;
+  _pickBox.visible=true;
+  _pickBox.position.set(d.x,d.y,d.z);
+  _pickBox.quaternion.copy(d.quat);
+  _pickBox.scale.set(d.half.x*1.06, d.half.y*1.06, d.half.z*1.06);   // a hair proud of the surface so the lines are not z-fighting the model
+}
 function removeDropById(did){ for(let i=drops.length-1;i>=0;i--){ if(drops[i].did===did){ const o=drops[i]; dropGroup.remove(o.mesh); _disposeView(o.mesh); drops.splice(i,1); } } }
 function updateDrops(dt){ for(let i=drops.length-1;i>=0;i--){ const d=drops[i]; d.age+=dt;
     if(!d.rest) _dropStep(d,dt);
