@@ -314,12 +314,11 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
 
     // THE CAN'S ACTUAL EFFECT ON THE GAME, not on a flag: the range at which the Wretch hears the shot and the size
     // of the noise it makes. Both are decided inside fireGun, so this is the only way to see a suppressor working.
-    await p.evaluate("__hc.handFire('main',1,'ar15'); __hc.attFit('muzzle',null)"); await sleep(300);
-    await p.evaluate("__hc.handFire('main',1,'ar15')"); await sleep(300);
-    const loud=await p.evaluate("__hc.shotNoise()");
-    await p.evaluate("__hc.attFit('muzzle','suppressor')"); await sleep(300);
-    await p.evaluate("__hc.handFire('main',1,'ar15')"); await sleep(300);
-    const quiet=await p.evaluate("__hc.shotNoise()");
+    // A FRESH INSTANCE, because a magazine is per instance: the guns used earlier in this bench are empty and
+    // fireGun answers an empty gun with a reload rather than a shot. __hc.hold mints a new stack, and a new stack
+    // draws a full magazine — which is exactly what makes it the right tool here rather than a nuisance.
+    const loud=await p.evaluate("(()=>{ __hc.hold('bullpup'); const why=__hc.fireWhy(); const r=__hc.handFire('main',1,'bullpup'); return Object.assign({fired:r&&r.fired, why}, __hc.shotNoise()||{}); })()");
+    const quiet=await p.evaluate("(()=>{ __hc.hold('bullpup'); __hc.attFit('muzzle','suppressor'); const r=__hc.handFire('main',1,'bullpup'); return Object.assign({fired:r&&r.fired}, __hc.shotNoise()||{}); })()");
     await p.evaluate("__hc.attFit('muzzle',null)");
     console.log('noise', JSON.stringify({loud, quiet}));
     T('a fitted can shortens the range the shot is heard at', quiet.range < loud.range*0.7, {loud:loud.range, quiet:quiet.range});
