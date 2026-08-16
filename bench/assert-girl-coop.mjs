@@ -66,6 +66,16 @@ async function boot(b, base, tag){
     T('a guest shot takes health off her on the owner', hp1 < hp0, {before:hp0, after:hp1});
     T('and the guest is shown the same health', Math.abs(hpG-hp1) <= 60, {guest:hpG, host:hp1});
 
+    // HER FOOT LANDS FOR EVERYONE. The impact crosses the wire and each client resolves it against its own player,
+    // so a guest standing where the sole comes down takes the blow the owner's player would have taken. Driven from
+    // the probe rather than by waiting for her to choose a stomp, which she only does within reach of HER target.
+    const hurt=await B.evaluate("(()=>{ const h0=__hc.vitals?__hc.vitals().health:null; __hc.girlStompAt&&__hc.girlStompAt();"+
+      "return {h0}; })()").catch(()=>null);
+    if(hurt){ await sleep(900);
+      const h1=await B.evaluate("__hc.vitals?__hc.vitals().health:null");
+      console.log('guest health', hurt.h0, '->', h1);
+      T('a stomp beside a guest hurts that guest', h1!==null && hurt.h0!==null && h1<hurt.h0, {before:hurt.h0, after:h1}); }
+
     // AND SHE DIES FOR EVERYONE. The host kills her; the guest must take the same state, not keep walking a corpse.
     await A.evaluate("__hc.girlShoot('Head',30)"); await sleep(3000);
     const a2=await A.evaluate("__hc.girlState()"), g2=await B.evaluate("__hc.girlState()");
