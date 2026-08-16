@@ -87,7 +87,7 @@ function waitHttp(u,t=20000){ return new Promise((res,rej)=>{ const t0=Date.now(
 function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Google/Chrome/Application/chrome.exe']) if(fs.existsSync(p)) return p; throw new Error('no browser'); }
 
 (async()=>{
-  let live=null, flags=null, gunSourced=new Set();
+  let live=null, flags=null, gunSourced=new Set(), craftSourced=new Set();
   if(!STATIC_ONLY){
     const { chromium }=await import('playwright-core');
     const port=await freePort();
@@ -108,6 +108,14 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
       // which a scan of the table would have got wrong in the generous direction.
       try{ const gl=await page.evaluate(`__hc.gunLoot(300)`); if(gl&&gl.covered) gunSourced=new Set(gl.covered);
            if(gl&&gl.missing&&gl.missing.length) console.log('  in a gun pool but never picked: '+gl.missing.join(' ')); }catch(e){}
+      // THE RECIPE TABLE AS THE GAME HOLDS IT, not as this file can find it written down. The tool ladder is built
+      // by a loop that assembles each id as tier+'_pickaxe', so the string 'diamond_pickaxe' appears nowhere in
+      // index.html and a scan reported all sixteen tools as unobtainable. Sixteen duplicate recipes were written and
+      // reverted on the strength of that. It was the third finding of the same class — the block items and the mob
+      // drop tables were the other two — and the class is: A SOURCE SCAN CANNOT SEE WHAT THE SOURCE DOES NOT SPELL
+      // OUT. Reading the live table ends it for recipes rather than adding a fourth pattern to guess at.
+      try{ const rc=await page.evaluate(`__hc.recipes()`);
+           if(rc&&rc.recipes){ craftSourced=new Set(rc.recipes.map(r=>r.out)); console.log(`  ${craftSourced.size} distinct items are craftable in the live table (${rc.n} recipes)`); } }catch(e){}
       if(flags && !flags.err){ ids=new Set(Object.keys(flags)); console.log(`  ${ids.size} items in the live table (the source scan alone finds ${SRC.match(/defItem\(/g).length} defItem calls)`); }
       // BATCHED, because 250 items at one round trip each is minutes of waiting for numbers that are all read off
       // the same frame anyway. heldSig needs the item actually HELD, and __hc.hold mints a fresh stack every call.
@@ -149,6 +157,7 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     // leaf as unobtainable, which is true of no voxel game ever written and would have buried the real finding.
     const src=[...r.kinds].filter(k=>SOURCEY.has(k)); if(F.block!=null && !src.includes('mine')) src.push('mine');
     if(gunSourced.has(id) && !src.includes('loot')) src.push('loot');
+    if(craftSourced.has(id) && !src.includes('craft')) src.push('craft');
     return { id, name:F.name||id, hidden:(F.extra||[]).includes('hidden'), kinds:[...r.kinds], src, act,
              inert: act.length===0 && !r.kinds.has('code'),
              world:L?L.world:null, held:L?L.held:null,
