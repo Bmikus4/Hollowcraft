@@ -198,6 +198,25 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
       if(!(y>0.0 && y<0.40)) bad.push({g:gid, why:'rail height', y});
       else if(Math.abs(z)>Math.max(0.9,(r.len||0.8)*1.3)) bad.push({g:gid, why:'along the barrel', z});
     }
+    // THE SIDE AND UNDER RAILS, across the rack. The optic's mount is derived from each gun's own rear sight, but
+    // the light, the laser and the foregrip hang off fixed offsets from the bore and the muzzle — which is a guess
+    // that has never been checked on anything but the AR. A piece out past the muzzle or floating clear of the
+    // handguard is the same failure the optic mount exists to avoid.
+    const rail=[];
+    for(const gid of guns){
+      const r=await p.evaluate(g=>{ __hc.hold(g); __hc.attFit('light','weapon_light'); __hc.attFit('laser','laser_sight');
+        __hc.attFit('grip','foregrip'); const a=__hc.attProbe();
+        return JSON.parse(JSON.stringify({g, f:a.fitted||[], muzzleZ:a.muzzleZ, len:a.len})); }, gid);
+      for(const f of r.f){
+        if(f.slot==='optic'||f.slot==='muzzle') continue;
+        // ON THE GUN: forward of the shooter's hand and no further out than the muzzle, and within a hand's width
+        // of the centreline. The bore runs down -z, so the muzzle is the most negative z the piece may reach.
+        if(f.pos[2] < r.muzzleZ-0.02 || f.pos[2] > 0.30) rail.push({g:r.g, slot:f.slot, why:'off the barrel', z:f.pos[2], muzzleZ:r.muzzleZ});
+        else if(Math.abs(f.pos[0]) > 0.12) rail.push({g:r.g, slot:f.slot, why:'too far outboard', x:f.pos[0]});
+      }
+    }
+    console.log('rails bad:', JSON.stringify(rail.slice(0,10)), 'of', guns.length*3);
+    T('the side and under rails land on every gun', rail.length===0, rail.slice(0,6));
     console.log('rack', guns.length, 'guns; bad:', JSON.stringify(bad));
     T('an optic lands on the rail of every gun that can take one', bad.length===0, bad);
 
