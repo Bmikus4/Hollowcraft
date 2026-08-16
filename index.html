@@ -17050,7 +17050,12 @@ const HORROR={ tier:1, menace:0, sinceScare:80, nightsSurvived:0, sightings:0, e
 // SESSION SKILL LEDGER — the Wretch's read on THIS player's skill at THIS game, learned live: how encounters
 // went (routs vs captures), whether they shoot it whenever it shows itself, whether they go AFK. Feeds sneakConf.
 const SKILL={ routs:0, grabs:0, afkSpells:0, perfTotal:0, perfShot:0, idleT:0, _afkFlag:false, _perfWas:false };
-let _audioFrame=null, wretchVoice=null, setThreat=null, sfxStep=null, sfxAmbience=null;
+let _audioFrame=null, wretchVoice=null, setThreat=null, sfxStep=null, sfxAmbience=null, burrowVoice=null;
+// WHAT THE BURROWER ASKED FOR AND WHAT ACTUALLY REACHED THE GRAPH. These are not the same thing and the difference is not
+// visible from the call site: the creature originally dug using wretchVoice('close_clicks'), which returns on its first line
+// because the clicking was cut from the game on 2026-07-20 — so the one creature whose entire channel is sound made none at
+// all, and every call site looked correct. `req` counts asks, `played` counts sounds built, and a gap between them is the bug.
+const BUR_AUD={ req:{}, played:{}, noAC:0, far:0 };
 function updateAudio(dt){ if(_audioFrame) _audioFrame(dt); }
 
 // =====================================================================
@@ -17773,16 +17778,22 @@ function updateBurrower(dt){
     if(w.dist<26 && Math.random()<dt*6 && typeof spawnParticles==='function'){
       const hx=w.pos.x, hz=w.pos.z, hy=surfaceH(Math.floor(hx),Math.floor(hz))+0.1;
       spawnParticles(hx,hy,hz,0x4a3a28,3,0.35,1.1); }
-    if(w.dist<34 && typeof wretchVoice==='function'){
+    if(w.dist<40 && typeof burrowVoice==='function'){
       w._digT=(w._digT||0)-dt;
       if(w._digT<=0){ w._digT=0.55+Math.random()*0.7;
         // JITTERED BY UP TO THREE BLOCKS so the ear gets range and not bearing (see the header). A precise dig sound turns the
         // creature into a marker on a map, and a thing you can locate is a thing you can simply walk away from.
-        wretchVoice('close_clicks',{x:w.pos.x+(Math.random()*6-3), y:surf+0.5, z:w.pos.z+(Math.random()*6-3)}); } }
+        //   THIS WAS SILENT UNTIL 08-16. It called wretchVoice('close_clicks'), and that type returns on the first line of
+        // wretchVoice because the clicking was cut from the game on 07-20 — so the one creature whose whole channel is sound
+        // made none. It has its own voice now, and BUR_AUD counts asks against sounds actually built so it cannot recur.
+        burrowVoice('dig', {x:w.pos.x+(Math.random()*6-3), y:surf+0.5, z:w.pos.z+(Math.random()*6-3)}, 1); } }
     if(w._cool<=0 && w.dist<BUR_STRIKE_R && burSoft(cam.x,cam.z)){ w._bst='RISE'; w._bt=0;
-      if(typeof wretchVoice==='function') wretchVoice('shriek',{x:w.pos.x,y:surf+1,z:w.pos.z}); }
+      // The ground opening comes FIRST and the animal second, a beat apart, because that is the order the player experiences
+      // it in: the floor fails, and only then is there something in the room. Both at once is one noise and reads as an effect.
+      if(typeof burrowVoice==='function'){ burrowVoice('surface',{x:w.pos.x,y:surf+0.4,z:w.pos.z},0); w._cryT=0.22; } }
   }
   else if(st==='RISE'){
+    if(w._cryT!=null){ w._cryT-=dt; if(w._cryT<=0){ w._cryT=null; if(typeof burrowVoice==='function') burrowVoice('cry',{x:w.pos.x,y:surf+1.2,z:w.pos.z},0); } }
     // 0.5s of coming up. The rig is visible from the first frame of it, because half a creature out of the soil is the shot.
     w._sub=false; if(w.group)w.group.visible=true; w.crawl=1;
     const u=Math.min(1,w._bt/0.5);
@@ -17794,7 +17805,10 @@ function updateBurrower(dt){
   else if(st==='STRIKE'){ w.pos.y=surf; if(w._bt>0.8){ w._bst='DIVE'; w._bt=0; } }   // a beat reared up, then it is gone again
   else if(st==='DIVE'){
     const u=Math.min(1,w._bt/0.6); w.pos.y=surf-BUR_DEPTH*u;
-    if(u>=1){ w._bst='DOWN'; w._bt=0; w._cool=BUR_COOL; w._sub=true; if(w.group)w.group.visible=false; }
+    // Going back down is the same earth moving, heard from the wrong side of it: the muffle rises as the body sinks, so the
+    // sound closes over it. It is the one moment the player gets to hear the transition rather than infer it.
+    if(w._divT==null||w._divT<=0){ w._divT=0.18; if(typeof burrowVoice==='function') burrowVoice('dig',{x:w.pos.x,y:surf,z:w.pos.z}, u); } else w._divT-=dt;
+    if(u>=1){ w._bst='DOWN'; w._bt=0; w._cool=BUR_COOL; w._sub=true; w._divT=null; if(w.group)w.group.visible=false; }
   }
   w.state = (st==='DOWN') ? 'SUBMERGED' : st;
   placeWretch(dt, st==='DOWN');
@@ -32714,7 +32728,11 @@ const _volRej={dim:0,parked:0,far:0,behind:0,near:1e9};   // why each pool light
 // SEATED IN A BOX AROUND THE CAMERA, not in the world. Dust is everywhere; what matters is that some of it is where
 // you are looking, and a mote that leaves the box is re-seated on the far side rather than allocated. Count and radius
 // are fixed, so this is one draw call and one buffer that never resizes.
-const MOTE_N=260, MOTE_R=18;
+// DENSITY IS THE DIAL, NOT SIZE. 260 motes in an 18-block ball, each capped at five pixels, contributed 0.048 luminance
+// to a lit dungeon crop against a 0.029 noise floor - present, and invisible. The instinct is to make each speck bigger,
+// which is exactly how this became soft orange discs the first time. Air reads as air because there is a lot of it and
+// each piece is small, so the count went up and the sprite stayed a speck. One draw call either way.
+const MOTE_N=900, MOTE_R=18;
 let _motePts=null, _moteMat=null, _moteOn=true, _moteLive=0, _moteErr=null, _moteLastT=0;
 const _moteS=[];   // {x,y,z, vx,vy,vz, ph}
 function _moteSeat(s, cx, cy, cz){
@@ -32744,7 +32762,7 @@ function updateMotes(){
                  // 2.6 doubled the luminance of a lit dungeon crop (15.2 to 35.8). Dust you notice instead of the room
                  // is set dressing that has taken over the shot; the gain is set so the beam still reads as the light
                  // and the motes as what is floating in it.
-                 uGain:{value:1.0}, uSize:{value:2.4}, uT:{value:0} },
+                 uGain:{value:1.7}, uSize:{value:2.4}, uT:{value:0} },
       transparent:true, depthWrite:false, blending:THREE.AdditiveBlending, fog:false,
       vertexShader:[
       'uniform vec3 uVLPos[3]; uniform vec3 uVLCol[3]; uniform float uVLI[3]; uniform vec3 uCamPos;',
@@ -35925,6 +35943,68 @@ wretchVoice=(type,pos)=>{ if(!AC)return; try{
   for(let i=0;i<8;i++){ const tt=t0+i*(dur/8); const f=base*(0.7+Math.random()*(type==='scream'?1.2:0.6)); car.frequency.setValueAtTime(f,tt); mod.frequency.setValueAtTime(f*(1.3+Math.random()*0.4),tt); }
   car.start(t0); mod.start(t0); noise.start(t0); car.stop(t0+dur+0.05); mod.stop(t0+dur+0.05); noise.stop(t0+dur+0.05);
 }catch(e){} };
+// ============================================================================================
+//  THE BURROWER'S OWN VOICE. It does not borrow the Wretch's, and the reason is the design: the
+//  Wretch's cries are close, wet and human-adjacent, and they arrive as a threat that has already
+//  found you. This creature's sound is the opposite — it is the only warning you get, it comes
+//  through several blocks of soil, and it must give range without giving bearing.
+//
+//  MUFFLE IS THE WHOLE CHARACTER, so it is a parameter rather than a preset. Everything the ear
+//  uses to place a source precisely lives above about 1.5 kHz, and earth eats exactly that; a dig
+//  filtered down to a low rumble is loud enough to judge distance from and useless for pointing at.
+//  That is not decoration, it IS the mechanic — the jitter in updateBurrower smears the position
+//  and the lowpass smears the cue itself.
+burrowVoice=(kind,pos,muffle)=>{
+  BUR_AUD.req[kind]=(BUR_AUD.req[kind]||0)+1;
+  if(!AC){ BUR_AUD.noAC++; return false; }
+  try{
+    const src=pos||(wretch&&wretch.pos)||camera.position;
+    if(!(Number.isFinite(src.x)&&Number.isFinite(src.y)&&Number.isFinite(src.z))) return false;
+    // The dig carries FURTHER than any Wretch cue on purpose: 40 blocks against the voice pool's 24. It is a long channel by
+    // design — a warning you only get at ten blocks is not a warning, it is a death.
+    const fadeR = kind==='dig' ? 40 : 30;
+    const d=Math.hypot(src.x-camera.position.x, src.z-camera.position.z);
+    const dg=clamp(1-d/fadeR,0,1);
+    if(dg<=0.001){ BUR_AUD.far++; return false; }
+    const p=panAt(src.x, src.y, src.z);
+    const m=clamp(muffle==null?1:muffle,0,1);                       // 1 = fully underground, 0 = out in the air
+    if(kind==='dig'){
+      // Displaced mass, then grit. The body tone is below where a lowpass can take anything away, which is why it survives the
+      // earth at all; the grit is what makes it read as digging rather than as distant thunder.
+      tone(p,{f:46+Math.random()*10, type:'sine', dur:0.42, vol:0.09*dg, to:32});
+      burst(p, (0.16-0.06*m)*dg, 0.38, 420-260*m, 0.7, -160, 'lowpass');
+      burst(p, (0.07-0.03*m)*dg, 0.16, 300-180*m, 1.1, -90,  'lowpass');
+    } else if(kind==='surface'){
+      // The ground opening. This one is BRIGHT, because nothing is between you and it any more — the sudden arrival of high
+      // frequency after a minute of muffled rumble is the whole jump, and it is the same trick as a door being opened on noise.
+      tone(p,{f:74, type:'sine', dur:0.5, vol:0.42*dg, to:30});
+      burst(p, 0.55*dg, 0.34, 900, 0.5, 2600, 'highpass');           // soil spraying up and out
+      burst(p, 0.30*dg, 0.55, 1600, 0.4, -1200);                     // the spray falling back
+      for(let i=0;i<4;i++) tone(p,{f:150+Math.random()*400, type:'triangle', dur:0.05, vol:0.10*dg, delay:0.12+Math.random()*0.5, to:90});   // clods landing
+    } else if(kind==='cry'){
+      // Not a shriek. It has no eyes and a mouth built for gripping, so the cry is a low wet bellow with a hard downward slide
+      // and inharmonic ring-mod on it — recognisable as an animal, placeable as nothing you have ever heard.
+      const t0=AC.currentTime, dur=0.95, vol=0.85*dg, f0=88+Math.random()*22;
+      const car=AC.createOscillator(); car.type='sawtooth'; car.frequency.setValueAtTime(f0*1.35,t0);
+      car.frequency.exponentialRampToValueAtTime(f0*0.55, t0+dur*0.8);
+      const mod=AC.createOscillator(); mod.type='sine'; mod.frequency.value=f0*1.87;   // inharmonic: no note, no pitch to name
+      const ring=AC.createGain(); ring.gain.value=0; mod.connect(ring.gain); car.connect(ring);
+      const bp=AC.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=380; bp.Q.value=0.8;
+      const ws=AC.createWaveShaper(); { const n=1024,c=new Float32Array(n),k=11; for(let i=0;i<n;i++){ const x=i*2/n-1; c[i]=(1+k)*x/(1+k*Math.abs(x)); } ws.curve=c; ws.oversample='2x'; }
+      const wet=AC.createBufferSource(); wet.buffer=NB; wet.loop=true;                 // the wet layer: breath through something full of fluid
+      const wbp=AC.createBiquadFilter(); wbp.type='bandpass'; wbp.frequency.value=650; wbp.Q.value=0.5;
+      const wg=AC.createGain(); wg.gain.value=0.22*dg;
+      const vg=AC.createGain(); vg.gain.setValueAtTime(0.0001,t0);
+      vg.gain.exponentialRampToValueAtTime(vol,t0+0.05); vg.gain.setValueAtTime(vol,t0+dur*0.55);
+      vg.gain.exponentialRampToValueAtTime(0.0001,t0+dur);
+      ring.connect(ws); ws.connect(bp); bp.connect(vg); wet.connect(wbp); wbp.connect(wg); wg.connect(vg); vg.connect(p);
+      car.start(t0); mod.start(t0); wet.start(t0);
+      const end=t0+dur+0.05; car.stop(end); mod.stop(end); wet.stop(end);
+    } else return false;
+    BUR_AUD.played[kind]=(BUR_AUD.played[kind]||0)+1;
+    return true;
+  }catch(e){ return false; }
+};
 setThreat=(v)=>{
   if(_threatPin!=null) v=_threatPin;
   // PUBLISHED BEFORE THE AUDIO GUARD, deliberately. The soundtrack is streamed HTMLAudio and has nothing to do with the WebAudio
@@ -39953,6 +40033,14 @@ window.__hc={
       const before=(typeof PNOISE!=='undefined')?PNOISE.length:0;
       player.pos.x=m.pos.x+1.0; player.pos.z=m.pos.z;                       // inside MEEK_FLUSH, which is what disturbing one means
       return { moved:true, before, dist:+Math.hypot(player.pos.x-m.pos.x,player.pos.z-m.pos.z).toFixed(2) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // QA: the Burrower's audio as asks against sounds actually built. The distinction is the whole point of this probe — the dig
+  // was routed to a voice type that had been cut from the game and returned on its first line, so the call site read perfectly
+  // and the creature was mute. A bench can only prove the ask headless (an AudioContext needs a user gesture), so noAC is
+  // reported rather than hidden: a run with noAC>0 has proven the plumbing and NOT the sound.
+  burAudio(reset){ try{ if(reset){ BUR_AUD.req={}; BUR_AUD.played={}; BUR_AUD.noAC=0; BUR_AUD.far=0; }
+      return { req:Object.assign({},BUR_AUD.req), played:Object.assign({},BUR_AUD.played), noAC:BUR_AUD.noAC, far:BUR_AUD.far,
+               dropped:Object.keys(BUR_AUD.req).reduce((n,k)=>n+((BUR_AUD.req[k]||0)-(BUR_AUD.played[k]||0)),0) }; }
     catch(e){ return {err:String(e.message||e)}; } },
   // QA: put the player on ground the creature cannot open, without needing a build. Returns what is now underfoot.
   burFloor(id){ try{ const fx=Math.floor(player.pos.x), fz=Math.floor(player.pos.z), gy=surfaceH(fx,fz);
