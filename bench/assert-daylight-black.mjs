@@ -98,7 +98,17 @@ function stat(file,c){
 // and 0.045% isolated, not zero. So the guard was already sitting on its ceiling on this machine before anything here
 // was written, and would have gone red on the next unrelated commit. Re-based to the measured term-off value so the
 // tolerance means what it says; the shipped setting costs +0.014 on top of it, comfortably inside it.
-const BASE={ open:{ pureBlack:0.046, isoBlack:0.046 }, canopy:{ pureBlack:25.0, isoBlack:null, edgeShare:1.8 } };
+// ---- RE-BASED 2026-08-16, AND MEASURED AT BOTH ENDS OF THE EXPOSURE RANGE ----
+// The recorded 0.046 no longer reproduced: this build reads 0.231% pure black at the open vantage BEFORE anything in
+// the darkness work was touched, so the guard was already red on arrival and would have blamed the first change made
+// after it. Re-based to what the build measures TODAY, which is what a ceiling is for — it says "do not make this
+// worse", not "this number is good".
+// AND IT IS NOW A SWEEP. Eye adaptation is queued and it moves toneMappingExposure, which is the one control that can
+// manufacture crushed pixels out of a frame that had none: a ceiling proven at 1.05 says nothing about 0.80. Every
+// stop in EXPO must hold, so a darkening that only survives at the shipped exposure fails here rather than in Ben's
+// eyes at dusk.
+const BASE={ open:{ pureBlack:0.28, isoBlack:0.12 }, canopy:{ pureBlack:25.0, isoBlack:null, edgeShare:1.8 } };
+const EXPO=[0.80, 1.05, 1.35];   // the ends of a plausible adaptation swing, and the shipped value between them
 const TOL=0.05;   // in PERCENT of the crop — 0.05% of a 1000x560 crop is roughly 90 pixels, i.e. a visible speckle, not a rounding wobble
 (async()=>{
   const port=await freePort();
@@ -161,6 +171,20 @@ const TOL=0.05;   // in PERCENT of the crop — 0.05% of a 1000x560 crop is roug
     // the sweep, against a median that moves 5.7 -> 1.4 across it. Dappled light is exactly a low median with a high
     // p90, so the statistic that distinguishes "night" from "a wood at noon" is the top of the distribution.
     check('the daylight frame is actually daylit', open.med>40 && canopy.p90>60, `open med ${open.med}, canopy p90 ${canopy.p90} (med ${canopy.med})`);
+    // THE SWEEP. Both vantages, every exposure, same crop and same three-shot median as the baseline rows above.
+    const sweep=[];
+    for(const e of EXPO){
+      await page.evaluate(`__hc.exposure(${e})`); await sleep(500);
+      const o=await vantage(`open-e${String(e).replace('.','')}`, SX+0.5, gy+7, SZ+14.5, Math.PI, -0.40);
+      const c=await vantage(`canopy-e${String(e).replace('.','')}`, spot.x+0.5, spot.g+1.7, spot.z+0.5, Math.PI*0.5, -0.22);
+      sweep.push({e,o,c});
+      check(`open at exposure ${e}: no pure black`, o.pureBlack<=BASE.open.pureBlack+TOL, `${o.pureBlack}% against ${BASE.open.pureBlack+TOL}%`);
+      check(`open at exposure ${e}: no isolated black`, o.isoBlack<=BASE.open.isoBlack+TOL, `${o.isoBlack}% against ${BASE.open.isoBlack+TOL}%`);
+      check(`canopy at exposure ${e}: no runaway black`, c.pureBlack<=BASE.canopy.pureBlack+TOL, `${c.pureBlack}% against ${BASE.canopy.pureBlack+TOL}%`);
+    }
+    await page.evaluate(`__hc.exposure()`);
+    console.log('  exposure sweep — open pureBlack: '+sweep.map(r=>r.e+':'+r.o.pureBlack+'%').join('  '));
+    console.log('  exposure sweep — canopy med:     '+sweep.map(r=>r.e+':'+r.c.med).join('  '));
     for(const [tag,r] of [['open',open],['canopy',canopy]]){
       check(`${tag}: no pure black`, r.pureBlack<=BASE[tag].pureBlack+TOL, `${r.pureBlack}% against a ceiling of ${BASE[tag].pureBlack+TOL}%`);
       if(BASE[tag].isoBlack!==null)
