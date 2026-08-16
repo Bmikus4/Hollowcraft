@@ -75,14 +75,18 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     const carry=async(v0)=>{
       await page.evaluate(`__hc.swimStop(); __hc.tpAt(${sea.x}.5, ${SEA-2}, ${sea.z}.5)`); await sleep(600);
       await page.evaluate(`__hc.setVel&&__hc.setVel(${v0},0,0)`).catch(()=>{});
-      const got=await page.evaluate(`(()=>{ __hc.setVel(${v0},0,0); return __hc.swimProbe().speed; })()`).catch(()=>null);
+      const got=await page.evaluate(`(()=>{ __hc.setVel(${v0},0,0); return __hc.swimProbe(); })()`).catch(()=>null);
       await sleep(250);
       const a=await page.evaluate(`__hc.swimProbe()`);
-      return { set:got, after:a.speed }; };
+      // THE STATE IS PRINTED, not just the speed. The first run of this row read 0 from both entries and there was
+      // no way to tell whether the velocity had been refused, drained by the ground branch because the swimmer had
+      // reached the seabed, or zeroed by the no-input guard.
+      return { set:got&&got.speed, inWater:a.inWater, onGround:a.onGround, y:a.y, after:a.speed }; };
     const fastIn=await carry(9), slowIn=await carry(1.5);
     if(fastIn.set==null){ console.log('  (momentum rows skipped — no __hc.setVel to inject an entry speed)'); }
     else {
-      console.log(`  entered at 9.0 -> ${fastIn.after} after 0.25 s;  entered at 1.5 -> ${slowIn.after}`);
+      console.log(`  entered at 9.0 -> ${fastIn.after} after 0.25 s   ${JSON.stringify(fastIn)}`);
+      console.log(`  entered at 1.5 -> ${slowIn.after} after 0.25 s   ${JSON.stringify(slowIn)}`);
       check('MOMENTUM CARRIES IN: a fast entry is still faster a quarter-second later', fastIn.after>slowIn.after+0.3, `${fastIn.after} against ${slowIn.after}`);
       check('and it is bleeding off rather than holding', fastIn.after<9, `${fastIn.after} from 9.0`);
     }
