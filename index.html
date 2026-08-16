@@ -6818,7 +6818,7 @@ function _openH(wx,wz){
   const elev = CFG.SEA + 2 + cont*24 + (rdg-0.4)*30*smooth(0.15,0.6,cont+0.3) - ero*7;
   return Math.min(elev, CFG.SEA+34);                // a coast, not a range
 }
-let _cpLastX=1e9, _cpLastZ=1e9, _cpLastRD=-1;
+let _cpLastX=1e9, _cpLastZ=1e9, _cpLastRD=-1; let _cpMs=0;
 function _coastPineMask(){
   const px=camera.position.x, pz=camera.position.z, wall=CFG.RENDER_DIST*CK;
   // Recomputed on MOVEMENT, not on a schedule: the mask is a function of where you stand and how far you see, and at
@@ -6826,6 +6826,7 @@ function _coastPineMask(){
   // a few milliseconds once every couple of hundred blocks, and a stutter every frame.
   if(Math.abs(px-_cpLastX)+Math.abs(pz-_cpLastZ) < 24 && CFG.RENDER_DIST===_cpLastRD) return;
   _cpLastX=px; _cpLastZ=pz; _cpLastRD=CFG.RENDER_DIST;
+  const _cpT0=performance.now();
   const SEA=CFG.SEA;
   for(let b=0;b<3;b++){
     // THE RADIAL WINDOW IS SHORT, AND THAT IS WHAT MAKES A COASTLINE. At d0*0.16 the six samples of the far band spanned
@@ -6874,6 +6875,7 @@ function _coastPineMask(){
     }
   }
   _cpTex.needsUpdate=true;
+  _cpMs=performance.now()-_cpT0;   // what one rebuild costs, for __hc.pines() — this runs on the frame you cross 24 blocks, so it is a hitch if it is large
 }
 const _uCoastPine={ value:new THREE.Color(0.034,0.090,0.029) };   // PINE_GREEN, the approved treeline green; driven by the hour below
 const _uCoastAir ={ value:new THREE.Color(0.6,0.68,0.76) };
@@ -22232,6 +22234,13 @@ function buildGlbGun(key,dot,suppressed,att){
   // its GLASS occupies, and a crafted red dot hides it (holosight XOR scope, the rule the procedural rifle keeps).
   const parts=[];
   if(spec.pump&&P.woodFore) parts.push({name:'pump',mats:/wood/i,box:_glbBox(P.woodFore.from-0.02,-99,-99,P.woodFore.to+0.02,99,99)});
+  // THE MAGAZINE, so the reload animation has something to drop. The animation has always been written (a mag falls
+  // free at 0.12 of the reload and a fresh one seats at 0.55) and has always moved nothing, because nothing carved a
+  // mag out of the one-piece mesh. magRange is the placement pass's own landmark for it; it is widened by 0.05 in x
+  // because the derived range is the widest SLAB it found and a real magazine has a floorplate wider than its body,
+  // and it takes everything BELOW the receiver line so the box catches the whole thing and no receiver metal.
+  if(!spec.pump && P.magRange && P.magRange.top!=null)
+    parts.push({name:'mag',box:_glbBox(P.magRange.from-0.05,-99,-99,P.magRange.to+0.05,P.magRange.top,99)});
   if(spec.scope&&P.glassRange){
     const g0=P.glassRange.from, g1=P.glassRange.to;
     parts.push({name:'lens',mats:/glass|lens/i,box:_glbBox(g0-0.10,P.railTop,-99,g0+0.30*(g1-g0),99,99)});   // the EYEPIECE only: the magnified pass renders into this one disc, and the objective at the far end must stay glass
@@ -22464,6 +22473,8 @@ function buildGlbGun(key,dot,suppressed,att){
     can.position.set(0,boreG,spec.muzzleZ-cl/2+0.01); can.castShadow=true; g.add(can); }
   if(spec.adsZ!=null) UD.adsZ=spec.adsZ;
   if(sub.pump){ UD.pump=sub.pump; UD.pumpZ=sub.pump.position.z; }
+  // Published the way the pump is: the animation moves these directly and needs the rest position to return to.
+  if(sub.mag){ UD.mag=sub.mag; UD.magY=sub.mag.position.y; UD.magRx=sub.mag.rotation.x; }
   const flash=buildMuzzleFlash(spec.cal); flash.renderOrder=8; flash.userData.base=suppressed?spec.flash*0.55:spec.flash;
   flash.position.set(0,boreG,suppressed?spec.muzzleZ-spec.can[1]-0.01:spec.muzzleZ-0.01);
   flash.scale.setScalar(suppressed?spec.flashS*0.6:spec.flashS); flash.visible=false; g.add(flash); UD.flash=flash;
@@ -35849,6 +35860,20 @@ window.__hc={
       return this.attProbe(); }catch(e){ return {err:String(e.message||e)}; } },
   attKey(code){ try{ const hs=heldSlot(); attUIKey(code); return {sel:_attSel, ui:openUI, held:hs&&hs.id, wearing:attOf(heldSlot())}; }catch(e){ return {err:String(e.message||e)}; } },
   attOpen(on){ try{ if(on===false) closeAttUI(); else openAttUI(); return {ui:openUI}; }catch(e){ return {err:String(e.message||e)}; } },
+  // DOES THE RELOAD MOVE THE GUN'S OWN PARTS? Holds the gun, starts a real reload, and steps the animation while
+  // sampling the magazine's LOCAL position — the one thing that says whether the mag is a carved part or still
+  // welded into the receiver. Travel is peak displacement; return is how far from rest it ends up.
+  reloadParts(id){ try{ if(id){ inv[selSlot]={id,n:1}; refreshHotbar(); setViewItem(id); }
+      const M=view.mesh&&view.mesh.userData; if(!M) return {err:'nothing held'};
+      const has={mag:!!M.mag, pump:!!M.pump, bolt:!!M.bolt, cyl:!!M.cyl};
+      if(!M.mag) return Object.assign({id:view.id},has,{magTravel:0,magReturn:0});
+      const y0=M.mag.position.y; let peak=0;
+      view.reloadDur=1.0; view.reloadT=1.0; view._rlOff=false;
+      for(let i=0;i<60;i++){ view.reloadT=Math.max(0,1.0-i/59); updateView(1/60);
+        peak=Math.max(peak,Math.abs(M.mag.position.y-y0)); }
+      view.reloadT=0; updateView(1/60);
+      return Object.assign({id:view.id},has,{ magTravel:+peak.toFixed(4), magReturn:+Math.abs(M.mag.position.y-y0).toFixed(4) }); }
+    catch(e){ return {err:String(e.message||e)}; } },
   // IS THE HELD ITEM IN FRAME, AND IS THE HAND ON IT? A screenshot is how a held pose gets judged and it is the one
   // thing a bench cannot read. This projects the held mesh's corners to screen space and reports the fraction of the
   // viewport it covers, plus the distance from the fist's palm to the grip it was solved to — so "the axe is off the
@@ -39614,7 +39639,7 @@ window.__hc={
   pines(v,o){ try{ if(v!=null) _cpWant=!!v;
       if(o){ if(o.gain!=null) _cpU.uGain.value=+o.gain; if(o.fogMul!=null) _cpU.uFogMul.value=+o.fogMul;
              if(o.force) { _cpLastX=1e9; _cpLastZ=1e9; } }
-      return { on:_cpWant, gain:_cpU.uGain.value, fogMul:_cpU.uFogMul.value, wall:_cpU.uWall.value }; }
+      return { on:_cpWant, gain:_cpU.uGain.value, fogMul:_cpU.uFogMul.value, wall:_cpU.uWall.value, buildMs:+_cpMs.toFixed(2), n:_CPN }; }
     catch(e){ return String(e.message||e); } },
   // QA/bench: paint the sea with the RAW mirror target. The only way to tell a reflection that contributes nothing
   // from a reflection that is contributing something invisible is to look at what the pass actually rendered.
