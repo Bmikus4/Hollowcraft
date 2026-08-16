@@ -46,10 +46,16 @@ const fb=()=>['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Progra
     say(m.lightSlots>0, 'the light pool is whole with a full house alive ('+m.lightSlots+' slots) — none of them borrows one');
 
     // 2. THEY KEEP THEIR DISTANCE. A creature that closes is a threat, and this one is explicitly not one.
-    let minSeen=99;
-    for(let i=0;i<40;i++){ const r=await ev('__hc.meek()'); if(r.closest!=null && r.closest<minSeen) minSeen=r.closest; await sleep(100); }
-    console.log('  closest any of them came over four seconds: '+minSeen.toFixed(2));
-    say(minSeen>2.5, 'they watch instead of closing ('+minSeen.toFixed(2)+' blocks at the nearest)');
+    // THE THIRD TEST THAT PASSED AGAINST NOTHING. `closest` is null when none are alive, so this loop left minSeen at 99 and
+    // the assertion below read "they watch instead of closing (99.00)" — a green light produced by an empty world. Two of
+    // these have already been found today (the Tenant's stillness, and a fork's pose never running); this was the third.
+    let minSeen=99, livePolls=0;
+    for(let i=0;i<40;i++){ const r=await ev('__hc.meek()');
+      if(r.live>0) livePolls++;
+      if(r.closest!=null && r.closest<minSeen) minSeen=r.closest; await sleep(100); }
+    console.log('  closest any of them came over four seconds: '+minSeen.toFixed(2)+' ('+livePolls+'/40 polls with any alive)');
+    say(livePolls>30, 'they were alive for the whole watch ('+livePolls+' of 40 polls) — without this the next line passes on an empty world');
+    say(minSeen>2.5 && minSeen<40, 'they watch instead of closing ('+minSeen.toFixed(2)+' blocks at the nearest)');
 
     // 3. THE CROW MECHANISM. Disturbing one has to reach the WRETCH — not make a sound effect, but write into PNOISE, which is
     //    the array the Wretch's hearing reads. If this does not fire, the creature is decoration.
