@@ -39,11 +39,12 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     // at the same eye height above the STAND's ground both times, so the canopy sits in the same part of the frame.
     const tx=IC.x-Math.round(IC.R*0.35), tz=IC.z+Math.round(IC.R*0.20);
     const tg=await page.evaluate(`__hc.groundY(${tx},${tz})`);
-    const shoot=async(tag,dist,fogmul)=>{
+    const shoot=async(tag,dist,fogmul,t)=>{
+      t=(t==null?0.25:t);
       const x=tx-dist;
-      await page.evaluate(`__hc.vis({fogmul:${fogmul}}); __hc.tpAt(${x}+0.5, ${tg}+26, ${tz}+0.5); __hc.cam({yaw:${Math.atan2(-1,-0)+Math.PI}, pitch:-0.05}); __hc.fog(0); __hc.freezeT(0); __hc.setTime(0.25)`);
+      await page.evaluate(`__hc.vis({fogmul:${fogmul}}); __hc.tpAt(${x}+0.5, ${tg}+26, ${tz}+0.5); __hc.cam({yaw:${Math.atan2(-1,-0)+Math.PI}, pitch:-0.05}); __hc.fog(0); __hc.freezeT(0); __hc.setTime(${t})`);
       for(let i=0;i<40;i++){ const f=await page.evaluate(`__hc.fill()`); if(f&&f.meshed>=f.want) break; await sleep(400); }
-      await sleep(2500); await page.evaluate(`__hc.setTime(0.25)`); await sleep(500);
+      await sleep(2500); await page.evaluate(`__hc.setTime(${t})`); await sleep(500);
       const f=path.join(OUT,`cdist-${tag}.png`); await page.screenshot({path:f});
       const buf=fs.readFileSync(f).toString('base64');
       // THE CROP FINDS THE CANOPY INSTEAD OF ASSUMING IT. A fixed box measured sky at one distance and the inside of a
@@ -76,6 +77,10 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     await shoot('far-220', 220, 1.0);
     await shoot('far-220-fog015', 220, 0.15);
     await shoot('far-220-fog0', 220, 0.0);
+    // Dawn and dusk ride on the same fog colour through the grazing-warmth term, so a change to the day DENSITY has to
+    // be looked at there too: too little haze at a low sun is a dead neutral distance under an orange sky.
+    await shoot('far-220-dusk', 220, 1.0, 0.46);
+    await shoot('far-220-dawn', 220, 1.0, 0.04);
     await page.evaluate('__hc.pines(0)'); await sleep(900); await shoot('near-60-nopines', 60, 1.0);
     await page.evaluate('__hc.pines(1)'); await sleep(900);
     await shoot('near-60-repeat', 60, 1.0);
