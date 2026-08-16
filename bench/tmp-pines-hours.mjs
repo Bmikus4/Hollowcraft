@@ -96,6 +96,10 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
         const g=c.getContext('2d'); g.drawImage(im,0,0); const d=g.getImageData(0,300,1280,140).data;
         let s=0,n=0; for(let i=0;i<d.length;i+=4){ s+=d[i+1]-(d[i]+d[i+2])/2; n++; } return +(s/n).toFixed(2); })()`);
       console.log('    band green dominance (on frame): '+grn);
+      // ALONG THE COAST, which is where they live now. The seaward cone is deliberately clear - Ben: "they should be up
+      // and down the coast to the left and right when looking out at the water" - so an A/B on a strip pointed straight
+      // out to sea measures the part that was switched off on purpose. This turns to look along the beach.
+      await page.evaluate(`__hc.cam({yaw:${YAW_OUT+Math.PI/2}, pitch:-0.02})`); await sleep(1500);
       const HOURS=[['noon',0.25],['dawn',0.04],['dusk',0.46],['night',0.75]];
       // THE A/B AT EVERY HOUR, not just a frame at each: the pines were measured at noon and photographed at the rest.
       for(const [when,t] of HOURS){
