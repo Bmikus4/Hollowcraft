@@ -95,7 +95,7 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
         const g=c.getContext('2d'); g.drawImage(im,0,0); const d=g.getImageData(0,300,1280,140).data;
         let s=0,n=0; for(let i=0;i<d.length;i+=4){ s+=d[i+1]-(d[i]+d[i+2])/2; n++; } return +(s/n).toFixed(2); })()`);
       console.log('    band green dominance (on frame): '+grn);
-      for(const [when,t] of [['noon',0.25],['dusk',0.46],['night',0.75]]){
+      for(const [when,t] of [['noon',0.25],['dawn',0.04],['dusk',0.46],['night',0.75]]){
         await page.evaluate(`__hc.setTime(${t})`); await sleep(900); await page.evaluate(`__hc.setTime(${t})`); await sleep(400);
         await page.screenshot({path:path.join(OUT,'cp-shore-'+when+'.png')}); }
       console.log('    frames: cp-shore-noon/dusk/night.png');
