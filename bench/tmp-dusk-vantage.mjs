@@ -104,9 +104,20 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     // is no hook that stops the day). So the question is asked the only way it stays answerable: hold the camera and the
     // hour still, and move the fog dial alone. Whatever the metric's absolute value is at dusk, the DIFFERENCE across
     // that dial is the wash.
-    await shoot('dusk-220-fog1',   220, 0.46, 1.0);
-    await shoot('dusk-220-fog015', 220, 0.46, 0.15);
-    await shoot('dusk-220-fog0',   220, 0.46, 0.0);
-    await shoot('dusk-220-fog1-repeat', 220, 0.46, 1.0);
+    // ---- WHAT MAKES A DUSK CANOPY BRIGHTER THAN THE SKY ----
+    // Three candidates and only two can be tested by a dial, which is itself the answer to the third: the tone curve is
+    // GLOBAL, so it cannot lift the canopy past the sky it is being compared against - it moves both together. That
+    // leaves the key light (a low sun at intensity ~2.6 with a warm grazing colour) and the thin-leaf transmission
+    // (uFolTrans, which adds 45% of the direct light to every face turned AWAY from the sun, so a canopy lights from
+    // both sides at once). Each is moved alone, with the baseline repeated last.
+    await shoot('base',      220, 0.46, 1.0);
+    await page.evaluate(`__hc.folTrans({amt:0})`); await sleep(600);
+    await shoot('foltrans0', 220, 0.46, 1.0);
+    await page.evaluate(`__hc.folTrans({amt:0.45}); __hc.keyMul(0.5)`); await sleep(600);
+    await shoot('key50',     220, 0.46, 1.0);
+    await page.evaluate(`__hc.keyMul(1); __hc.folAmb(0)`); await sleep(600);
+    await shoot('folamb0',   220, 0.46, 1.0);
+    await page.evaluate(`__hc.folAmb(1.5)`); await sleep(600);
+    await shoot('base-repeat', 220, 0.46, 1.0);
   } finally { try{ if(browser) await browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }
 })().catch(e=>{ console.error(e); process.exit(1); });
