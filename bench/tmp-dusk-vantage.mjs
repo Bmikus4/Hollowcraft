@@ -118,6 +118,11 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     await page.evaluate(`__hc.keyMul(1); __hc.folAmb(0)`); await sleep(600);
     await shoot('folamb0',   220, 0.46, 1.0);
     await page.evaluate(`__hc.folAmb(1.5)`); await sleep(600);
+    // THE NIGHT FADE, THE AMBIENT'S TWIN: same gate, same display-referred place, but a mix rather than an add. If it
+    // carries the same fault it will LIFT a distant canopy at dusk toward a target meant for midnight.
+    await page.evaluate(`__hc.folFade(0)`); await sleep(600);
+    await shoot('folfade0', 220, 0.46, 1.0);
+    await page.evaluate(`__hc.folFade(0.72)`); await sleep(600);
     await shoot('base-repeat', 220, 0.46, 1.0);
   } finally { try{ if(browser) await browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }
 })().catch(e=>{ console.error(e); process.exit(1); });
