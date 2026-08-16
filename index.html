@@ -8761,6 +8761,87 @@ const HeightFogShader={
       gl_FragColor=vec4(mix(src, col, clamp(f,0.0,1.0)), 1.0);
     }`
 };
+// =====================================================================
+//  PER-LIGHT VOLUMETRIC SCATTERING — the air a lantern lights (Ben 08-16)
+// =====================================================================
+// "the existing god rays come from just the sun, these should be all lights shining through windows for example should
+// show the fog/gas inside of a room." The sun shafts are a screen-space smear seeded only by sky pixels and they cannot
+// do this: indoors there is no sky to seed from. This is the other thing — single scattering, marched along the view
+// ray, from the three lights the rule beside _volPick has already chosen.
+//
+// IT IS A RAYMARCH AND IT IS PRICED LIKE ONE. Ten steps, three lights, thirty samples a pixel — the same order as the
+// godray pass that already ships at 0.645 ms. The step count and the budget are the two dials that matter, and the
+// budget is enforced on the CPU where it can be measured without a frame.
+//
+// DEPTH IS THE OCCLUDER. Each pixel marches only as far as the surface behind it, so a wall stops the beam: light does
+// not pour through stone because the march simply ends there. That is also why this pass needs the depth texture and
+// therefore sits in the same place the godray pass does — before motion blur, or assert-godray-survives-mb is telling
+// the truth about the sun's shafts and lying about these.
+//
+// THE DITHER IS NOT DECORATION. Ten steps across twenty blocks is a two-block sample spacing, and a fixed spacing puts
+// visible rings in the air wherever the falloff is steep. Offsetting each pixel's first step by a hash of its position
+// turns the rings into noise the eye reads as dust, which is also what item 7's motes will thicken.
+const VolLightShader={
+  uniforms:{ tDiffuse:{value:null}, tDepth:{value:null}, uInvVP:{value:new THREE.Matrix4()},
+    uCamPos:{value:new THREE.Vector3()}, uVLPos:{value:[new THREE.Vector3(),new THREE.Vector3(),new THREE.Vector3()]},
+    uVLCol:{value:[new THREE.Vector3(),new THREE.Vector3(),new THREE.Vector3()]},
+    uVLI:{value:[0,0,0]}, uDensity:{value:0}, uStrength:{value:0.85}, uMaxDist:{value:34.0}, uSteps:{value:10.0} },
+  vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
+  fragmentShader:[
+  'precision highp float; varying vec2 vUv;',
+  'uniform sampler2D tDiffuse, tDepth; uniform mat4 uInvVP; uniform vec3 uCamPos;',
+  'uniform vec3 uVLPos[3]; uniform vec3 uVLCol[3]; uniform float uVLI[3];',
+  'uniform float uDensity, uStrength, uMaxDist, uSteps;',
+  'float hash12(vec2 p){ vec3 p3=fract(vec3(p.xyx)*0.1031); p3+=dot(p3,p3.yzx+33.33); return fract((p3.x+p3.y)*p3.z); }',
+  'vec3 worldAt(vec2 uv, float d){ vec4 ndc=vec4(uv*2.0-1.0, d*2.0-1.0, 1.0); vec4 w=uInvVP*ndc; return w.xyz/max(w.w,1e-6); }',
+  'void main(){',
+  '  vec4 src=texture2D(tDiffuse, vUv);',
+  '  if(uDensity<=0.0001){ gl_FragColor=src; return; }',
+  '  float dep=texture2D(tDepth, vUv).x;',
+  '  vec3 endW=worldAt(vUv, dep);',
+  '  vec3 ray=endW-uCamPos; float len=length(ray);',
+  '  if(len<0.05){ gl_FragColor=src; return; }',
+  '  vec3 dir=ray/len;',
+  '  len=min(len, uMaxDist);',
+  '  float jitter=hash12(gl_FragCoord.xy);',
+  '  float dt=len/uSteps;',
+  '  vec3 acc=vec3(0.0);',
+  '  for(int s=0;s<12;s++){',
+  '    if(float(s)>=uSteps) break;',
+  '    vec3 p=uCamPos + dir*((float(s)+jitter)*dt);',
+  '    for(int l=0;l<3;l++){',
+  '      if(uVLI[l]<=0.0) continue;',
+  '      vec3 dl=uVLPos[l]-p; float d2=dot(dl,dl)+0.25;',
+  // Inverse-square with a softening term, and a mild forward phase: air scatters more of a light toward you when you
+  // are looking into it, which is why a beam is brightest when you face the lamp and merely a glow when it is behind.
+  '      float att=uVLI[l]/d2;',
+  '      float ph=0.65+0.35*max(0.0, dot(dir, dl*inversesqrt(d2)));',
+  '      acc+=uVLCol[l]*att*ph;',
+  '    }',
+  '  }',
+  '  acc*=dt*uDensity*uStrength;',
+  '  gl_FragColor=vec4(src.rgb+acc, src.a);',
+  '}'].join('\n') };
+let volPass=null;
+// Wired per frame from the selection. The uniform arrays are fixed at three because the budget is three; a light that
+// is not chosen has its intensity written to zero rather than being removed, so the array never changes length and the
+// program never recompiles.
+function updateVolPass(){
+  if(!volPass) return;
+  const u=volPass.uniforms;
+  const air=(typeof _volAir==='function')?_volAir():0;
+  u.uDensity.value = air<=0.001 ? 0 : (0.02 + 0.16*air);
+  volPass.enabled = (volPass.userData.want!==false) && u.uDensity.value>0.0001 && _volSel.length>0;
+  if(!volPass.enabled) return;
+  u.uCamPos.value.copy(camera.position);
+  camera.updateMatrixWorld();
+  u.uInvVP.value.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse).invert();
+  for(let i=0;i<3;i++){
+    const o=_volSel[i];
+    if(o){ u.uVLPos.value[i].set(o.x,o.y,o.z); u.uVLCol.value[i].set(o.r,o.g,o.b); u.uVLI.value[i]=o.inten; }
+    else { u.uVLI.value[i]=0; }
+  }
+}
 const GodrayShader={
   // uSeedMin is WHAT COUNTS AS THE SUN (Ben 08-04: "SOMETIMES NON-sun light sources also emit god rays"). This pass has no
   // idea what it is looking at: it marches from every pixel toward the sun's screen position and accumulates any sample
@@ -9074,8 +9155,13 @@ function buildComposer(){
   if (CFG.quality!=='Low' && !Q.get('norays') && _rtPath && _sceneRT && _sceneRT.depthTexture){
     godrayPass = new ShaderPass(GodrayShader);
     godrayPass.uniforms.tDepth.value=_sceneRT.depthTexture; godrayPass.uniforms.uHasDepth.value=1;
-    composer.addPass(godrayPass); }
-  else godrayPass=null;
+    composer.addPass(godrayPass); 
+    // The per-light volumetric sits in the same slot for the same reason: it needs the depth attachment, and it has to
+    // be upstream of motion blur or the shafts it draws are not covered by the assert that says shafts survive it.
+    volPass = new ShaderPass(VolLightShader);
+    volPass.uniforms.tDepth.value=_sceneRT.depthTexture; volPass.enabled=false;
+    composer.addPass(volPass); }
+  else { godrayPass=null; volPass=null; }
   // THRESHOLD 0.74 -> 0.88, RADIUS 0.5 -> 0.34 (Ben: make the sun read as a disc). At 0.74 the bright SKY around the sun --
   // forward scatter and halo, both well over that -- was blooming as hard as the sun itself, so the pass had a wide soft
   // region to smear and the result was an ellipse with no edge anywhere. At 0.88 only the sun's clipped core and genuinely
@@ -10756,6 +10842,7 @@ function assignPointLights(){
   // The pool is settled for this frame, so this is the moment to choose which of it lights the AIR. Any earlier and it
   // would be scoring last frame's positions and intensities.
   try{ _volPick(); }catch(e){}
+  try{ updateVolPass(); }catch(e){}
   // held torch/lantern lights the player's surroundings — EITHER HAND (Ben: "lighting should emit from off hand lighting").
   // This read inv[selSlot] alone, so a torch moved to the offhand went dark: it was drawn in the left fist, lit as a
   // viewmodel, and threw nothing into the world. The brighter of the two hands wins rather than the two summing, because
@@ -18361,6 +18448,14 @@ function redGlowTex(){ if(_redGlowTex)return _redGlowTex; const c=document.creat
   x.fillStyle=g; x.fillRect(0,0,64,64); _redGlowTex=new THREE.CanvasTexture(c); _redGlowTex.colorSpace=THREE.SRGBColorSpace; return _redGlowTex; }
 function placeWretch(dt,moving){
   const P=wretch.P, g=wretch.group;
+  // HOW FAST IS THE BODY ACTUALLY TRAVELLING, measured rather than intended. Ben, twice: "the wretch is still
+  // running at the player without being in his animation". Every existing number here is an INPUT — a state name, an
+  // advance rate, a speed it was asked to move at — and none of them says whether the thing on screen moved. This is
+  // the output, sampled where the position is written, so a probe can put movement and pose side by side ON THE SAME
+  // FRAME instead of inferring one from the other.
+  if(dt>1e-4){ const _p=wretch._mvLast;
+    if(_p) wretch._mvSpeed=Math.hypot(wretch.pos.x-_p.x, wretch.pos.z-_p.z)/dt;
+    wretch._mvLast={x:wretch.pos.x,z:wretch.pos.z}; }
   // NaN recovery: if any pathing/ground math produced a bad position, don't let it thrash the
   // rig (visual spasm) or leak into the audio panner — respawn cleanly instead.
   if(!(Number.isFinite(wretch.pos.x)&&Number.isFinite(wretch.pos.y)&&Number.isFinite(wretch.pos.z))){ despawnWretch(true); return; }
@@ -40306,6 +40401,23 @@ window.__hc={
       parts.sort((a,b)=>Math.max(b.w,b.h,b.d)-Math.max(a.w,a.h,a.d));
       return { id, box:[+sz.x.toFixed(3),+sz.y.toFixed(3),+sz.z.toFixed(3)], parts:parts.slice(0,4) }; });
     }catch(e){ return {err:String(e.message||e)}; } },
+  // POSE AND MOVEMENT, ON ONE FRAME. The charge bug is not "he is in the wrong state" — it is that the state
+  // machine commits to closing the distance while the RIG is left in whatever pose it was in, so a body that is
+  // travelling at four blocks a second is standing upright with its arms down. Reading the two from different
+  // places, a frame apart, is how it has been "fixed" before and come back.
+  //   crawl IS the charge pose on this rig: the all-fours gallop, the forward torso pitch (leanT = claw*1.15) and
+  //   the hunch all hang off it, so crawl≈0 while moving fast is the bug exactly.
+  wretchPose(){ try{ if(!wretch.active) return {active:false};
+      return { active:true, state:wretch.state, committed:!!wretch.committed,
+               speed:+((wretch._mvSpeed||0)).toFixed(2),          // measured, from placeWretch
+               crawl:+((wretch.crawl||0)).toFixed(2),             // the charge POSE
+               advRate:+((wretch._advRate||0)).toFixed(2),
+               gait:+((wretch.gaitPhase||0)).toFixed(2), phase:+((wretch.phase||0)).toFixed(2),
+               sneaking:!!wretch.sneaking, cling:!!wretch._clingN, grab:wretch.grabPhase||'none',
+               dist:+((wretch.dist||0)).toFixed(1),
+               // THE ONE LINE THE BENCH ASSERTS: a body moving at a charge's speed must be in a charge's pose.
+               charging:(wretch._mvSpeed||0)>2.2, posed:(wretch.crawl||0)>0.5 }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   wretchHp(){ try{ return wretch.hp==null?null:wretch.hp; }catch(e){ return null; } },
   // QA/bench: WHERE THE SUN IS, and the camera angles that face it. Three attempts to photograph the water's sunglade
   // failed because nothing exposed this: the harness could find open water and pin the clock, but aiming at the sun was
@@ -40675,6 +40787,17 @@ window.__hc={
   putBlock(x,y,z,name){ try{ const id=BID[name]; if(id==null) return 'no block '+name;
     setBlockWorld(Math.floor(x),Math.floor(y),Math.floor(z),id,true);
     return { placed:name, id, at:[Math.floor(x),Math.floor(y),Math.floor(z)] }; }
+    catch(e){ return String(e.message||e); } },
+  // QA/bench: the volumetric pass itself — on/off and its two dials. Off is the A/B; a beam has to be measurable
+  // against its own absence like everything else on this horizon.
+  vol(v,o){ try{ if(!volPass) return 'no pass (Low quality or ?norays)';
+      if(v!=null) volPass.userData.want=!!v;
+      if(o){ if(o.strength!=null) volPass.uniforms.uStrength.value=+o.strength;
+             if(o.steps!=null) volPass.uniforms.uSteps.value=Math.max(2,Math.min(12,+o.steps));
+             if(o.maxDist!=null) volPass.uniforms.uMaxDist.value=+o.maxDist; }
+      return { on:volPass.enabled, want:volPass.userData.want!==false, density:+volPass.uniforms.uDensity.value.toFixed(4),
+               strength:volPass.uniforms.uStrength.value, steps:volPass.uniforms.uSteps.value,
+               lights:_volSel.length }; }
     catch(e){ return String(e.message||e); } },
   volLights(){ try{ return { budget:VOL_MAX, range:VOL_RANGE, air:+_volAir().toFixed(3), why:_volWhy,
       chosen:_volSel.map(o=>({slot:o.i, d:o.d, inten:+o.inten.toFixed(2), score:+o.score.toFixed(3)})) }; }
