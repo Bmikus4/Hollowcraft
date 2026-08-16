@@ -317,10 +317,12 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     // A FRESH INSTANCE, because a magazine is per instance: the guns used earlier in this bench are empty and
     // fireGun answers an empty gun with a reload rather than a shot. __hc.hold mints a new stack, and a new stack
     // draws a full magazine — which is exactly what makes it the right tool here rather than a nuisance.
-    const loud=await p.evaluate("(()=>{ __hc.hold('bullpup'); const why=__hc.fireWhy(); const r=__hc.handFire('main',1,'bullpup'); return Object.assign({fired:r&&r.fired, why}, __hc.shotNoise()||{}); })()");
+    const loud=await p.evaluate("(()=>{ __hc.hold('bullpup'); const r=__hc.handFire('main',1,'bullpup'); return Object.assign({fired:r&&r.fired, threw:r&&r.threw}, __hc.shotNoise()||{}); })()");
     const quiet=await p.evaluate("(()=>{ __hc.hold('bullpup'); __hc.attFit('muzzle','suppressor'); const r=__hc.handFire('main',1,'bullpup'); return Object.assign({fired:r&&r.fired}, __hc.shotNoise()||{}); })()");
     await p.evaluate("__hc.attFit('muzzle',null)");
     console.log('noise', JSON.stringify({loud, quiet}));
+    // A shot that THREW is not a shot that was refused, and both used to look the same from here.
+    T('the shots actually fired', loud.fired===1 && quiet.fired===1 && !loud.threw && !quiet.threw, {loud, quiet});
     T('a fitted can shortens the range the shot is heard at', quiet.range < loud.range*0.7, {loud:loud.range, quiet:quiet.range});
     T('and it makes a smaller noise where it is heard', quiet.noise < loud.noise, {loud:loud.noise, quiet:quiet.noise});
     // The can's other half: a damage penalty, authored per class because a flat -20 once drove the light guns
