@@ -71,5 +71,14 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     await sample('peel-off');
     await sleep(20000); await sample('peel-off-plus20');
     await sleep(40000); await sample('peel-off-plus60');
+    // THE BACKROOMS, in and out by the same functions the door uses. brApplyAtmo swaps the background, the fog and both
+    // lights wholesale; brRestoreAtmo is the last atmosphere hand-back in the game that has never been measured.
+    console.log('    br in  ', JSON.stringify(await page.evaluate('__hc.br(1)')));
+    await sleep(4000); await sample('br-inside');
+    console.log('    br out ', JSON.stringify(await page.evaluate('__hc.br(0)')));
+    await sleep(4000);
+    await page.evaluate(`__hc.tpAt(${IC.x-IC.R-40}, ${SEA}+60, ${IC.z}); __hc.cam({yaw:${Math.atan2(1,-0)}, pitch:0.18}); __hc.dayLock(0.30)`);
+    await sleep(4000); await sample('br-after');
+    await sleep(20000); await sample('br-after-plus20');
   } finally { try{ if(browser) await browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }
 })().catch(e=>{ console.error(e); process.exit(1); });
