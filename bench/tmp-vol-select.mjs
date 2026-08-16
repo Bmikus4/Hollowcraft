@@ -46,6 +46,14 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     await page.evaluate(`__hc.fog(0.7)`); await sleep(5000);
     await check('open ground, fog bank');
     // The dungeon is the proving ground: an interior, its own lights, and it knows it is indoors.
+    // THE POSITIVE CASE, which the first run of this bench could not reach: place a lantern three blocks in front of
+    // the camera, in the bank, and the rule should now CHOOSE it. A selection that only ever refuses is half a test.
+    { const lx=IC.x+2, ly=SEA+31, lz=IC.z;
+      console.log('    place', JSON.stringify(await page.evaluate(`__hc.putBlock(${lx},${ly},${lz},'lantern')`)));
+      await page.evaluate(`__hc.tpAt(${IC.x}-2, ${SEA}+31, ${IC.z}); __hc.cam({yaw:${Math.atan2(-1,-0)}, pitch:0}); __hc.fog(0.7)`);
+      await sleep(4000);
+      const v=await check('lantern 4 blocks ahead, fog bank');
+      if(!v.chosen || !v.chosen.length){ bad++; console.log('      <== NOTHING SELECTED with a lantern in reach - the positive case FAILS'); } }
     const dun=await page.evaluate(`(()=>{ try{ const d=__hc.dungeon&&__hc.dungeon(); return d&&d.pos?d.pos:null; }catch(e){ return null; } })()`);
     if(dun){ await page.evaluate(`__hc.tpAt(${dun.x}, ${dun.y}+2, ${dun.z}); __hc.fog(0)`); await sleep(3000); await check('dungeon interior'); }
     else console.log('    dungeon: no __hc hook for its position, skipped');
