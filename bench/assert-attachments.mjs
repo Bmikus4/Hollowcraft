@@ -274,6 +274,13 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     T('the sniper still reaches its own ceiling', zoom.bolt<=1.5, zoom);
     T('a fitted scope is capped below it', zoom.fitted>=4.0, zoom);
 
+    // THE LEFT HAND IS A SECOND INSTANCE. fireGun already read a suppressor off the offhand slot; only the model
+    // did not know, so a fitted gun in the left hand rendered bare while shooting quietly.
+    await p.evaluate("__hc.offFire(1,'ar15')"); await sleep(500);
+    const off=await p.evaluate("(()=>{const r=__hc.attFitOff('optic','red_dot'); return JSON.parse(JSON.stringify(r.off||r));})()");
+    console.log('offhand', JSON.stringify(off));
+    T('a gun in the left hand wears its attachments', off && off.fitted && off.fitted.indexOf('red_dot')>=0, off);
+
     T('zero page errors', errs.length===0, errs.slice(0,2));
     console.log(fails? fails+' FAILURE(S)':'ALL PASS');
     await b.close();

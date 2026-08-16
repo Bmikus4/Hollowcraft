@@ -7096,7 +7096,14 @@ function _mtnMask(b){
 }
 const _uMtnRock={ value:new THREE.Color(0.055,0.057,0.062) };   // wet slate, not blue-grey: the island's own cliffs
 const _uMtnSnow={ value:new THREE.Color(0.62,0.66,0.72) };      // driven by the hour below, and CLAMPED under the air in the shader
-const _mtU={ uMask:{value:_mtTex}, uPine:_uCoastPine, uRock:_uMtnRock, uSnow:_uMtnSnow, uAir:_uCoastAir,
+// A MOUNTAIN'S AIR IS NOT THE WATERLINE'S. The coast pines drain toward _uHorizonBlend, the shared sea-and-sky anchor,
+// and that is right for a treeline standing ON the horizon - the anchor is deliberately DARK so nothing at the sea line
+// is brighter than its neighbours. A range stands well ABOVE the horizon, in sky, and clamping it to that dark anchor is
+// what kept these ridges a flat blue-grey and made the snow line invisible however high it was put: the cap was being
+// crushed to the anchor's own value along with everything else. This is the same anchor carried three quarters of the way
+// to the air the terrain fades into, so the ranges recede into the SKY they are actually seen against.
+const _uMtnAir={ value:new THREE.Color(0.6,0.68,0.76) };
+const _mtU={ uMask:{value:_mtTex}, uPine:_uCoastPine, uRock:_uMtnRock, uSnow:_uMtnSnow, uAir:_uMtnAir,
   uFogCol:{value:_uPineFog}, uFogD:{value:0.01}, uWall:{value:CFG.RENDER_DIST*CK}, uCamY:{value:CFG.SEA+2},
   uWx:{value:0}, uDay:globalU.uDay, uSunXZ:_cpU.uSunXZ, uSunUp:_cpU.uSunUp, uSunCol:globalU.uSunCol,
   uFogMul:{value:0.10}, uGain:{value:0.62}, uPixAng:_cpU.uPixAng, uScotG:{value:_scotG}, uScotH:{value:_scotH} };
@@ -7123,7 +7130,11 @@ const mountainMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false,
   // narrower than a pixel is not a feature, it is noise, and at these distances a 40-block crag is close to that.
   '    float cpx=(40.0/dist)/max(uPixAng,1e-6);',
   '    float det=smoothstep(1.4, 4.0, cpx);',
-  '    float crest=(nz(az*(dist/40.0))-0.5)*0.22 + (nz(az*(dist/12.0))-0.5)*0.10*det;',
+  // CRAGS. The coarse term is the range's shape and the fine one breaks its outline; at one render wall the fine term
+  // was on a 12-block wavelength and doing almost nothing, so the near range read as a smooth mass. Halved to 6, with a
+  // third octave under it, and both ride det - a feature narrower than a pixel is not a crag, it is the aliasing the
+  // pine crowns already taught this file.
+  '    float crest=(nz(az*(dist/40.0))-0.5)*0.22 + (nz(az*(dist/6.0))-0.5)*0.17*det + (nz(az*(dist/2.4))-0.5)*0.07*det;',
   '    float top=(peak*(1.0+crest))/dist;',
   '    if(elev>top) continue;',
   '    float footY=' + (CFG.SEA+18).toFixed(1) + '-uCamY;',        // the range stands on the island's own high ground
@@ -7135,9 +7146,16 @@ const mountainMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false,
   // rock above it, snow on the top quarter, each edge softened so a range does not read as three stacked stripes. The
   // snow line RISES with the sun the way a real one does across a day, which is also what keeps a white cap off the
   // horizon at dawn and dusk when it would be the brightest thing in the frame.
-  '    float snowLine=mix(0.82, 0.70, uDay);',
+  // SNOW IS AN ALTITUDE, NOT A FRACTION OF A PEAK. It was a fraction of each ridge's own height, so doubling the range
+  // carried every snow line up with its own summit and no cap ever appeared. A snow line is a height above sea in the
+  // world, the same way the generator paints the interior peaks the player can walk to - so it is computed back through
+  // the projection: the fragment's own world height is the eye height plus its elevation times the range's distance,
+  // compared against a line that still RISES with the sun the way a real one does across a day.
+  '    float wy=uCamY+elev*dist;',
+  '    float snowY=mix(' + (CFG.SEA+150).toFixed(1) + ', ' + (CFG.SEA+188).toFixed(1) + ', uDay);',
+  '    float snowT=smoothstep(snowY-22.0, snowY+16.0, wy);',
   '    vec3 col=mix(uPine*1.15, uRock, smoothstep(0.34,0.52,t));',
-  '    col=mix(col, uSnow, smoothstep(snowLine-0.06, snowLine+0.05, t)*smoothstep(0.15,0.5,uDay+0.15));',
+  '    col=mix(col, uSnow, snowT*smoothstep(0.15,0.5,uDay+0.15));',
   '    float per=0.80+0.34*mix(0.5, nz(az*(dist/18.0)), det);',    // face-to-face brightness across the range
   '    col*=per*uGain;',
   // The same key light the coast pines take, resolved per azimuth: the flank facing the sun is lit, the one away is a
@@ -7183,6 +7201,7 @@ function updateInlandMountains(){
   const dim=0.10+0.90*day;
   _uMtnRock.value.setRGB(0.055*dim, 0.057*dim, 0.062*dim);
   _uMtnSnow.value.setRGB(0.62*dim, 0.66*dim, 0.72*dim);
+  _uMtnAir.value.copy(_uHorizonBlend.value).lerp(scene.fog?scene.fog.color:_uPineFog, 0.75);
 }
 let _cpWant=!(Q.get('pines')==='0');
 function updateCoastPines(){
@@ -23158,7 +23177,12 @@ function setOffItem(id){ if(offView.id===id)return; offView.id=id;
   if(!(ITEMS[id].shield && !_NO_SHIELD)){
     // itemModel is the single source of truth already used for hotbar icons, ground drops and a peer's held item, so an item
     // in the left hand is the same object the game shows everywhere else rather than a fourth interpretation of it.
-    let m; try{ m=itemModel(id); }catch(e){ return; }
+    // A GUN IN THE LEFT HAND WEARS ITS OWN ATTACHMENTS. itemModel builds from an item id alone, which is right for
+    // an icon or a ground drop and wrong for the thing being HELD: the offhand slot is a real instance with its own
+    // fitted pieces, and fireGun already reads its suppressor off it — so the model was the only part that did not
+    // know. Same builder, same instance, as the main hand.
+    let m; try{ const _oa=(ITEMS[id].gun&&typeof GLB_GUNS!=='undefined'&&GLB_GUNS[id]&&typeof attOf==='function')?attOf(armor[EQ_OFF]):null;
+      m=(_oa&&Object.keys(_oa).length)?(buildGlbGun(id,ITEMS[id].dot,ITEMS[id].suppressed,_oa)||itemModel(id)):itemModel(id); }catch(e){ return; }
     if(!m) return;
     // Normalised to a fist-sized object by its own bounding box and re-centred on it: the models come in wildly different
     // scales -- a rifle is a metre long, a berry is a few centimetres -- and without this a gun would fill the screen.
@@ -36231,8 +36255,11 @@ window.__hc={
                    pos:[+o.position.x.toFixed(3),+o.position.y.toFixed(3),+o.position.z.toFixed(3)],
                    size:[+sz.x.toFixed(3),+sz.y.toFixed(3),+sz.z.toFixed(3)] }); } });
       const mt=spec?attMount(spec):null;
+      // The OFFHAND is a second instance with its own fits, and nothing reported it.
+      const _off=armor[EQ_OFF], offW=(_off&&typeof attOf==='function')?(attOf(_off)||{}):null, offF=[];
+      if(offView&&offView.mesh) offView.mesh.traverse(o=>{ if(o.userData&&o.userData.att) offF.push(o.userData.att); });
       const sc=attScreenState();
-      return { gun:s.id, key:gunKey(s), wearing:on, fitted:out, mount:mt,
+      return { gun:s.id, key:gunKey(s), wearing:on, fitted:out, mount:mt, off:{ id:_off?_off.id:null, wearing:offW, fitted:offF },
                rows:sc?sc.rows.map(r=>({slot:r.slot,fitted:r.fitted,opts:r.opts.length})):null,
                opticTop:(m&&m.userData.opticTop!=null)?+m.userData.opticTop.toFixed(3):null,
                ui:openUI==='att', slots:ATT_SLOTS, defs:Object.keys(ATT_DEFS), guns:Object.keys(GLB_GUNS),
@@ -36241,6 +36268,12 @@ window.__hc={
                scopeActive:+((scopeLensMat&&scopeLensMat.uniforms.uActive.value)||0).toFixed(2) }; }
     catch(e){ return {err:String(e.message||e)}; } },
   // QA: fit or clear an attachment on the gun in hand, through the same call the screen uses.
+  // QA: fit or clear on the OFFHAND gun, which is a different instance from the one in your right hand and has to
+  // be reachable on its own — the harness cannot touch armor[] from the page.
+  attFitOff(slot,id){ try{ const s=armor[EQ_OFF]; if(!s) return {err:'nothing in the left hand'};
+      if(id && !attFits(s.id,id)) return {err:id+' does not fit '+s.id};
+      attSet(s,slot,id||null); setOffItem(null); setOffItem(s.id);
+      return this.attProbe(); }catch(e){ return {err:String(e.message||e)}; } },
   attFit(slot,id){ try{ const s=heldSlot(); if(!s) return {err:'nothing held'};
       if(id && !attFits(s.id,id)) return {err:id+' does not fit '+s.id};
       attSet(s,slot,id||null); view.id=null; setViewItem(s.id);
