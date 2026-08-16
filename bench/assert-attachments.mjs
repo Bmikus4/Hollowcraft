@@ -324,6 +324,9 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     console.log('noise', JSON.stringify({loud, quiet}));
     T('a fitted can shortens the range the shot is heard at', quiet.range < loud.range*0.7, {loud:loud.range, quiet:quiet.range});
     T('and it makes a smaller noise where it is heard', quiet.noise < loud.noise, {loud:loud.noise, quiet:quiet.noise});
+    // The can's other half: a damage penalty, authored per class because a flat -20 once drove the light guns
+    // negative and bullets healed animals.
+    T('a can costs the shot damage as well', quiet.animDmg < loud.animDmg && quiet.animDmg>=3, {loud:loud.animDmg, quiet:quiet.animDmg});
 
     T('zero page errors', errs.length===0, errs.slice(0,2));
     console.log(fails? fails+' FAILURE(S)':'ALL PASS');
