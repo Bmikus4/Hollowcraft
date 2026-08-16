@@ -55,8 +55,24 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     check('enough inland water was sampled to mean anything', bed.inland.n>=40, `${bed.inland.n} inland bed columns`);
     // Not 100%: a river runs out to the coast, where the falloff has taken the island away and the gate correctly stops.
     check('most of the inland bed is mud', bed.inlandMudPct!=null && bed.inlandMudPct>=80, `${bed.inlandMudPct}%`);
-    // THE OTHER HALF OF THE ASK. The sea floor is not part of this and must not have moved.
-    check('the ocean floor is NOT mud', bed.ocean.n===0 || bed.oceanMudPct<=2, `${bed.oceanMudPct}% over ${bed.ocean.n} ocean bed columns`);
+    // THE OTHER HALF OF THE ASK, AND IT NEEDS ITS OWN TRIP. A river bank is deep inside the island, so a census taken
+    // there contains no ocean at all - the first run of this reported the sea floor clean over a sample of ZERO columns
+    // and passed. An empty control is not a control, which is the fault this whole day has been made of. So go and
+    // stand in the sea.
+    const IC=await page.evaluate(`__hc.isleStats()`);
+    let sea=null;
+    for(const d of [40,80,120,-40,-80]){ const x=IC.x+IC.R+d;
+      await page.evaluate(`__hc.tpAt(${x}, __hc.island().sea+6, ${IC.z})`);
+      for(let i=0;i<50;i++){ const f=await page.evaluate(`__hc.fill()`); if(f&&f.meshed>=f.want) break; await sleep(500); }
+      await sleep(2500);
+      const s=await page.evaluate(`__hc.bedCensus(50,1)`);
+      console.log(`  ocean probe x=${x}  ocean columns ${s.ocean.n}  inland ${s.inland.n}`);
+      if(s.ocean.n>=40){ sea=s; break; }
+    }
+    if(!sea){ console.log('\n  COULD NOT REACH OPEN SEA FLOOR - refusing to certify the ocean is unchanged on no samples.'); process.exit(1); }
+    console.log(`  OCEAN   ${JSON.stringify(sea.ocean)}    mud ${sea.oceanMudPct}%`);
+    check('the ocean floor was actually sampled', sea.ocean.n>=40, `${sea.ocean.n} ocean bed columns`);
+    check('the ocean floor is NOT mud', sea.oceanMudPct<=2, `${sea.oceanMudPct}% over ${sea.ocean.n} ocean bed columns`);
 
     // A frame as well - not as the evidence, but because a bed that counts correctly can still look wrong.
     await page.evaluate(`__hc.cam({pitch:-0.5})`); await sleep(900);
