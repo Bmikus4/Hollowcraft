@@ -8954,12 +8954,16 @@ const GradeShader={
   // grey wall over the black Ben has signed off four times; a quarter of it stops the crush without lighting anything.
   uniforms:{ tDiffuse:{value:null}, uTime:{value:0}, uSat:{value:0.96}, uGrain:{value:0.06}, uDark:{value:0}, uResolution:{value:new THREE.Vector2(innerWidth,innerHeight)}, uFXAA:{value:CFG.quality==='Low'?0:1}, uWhiteVoid:{value:0},
     uCurve:{value:0.26}, uVib:{value:0.14}, uWarm:{value:1.6}, uTemp:{value:-0.35},
-    uVig:{value:0.50}, uVigR:{value:new THREE.Vector2(0.88,0.24)}, uLift:{value:0.030}, uLiftNight:{value:0.25}, uGain:{value:0.97} },   // grain +20% (Ben 07-21): 0.05→0.06; uWhiteVoid = stage-3 pure-white glow override
+    uVig:{value:0.50}, uVigR:{value:new THREE.Vector2(0.88,0.24)}, uLift:{value:0.030}, uLiftNight:{value:0.25}, uGain:{value:0.97},
+    // THE DAYTIME TOE (Ben 08-12: "absolute dark shadows during day time ... and THEN ALSO realistic daytime
+    // darkness too"). uDayToe is the depth, uDayKnee the luminance it reaches up to. Day-gated by uDark so a
+    // night he has signed off four times cannot move by a digit.
+    uDayToe:{value:0.34}, uDayKnee:{value:0.30} },   // grain +20% (Ben 07-21): 0.05→0.06; uWhiteVoid = stage-3 pure-white glow override
   // uSat 1.3 -> 1.06 (Ben 08-04, the realism pass). AgX already has a strong toe, and multiplying saturation by 1.3 on top of
   // it is the largest remaining departure from photographic colour: it is what makes grass read as poster-green and sand as
   // orange. 1.0 is neutral; 1.06 keeps a trace of lift so the world does not go flat under fog, which desaturates on its own.
   vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
-  fragmentShader:`varying vec2 vUv; uniform sampler2D tDiffuse; uniform float uTime,uSat,uGrain,uDark,uFXAA,uWhiteVoid,uCurve,uVib,uWarm,uTemp,uVig,uLift,uLiftNight,uGain; uniform vec2 uResolution,uVigR;
+  fragmentShader:`varying vec2 vUv; uniform sampler2D tDiffuse; uniform float uTime,uSat,uGrain,uDark,uFXAA,uWhiteVoid,uCurve,uVib,uWarm,uTemp,uVig,uLift,uLiftNight,uGain,uDayToe,uDayKnee; uniform vec2 uResolution,uVigR;
     float h21(vec2 p){ return fract(sin(dot(p,vec2(12.9898,78.233)))*43758.5453); }
     // FXAA 3.11 (console variant) — cheap edge AA on the final sRGB image; luma-driven, 5+4 taps
     vec3 fxaa(sampler2D tex, vec2 uv, vec2 res){
@@ -8992,7 +8996,21 @@ const GradeShader={
       // survives at uDark 1; at 1.0 this term is inert and the lift applies at every hour, which is what shipped first.
       float _lift=uLift*mix(1.0, uLiftNight, clamp(uDark,0.0,1.0));
       c=(c*uGain)*(1.0-_lift)+vec3(_lift);
-      c=mix(c, c*c*(3.0-2.0*c), uCurve);                                     // gentle S-curve contrast that ANCHORS black at 0 (the old (c-0.5)*1.07+0.5 mapped the bottom ~3% to negative → clamped to pure black → the hard black ring in the torch falloff). Now light fades smoothly to dark.
+      c=mix(c, c*c*(3.0-2.0*c), uCurve);
+      // ---- THE DAYTIME TOE: SHAPE, NOT A FLOOR ----
+      // What holds a daylit shadow up is not the ambient — both floors measured nearly inert (see
+      // bench/assert-daylight-black.mjs and the sweeps behind it) — it is the black point of AgX at exposure 1.05
+      // plus this grade. So the shadow is deepened HERE, and deliberately as a curve rather than a level:
+      //   · it is strongest at mid-shade and eases to nothing at uDayKnee, so a shadow gains SHAPE — Ben rejected
+      //     flat black shade with no form, twice, and a subtracted constant is exactly that;
+      //   · it MULTIPLIES, so a pixel that was zero stays zero and a pixel that was one stays one — it cannot invent
+      //     a black pixel where there was light, which is the precondition he set;
+      //   · (1-t)^2 rather than (1-t): the quadratic keeps the very bottom nearly untouched, which is the region he
+      //     approved at 2 of 255, while taking the most out of the middle where a daylit shadow actually lives.
+      // uDark gates it to the day: at night this term is inert to the digit.
+      { float _tl=dot(c,vec3(0.299,0.587,0.114));
+        float _t=clamp(_tl/max(1e-4,uDayKnee),0.0,1.0), _w=(1.0-_t)*(1.0-_t);
+        c *= mix(1.0, 1.0-uDayToe*_w, 1.0-clamp(uDark,0.0,1.0)); }                                     // gentle S-curve contrast that ANCHORS black at 0 (the old (c-0.5)*1.07+0.5 mapped the bottom ~3% to negative → clamped to pure black → the hard black ring in the torch falloff). Now light fades smoothly to dark.
       // ---- HIGH-LEVEL CINEMATIC GRADE (Ben 07-27): vibrance (protects already-vivid pixels) + gentle warm-highlight / cool-shadow split-tone ----
       { float _mx=max(c.r,max(c.g,c.b)), _mn=min(c.r,min(c.g,c.b)), _sat=(_mx-_mn)/max(_mx,1e-4), _lum=dot(c,vec3(0.299,0.587,0.114));
         c=mix(vec3(_lum), c, 1.0 + (1.0-_sat)*uVib);                       // vibrance: lift muted colours more than saturated ones
@@ -34274,6 +34292,8 @@ function buildLighthouse(){ if(_lighthouseDone)return; const lx=spawnX+150, lz=s
 // FISHING PIER — finds the nearest shore, then runs a plank pier on log posts out over the water, lamp at the end
 
 // ---- WEATHER — rain streaks + overcast dimming + lightning flash & delayed thunder ----
+const _RAIN_PROBE=[1.5,4.0,8.0,14.0,22.0];   // heights above a streak that are checked for a roof — see the canopy note in the rain loop
+let _rainRoofed=0, _rainDrawn=0;
 const RAIN_N=440, rainOff=[]; for(let i=0;i<RAIN_N;i++) rainOff.push({x:(Math.random()-0.5)*38, y:Math.random()*28, z:(Math.random()-0.5)*38, s:0.8+Math.random()*0.9});   // a falling column of streaks around the camera
 const rainPos=new Float32Array(RAIN_N*6);
 const rainGeo=new THREE.BufferGeometry(); rainGeo.setAttribute('position',new THREE.BufferAttribute(rainPos,3));
@@ -34321,13 +34341,28 @@ function updateWeather(dt){
   weather.overcast = weather.rain;                                            // read by updateSky to dim the sky (1-frame lag is fine)
   weather.raining = weather.rain>0.03;
   if(weather.raining!==weather._wasRaining){ weather._wasRaining=weather.raining; if(typeof reasonEvent==='function')reasonEvent(weather.raining?'rain_begins':'rain_stops'); }   // weather shift → Gemini reasons (rain muffles its hearing)
+  _rainRoofed=0;
   if(weather.raining && !under){ rainMesh.visible=true; rainMesh.material.opacity=0.10+weather.rain*0.42;
     const cx=camera.position.x, cy=camera.position.y, cz=camera.position.z, fall=(24+weather.rain*18)*dt;
     for(let i=0;i<RAIN_N;i++){ const o=rainOff[i]; o.y-=fall; if(o.y<-8)o.y+=32;
       const ax=cx+o.x, ay=cy+o.y, az=cz+o.z, k=i*6;
+      // ---- AND LEAVES ARE A ROOF (Ben 08-16: "rain should not pass through any blocks, including leaves") ----
+      // opaqueTop reads c.htop, and htop is written in genColumn from TERRAIN ONLY - trees are stamped afterwards
+      // through setBlockWorld, so a canopy has never been in that map and rain fell through it because to the rain
+      // the leaves were not there. This is NOT the vSky/occludesSky term that leaves are deliberately excluded from,
+      // so fixing it here cannot turn leaves back into sky occluders and cannot undo e69860b.
+      // A SPARSE PROBE, not a walk. Five block lookups up the column catch a canopy because a canopy is many blocks
+      // thick; a one-block ledge between the samples is the known miss, and it is the trade for five lookups a
+      // streak instead of twenty. Water is not a roof - rain falling into the sea is rain.
+      { let _roofed=false;
+        for(let _pi=0;_pi<5;_pi++){ const _py=ay+_RAIN_PROBE[_pi];
+          const _b=getBlock(Math.floor(ax), Math.floor(_py), Math.floor(az));
+          if(_b!==AIR && _b!==WATER){ _roofed=true; break; } }
+        if(_roofed){ rainPos[k]=rainPos[k+3]=ax; rainPos[k+1]=rainPos[k+4]=ay; rainPos[k+2]=rainPos[k+5]=az; _rainRoofed++; continue; } }
       if(opaqueTop(Math.floor(ax),Math.floor(az)) > ay-0.3){ rainPos[k]=rainPos[k+3]=ax; rainPos[k+1]=rainPos[k+4]=ay; rainPos[k+2]=rainPos[k+5]=az; continue; }   // a roof/terrain is above this streak → no rain here, so INDOORS you only see it falling past the doorway/windows (open-sky columns)
       const len=0.9+o.s*(1+weather.rain);
       rainPos[k]=ax; rainPos[k+1]=ay; rainPos[k+2]=az; rainPos[k+3]=ax+0.14; rainPos[k+4]=ay-len; rainPos[k+5]=az; }
+    _rainDrawn=RAIN_N-_rainRoofed;
     rainGeo.attributes.position.needsUpdate=true;
     // THE STREAKS TAKE THE SKY'S VALUE (Ben's note 6, second half: the rain drew near-white over a dark sky). The material's
     // colour was a fixed 0x9fb0c4 — rgb(159,176,196) — at every hour, so at night, under a storm, falling water was the
@@ -36855,6 +36890,13 @@ window.__hc={
       const hit=(typeof girlStompHit==='function')?girlStompHit(fx,fz):null;
       if(NET.on && typeof netSend==='function') netSend({t:'gst',x:+fx.toFixed(2),z:+fz.toFixed(2)});
       return { at:[+fx.toFixed(1),+fz.toFixed(1)], hit, health:player.health }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // THE DAYTIME TOE, as a dial for Ben's eye and for a sweep. amt 0 is the pre-feature build to the digit.
+  dayToe(o){ try{ const u=gradePass&&gradePass.uniforms?gradePass.uniforms:(_gradeMat&&_gradeMat.uniforms);
+      if(!u||!u.uDayToe) return {err:'no grade uniforms'};
+      if(o&&o.amt!=null) u.uDayToe.value=Math.max(0,Math.min(0.9,+o.amt));
+      if(o&&o.knee!=null) u.uDayKnee.value=Math.max(0.02,Math.min(0.9,+o.knee));
+      return { amt:+u.uDayToe.value.toFixed(3), knee:+u.uDayKnee.value.toFixed(3) }; }
     catch(e){ return {err:String(e.message||e)}; } },
   // THE FRAME'S EXPOSURE, as a dial. The daylight black guard has to run at BOTH ends of whatever range eye
   // adaptation will move this through, not only at the shipped 1.05: adaptation can manufacture exactly the crushed
@@ -40424,6 +40466,10 @@ window.__hc={
   void3(o){ try{ o=o||{}; if(o.chainNow)VOID.chainCd=0.05; if(o.meter!=null)VOID.meter=o.meter;                       // QA: fractal-void state (+ force a chain / set the meter)
     return { on:VOID.on, morph:+VOID.morph.toFixed(2), fractal:!!VOID.fmat, chain:!!VOID.chain, bound:!!player.bound, meter:+VOID.meter.toFixed(2), teased:VOID.teased, hp:wretch.hp, phase:wretch._bossPhase,
       bgIsRT:!!(scene.background&&scene.background.isTexture), clouds:VOID.clouds?VOID.clouds.children.length:0 }; }catch(e){ return {err:e.message}; } },
+  // QA: force/read the rain, the way fog already can be. weather is module-scoped, so a bench cannot reach it directly
+  // and every rain measurement until now had to wait for a storm to roll in by itself.
+  rain(v){ try{ if(v!=null){ weather.rain=v; weather.rainTgt=v; weather.rainHold=9999; weather.raining=v>0.03; }
+    return +weather.rain.toFixed(2); }catch(e){ return String(e.message||e); } },
   fog(v){ try{ if(v!=null){ weather.fog=v; weather.fogTgt=v; weather.fogHold=999; } return +weather.fog.toFixed(2); }catch(e){ return e.message; } },   // QA: force/read the weather fog bank
   // QA/bench: the fog's own state, in LINEAR terms, beside the two numbers that drive it. A screenshot answers "how bright does
   // it look"; only this answers "is the ramp behind it smooth", because a kink in the colour and a kink in the tonemap look
@@ -40893,6 +40939,12 @@ window.__hc={
       return { on:volPass.enabled, want:_volWant, density:+volPass.uniforms.uDensity.value.toFixed(4),
                strength:volPass.uniforms.uStrength.value, steps:volPass.uniforms.uSteps.value,
                lights:_volSel.length }; }
+    catch(e){ return String(e.message||e); } },
+  // QA/bench: how many rain streaks were suppressed by something overhead this frame, and how many drew. Under a full
+  // canopy in rain the roofed share should be near total; in the open it should be near zero. A screenshot of rain in a
+  // wood cannot be read either way, which is why this counts instead.
+  rainRoof(){ try{ return { drawn:_rainDrawn, roofed:_rainRoofed, total:RAIN_N,
+      roofedPct:+(100*_rainRoofed/Math.max(1,RAIN_N)).toFixed(1), raining:!!weather.raining, rain:+weather.rain.toFixed(2) }; }
     catch(e){ return String(e.message||e); } },
   volLights(){ try{ return { budget:VOL_MAX, range:VOL_RANGE, air:+_volAir().toFixed(3), why:_volWhy,
       chosen:_volSel.map(o=>({slot:o.i, d:o.d, inten:+o.inten.toFixed(2), score:+o.score.toFixed(3)})) }; }
