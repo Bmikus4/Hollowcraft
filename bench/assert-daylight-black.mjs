@@ -108,6 +108,12 @@ function stat(file,c){
 // stop in EXPO must hold, so a darkening that only survives at the shipped exposure fails here rather than in Ben's
 // eyes at dusk.
 const BASE={ open:{ pureBlack:0.28, isoBlack:0.12 }, canopy:{ pureBlack:25.0, isoBlack:null, edgeShare:1.8 } };
+// WHAT THE SHIPPED TOE MEASURED, on this guard, the run it was accepted on (uDayToe 0.34 / uDayKnee 0.30):
+//   canopy p10   8.99 -> 6.78     the shade itself, deeper
+//   canopy sunShade 15.33 -> 20.42  the sun-to-shade ratio, i.e. CONTRAST — "absolute dark shadows" is this number
+//   open   p10  30.91 -> 27.81    open ground follows a little, as a daylit frame with real shadow should
+//   open   pureBlack 0.229% -> 0.207%, isoBlack 0.054% -> 0.057%  — inside the ceiling at all three exposures
+// A darkening that had crushed instead of shaped would show the opposite: black share up, contrast flat.
 const EXPO=[0.80, 1.05, 1.35];   // the ends of a plausible adaptation swing, and the shipped value between them
 const TOL=0.05;   // in PERCENT of the crop — 0.05% of a 1000x560 crop is roughly 90 pixels, i.e. a visible speckle, not a rounding wobble
 (async()=>{
