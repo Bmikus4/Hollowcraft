@@ -10753,6 +10753,9 @@ function assignPointLights(){
         if(pl.userData.owCaster && pl.intensity>0.5 && !_streamMeshed && _owShFire) pl.shadow.needsUpdate=true;
       } else { pl.intensity=0; pl.position.set(0,-999,0); } }
   }
+  // The pool is settled for this frame, so this is the moment to choose which of it lights the AIR. Any earlier and it
+  // would be scoring last frame's positions and intensities.
+  try{ _volPick(); }catch(e){}
   // held torch/lantern lights the player's surroundings — EITHER HAND (Ben: "lighting should emit from off hand lighting").
   // This read inv[selSlot] alone, so a torch moved to the offhand went dark: it was drawn in the left fist, lit as a
   // viewmodel, and threw nothing into the world. The brighter of the two hands wins rather than the two summing, because
@@ -31771,6 +31774,63 @@ function updateLampHalos(dt){
   _lampPts.geometry.attributes.position.needsUpdate=true;
   _lampPts.geometry.attributes.color.needsUpdate=true;
 }
+// =====================================================================
+//  WHICH LIGHTS LIGHT THE AIR — the selection for per-light volumetrics (Ben 08-16)
+// =====================================================================
+// Ben: "the existing god rays come from just the sun, these should be all lights shining through windows for example
+// should show the fog/gas inside of a room." The sun shafts are a screen-space pass seeded only by sky pixels; this is
+// the other thing entirely - a lantern lighting the air it stands in, indoors, where there is no sky at all.
+//
+// THE RULE IS DECIDED HERE, BEFORE THE SHADER EXISTS, because the pool it draws from is the constraint. There are 16
+// point-light slots for the whole game and bench/tmp-break-light-wash.mjs found 14 of them already lit by ONE placed
+// lantern, so "per-light" cannot mean every light without turning a raymarch into a frame-rate cliff. A light earns a
+// shaft when all four hold: it is in the frustum or within half a screen-width of its edge, since a beam from just off
+// screen still crosses the view; it is within 28 blocks, beyond which a shaft is a few pixels and costs what one at
+// arm's length costs; its own intensity clears a floor, so a dying ember does not qualify and a lantern does; and there
+// is AIR for it to light - fog in the scene, or a place that knows it is indoors.
+//
+// THE BUDGET IS THREE, HARD. Each light is an inner loop in a raymarch, so at 8-12 steps three lights is 24-36 samples
+// a pixel: the same order as the godray pass that already ships. Re-sorted every fourth frame rather than every frame,
+// and an incumbent keeps a 25% bonus so the set does not flicker as the player turns on the spot.
+const VOL_MAX=3, VOL_RANGE=28, VOL_MIN_I=0.25;
+const _volSel=[];            // {i, x,y,z, r,g,b, inten, score} for the lights lighting the air this frame
+let _volTick=0, _volWhy='';
+function _volAir(){
+  // Air to light: a real fog density, or a place that knows it is interior. The Backrooms and the dungeon both do.
+  try{
+    if(typeof BR!=='undefined' && BR.inside) return 1;
+    if(typeof inDungeon==='function' && inDungeon(camera.position.x, camera.position.y, camera.position.z)) return 1;
+  }catch(e){}
+  const d=(scene.fog&&scene.fog.density)||0;
+  return clamp((d-0.0016)/0.010, 0, 1);      // the clear-air day floor is about 0.001; a bank is ten times it
+}
+function _volPick(){
+  const air=_volAir();
+  if(air<=0.001){ _volSel.length=0; _volWhy='no air'; return; }
+  if((_volTick++ % 4)!==0 && _volSel.length) return;    // re-sort on one frame in four; the set is stable between
+  const fwd=_volFwd; camera.getWorldDirection(fwd);
+  const prev=_volSel.map(o=>o.i);
+  const cand=[];
+  for(let i=0;i<pointPool.length;i++){ const pl=pointPool[i];
+    if(!pl || pl.intensity<VOL_MIN_I || pl.position.y<-900) continue;
+    const dx=pl.position.x-camera.position.x, dy=pl.position.y-camera.position.y, dz=pl.position.z-camera.position.z;
+    const d2=dx*dx+dy*dy+dz*dz; if(d2>VOL_RANGE*VOL_RANGE) continue;
+    const d=Math.sqrt(d2)||1e-3;
+    // Centrality, not a frustum test: the dot with the view direction is 1 dead ahead and falls off round the sides, and
+    // -0.2 still counts because a beam from a lamp just behind the shoulder crosses the frame in front of you.
+    const cen=(dx*fwd.x+dy*fwd.y+dz*fwd.z)/d;
+    if(cen<-0.2) continue;
+    let score=pl.intensity/(d2*0.01+1) * (0.35+0.65*clamp((cen+0.2)/1.2,0,1));
+    if(prev.indexOf(i)>=0) score*=1.25;                 // hysteresis: an incumbent has to be beaten, not merely matched
+    cand.push({i, x:pl.position.x, y:pl.position.y, z:pl.position.z,
+               r:pl.color.r, g:pl.color.g, b:pl.color.b, inten:pl.intensity, d:+d.toFixed(2), score});
+  }
+  cand.sort((a,b)=>b.score-a.score);
+  _volSel.length=0;
+  for(let i=0;i<Math.min(VOL_MAX,cand.length);i++) _volSel.push(cand[i]);
+  _volWhy = cand.length? ('air '+air.toFixed(2)+', '+cand.length+' eligible') : ('air '+air.toFixed(2)+', none eligible');
+}
+const _volFwd=new THREE.Vector3();
 // ---- CONTACT SHADOWS: everything alive is joined to the ground it stands on ----------------------------------------------
 // Plan §4 item 11. Creatures cast shadow-map shadows only, and only inside the 46-block frustum; beyond that a deer stands on a
 // hillside with nothing under it and reads as a sticker. What sells contact is small and local — the dark patch right at the feet —
@@ -36635,6 +36695,13 @@ window.__hc={
       if(NET.on && typeof netSend==='function') netSend({t:'gst',x:+fx.toFixed(2),z:+fz.toFixed(2)});
       return { at:[+fx.toFixed(1),+fz.toFixed(1)], hit, health:player.health }; }
     catch(e){ return {err:String(e.message||e)}; } },
+  // THE FRAME'S EXPOSURE, as a dial. The daylight black guard has to run at BOTH ends of whatever range eye
+  // adaptation will move this through, not only at the shipped 1.05: adaptation can manufacture exactly the crushed
+  // pixels Ben's precondition forbids, and a ceiling measured at one exposure says nothing about the other end.
+  // Returns to 1.05 with no argument, which is also what the weather's lightning flash restores it to.
+  exposure(n){ try{ if(n!=null) renderer.toneMappingExposure=Math.max(0.05,Math.min(4,+n));
+      else renderer.toneMappingExposure=1.05;
+      return +renderer.toneMappingExposure.toFixed(3); }catch(e){ return {err:String(e.message||e)}; } },
   // QA: the giantess's side of the wire. Who owns her, whether this client is sending or receiving her, and how
   // many of her packets have arrived — the three things that separate "not replicated" from "replicated into a
   // client that is ignoring it".
@@ -40586,6 +40653,11 @@ window.__hc={
   ocean3Dbg(v,o){ try{ const u=_ocean3&&_ocean3.userData.maskU; if(!u) return 'no ocean'; if(v!=null) u.uMirDbg.value=v?1:0;
     if(o&&o.mirror!=null) u.uMirror.value=+o.mirror;
     return { dbg:u.uMirDbg.value, mirror:u.uMirror.value, refl:!!(_ocean3.userData&&_ocean3.userData.refl) }; }catch(e){ return String(e.message||e); } },
+  // QA/bench: which lights are lighting the air this frame, and why. The rule and the budget are stated where _volPick
+  // is defined; this is how a bench checks that they are being obeyed rather than that a beam looks nice.
+  volLights(){ try{ return { budget:VOL_MAX, range:VOL_RANGE, air:+_volAir().toFixed(3), why:_volWhy,
+      chosen:_volSel.map(o=>({slot:o.i, d:o.d, inten:+o.inten.toFixed(2), score:+o.score.toFixed(3)})) }; }
+    catch(e){ return String(e.message||e); } },
   gpuInfo(){ try{ const I=renderer.info; const h=(performance.memory)?+(performance.memory.usedJSHeapSize/1048576).toFixed(1):null;
     return { calls:I.render.calls, tris:I.render.triangles, geo:I.memory.geometries, tex:I.memory.textures,
              prog:(I.programs||[]).length, heapMB:h }; }catch(e){ return { err:String(e.message||e) }; } },
