@@ -71,9 +71,10 @@ const ITEMS=['ak','red_dot','coal','lantern','buckshot'];
     await page.evaluate(`__hc.dropClear()`);
     for(let i=0;i<4;i++) await page.evaluate(`__hc.dropSpawn('coal', ${SX+0.5}+${i}, ${gy}+40, ${SZ+0.5})`);
     await sleep(6000);
+    // `inside` comes from the probe, which asks solidAt — the physics' own definition. Asking blockAt()!==0 here
+    // reported an item lying in tall grass as having tunnelled through the floor, because a flower is a block.
     const F=await page.evaluate(`(()=>{ const p=__hc.dropPhys();
-      return p.drops.map(d=>({ id:d.id, rest:d.rest, y:d.y, gap:d.gap,
-        inside: __hc.blockAt(Math.floor(d.x),Math.floor(d.y),Math.floor(d.z))!==0 ? 1 : 0 })); })()`);
+      return p.drops.map(d=>({ id:d.id, rest:d.rest, y:d.y, gap:d.gap, inside:d.inside })); })()`);
     console.log('  fell 40 blocks: '+JSON.stringify(F));
     check('a body dropped from 40 blocks does not tunnel through the floor', F.every(d=>d.inside===0), JSON.stringify(F.filter(d=>d.inside)));
     check('and it still comes to rest', F.every(d=>d.rest===true), JSON.stringify(F.filter(d=>!d.rest)));
