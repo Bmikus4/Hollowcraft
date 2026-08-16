@@ -6856,7 +6856,7 @@ const _uCoastAir ={ value:new THREE.Color(0.6,0.68,0.76) };
 const _cpU={ uMask:{value:_cpTex}, uPine:_uCoastPine, uAir:_uCoastAir, uFogCol:{value:_uPineFog}, uFogD:{value:0.01},
   uWall:{value:CFG.RENDER_DIST*CK}, uCamY:{value:CFG.SEA+2}, uWx:{value:0}, uDay:globalU.uDay,
   uSunXZ:{value:new THREE.Vector2(1,0)}, uSunUp:{value:0}, uSunCol:globalU.uSunCol,
-  uFogMul:{value:0.55}, uGain:{value:0.42}, uScotG:{value:_scotG}, uScotH:{value:_scotH} };
+  uFogMul:{value:0.18}, uGain:{value:0.42}, uScotG:{value:_scotG}, uScotH:{value:_scotH} };
 const coastPineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, side:THREE.BackSide, fog:false,
   uniforms:_cpU, vertexShader:_horizVert, fragmentShader:[
   'precision highp float; varying vec3 vPos;',
@@ -6914,7 +6914,7 @@ const coastPineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false
   // distance, which is the aerial perspective the scrapped mountains left behind as their one finding.
   '    float fg=1.0-exp2(-uFogD*uFogD*dist*dist*1.442695);',
   '    col=mix(col, uFogCol, clamp(fg*uFogMul,0.0,0.94));',
-  '    col=mix(col, uAir*mix(0.30,0.86,uDay), haze);',
+  '    col=mix(col, uAir, haze);',
   '    float a=smoothstep(0.10,0.30,m.r)*clamp(1.0-uWx*1.25,0.0,1.0);',
   '    outc=mix(outc, col, a); outa=max(outa, a);',
   '  }',
@@ -6946,7 +6946,12 @@ function updateCoastPines(){
   // derived from one expression, and it is the artefact if they ever drift.
   const dim=0.10+0.90*day;
   _uCoastPine.value.setRGB(0.034*dim, 0.090*dim, 0.029*dim);
-  _uCoastAir.value.copy(scene.fog?scene.fog.color:_uPineFog);
+  // WHAT DISTANCE DRAINS TOWARD IS THE AIR, AND THE AIR IS THE SKY AT THE HORIZON — not the fog colour, which by day
+  // is a near-white. The scrapped backdrop was pinned to that white and no dial above it could be seen at all; its own
+  // note says distance should carry the BLUE of the air. _uHorizonBlend is the shared sea-and-sky anchor updateHorizon
+  // has just written, so the far band drains into exactly the value the horizon already holds and cannot read as a
+  // stripe laid over it.
+  _uCoastAir.value.copy(_uHorizonBlend.value).lerp(scene.fog?scene.fog.color:_uPineFog, 0.35*day);
   { const sd=globalU.uSunDir.value, L=Math.hypot(sd.x,sd.z)||1;
     _cpU.uSunXZ.value.set(sd.x/L, sd.z/L);
     _cpU.uSunUp.value=Math.max(0, Math.min(1, (sd.y+0.02)/0.18))*day; }
@@ -7049,7 +7054,7 @@ function _ensureOcean3(){
     // there was no sun on the water at all with the reflection dead: no target, no glint.
     // TWO LOBES, because one cannot be both. The tight core is the disc's own image; the wide sheen is the long track a
     // low sun lays toward the eye. Ben 08-12 asked for bright sun reflections and this is where they live.
-    uBroad:{value:0.30}, uSpecExp:{value:220.0}, uSpecGain:{value:5.5}, uWideExp:{value:14.0}, uWideGain:{value:0.55},
+    uMirDbg:{value:0}, uBroad:{value:0.30}, uSpecExp:{value:220.0}, uSpecGain:{value:5.5}, uWideExp:{value:14.0}, uWideGain:{value:0.55},
     // THE NIGHT WASH THE LAND AND THE OLD WATER TAKE. Same vec4s, by reference, so the sea desaturates into scotopic
     // night with everything else instead of holding its daylight chroma after dark.
     uScotG:{value:_scotG}, uScotH:{value:_scotH} };
@@ -7060,7 +7065,7 @@ function _ensureOcean3(){
       .replace('void main() {',
         ['uniform sampler2D uLandTex; uniform vec2 uLandOrigin; uniform float uLandSpan, uSeaY, uLandBias;',
          'uniform vec3 uHorizonC, uZenithC, uSunColU, uSunDirW;',
-         'uniform float uDayF, uSkyDim, uReflSharp, uMirror, uBroad, uSpecExp, uSpecGain, uWideExp, uWideGain;',
+         'uniform float uDayF, uSkyDim, uReflSharp, uMirror, uBroad, uSpecExp, uSpecGain, uWideExp, uWideGain, uMirDbg;',
          // uScotG/uScotH are NOT declared here and must not be: line ~1202 appends them to
          // THREE.ShaderChunk.lights_pars_begin, this material is lights:true and includes that chunk, and a second
          // declaration is a redefinition error that fails the whole program. That is what took the sea AND the sky out
@@ -7117,16 +7122,23 @@ function _ensureOcean3(){
          // The body the water sinks toward with depth is waterColor, which is already the hour's own sea colour; over a
          // shelf the scatter term keeps most of its brightness and the seabed shows through the alpha below.
          'vec3 _o3Body = mix( uBroad * diffuseLight + scatter, waterColor * (0.35 + 0.65 * uSkyDim), _o3Ab * 0.85 );',
-         'vec3 albedo = mix( _o3Body * getShadowMask(), _o3Refl, reflectance );',
-         'albedo += (specularLight + _o3Wide) * (0.35 + 0.65 * reflectance);'].join('\n'))
+         // THE REFLECTION HAS TO BE SEEN, and Fresnel alone does not show it. Looking down at water a few dozen blocks
+         // away, theta is near 1 and the example's rf0 puts the mirror at 30% against a lit body colour and a seabed
+         // showing through the alpha, which is why the island's reflection measured as nothing in the frame while the
+         // mirror target itself held a clean upside-down island (bench/results/skyrefl-mirror-raw.png). The weight is
+         // biased up and floored so the sea carries its surroundings at every angle a player actually looks from.
+         'float _o3W = clamp(reflectance*1.55 + 0.14, 0.0, 1.0);',
+         'vec3 albedo = mix( _o3Body * getShadowMask(), _o3Refl, _o3W );',
+         'albedo += (specularLight + _o3Wide) * (0.35 + 0.65 * _o3W);'].join('\n'))
       .replace('gl_FragColor = vec4( outgoingLight, alpha );',
-        ['{ float _nw=1.0-smoothstep(uScotG.y,uScotG.z,uScotG.w);',
+        ['if(uMirDbg>0.5){ gl_FragColor=vec4(reflectionSample,1.0); return; }',
+         '{ float _nw=1.0-smoothstep(uScotG.y,uScotG.z,uScotG.w);',
          '  float _nl=dot(outgoingLight, vec3(0.2126,0.7152,0.0722));',
          '  outgoingLight=mix(outgoingLight, vec3(_nl), uScotG.x*_nw); }',
          // OPACITY IS DEPTH. 0.86 everywhere is what made a shelf look like mud; a film of water over sand is nearly
          // clear and six blocks of it is nearly opaque. The submerged case (alpha driven to 1.0 in updateOcean3, so the
          // surface reads as a ceiling from below) is kept exactly opaque rather than scaled.
-         'float _o3A = alpha >= 0.999 ? 1.0 : min(1.0, alpha * (0.34 + 0.78 * _o3Ab));',
+         'float _o3A = alpha >= 0.999 ? 1.0 : min(1.0, alpha * (0.62 + 0.50 * _o3Ab));',
          'gl_FragColor = vec4( outgoingLight, _o3A );'].join('\n'));
   };
   _ocean3.material.needsUpdate=true;
@@ -7229,7 +7241,12 @@ function updateOcean3(dt){
   // ocean underneath"). Three things drew it and all three stop: the painted horizon band, the far-sea disc, and the
   // voxel water surface itself. The last one is switched off through the MATERIAL rather than by finding meshes,
   // because chunk water meshes keep streaming in and a traversal would have to run for ever to catch them.
-  oceanLayer.visible=false; _farSeaWant=false; if(farSea) farSea.visible=false;
+  // oceanLayer STAYS VISIBLE and its two drawing parts are switched off individually. Hiding the object was the same
+  // thing until the coast pines became a child of it: three's visibility is hierarchical, so an invisible parent takes
+  // the treeline with it, and the first frames of the pines were a horizon with nothing on it for exactly that reason.
+  // Nothing is gained by the object flag — oceanMat.visible has been false since the band was retired, and farSea is
+  // hidden on the next line — so the two parts that draw are named and the parent is left alone.
+  oceanMat.visible=false; _farSeaWant=false; if(farSea) farSea.visible=false;
   if(waterMat.colorWrite!==false){ waterMat.colorWrite=false; waterMat.depthWrite=false; }
   _o3Mask();
   // The same underground rule the far-sea disc carries: a sea plane seen through a hole you dug is the 08-05 report.
@@ -21304,8 +21321,13 @@ const TOOL_BUILDERS={ sword:buildGreatsword, pickaxe:buildPickaxe, axe:buildAxe,
 // stays behind the near plane. The held copy is also pushed forward by rather more than its own half-length, so
 // the whole pike sits in front of the eye and the grip is the end nearest the hand.
 const SPEAR_HELD_SCALE=0.26, SPEAR_HELD_Z=-1.05;
-const TOOL_POSE={ sword:{x:0.30,y:-0.12,s:0.60,rx:0.20,rz:0.24}, pickaxe:{x:0.30,y:0.28,s:1.08,rx:0.12,rz:0.14},
-  axe:{x:0.30,y:0.28,s:1.08,rx:0.12,rz:0.14}, shovel:{x:0.30,y:0.28,s:1.08,rx:0.12,rz:0.14} };
+// gx/gy/gz IS THE GRIP, in the view's own space, and it is the point the hand is solved to. The head-end angles
+// (rx/ry/rz) turn the tool about that grip, so changing where it is held and changing which way it points are
+// two separate numbers instead of one orbit that moved both.
+const TOOL_POSE={ sword:{x:0.30,y:-0.12,s:0.60,rx:-0.30,rz:-0.40,gx:0.26,gy:-0.30,gz:-0.44,ry:0.75},
+  pickaxe:{x:0.30,y:0.28,s:1.00,rx:-0.35,rz:-0.45,gx:0.22,gy:-0.32,gz:-0.30,ry:1.05},
+  axe:{x:0.30,y:0.28,s:1.00,rx:-0.42,rz:-0.55,gx:0.30,gy:-0.36,gz:-0.26,ry:0.55},
+  shovel:{x:0.30,y:0.28,s:0.92,rx:0.10,rz:-0.45,gx:0.30,gy:-0.34,gz:-0.55,ry:0.90} };
 // ===== A TORCH AND A LANTERN'S SURFACES, ONE DESCRIPTION EACH (Ben 08-05: "texture lanterns", "texture torches") =====
 // Both were flat colour: a torch's shaft a plain Lambert brown with MeshBasic rings for the rag, a lantern's frame a plain Phong
 // black. Both are also drawn TWICE — once as the placed block's instanced model, once as the held/dropped/icon model — so a
@@ -22156,7 +22178,9 @@ buildShotgun  =(sup)    =>buildGlbGun('shotgun',false,sup)|| _procGun.shotgun(su
 // tiers apart (GLB_TIER_MIX; iron is 0.15, i.e. very nearly the model as exported), and the haft takes the
 // tier's handle colour under the same wood grain the procedural tools use.
 // There is no pickaxe and no sword in the pack, so those two keep their procedural models.
-const GLB_TOOLS={ axe:{id:'tools/axe',len:1.07}, shovel:{id:'tools/shovel',len:1.10}, pickaxe:{id:'tools/pickaxe',len:1.12} };
+// The pickaxe is SHORTER than the axe on purpose: its grip sits only 0.35 from the butt, so at the axe's length
+// there would be 1.6 units of haft above the fist and the head would be off the top of the frame.
+const GLB_TOOLS={ axe:{id:'tools/axe',len:1.07}, shovel:{id:'tools/shovel',len:1.10}, pickaxe:{id:'tools/pickaxe',len:0.78} };
 function buildGlbTool(kind,tool){
   const spec=GLB_TOOLS[kind], P=spec&&GLB_PLACE[spec.id];
   if(!spec||!P||!glbHas(spec.id)) return null;
@@ -22188,9 +22212,13 @@ function buildGlbTool(kind,tool){
     // five times too big) and when it flips. The long axis is turned to +Y first, and the grip offset is taken
     // AFTER that turn — the offset is a vector in the model's own space and rotating the model rotates it too.
     const f=new THREE.Group(); g.remove(m); f.add(m); g.add(f);
-    if(LI===2) f.rotation.x=-Math.PI/2;                          // +Z runs up
-    else       f.rotation.z=Math.PI/2;                           // +X runs up
-    if(P.axis&&P.axis.headAtMax===false) f.rotateZ(Math.PI);     // head was at the min end: turn it over, head up
+    // WHICH WAY THE LONG AXIS IS TURNED IS ALSO WHICH END ENDS UP ON TOP, so the head-at-the-min-end case is a
+    // different quarter turn rather than a second flip on top of one. A flip about Z after turning Z into Y does
+    // nothing at all — Z is the axis it rotates about — which left the pickaxe hanging head-down through the eye
+    // with only its haft in frame.
+    const up=(P.axis&&P.axis.headAtMax===false)?1:-1;
+    if(LI===2) f.rotation.x=up*Math.PI/2;                        // the long axis runs up, head at the top
+    else       f.rotation.z=-up*Math.PI/2;
     f.updateMatrix();
     const gp=new THREE.Vector3(P.gripPoint.position[0],P.gripPoint.position[1],P.gripPoint.position[2])
       .multiplyScalar(s).applyQuaternion(f.quaternion);
@@ -22685,14 +22713,22 @@ function setViewItem(id){ if(view.id===id)return; view.id=id;
     em.position.set(0.34,0.44,0); grp.add(em); grp.scale.setScalar(0.5); grp.rotation.set(0.1,0.18+Math.PI/2,0.15); view.mesh=grp; }   // the same pose the extruded food/material sprites take, so a picked flower sits in the hand like everything else drawn this way
   else if(it.block!=null) view.mesh=new THREE.Mesh(new THREE.BoxGeometry(0.2,0.2,0.2), new THREE.MeshLambertMaterial({map:dropTex(id)}));   // SOLID blocks → a small textured cube in hand (correct for placing)
   else if(it.tool && TOOL_BUILDERS[it.tool.kind]){   // SAME builder table itemModel uses — only the POSE is the viewmodel's own
+    // A TOOL IS HELD AT ITS GRIP, AND THE GRIP IS THE ORIGIN (Ben 08-12: "none of the tool items are held in the
+    // players hand"). Every builder puts the hand end of the haft at the model's origin — buildGlbTool slides the
+    // pack model's measured grip point there, and the procedural ones are drawn upward from the fist.
+    //
+    // THE ROTATION MOVED OFF THE GROUP AND ONTO THE TOOL, which is the whole pass. Turning the GROUP orbited the
+    // tool around the camera: the pose's 100 degrees of yaw swung a haft authored at x=0.30 off to one side, so the
+    // grip was never where a hand could be and an arm solved to it crossed the frame as a beam. Turning the TOOL
+    // rotates it about its own grip, so the grip stays exactly where it is put and the pose only decides which way
+    // the head points. The look is preserved — same angles, same size — but now there is a fixed point to hold.
     const P=TOOL_POSE[it.tool.kind]||TOOL_POSE.pickaxe, grp=new THREE.Group(), tm=TOOL_BUILDERS[it.tool.kind](it.tool);
-    tm.position.set(P.x,P.y,0); grp.add(tm); grp.scale.setScalar(P.s); grp.rotation.set(P.rx,0.18+Math.PI/2,P.rz); view.mesh=grp;
-    // NO HAND ON A TOOL YET (Ben 08-12: "none of the tool items are held in the players hand"). attachGunHand solves
-    // for an arm whose forearm runs back past the eye, and that only works because a gun's grip sits a few
-    // centimetres in front of the camera. TOOL_POSE puts the haft 0.30 out and yaws the whole tool 100 degrees, so
-    // the grip lands off to the side and the same arm crosses the frame as a beam — tried, photographed, reverted.
-    // What this needs is a grip authored per tool off its own haft, which is a pose pass, not a hand attachment.
-  }   // handle-bottom near the pivot → swings from the base (1.5x bigger in hand)
+    grp.add(tm); grp.scale.setScalar(P.s);
+    tm.rotation.set(P.rx,P.ry!=null?P.ry:0.18+Math.PI/2,P.rz);
+    tm.position.set(P.gx!=null?P.gx:P.x, P.gy!=null?P.gy:P.y, P.gz!=null?P.gz:0);   // the grip, in the view's own space
+    view.mesh=grp;
+    if(typeof attachGunHand==='function'){ grp.userData.gripAt=[tm.position.x,tm.position.y,tm.position.z]; attachGunHand(grp,1); }
+  }
   // THE VIEWMODEL IS A SECOND DISPATCH, and this is the branch that proves it matters: itemModel already returned a real
   // 3D shell for the drop and a peer's hand, and the held form still came out as the flat extruded sprite because THIS
   // list never heard about it. Adding a model to itemModel alone changes nothing you can see in your own hands.
@@ -33042,14 +33078,22 @@ function updateWeather(dt){
   weather.dripT=(weather.dripT==null?1.5:weather.dripT)-dt;
   if(under && weather.dripT<=0){ weather.dripT=0.9+Math.random()*2.6; caveDrip(); }
   else if(!under) weather.dripT=Math.max(weather.dripT,0.3);
-  weather.flash=Math.max(0,weather.flash-dt*3.5);
+  // Math.max(0, NaN) IS NaN, and this line is the only thing that decays the flash — so a single frame with a bad
+  // dt does not blow one frame, it pins weather.flash at NaN for the rest of the session, and the exposure below with
+  // it. A NaN exposure is a white world: sky, canopy and foliage clip out together while dark ground survives, which
+  // is the report ("leaves, foliage, and the sky are all white", random, not immediate, and it never comes back).
+  // Written so a non-finite value can only fall OUT of the state, never into it.
+  weather.flash = Number.isFinite(weather.flash) ? Math.max(0, weather.flash-(Number.isFinite(dt)?dt:0.016)*3.5) : 0;
   // EXPOSURE STAYS FLAT ACROSS THE DAY, and that is now a measurement rather than an oversight. Plan Tier 1 item 2 proposed a
   // per-hour curve so night would sit above AgX's toe instead of inside it. Tried at +0.35 toward midnight: the crushed-black
   // speckle on lantern-lit ground fell from 0.109% to 0.060% of the crop while the night SKY's median rose from 17.7 to 23.5 —
   // a third brighter night to remove not even half the artefact. Ben has asked four separate times for night to be genuinely
   // black, so the lever that lifts everything is the wrong one; the floor below is aimed only where a lamp is actually lighting
   // a surface. Left flat deliberately: do not "finish" this item.
-  renderer.toneMappingExposure = 1.05 + weather.flash*1.7;                                          // lightning briefly blows out exposure
+  // AND THE EXPOSURE IS CLAMPED WHERE IT IS WRITTEN. It is one global that whitens EVERY surface at once, this is the
+  // only place play sets it, and nothing downstream can tell a blown frame from a bright one. 1.05 to 2.75 is the
+  // entire range this expression was ever meant to produce, since flash runs 0 to 1.
+  renderer.toneMappingExposure = Math.min(2.75, Math.max(0.2, 1.05 + weather.flash*1.7)) || 1.05;                                          // lightning briefly blows out exposure
   // FOG WEATHER EVENT — a cold bank gathers slowly, hangs, then lifts (drives weather.fog, read by updateSky)
   if(!NET.on||NET.host){ if(weather.fogHold>0){ weather.fogHold-=dt; if(weather.fogHold<=0){ weather.fogTgt=0; if(typeof reasonEvent==='function')reasonEvent('fog_lifts'); } }
   else { weather.fogNext-=dt; if(weather.fogNext<=0){ weather.fogNext=750+Math.random()*900; weather.fogTgt=0.72+Math.random()*0.28; weather.fogHold=180+Math.random()*90; flashName('a cold fog rolls in over the wood'); if(typeof reasonEvent==='function')reasonEvent('fog_rolls_in'); } } }   // host-only ROLL; guests receive fogTgt + lerp
@@ -35429,6 +35473,31 @@ window.__hc={
                splatMapped:!!t, markMapped:!!(_markBlood&&_markBlood.im.material.map),
                markTint:'#'+(_markBlood?_markBlood.base.toString(16).padStart(6,'0'):'?'),
                brMapped:(typeof _brGoreMat==='object'&&_brGoreMat)?!!_brGoreMat.blood.map:null }; }catch(e){ return {err:String(e.message||e)}; } },
+  // IS THE HELD ITEM IN FRAME, AND IS THE HAND ON IT? A screenshot is how a held pose gets judged and it is the one
+  // thing a bench cannot read. This projects the held mesh's corners to screen space and reports the fraction of the
+  // viewport it covers, plus the distance from the fist's palm to the grip it was solved to — so "the axe is off the
+  // top of the screen" and "the arm is a beam across the frame" are both numbers.
+  heldBox(){ try{ const m=view.mesh; if(!m) return {err:'nothing held'};
+      m.updateWorldMatrix(true,true);
+      const bb=new THREE.Box3(); const hand=m.userData._gunHand;
+      m.traverse(o=>{ if(o.isMesh&&o.visible&&!(hand&&(o===hand||o.parent===hand))) bb.expandByObject(o); });
+      if(!isFinite(bb.min.x)) return {err:'no geometry'};
+      const v=new THREE.Vector3(); let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9, front=0;
+      for(let i=0;i<8;i++){ v.set(i&1?bb.max.x:bb.min.x, i&2?bb.max.y:bb.min.y, i&4?bb.max.z:bb.min.z);
+        // Box3.expandByObject already works in WORLD space, so the corners are world points: projecting them is the
+        // whole transform. Sending them through localToWorld first put the held item 27 screens off to the left.
+        const w=v.clone(); v.project(camera);
+        if(camera.worldToLocal(w).z<0) front++;
+        x0=Math.min(x0,v.x); x1=Math.max(x1,v.x); y0=Math.min(y0,v.y); y1=Math.max(y1,v.y); }
+      const cx0=Math.max(-1,x0), cx1=Math.min(1,x1), cy0=Math.max(-1,y0), cy1=Math.min(1,y1);
+      const vis=Math.max(0,cx1-cx0)*Math.max(0,cy1-cy0)/4;
+      let palm=null;
+      if(hand&&hand.userData.palmLocal){ const p=new THREE.Vector3().fromArray(hand.userData.palmLocal);
+        const g=m.userData.gripAt?new THREE.Vector3().fromArray(m.userData.gripAt):null;
+        if(g) palm=+p.distanceTo(g).toFixed(3); }
+      return { id:view.id, hand:!!hand, palmToGrip:palm, front:front,
+               ndc:[+x0.toFixed(2),+y0.toFixed(2),+x1.toFixed(2),+y1.toFixed(2)], onScreen:+vis.toFixed(3) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   // WHAT IS SHE MADE OF, AND WHAT IS LIGHTING HER? Her GLB materials are her own module's and are not the world's
   // shader path, so "she looks wrong at night" is answered by comparing what she has against what the scene gives.
   girlMats(){ try{ if(!GIRL.rig) return {err:'no rig'};
@@ -39171,6 +39240,14 @@ window.__hc={
              if(o.force) { _cpLastX=1e9; _cpLastZ=1e9; } }
       return { on:_cpWant, gain:_cpU.uGain.value, fogMul:_cpU.uFogMul.value, wall:_cpU.uWall.value }; }
     catch(e){ return String(e.message||e); } },
+  // QA/bench: paint the sea with the RAW mirror target. The only way to tell a reflection that contributes nothing
+  // from a reflection that is contributing something invisible is to look at what the pass actually rendered.
+  // The mirror's CONTRIBUTION is measured with uMirror, not with ocean3Refl: switching the pass off leaves the render
+  // target holding its last frame, so the water goes on sampling a stale but perfectly good reflection and an A/B
+  // across that switch measures nothing. uMirror is the weight the fragment gives the sample, so 0 is a real off.
+  ocean3Dbg(v,o){ try{ const u=_ocean3&&_ocean3.userData.maskU; if(!u) return 'no ocean'; if(v!=null) u.uMirDbg.value=v?1:0;
+    if(o&&o.mirror!=null) u.uMirror.value=+o.mirror;
+    return { dbg:u.uMirDbg.value, mirror:u.uMirror.value, refl:!!(_ocean3.userData&&_ocean3.userData.refl) }; }catch(e){ return String(e.message||e); } },
   gpuInfo(){ try{ const I=renderer.info; const h=(performance.memory)?+(performance.memory.usedJSHeapSize/1048576).toFixed(1):null;
     return { calls:I.render.calls, tris:I.render.triangles, geo:I.memory.geometries, tex:I.memory.textures,
              prog:(I.programs||[]).length, heapMB:h }; }catch(e){ return { err:String(e.message||e) }; } },
