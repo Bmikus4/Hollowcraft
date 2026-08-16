@@ -65,25 +65,33 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
           a.sort((p,q)=>p-q); return +a[a.length>>1].toFixed(1); };
         return { crop:med(${box.join(',')}), sky:med(340,60,600,90) }; })()`);
     };
-    const rows=[];
-    const shoot=async(name,x,z,dy,yaw,pitch,when,t)=>{
-      const g=await page.evaluate(`__hc.groundY(${x},${z})`);
-      await page.evaluate(`__hc.tpAt(${x}+0.5, ${g}+${dy}, ${z}+0.5); __hc.cam({yaw:${yaw}, pitch:${pitch}}); __hc.fog(0)`);
-      for(let i=0;i<30;i++){ const f=await page.evaluate(`__hc.fill()`); if(f&&f.meshed>=f.want) break; await sleep(400); }
-      await page.evaluate(`__hc.freezeT(0); __hc.setTime(${t})`); await sleep(900); await page.evaluate(`__hc.setTime(${t})`); await sleep(400);
-      const f=path.join(OUT,`cp-${name}-${when}.png`); await page.screenshot({path:f});
-      console.log('    '+name+' '+when+' -> '+path.basename(f));
-    };
+    // DO THE PINES DRAW, AND HOW HARD? __hc.pines(0/1) is a live toggle, so the A/B is two frames of one page with
+    // nothing else moving. The strip measured is the horizon band; the number is the mean absolute level change over it,
+    // against a repeat of the ON frame as the noise floor.
+    const grab=async(tag)=>{ const f=path.join(OUT,'cp-'+tag+'.png'); await page.screenshot({path:f});
+      const buf=fs.readFileSync(f).toString('base64');
+      return await page.evaluate(`(async()=>{ const im=new Image(); im.src='data:image/png;base64,${buf}';
+        await im.decode(); const c=document.createElement('canvas'); c.width=im.width; c.height=im.height;
+        const g=c.getContext('2d'); g.drawImage(im,0,0);
+        const d=g.getImageData(0,300,1280,140).data; const px=[]; for(let i=0;i<d.length;i+=4) px.push(0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2]);
+        return px; })()`); };
     const YAW_OUT=Math.atan2(1,-0);
-    console.log('  pines', JSON.stringify(await page.evaluate(`__hc.pines()`)));
+    console.log('  pines', JSON.stringify(await page.evaluate('__hc.pines()')));
     if(shore){
-      for(const [when,t] of [['noon',0.25],['dusk',0.46],['night',0.75]]) await shoot('shore', shore.x, shore.z, 3, YAW_OUT, -0.02, when, t);
-      await shoot('shorehigh', shore.x, shore.z, 40, YAW_OUT, -0.06, 'noon', 0.25);
-      await page.evaluate(`__hc.pines(0)`);
-      await shoot('shore-off', shore.x, shore.z, 3, YAW_OUT, -0.02, 'noon', 0.25);
-      await page.evaluate(`__hc.pines(1)`);
+      const g=await page.evaluate(`__hc.groundY(${shore.x},${shore.z})`);
+      await page.evaluate(`__hc.tpAt(${shore.x}+0.5, ${g}+3, ${shore.z}+0.5); __hc.cam({yaw:${YAW_OUT}, pitch:-0.02}); __hc.fog(0); __hc.freezeT(0); __hc.setTime(0.25)`);
+      for(let i=0;i<30;i++){ const f=await page.evaluate('__hc.fill()'); if(f&&f.meshed>=f.want) break; await sleep(400); }
+      await sleep(4000); await page.evaluate('__hc.setTime(0.25)'); await sleep(600);
+      const on=await grab('on'); await page.evaluate('__hc.pines(0)'); await sleep(900);
+      const off=await grab('off'); await page.evaluate('__hc.pines(1)'); await sleep(900);
+      const on2=await grab('on2');
+      let d1=0,d2=0,n=on.length,changed=0;
+      for(let i=0;i<n;i++){ const a=Math.abs(on[i]-off[i]); d1+=a; if(a>4) changed++; d2+=Math.abs(on[i]-on2[i]); }
+      console.log('    horizon strip: mean |on-off| '+(d1/n).toFixed(2)+'   noise |on-on| '+(d2/n).toFixed(2)+'   pixels changed >4 levels: '+(100*changed/n).toFixed(1)+'%');
+      for(const [when,t] of [['noon',0.25],['dusk',0.46],['night',0.75]]){
+        await page.evaluate(`__hc.setTime(${t})`); await sleep(900); await page.evaluate(`__hc.setTime(${t})`); await sleep(400);
+        await page.screenshot({path:path.join(OUT,'cp-shore-'+when+'.png')}); }
+      console.log('    frames: cp-shore-noon/dusk/night.png');
     }
-    { const x=IC.x-IC.R-90, z=IC.z;
-      await shoot('sea', x, z, 20, Math.atan2(-1,-0), -0.1, 'noon', 0.25); }
   } finally { try{ if(browser) await browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }
 })().catch(e=>{ console.error(e); process.exit(1); });

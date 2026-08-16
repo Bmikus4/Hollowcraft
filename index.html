@@ -6798,7 +6798,10 @@ const _uPineFog=new THREE.Color(0.1,0.13,0.2), _stormBlue=new THREE.Color(0.09,0
 // to the island; hazed with the TERRAIN'S OWN fog term evaluated at that distance rather than a colour chosen by eye;
 // and the far band mixed much harder toward the air than the near one, because the depth is in the aerial perspective
 // and not in the geometry — a single ridge silhouette reads as a cut-out whatever shape it is given.
-const _CPN=192;                                     // azimuth steps
+const _CPN=384;                                     // azimuth steps. 192 was 1.9 degrees each, and with the far bands'
+                                                    // crowns below a pixel the SILHOUETTE was the mask's own resolution:
+                                                    // 40-pixel plateaus with hard vertical sides, which is the row of pale
+                                                    // mesas in bench/results/cdist-near-60.png. Doubling it halves that cell.
 const _CP_BAND=[1.0, 2.3, 4.6];                     // per-layer distance, in render walls
 const _cpData=new Uint8Array(_CPN*3*4);
 const _cpTex=new THREE.DataTexture(_cpData,_CPN,3,THREE.RGBAFormat);
@@ -6856,12 +6859,12 @@ const _uCoastAir ={ value:new THREE.Color(0.6,0.68,0.76) };
 const _cpU={ uMask:{value:_cpTex}, uPine:_uCoastPine, uAir:_uCoastAir, uFogCol:{value:_uPineFog}, uFogD:{value:0.01},
   uWall:{value:CFG.RENDER_DIST*CK}, uCamY:{value:CFG.SEA+2}, uWx:{value:0}, uDay:globalU.uDay,
   uSunXZ:{value:new THREE.Vector2(1,0)}, uSunUp:{value:0}, uSunCol:globalU.uSunCol,
-  uFogMul:{value:0.18}, uGain:{value:0.42}, uScotG:{value:_scotG}, uScotH:{value:_scotH} };
+  uFogMul:{value:0.10}, uGain:{value:0.42}, uPixAng:{value:0.0015}, uScotG:{value:_scotG}, uScotH:{value:_scotH} };
 const coastPineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, side:THREE.BackSide, fog:false,
   uniforms:_cpU, vertexShader:_horizVert, fragmentShader:[
   'precision highp float; varying vec3 vPos;',
   'uniform sampler2D uMask; uniform vec3 uPine, uAir, uFogCol, uSunCol; uniform vec2 uSunXZ;',
-  'uniform float uFogD, uWall, uCamY, uWx, uDay, uSunUp, uFogMul, uGain; uniform vec4 uScotG, uScotH;',
+  'uniform float uFogD, uWall, uCamY, uWx, uDay, uSunUp, uFogMul, uGain, uPixAng; uniform vec4 uScotG, uScotH;',
   'float hash(float n){ return fract(sin(n)*43758.5453); }',
   'float nz(float x){ float i=floor(x), f=fract(x); return mix(hash(i),hash(i+1.0),f*f*(3.0-2.0*f)); }',
   'void main(){',
@@ -6874,16 +6877,24 @@ const coastPineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false
   '    vec4 m=texture2D(uMask, vec2(u, (float(b)+0.5)/3.0));',
   '    if(m.r<0.10) continue;',
   '    float dist=uWall*(b==0?1.0:(b==1?2.3:4.6));',
-  '    float haze=(b==0?0.0:(b==1?0.38:0.66));',
+  '    float haze=(b==0?0.0:(b==1?0.18:0.34));',
   '    float gnd=m.g*WORLD_H-uCamY;',
   '    float hs=m.b;',
   // ---- THE TREES, IN WORLD UNITS ----
   // Crowns every ~7 blocks subtend 7/dist radians at this band. TWO crown series half a period apart, taken as a max,
   // because real canopies overlap: one series alone is a picket fence.
   '    float f=dist/7.0;',
-  '    float c1=nz(az*f), c2=nz(az*f+37.7);',
+  // A CROWN NARROWER THAN A PIXEL IS NOT A CROWN, IT IS NOISE. The far band puts about 126 crowns in a radian, which
+  // is a twentieth of a pixel each: sampled once per fragment, the cone term and the per-tree jitter alias into hard
+  // vertical streaks and flat slabs of colour standing on the horizon, which is exactly what the first frames showed
+  // (bench/results/cdist-near-60.png, first run). Detail is faded toward its own mean as the crown width approaches a
+  // pixel, so a band that cannot be resolved becomes the smooth treeline it would average to. uPixAng is the angle one
+  // pixel subtends, handed in from the live fov and drawing height.
+  '    float cpx=(7.0/dist)/max(uPixAng,1e-6);',
+  '    float det=smoothstep(1.4, 4.0, cpx);',
+  '    float c1=mix(0.5, nz(az*f), det), c2=mix(0.5, nz(az*f+37.7), det);',
   '    float p1=fract(az*f), p2=fract(az*f+0.5);',
-  '    float cone1=1.0-abs(p1*2.0-1.0), cone2=1.0-abs(p2*2.0-1.0);',
+  '    float cone1=mix(0.62, 1.0-abs(p1*2.0-1.0), det), cone2=mix(0.62, 1.0-abs(p2*2.0-1.0), det);',
   // The generator's own envelope, 18 + 0..13 blocks, scaled by the taper. The stand term is the slow one: whole stands
   // stand taller than their neighbours, which is what stops a treeline reading as a comb.
   '    float stand=nz(az*(dist/40.0))*0.5+0.5;',
@@ -6903,10 +6914,10 @@ const coastPineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false
   // azimuth instead of per fragment normal.
   '    float face=clamp(-dot(normalize(vec2(d.x,d.z)), uSunXZ), -1.0, 1.0);',
   '    float lit=clamp(face,0.0,1.0)*uSunUp;',
-  '    float per=0.62+0.44*nz(az*f*3.1);',
+  '    float per=0.62+0.44*mix(0.5, nz(az*f*3.1), det);',
   '    vec3 col=uPine*per*(0.58+0.55*t)*uGain;',
-  '    col*=mix(0.66, 1.5, lit);',
-  '    col+=uSunCol*0.16*pow(clamp(-face,0.0,1.0),3.0)*uSunUp*smoothstep(0.55,1.0,t);',
+  '    col*=mix(0.72, 1.18, lit);',
+  '    col+=uSunCol*0.05*pow(clamp(-face,0.0,1.0),3.0)*uSunUp*smoothstep(0.55,1.0,t);',
   '    col*=mix(1.0,0.34,1.0-smoothstep(0.0,0.14,t));',
   // ---- FOG, WEATHER, AND THE AIR IT STANDS IN ----
   // The haze is the terrain's own exp2 fog evaluated at this band's distance, never a colour picked by eye: every
@@ -6915,7 +6926,15 @@ const coastPineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false
   '    float fg=1.0-exp2(-uFogD*uFogD*dist*dist*1.442695);',
   '    col=mix(col, uFogCol, clamp(fg*uFogMul,0.0,0.94));',
   '    col=mix(col, uAir, haze);',
-  '    float a=smoothstep(0.10,0.30,m.r)*clamp(1.0-uWx*1.25,0.0,1.0);',
+  // A DISTANT THING IS NEVER BRIGHTER THAN THE AIR IN FRONT OF IT. Mixing toward the air by 0.66 took a dark canopy
+  // PAST the air's own value at noon, so the far coast came out as pale slabs standing over a darker sky. The band is
+  // clamped to the air it is seen through, and its alpha falls with the same haze, so distance thins it as well as
+  // greys it - which is what makes the third band read as further away rather than as a lighter object.
+  // 0.85 of the air, not the air. A treeline at distance is DARKER than the sky behind it at every hour - clamping to
+  // the air itself let the sun terms push the band up to the air's own value, and a band that equals the air is the
+  // pale ridge these frames kept showing. Cutting the haze could not fix that: the clamp, not the haze, was setting it.
+  '    col=min(col, uAir*0.85);',
+  '    float a=smoothstep(0.10,0.30,m.r)*clamp(1.0-uWx*1.25,0.0,1.0)*(1.0-0.38*haze);',
   '    outc=mix(outc, col, a); outa=max(outa, a);',
   '  }',
   '  if(outa<0.004) discard;',
@@ -6939,6 +6958,10 @@ function updateCoastPines(){
   const day=globalU.uDay.value;
   _cpU.uWall.value=CFG.RENDER_DIST*CK;
   _cpU.uCamY.value=camera.position.y;
+  // One pixel's angle, from the live camera and the live drawing height — the render can be scaled (_pixelScale) and the
+  // fov changes with the ADS, and both move where the crown detail stops being resolvable.
+  { const hpx=Math.max(1, renderer.domElement.height||720);
+    _cpU.uPixAng.value=(camera.fov*Math.PI/180)/hpx; }
   _cpU.uFogD.value=scene.fog?scene.fog.density:0.01;
   _cpU.uWx.value=(typeof weather!=='undefined'?(weather.fog||0):0);
   // The canopy green goes down with the hour exactly as real foliage does — the same 0.10..1.0 ramp _uPineFog carries —
@@ -11510,6 +11533,16 @@ defItem('flint',{name:'Flint',icon:{t:'shard',c:'#3b3b46'}});
 // its own — the switch is `_flashOn`, one boolean on the player, so putting the lamp down and picking it back up cannot
 // desync from the light. Right-click toggles it (see doPlace).
 defItem('flashlight',{name:'Flashlight',max:1,flashlight:true,icon:{t:'bar',c:'#9aa0aa'}});
+// THE ATTACHMENTS ARE ITEMS, and they are the ONLY items this system adds. The sixteen gun-with-attachment ids were
+// deleted so that a scope is a thing you own and fit, not a second rifle — see ATT_DEFS for the fitting and GUNATT
+// for where a fitted one lives. `att:` is what the attach screen filters the inventory by; nothing else reads it.
+defItem('red_dot',      {name:'Red Dot Sight',   max:1, att:'red_dot',      icon:{t:'bar',c:'#c02020'}});
+defItem('holo_sight',   {name:'Holographic Sight',max:1,att:'holo_sight',   icon:{t:'bar',c:'#2a3038'}});
+defItem('optic_scope',  {name:'Rifle Scope',     max:1, att:'optic_scope',  icon:{t:'bar',c:'#1b1f24'}});
+defItem('suppressor',   {name:'Suppressor',      max:1, att:'suppressor',   icon:{t:'bar',c:'#33363c'}});
+defItem('weapon_light', {name:'Weapon Light',    max:1, att:'weapon_light', icon:{t:'bar',c:'#d8d2b8'}});
+defItem('laser_sight',  {name:'Laser Sight',     max:1, att:'laser_sight',  icon:{t:'bar',c:'#20c040'}});
+defItem('foregrip',     {name:'Foregrip',        max:1, att:'foregrip',     icon:{t:'bar',c:'#3a3a40'}});
 // A HANDFUL OF STONE OFF THE GROUND (Ben 08-05: "when pebbles are broken they give a new stone item, which is a stone rock. four of
 // it can make cobble"). Its own item rather than dropping cobble directly: four rocks to a block is the point — a pebble
 // cluster is not a building block, it is the raw material for one.
@@ -12399,6 +12432,15 @@ shaped('torch',4,['C','S'],{C:'coal',S:'stick'});
 // diamond is the cell — the game has no battery item and inventing one for a single recipe is a worse answer than
 // spending the one material that already means "a thing that holds power" here.
 shaped('flashlight',1,['IGI','IDI',' I '],{I:'iron_ingot',G:'glass',D:'diamond'});
+// CRAFT THE ATTACHMENT, FIT IT TO THE GUN (see ATT_DEFS). None of these produces a gun: that is the rule the
+// deleted variant items broke, and a recipe whose OUTPUT is a rifle-with-a-scope is how they would come back.
+shaped('red_dot',1,     [' G ','ICI',' I '],       {G:'glass',I:'iron_ingot',C:'coal'});
+shaped('holo_sight',1,  ['GGG','ICI',' I '],       {G:'glass',I:'iron_ingot',C:'coal'});
+shaped('optic_scope',1, [' G ',' G ','IDI'],       {G:'glass',I:'iron_ingot',D:'diamond'});
+shaped('suppressor',1,  ['III','I I','III'],       {I:'iron_ingot'});
+shaped('weapon_light',1,[' G ','IDI',' I '],       {G:'glass',I:'iron_ingot',D:'diamond'});
+shaped('laser_sight',1, [' D ','IGI',' I '],       {D:'diamond',I:'iron_ingot',G:'glass'});
+shaped('foregrip',1,    [' I ',' S ',' S '],       {I:'iron_ingot',S:'stick'});
 shaped('chest',1,['PPP','P P','PPP'],{P:'planks'});
 shaped('backpack',1,['L L','LSL','LLL'],{L:'leather',S:'string'});   // six hides and a drawstring — the same shape as the chest, softened
 shaped('alice_pack',1,['ISI','LBL','LLL'],{L:'leather',S:'string',B:'backpack',I:'iron_ingot'});   // the satchel rebuilt on an iron frame: the second tier is an UPGRADE, so it consumes the pack it is built from
@@ -13405,7 +13447,11 @@ addEventListener('keydown',e=>{ if(e.code==='Space')e.preventDefault();
     if(openUI==='cmd'){ closeConsole(); return; }
     if(!openUI && started && !locked && !player.dead && !player.grabbed && typeof pause!=='undefined' && pause && pause.style.display!=='none'){ requestLock(); return; }
   }
-  if(!openUI && !player.grabbed && !player.dead && (e.code==='KeyT' || (e.code==='Slash'&&!e.shiftKey))){ e.preventDefault(); openConsole(e.code==='Slash'?'/':''); return; }
+  // T IS THE ATTACH SCREEN NOW (Ben 08-15: "T activating attachments"). The console keeps Slash, which is where a
+  // command line belongs; Shift+T still reaches it for anyone with the old key in their fingers.
+  if(openUI==='att'){ if(e.code==='KeyT'||e.code==='Escape'){ e.preventDefault(); closeAttUI(); return; } e.preventDefault(); attUIKey(e.code); return; }
+  if(!openUI && !player.grabbed && !player.dead && e.code==='KeyT' && !e.shiftKey){ e.preventDefault(); openAttUI(); return; }
+  if(!openUI && !player.grabbed && !player.dead && ((e.code==='KeyT'&&e.shiftKey) || (e.code==='Slash'&&!e.shiftKey))){ e.preventDefault(); openConsole(e.code==='Slash'?'/':''); return; }
   // F3 = THIRD PERSON (Ben). It was on F4 and F3 toggled the profiler; the profiler moves to SHIFT+F3, since a debug
   // overlay is the rarer of the two and third person is a thing you flip constantly.
   if(e.code==='F3' && e.shiftKey){ prof.style.display=prof.style.display==='none'?'block':'none'; return; }
@@ -19847,6 +19893,80 @@ function cmdEcho(text,colour){ _cmdBuild(); const d=document.createElement('div'
                // after that. A bench that echoes 121 lines of setup then reads a command's reply gets an empty string and no error.
   while(_cmdLog.children.length>120) _cmdLog.removeChild(_cmdLog.firstChild);
   _cmdLog.scrollTop=_cmdLog.scrollHeight; }
+// =====================================================================
+//  THE ATTACH SCREEN — T (Ben 08-15: "T activating attachments")
+// =====================================================================
+// A LIST, NOT A DRAG-AND-DROP GRID. The whole interaction is "which of the things I am carrying goes in which of the
+// five slots on the gun in my hands", and a list of the slots against a list of what fits them says that in one
+// screen with no cursor. The console kept T and gave it up; it is still on Slash, which is where a command line
+// belongs anyway.
+//
+// IT REBUILDS THE HELD MODEL ON EVERY CHANGE, on purpose. The fitted attachment is part of the gun's mesh (the fit
+// needs the model scale and the two axis maps, all local to buildGlbGun), so the honest way to show a change is to
+// build the gun again — 14-82 ms once per fit, in a menu, against a per-frame cost of nothing.
+let _attEl=null, _attSel=0;
+function _attBuild(){ if(_attEl) return;
+  const d=document.createElement('div'); d.id='attui';
+  d.style.cssText='position:fixed;inset:0;z-index:26;display:none;align-items:center;justify-content:center;'+
+    'background:rgba(6,7,9,0.72);font:13px/1.5 ui-monospace,Consolas,monospace;color:#d6d2c4';
+  d.innerHTML='<div id="attbox" style="min-width:430px;max-width:620px;padding:18px 22px;background:#14161a;'+
+    'border:1px solid #2a2f36;box-shadow:0 18px 60px rgba(0,0,0,0.6)"></div>';
+  document.body.appendChild(d); _attEl=d; }
+function attScreenState(){
+  const s=heldSlot(), it=s&&ITEMS[s.id];
+  if(!it||!it.gun||!GLB_GUNS[s.id]) return null;
+  const on=attOf(s)||{}, rows=[];
+  for(const sl of ATT_SLOTS){
+    const fitted=on[sl]||null, opts=[];
+    // THE BAR AND THE BAG. invAdd fills the five hotbar slots first and spills into GRID.items, so a screen that
+    // only read `inv` showed nothing for a player whose optics are in their pack — which is where they will be,
+    // because five slots are for guns and ammunition.
+    const carried=[]; for(let i=0;i<inv.length;i++) if(inv[i]) carried.push(inv[i]);
+    if(typeof GRID==='object'&&GRID&&GRID.items) for(const q of GRID.items) carried.push(q);
+    for(const q of carried){ const qi=ITEMS[q.id];
+      if(qi&&qi.att&&ATT_DEFS[qi.att]&&ATT_DEFS[qi.att].slot===sl&&attFits(s.id,qi.att)) opts.push({id:qi.att,name:qi.name}); }
+    rows.push({slot:sl,fitted,opts});
+  }
+  return {gun:s.id,rows,on};
+}
+function renderAttUI(){ const st=attScreenState(); if(!st){ closeAttUI(); return; }
+  const box=document.getElementById('attbox'); if(!box) return;
+  const L=['<div style="color:#8f8a7c;letter-spacing:2px;margin-bottom:10px">ATTACHMENTS — '+(ITEMS[st.gun].name||st.gun).toUpperCase()+'</div>'];
+  st.rows.forEach((r,i)=>{
+    const sel=i===_attSel;
+    const what=r.fitted?(ITEMS[r.fitted]?ITEMS[r.fitted].name:r.fitted):(r.opts.length?('— '+r.opts.length+' available'):'—');
+    L.push('<div style="padding:4px 8px;'+(sel?'background:#232830;color:#f0ead8':'')+'">'+
+      (sel?'&gt; ':'&nbsp;&nbsp;')+r.slot.toUpperCase().padEnd(8,' ').replace(/ /g,'&nbsp;')+
+      '<span style="color:'+(r.fitted?'#c8bd94':'#7d786c')+'">'+what+'</span></div>');
+  });
+  L.push('<div style="margin-top:12px;color:#6e6a5f">W/S choose a slot · ENTER fits the next one that fits · BACKSPACE removes it · T or ESC closes</div>');
+  box.innerHTML=L.join(''); }
+function openAttUI(){ const st=attScreenState();
+  if(!st){ flashName('nothing in hand to fit'); return; }
+  _attBuild(); openUI='att'; _attSel=0; _attEl.style.display='flex';
+  document.exitPointerLock&&document.exitPointerLock();
+  for(const k in keys) delete keys[k]; lmbHeld=false; rmbHeld=false;
+  renderAttUI(); }
+function closeAttUI(){ if(_attEl)_attEl.style.display='none'; if(openUI==='att')openUI=null;
+  if(!openUI && typeof requestLock==='function') requestLock(); }
+// ONE KEY DOES BOTH DIRECTIONS. Enter fits the next thing in the pack that fits this slot and cycles through them,
+// so a player with two optics can swap without a cursor; Backspace clears it. The gun is rebuilt after either.
+function attUIKey(code){
+  const st=attScreenState(); if(!st) return;
+  if(code==='KeyW'||code==='ArrowUp'){ _attSel=(_attSel+ATT_SLOTS.length-1)%ATT_SLOTS.length; renderAttUI(); return; }
+  if(code==='KeyS'||code==='ArrowDown'){ _attSel=(_attSel+1)%ATT_SLOTS.length; renderAttUI(); return; }
+  const row=st.rows[_attSel], hs=heldSlot();
+  if(code==='Enter'){
+    if(!row.opts.length){ flashName('nothing fits '+row.slot); return; }
+    const cur=row.fitted, at=row.opts.findIndex(o=>o.id===cur);
+    const next=row.opts[(at+1)%row.opts.length];
+    attSet(hs,row.slot,next.id); flashName(next.name+' fitted');
+  } else if(code==='Backspace'||code==='Delete'){
+    if(!row.fitted) return;
+    attSet(hs,row.slot,null); flashName(row.slot+' cleared');
+  } else return;
+  if(typeof setViewItem==='function'){ view.id=null; setViewItem(hs?hs.id:null); }   // rebuild the held model with what it now wears
+  renderAttUI(); }
 function openConsole(prefill){ _cmdBuild(); openUI='cmd'; _cmdEl.style.display='flex';
   _cmdIn.value=prefill||''; document.exitPointerLock&&document.exitPointerLock();
   for(const k in keys) delete keys[k];   // whatever was held when the console opened must not stay held while you type
@@ -21940,7 +22060,76 @@ function _glbOneOf(modelId,cut,style){
   for(const c of [...m.children]) if(c!==keep) m.remove(c);
   return m;
 }
-function buildGlbGun(key,dot,suppressed){
+// =====================================================================
+//  ATTACHMENTS — one object, fitted to any gun, carried by the gun INSTANCE
+// =====================================================================
+// Ben: "attatchment system, items and all models imported" / "because of the attatchment system, guns should all
+// have no attatchments on them as seperate items". The sixteen gun-with-attachment items were deleted for this, so
+// an attachment can never be part of an id again: it is state on the STACK, keyed the way ammunition already is.
+//
+// THE ONE MEASUREMENT THAT DECIDES THE WHOLE FITTER. Every gun model runs along its own X and is 1.8-7.3 units
+// long; every attachment model runs along its own Z and is 0.03-0.29 units long — thirty times smaller and turned
+// ninety degrees. But buildGlbGun already yaws the gun by PI/2, which puts the BORE ON THE GAME'S Z, and an
+// attachment's long axis is z as exported. So in the space the fitter works in there is no yaw to apply at all:
+// only a scale, and a sign for which way the bulk points (docs/GUN-MODEL-INDEX.md has the per-model signs).
+//
+// SIZE IS AUTHORED IN GAME UNITS, NOT AS A RATIO of the model it rides. A red dot is the same size on a carbine and
+// on a shotgun — that is what makes it the same object — and a ratio would draw a sniper's optic twice the size of
+// a pistol's. `len` here is what the attachment measures along the bore once fitted, in blocks.
+const ATT_DEFS={
+  red_dot:      {model:'attachments/red-dot',     slot:'optic',  len:0.10, flip:false, sit:'rail'},
+  holo_sight:   {model:'attachments/holographic', slot:'optic',  len:0.13, flip:true,  sit:'rail'},
+  optic_scope:  {model:'attachments/scope',       slot:'optic',  len:0.24, flip:false, sit:'rail'},
+  suppressor:   {model:'attachments/suppressor',  slot:'muzzle', len:0.20, flip:true,  sit:'muzzle'},
+  weapon_light: {model:'attachments/weapon-light',slot:'light',  len:0.11, flip:true,  sit:'side'},
+  laser_sight:  {model:'attachments/laser',       slot:'laser',  len:0.09, flip:false, sit:'side'},
+  foregrip:     {model:'attachments/foregrip',    slot:'grip',   len:0.10, flip:false, sit:'under'},
+};
+const ATT_SLOTS=['optic','muzzle','light','laser','grip'];
+// PER INSTANCE, exactly like GUNMAG: gunKey brands the stack with a uid that rides it between inventory slots, so
+// two identical rifles keep different optics and neither is a different ITEM. Inventing a second identity scheme
+// here is how the deleted variant items would come back by the side door.
+const GUNATT={};
+function attOf(slot){ if(!slot) return null; const k=gunKey(slot); if(!k) return null;
+  if(GUNATT[k]==null) GUNATT[k]=(slot.att&&typeof slot.att==='object')?Object.assign({},slot.att):{};
+  return GUNATT[k]; }
+function attSet(slot,which,id){ const a=attOf(slot); if(!a) return null;
+  if(id) a[which]=id; else delete a[which];
+  slot.att=Object.assign({},a);                       // the stack remembers, so a save or a hand-off carries it
+  return a; }
+function attFits(gunId,attId){ const d=ATT_DEFS[attId], spec=GLB_GUNS[gunId];
+  if(!d||!spec) return false;
+  if(d.slot==='optic') return !!(spec.mount || spec.sights);        // needs a rail plane to clamp to
+  if(d.slot==='muzzle') return spec.muzzleZ!=null;
+  return true; }
+// WHERE THE RAIL IS, without authoring one per gun twice. mount:{x,base} is the authored answer and only the AR has
+// one; every other gun already carries an authored REAR SIGHT ROOT, and on a real gun the rear sight is standing on
+// the rail — same plane, same x. That is why this fallback is a measurement rather than a guess, and it is the
+// reason an optic does not need twelve new numbers. railTop is deliberately not used: it is a MEDIAN across the
+// model, so on any gun whose receiver sits lower than its gas block it buries the clamp in metal.
+function attMount(spec){ if(spec.mount) return spec.mount;
+  if(spec.sights) return {x:spec.sights.rx, base:spec.sights.ry};
+  return null; }
+function buildAttachment(attId,spec,P,s,gy,gz,boreG){
+  const d=ATT_DEFS[attId]; if(!d||typeof glbHas!=='function'||!glbHas(d.model)) return null;
+  const AP=GLB_PLACE[d.model]; if(!AP) return null;
+  let m=null; try{ m=glbBuild(d.model,{style:(nm,mat)=>_glbGunStyle(nm,mat,spec.metalLift)}); }catch(e){ return null; }
+  if(!m) return null;
+  const own=AP.bbox.size, along=own[2]||0.05, as=d.len/along;         // its own long axis is z, as exported
+  const g=new THREE.Group(); g.add(m); m.scale.setScalar(as);
+  m.position.set(-AP.bbox.min[0]*as-own[0]*as/2, -AP.bbox.min[1]*as, -AP.bbox.min[2]*as-own[2]*as/2);   // centred on x/z, sitting on its own base
+  if(d.flip) g.rotation.y=Math.PI;
+  const H=own[1]*as, W=own[0]*as;
+  const mt=attMount(spec);
+  if(d.sit==='rail' && mt) g.position.set(0, gy(mt.base), gz(mt.x));
+  else if(d.sit==='muzzle') g.position.set(0, boreG, spec.muzzleZ - d.len*0.5);
+  else if(d.sit==='under') g.position.set(0, boreG-0.055-H, spec.muzzleZ+0.22);
+  else { g.position.set(W*0.5+0.028, boreG-0.012, spec.muzzleZ+0.20); }                                 // side rail, on the shooter's right
+  g.userData.att=attId; g.userData.attSlot=d.slot; g.userData.attH=H;
+  g.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
+  return g;
+}
+function buildGlbGun(key,dot,suppressed,att){
   const spec=GLB_GUNS[key], P=spec&&GLB_PLACE[spec.id];
   if(!spec||!P||!glbHas(spec.id)) return null;
   const s=spec.len/(P.bbox.size[0]||1);
@@ -21976,6 +22165,14 @@ function buildGlbGun(key,dot,suppressed){
   for(const nm in sub){ const p=sub[nm]; g.add(p); p.rotation.copy(m.rotation); p.scale.copy(m.scale); p.position.copy(m.position); }
   const UD=g.userData;
   UD.gripAt=spec.grip?[0,gy(spec.grip[1]),gz(spec.grip[0])]:[0,gy(P.gripPoint.position[1]),gz(P.gripPoint.position[0])];
+  // THE FITTED ATTACHMENTS. Added here rather than by the caller because everything the fit needs — the model
+  // scale, the two axis maps and the bore's height once placed — is local to this function and nowhere else.
+  UD.attOn={};
+  if(att) for(const sl of ATT_SLOTS){ const id=att[sl]; if(!id||!attFits(key,id)) continue;
+    const a=buildAttachment(id,spec,P,s,gy,gz,boreG); if(!a) continue;
+    g.add(a); UD.attOn[sl]=id;
+    if(sl==='optic') UD.opticTop=a.position.y+(a.userData.attH||0);   // the sight line an optic gives this gun
+  }
   const railY=gy(P.railTop), gripZ=gz(P.gripPoint.position[0]);
   // MATTE BLACK IRON for the sights. At the guns' own shininess/specular the little posts caught the sky and read
   // navy blue against the grey model (bench/results/models/revolver.png, first version). Sights are the one part of a
@@ -22668,7 +22865,10 @@ function setViewItem(id){ if(view.id===id)return; view.id=id;
   // guns would each fall into the branch for their class and every AK, pistol and sawn-off would be drawn as the
   // AR-15 — the same "wrong gun, no error" the hand-kept preload list produced. The four original keys are checked
   // by their class below as before, because their keys are the class and not the id.
-  if(it.gun && GLB_GUNS[id]) view.mesh=buildGlbGun(id,it.dot,it.suppressed);
+  // THE HELD GUN IS THE ONE INSTANCE THAT KNOWS ITS OWN ATTACHMENTS. itemModel builds the same gun for an icon, a
+  // ground drop and a peer's hand, and none of those have a stack to ask, so they get the bare model — which is
+  // correct: a picture of a rifle is the rifle, not this rifle with this optic.
+  if(it.gun && GLB_GUNS[id]) view.mesh=buildGlbGun(id,it.dot,it.suppressed, attOf(heldSlot()));
   if(view.mesh){}
   else if(it.gun==='bolt') view.mesh=buildBoltRifle(it.suppressed,it.dot);
   else if(it.gun==='auto') view.mesh=buildMinigun(it.dot,it.suppressed);                   // minigun (full-auto) — was falling into the AR-15 branch below
@@ -35473,6 +35673,29 @@ window.__hc={
                splatMapped:!!t, markMapped:!!(_markBlood&&_markBlood.im.material.map),
                markTint:'#'+(_markBlood?_markBlood.base.toString(16).padStart(6,'0'):'?'),
                brMapped:(typeof _brGoreMat==='object'&&_brGoreMat)?!!_brGoreMat.blood.map:null }; }catch(e){ return {err:String(e.message||e)}; } },
+  // THE ATTACHMENT SYSTEM, WITHOUT A SCREENSHOT. Reports what the held gun wears, where each fitted piece sits in
+  // the gun's own space against the rail plane it was fitted to, and how big it came out — the three ways a fit can
+  // be wrong (buried in the receiver, floating over it, thirty times too small) are all numbers here.
+  attProbe(){ try{ const s=heldSlot(), it=s&&ITEMS[s.id]; if(!it||!it.gun) return {err:'no gun held'};
+      const spec=GLB_GUNS[s.id], on=attOf(s)||{}, m=view.mesh, out=[];
+      if(m) m.traverse(o=>{ if(o.userData&&o.userData.att){ const bb=new THREE.Box3().setFromObject(o), sz=bb.getSize(new THREE.Vector3());
+        out.push({ id:o.userData.att, slot:o.userData.attSlot,
+                   pos:[+o.position.x.toFixed(3),+o.position.y.toFixed(3),+o.position.z.toFixed(3)],
+                   size:[+sz.x.toFixed(3),+sz.y.toFixed(3),+sz.z.toFixed(3)] }); } });
+      const mt=spec?attMount(spec):null;
+      const sc=attScreenState();
+      return { gun:s.id, key:gunKey(s), wearing:on, fitted:out, mount:mt,
+               rows:sc?sc.rows.map(r=>({slot:r.slot,fitted:r.fitted,opts:r.opts.length})):null,
+               opticTop:(m&&m.userData.opticTop!=null)?+m.userData.opticTop.toFixed(3):null,
+               ui:openUI==='att', slots:ATT_SLOTS, defs:Object.keys(ATT_DEFS) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // QA: fit or clear an attachment on the gun in hand, through the same call the screen uses.
+  attFit(slot,id){ try{ const s=heldSlot(); if(!s) return {err:'nothing held'};
+      if(id && !attFits(s.id,id)) return {err:id+' does not fit '+s.id};
+      attSet(s,slot,id||null); view.id=null; setViewItem(s.id);
+      return this.attProbe(); }catch(e){ return {err:String(e.message||e)}; } },
+  attKey(code){ try{ const hs=heldSlot(); attUIKey(code); return {sel:_attSel, ui:openUI, held:hs&&hs.id, wearing:attOf(heldSlot())}; }catch(e){ return {err:String(e.message||e)}; } },
+  attOpen(on){ try{ if(on===false) closeAttUI(); else openAttUI(); return {ui:openUI}; }catch(e){ return {err:String(e.message||e)}; } },
   // IS THE HELD ITEM IN FRAME, AND IS THE HAND ON IT? A screenshot is how a held pose gets judged and it is the one
   // thing a bench cannot read. This projects the held mesh's corners to screen space and reports the fraction of the
   // viewport it covers, plus the distance from the fist's palm to the grip it was solved to — so "the axe is off the
