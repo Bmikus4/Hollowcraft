@@ -21984,14 +21984,28 @@ const _dq=new THREE.Quaternion(), _dm=new THREE.Matrix4(), _de=new THREE.Euler()
 function _dropExt(d,ax){                                   // the box's half-extent along one WORLD axis
   const e=_dm.elements, h=d.half;                          // column-major: e[ax], e[4+ax], e[8+ax] is the row for that axis
   return Math.abs(e[ax])*h.x + Math.abs(e[4+ax])*h.y + Math.abs(e[8+ax])*h.z; }
-function _dropSolid(x,y,z){ const b=Math.floor(y); if(b<0) return true; return solidAt(Math.floor(x),b,Math.floor(z)); }
-// Overlap of the box's world-AABB with the grid, resolved one axis at a time against the axis it moved on. Corner
-// sampling rather than an exact OBB-vs-cell test: at these sizes the box spans one or two cells, so the corners plus
-// the face centres are the surface, and an exact test would cost more than the artefact it removes.
-function _dropHit(d,ex,ey,ez){
-  for(let sx=-1;sx<=1;sx++) for(let sy=-1;sy<=1;sy++) for(let sz=-1;sz<=1;sz++){
-    if(!sx&&!sy&&!sz) continue;
-    if(_dropSolid(d.x+sx*ex, d.y+sy*ey, d.z+sz*ez)) return true; }
+// THE BOX'S WORLD-AABB AGAINST THE CELLS IT SPANS. The first version of this sampled the 26 points around the
+// centre and asked "is any of them solid", which cannot work and is worth recording: a body resting on the ground
+// has solid samples beneath it FOREVER, so every subsequent move on any axis read as a collision, the horizontal
+// velocity was reflected every frame, and the landing branch — gated on vy<0, which is false once the bounce has
+// clamped vy to zero — never ran again. The bodies hovered a block off the ground at a permanent 2.5 m/s. An
+// overlap test has to answer WHICH cells, so the resolution can put the body against the face it actually hit.
+// EPS shrinks the box by a tenth of a millimetre so that resting exactly ON a surface is not itself an overlap.
+const _DEPS=1e-4;
+function _dropOverlap(d,ex,ey,ez){
+  const x0=Math.floor(d.x-ex+_DEPS), x1=Math.floor(d.x+ex-_DEPS);
+  const y0=Math.floor(d.y-ey+_DEPS), y1=Math.floor(d.y+ey-_DEPS);
+  const z0=Math.floor(d.z-ez+_DEPS), z1=Math.floor(d.z+ez-_DEPS);
+  if(y0<0) return true;
+  for(let y=y0;y<=y1;y++) for(let x=x0;x<=x1;x++) for(let z=z0;z<=z1;z++) if(solidAt(x,y,z)) return true;
+  return false; }
+// Is there ground directly under the bottom face? Separate from the overlap test because "am I supported" and "am I
+// inside something" are different questions, and conflating them is what the first version did.
+function _dropSupported(d,ex,ey,ez){
+  const y=Math.floor(d.y-ey-0.02); if(y<0) return true;
+  const x0=Math.floor(d.x-ex+_DEPS), x1=Math.floor(d.x+ex-_DEPS);
+  const z0=Math.floor(d.z-ez+_DEPS), z1=Math.floor(d.z+ez-_DEPS);
+  for(let x=x0;x<=x1;x++) for(let z=z0;z<=z1;z++) if(solidAt(x,y,z)) return true;
   return false; }
 function _dropStep(d,dt){
   if(dt>0.05) dt=0.05;                                     // a long frame must not tunnel a body through a floor
@@ -22000,20 +22014,27 @@ function _dropStep(d,dt){
   const ex=_dropExt(d,0), ey=_dropExt(d,1), ez=_dropExt(d,2);
   // ONE AXIS AT A TIME, each resolved against the movement that caused it. Resolving all three from one overlap
   // test is what makes a body slide along a wall it should have stopped against.
-  const px=d.x, py=d.y, pz=d.z;
-  d.x+=d.vx*dt; if(_dropHit(d,ex,ey,ez)){ d.x=px; d.vx*=-0.28; d.av.multiplyScalar(0.6); }
-  d.z+=d.vz*dt; if(_dropHit(d,ex,ey,ez)){ d.z=pz; d.vz*=-0.28; d.av.multiplyScalar(0.6); }
-  d.y+=d.vy*dt;
+  // Each axis is moved and then resolved against the FACE it moved into, which is why the direction of travel picks
+  // the snap. Sub-stepped so a fast body cannot pass through a floor in one frame: at terminal speed a drop from
+  // forty blocks covers well over a cell per frame.
+  const steps=Math.max(1, Math.ceil(Math.max(Math.abs(d.vx),Math.abs(d.vy),Math.abs(d.vz))*dt/0.25));
+  const sdt=dt/steps;
   let landed=false;
-  if(_dropHit(d,ex,ey,ez)){
-    d.y=py;
-    if(d.vy<0){                                            // came down onto something: sit exactly on top of it
-      const by=Math.floor(d.y-ey);
-      d.y=(by<0?0:by+1)+ey;
-      d.vy*=-0.22; if(Math.abs(d.vy)<1.2) d.vy=0;          // one small bounce, then it stays down
-      d.vx*=0.55; d.vz*=0.55; d.av.multiplyScalar(0.45); landed=true;
-    } else d.vy=0;                                         // clipped a ceiling on the way up
+  for(let s=0;s<steps;s++){
+    d.x+=d.vx*sdt; if(_dropOverlap(d,ex,ey,ez)){
+      d.x = d.vx>0 ? Math.floor(d.x+ex)-ex-_DEPS : Math.floor(d.x-ex)+1+ex+_DEPS;
+      d.vx*=-0.28; d.av.multiplyScalar(0.6); }
+    d.z+=d.vz*sdt; if(_dropOverlap(d,ex,ey,ez)){
+      d.z = d.vz>0 ? Math.floor(d.z+ez)-ez-_DEPS : Math.floor(d.z-ez)+1+ez+_DEPS;
+      d.vz*=-0.28; d.av.multiplyScalar(0.6); }
+    d.y+=d.vy*sdt; if(_dropOverlap(d,ex,ey,ez)){
+      if(d.vy<=0){                                         // came down onto something: sit exactly on top of it
+        d.y = Math.floor(d.y-ey)+1+ey+_DEPS;
+        d.vy*=-0.22; if(Math.abs(d.vy)<1.2) d.vy=0;        // one small bounce, then it stays down
+        d.vx*=0.55; d.vz*=0.55; d.av.multiplyScalar(0.45); landed=true;
+      } else { d.y = Math.floor(d.y+ey)-ey-_DEPS; d.vy=0; } }   // clipped a ceiling on the way up
   }
+  if(!landed && _dropSupported(d,ex,ey,ez) && Math.abs(d.vy)<0.2) landed=true;   // already sitting on it, just slowing down
   d.vx*=Math.pow(0.12,dt); d.vz*=Math.pow(0.12,dt);        // air/ground drag, frame-rate independent
   d.av.multiplyScalar(Math.pow(landed?0.02:0.35,dt));
   if(d.av.lengthSq()>1e-6){                                // integrate the tumble
@@ -22026,7 +22047,7 @@ function _dropStep(d,dt){
     _de.x=Math.round(_de.x/q)*q; _de.z=Math.round(_de.z/q)*q;
     d.quat.setFromEuler(_de);
     _dm.makeRotationFromQuaternion(d.quat);
-    d.y=Math.floor(d.y-_dropExt(d,1)+0.001)+1+_dropExt(d,1);   // re-seat: the snapped lie has a different height
+    d.y=Math.floor(d.y-_dropExt(d,1)+_DEPS)+1+_dropExt(d,1)+_DEPS;   // re-seat: the snapped lie has a different height
     d.rest=true; d.vx=d.vy=d.vz=0; d.av.set(0,0,0);
     if(typeof _dropRested==='function') _dropRested(d); }
   if(d.y<-8){ d.rest=true; d.vy=0; }                       // fell out of the world — do not simulate it forever
