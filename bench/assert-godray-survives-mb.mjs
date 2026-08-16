@@ -45,8 +45,9 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
       // the sun has to be up for the pass to be ENABLED, but `pass` (was it built at all) is independent of that
       await page.evaluate(`__hc.lock(true); __hc.pinScene(); __hc.setTime(0.42);`); await sleep(700);
       const g=await page.evaluate(`__hc.godrays()`), p=await page.evaluate(`__hc.postfx()`);
+      const v=await page.evaluate(`__hc.vol()`);
       await ctx.close();
-      return { g, p };
+      return { g, p, v };
     };
 
     const on=await boot(true);
@@ -61,6 +62,18 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     check('and the blur really is off', off.p.mbOn===false && off.p.mbMode===false, JSON.stringify({mbOn:off.p.mbOn,mbMode:off.p.mbMode}));
     // The bridge has to still be in the chain, or there is no depth texture to hand the god rays.
     check('the motion pass stays as the scene bridge', off.p.motionPass===true, `motionPass ${off.p.motionPass}`);
+
+    // ---- THE VOLUMETRIC PASS RIDES THE SAME DEPTH TEXTURE (30fa076, Ben's per-light item 6) ----
+    // It was built into the god rays' own slot precisely because it needs _sceneRT.depthTexture as its occluder — a
+    // wall ends the march instead of light pouring through stone. That makes it heir to this exact bug: the setting
+    // that once deleted the shafts would delete the beams too, and it would look like a shader that does not work
+    // rather than a pass that was never built. Its own commit named this as untested; these three lines are the test.
+    console.log(`  volumetric     : pass ON ${on.p.volPass}/depth ${on.p.volDepth}, pass OFF ${off.p.volPass}/depth ${off.p.volDepth}`);
+    check('with the blur on, the volumetric pass is built with depth', on.p.volPass===true && on.p.volDepth===1, JSON.stringify({pass:on.p.volPass,depth:on.p.volDepth}));
+    check('with the blur OFF, the volumetric pass still is', off.p.volPass===true && off.p.volDepth===1, JSON.stringify({pass:off.p.volPass,depth:off.p.volDepth}));
+    // And it must be REACHABLE, not merely present: __hc.vol() answers 'no pass' on Low quality or ?norays, which is
+    // the same string in both cases and would otherwise hide a build failure behind a settings explanation.
+    check('the volumetric dial reaches a real pass in both boots', typeof on.v==='object' && typeof off.v==='object', `on ${JSON.stringify(on.v)} off ${JSON.stringify(off.v)}`);
 
     check('no page errors in either boot', errs.length===0, errs.slice(0,2).join(' | ').slice(0,200));
   } finally { try{ if(browser) await browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }
