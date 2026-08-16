@@ -16319,33 +16319,67 @@ function computeHuntTarget(){
 const scopeRT=new THREE.WebGLRenderTarget(1024,1024,{minFilter:THREE.LinearFilter,magFilter:THREE.LinearFilter});
 const scopeCam=new THREE.PerspectiveCamera(7,1,0.05,FAR*3);                 // narrow FOV = the scope's magnification (lower = more zoom)
 const scopeLensMat=new THREE.ShaderMaterial({ depthTest:true, depthWrite:true,
-  uniforms:{ uScope:{value:scopeRT.texture}, uActive:{value:0} },
+  uniforms:{ uScope:{value:scopeRT.texture}, uActive:{value:0}, uFov:{value:7.78}, uDay:globalU.uDay, uSway:{value:new THREE.Vector2()} },
   vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
   fragmentShader:[
-  'precision highp float; varying vec2 vUv; uniform sampler2D uScope; uniform float uActive;',
+  'precision highp float; varying vec2 vUv; uniform sampler2D uScope; uniform float uActive, uFov, uDay; uniform vec2 uSway;',
   'void main(){',
   '  vec2 c=vUv-0.5; float r=length(c)*2.0;',                       // circle-local: 0 centre → 1 rim
   '  vec3 col=texture2D(uScope, 0.5+c*0.94).rgb;',                 // CLEAN magnified sample — no distortion, no colour tricks
   '  float rim=smoothstep(0.82,1.0,r); col=mix(col, vec3(0.0), rim);',   // only the extreme rim darkens (tube shadow)
-  '  // MIL-DOT RETICLE — fine crosshair with a small centre gap, thickening to bold duplex posts, five mil-dots per arm',
-  '  float aa=0.0016;',
-  '  float lw=0.0032 + smoothstep(0.56,0.74,r)*0.007;',           // thin near centre → bold outer post (duplex)',
+  // ---- A 9-16x RIFLE SCOPE, NOT A CROSSHAIR PAINTED ON A PICTURE (Ben 08-16) ----
+  // FIRST FOCAL PLANE, which is the whole difference and the one thing a screen-space cross cannot fake: the reticle
+  // subtends a fixed ANGLE, so its marks stay worth the same number of mils at every magnification and spread apart on
+  // the glass as you wind the zoom in. One mil is a milliradian; the disc shows the render's full vertical angle, so a
+  // mil is 0.001/fovRad of the disc. At 9x that is about 68 mils across the glass and at 16x about 38 - the ranging
+  // marks mean something, and they visibly change size when the zoom does, which is what tells the eye it is glass.
+  '  float fovR=max(uFov,0.5)*0.017453293;',
+  '  float mil=0.001/fovR;',
+  // THE GLASS ITSELF. Real optics are not a clean crop: colour splits toward the rim where the elements bend the two
+  // ends of the spectrum by different amounts, the image softens off-axis, and the coating leaves a faint cast. All
+  // three are strongest at the edge and absent in the middle, which is where the eye is looking, so they cost nothing
+  // in clarity and they are what separates a lens from a window.
+  '  float ca=0.0016+r*r*0.0075;',
+  '  vec2 sc=0.5+c*0.94;',
+  '  vec3 col2=vec3(texture2D(uScope, sc+c*ca).r, texture2D(uScope, sc).g, texture2D(uScope, sc-c*ca).b);',
+  '  vec3 soft=(texture2D(uScope, sc+vec2(0.0022,0.0)).rgb + texture2D(uScope, sc-vec2(0.0022,0.0)).rgb) * 0.25',
+  '            + (texture2D(uScope, sc+vec2(0.0,0.0022)).rgb + texture2D(uScope, sc-vec2(0.0,0.0022)).rgb) * 0.25;',
+  '  col=mix(col2, soft, smoothstep(0.45,1.0,r)*0.85);',
+  '  col*=mix(1.0, 0.96, smoothstep(0.2,1.0,r));',
+  '  col+=vec3(0.004,0.010,0.008)*smoothstep(0.55,1.0,r);',
+  // THE EYE BOX. At sixteen magnifications the exit pupil is a few millimetres across and the punishment for a head
+  // that is not behind it is a black crescent, not a dimmer picture. uSway is where the eye sits this frame, so the
+  // scallop moves with the rifle rather than sitting still on the glass.
+  '  float eb=smoothstep(0.62,1.02,length(c*2.0 - uSway*0.55));',
+  '  col=mix(col, vec3(0.0), eb);',
+  '  float rim2=smoothstep(0.86,1.0,r); col=mix(col, vec3(0.0), rim2);',   // rim2, not rim: the clean-sample block above already declared one, and a redeclaration is a compile error that would leave the glass black
+  // ---- THE RETICLE: a mil tree, fine wire, duplex posts ----
+  // Fine enough at the centre to shoot with and thick enough at the edge to find in a hurry, which is what a duplex is
+  // for. The wire is drawn in mils so it thins as the zoom goes up, exactly as a first-focal-plane reticle does.
+  '  float lw=mil*0.16 + smoothstep(0.62,0.80,r)*mil*1.9;',
+  '  float aa=mil*0.10;',
   '  float onAxis=max(smoothstep(lw+aa,lw,abs(c.x)), smoothstep(lw+aa,lw,abs(c.y)));',
-  '  onAxis*=smoothstep(0.018,0.026,length(c));',                 // leave a clean aiming gap at dead-centre',
+  '  onAxis*=smoothstep(mil*1.1, mil*1.8, length(c));',
   '  onAxis*=step(r,0.95);',
-  '  col=mix(col, vec3(0.015), onAxis*0.9);',
-  '  float dots=0.0;',
-  '  for(int i=1;i<=5;i++){ float d=float(i)*0.072;',             // evenly-spaced mil-dots up/down/left/right',
-  '    dots=max(dots, smoothstep(0.0125,0.0092,length(c-vec2(d,0.0))));',
-  '    dots=max(dots, smoothstep(0.0125,0.0092,length(c+vec2(d,0.0))));',
-  '    dots=max(dots, smoothstep(0.0125,0.0092,length(c-vec2(0.0,d))));',
-  '    dots=max(dots, smoothstep(0.0125,0.0092,length(c+vec2(0.0,d))));',
+  '  col=mix(col, vec3(0.02), onAxis*0.92);',
+  // Ranging marks every mil, longer every fifth, down the vertical and across the horizontal. This is the part that is
+  // useless as decoration and useful as a tool: five mils at 9x is a different fraction of the glass than five mils at
+  // 16x, and the marks say so.
+  '  float ticks=0.0;',
+  '  for(int i=1;i<=10;i++){ float m=float(i)*mil;',
+  '    float lenT=(i-(i/5)*5==0)? mil*0.85 : mil*0.42;',
+  '    ticks=max(ticks, smoothstep(lw*1.2,lw*0.5,abs(abs(c.y)-m))*smoothstep(lenT,lenT*0.55,abs(c.x)));',
+  '    ticks=max(ticks, smoothstep(lw*1.2,lw*0.5,abs(abs(c.x)-m))*smoothstep(lenT,lenT*0.55,abs(c.y)));',
   '  }',
-  '  dots*=step(r,0.9);',
-  '  col=mix(col, vec3(0.015), dots*0.95);',
-  '  float ctr=smoothstep(0.010,0.006,length(c));',               // tiny RED aiming dot dead-centre',
-  '  col=mix(col, vec3(1.0,0.12,0.06), ctr);',
-  '  col=mix(vec3(0.03,0.06,0.10), col, smoothstep(0.30,0.92,uActive));',   // PiP FADES IN with the raise (adsT) — dark optic until the sight is near the eye, meaningful only near full aim
+  '  ticks*=step(r,0.88);',
+  '  col=mix(col, vec3(0.02), ticks*0.9);',
+  // The illuminated centre, and it behaves like one: a dot of a fixed angular size with a faint halo, brightest when
+  // the light is poor and nearly invisible at noon, because an illuminated reticle you cannot switch off in daylight is
+  // a washed-out aiming point.
+  '  float ctr=smoothstep(mil*0.42, mil*0.20, length(c));',
+  '  float halo=smoothstep(mil*1.6, 0.0, length(c))*0.35;',
+  '  float lit=mix(1.0, 0.45, uDay);',
+  '  col=mix(col, vec3(1.0,0.10,0.05), clamp(ctr+halo*0.5,0.0,1.0)*lit);',
   '  gl_FragColor=vec4(col,1.0);',
   '}'].join('\n') });
 scopeLensMat.customProgramCacheKey=()=>'scopeLens';
@@ -16379,7 +16413,12 @@ function updateScopeRT(){ const _sa=(typeof attOf==='function'&&heldSlot())?(att
     // therefore snaps INTO the range rather than being merely floored, which is why this is a clamp and not a max.
     view.scopeFov = _fs ? clamp(view.scopeFov||7.78, 4.375, 7.78)
                         : Math.max(_bs?1.4:1.4, view.scopeFov||7);
-    scopeCam.fov=view.scopeFov; }
+    scopeCam.fov=view.scopeFov;
+    // The reticle needs the magnification it is being drawn at, and the eye box needs where the rifle is pointing
+    // relative to where it is held - both per frame, both from state that already exists.
+    scopeLensMat.uniforms.uFov.value=view.scopeFov;
+    { const sw=scopeLensMat.uniforms.uSway.value;
+      sw.set((view.swayX||0)*0.6, (view.swayY||0)*0.6); } }
   scopeCam.updateProjectionMatrix();
   const gv=view.group.visible; view.group.visible=false;                                   // keep the rifle OUT of its own scope image
   const pRT=renderer.getRenderTarget(); renderer.setRenderTarget(scopeRT); renderer.clear(); renderer.render(scene,scopeCam); renderer.setRenderTarget(pRT);
