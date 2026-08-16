@@ -38,6 +38,7 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
       for(let i=0;i<40;i++){ const f=await page.evaluate(`__hc.fill()`); if(f&&f.meshed>=f.want) break; await sleep(400); }
       await sleep(2500);
       const r=await page.evaluate(`__hc.rainRoof()`);
+      try{ console.log('      puddles', JSON.stringify(await page.evaluate('__hc.puddles()'))); }catch(e){}
       console.log(`    ${tag}   roofed ${r.roofed}/${r.total} (${r.roofedPct}%)  drawn ${r.drawn}  raining ${r.raining}`);
       await page.screenshot({path:path.join(ROOT,'bench','results','rain-'+tag.replace(/[^a-z0-9]+/gi,'-')+'.png')});
       return r;
