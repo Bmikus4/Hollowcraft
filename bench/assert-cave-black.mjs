@@ -227,7 +227,16 @@ function stat(file,c){
     const cOn=stat(path.join(OUT,'caveblack-chest-on.png'),CHEST);
     console.log(`  chest at night, wash OFF ${JSON.stringify(cOff2)}`);
     console.log(`  chest at night, wash ON  ${JSON.stringify(cOn)}`);
-    check('the wash reaches a non-atlas material', cOff2.sat - cOn.sat > 0.10, `sat ${cOff2.sat} -> ${cOn.sat}`);
+    // ---- RE-AIMED 2026-08-16, AND THE RULE IT ENCODES HAS CHANGED ----
+    // It asserted a 0.10 desaturation on a chest at night, and it has read about 0.055 since the albedo divide
+    // (`22042c4`): the gate stops being albedo-weighted, `_alb` is clamped to [0.05,0.2] and divided out, so MOONLIGHT
+    // now counts as light on a dark prop and a chest on open night ground is washed LESS than it was. That was a
+    // deliberate change and Ben has not asked for it back, so the old number asserts a world that was replaced.
+    //   THE RULE NOW: the wash must still REACH a non-atlas material — a MeshLambert chest is not a voxel-atlas
+    // surface and the whole point of `46381a2` was that it stops being exempt — but the amount it takes is whatever
+    // the albedo divide leaves, not a fixed 0.10. A threshold of 0.03 fails the thing worth catching (the chest going
+    // exempt again, which reads as 0.00) and passes the shipped 0.055 without pretending the old number still holds.
+    check('the wash reaches a non-atlas material', cOff2.sat - cOn.sat > 0.03, `sat ${cOff2.sat} -> ${cOn.sat} (delta ${(cOff2.sat-cOn.sat).toFixed(3)}, floor 0.03)`);
     check('and it does not brighten what it greys', cOn.lum <= cOff2.lum+2.0, `lum ${cOff2.lum} -> ${cOn.lum}`);
 
     check('no page errors and no shader compile errors', errs.length===0, errs.slice(0,2).join(' | ').slice(0,200));
