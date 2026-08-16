@@ -40,7 +40,7 @@ function waitHttp(url,t=15000){ return new Promise((res,rej)=>{ const t0=Date.no
     await sleep(1500);
     const ids=await p.evaluate("__hc.iconList()");
     console.log(ids.length,'items');
-    const done=[]; let failed=0;
+    const done=[], blank=[]; let failed=0;
     // In batches, because a data URL for a 100x100 PNG is ~10 KB and all of them at once is a single CDP message
     // of several megabytes — which is slower than the bake it is carrying.
     for(let i=0;i<ids.length;i+=25){
@@ -48,7 +48,13 @@ function waitHttp(url,t=15000){ return new Promise((res,rej)=>{ const t0=Date.no
       const urls=await p.evaluate(b=>b.map(id=>[id,__hc.iconBake(id)]), batch);
       for(const [id,u] of urls){
         if(!u){ failed++; continue; }
-        fs.writeFileSync(path.join(OUT,id+'.png'), Buffer.from(u.split(',')[1],'base64'));
+        const buf=Buffer.from(u.split(',')[1],'base64');
+        // A BLANK BAKE MUST NOT BECOME A BLANK FILE. Some items render nothing into the icon pass — a plain block
+        // draws from the atlas tile instead — and before the manifest existed that cost nothing, because the game
+        // simply drew them the other way. A file on disk is PREFERRED over that path, so writing an empty PNG would
+        // replace a working icon with a hole. 400 bytes is about the size of a 100x100 fully transparent PNG.
+        if(buf.length<450){ blank.push(id); continue; }
+        fs.writeFileSync(path.join(OUT,id+'.png'), buf);
         done.push(id);
       }
       process.stdout.write('.');
