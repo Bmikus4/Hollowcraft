@@ -172,6 +172,19 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     console.log('scope', JSON.stringify({bare:sc0.scopeActive, fitted:sc1.scopeActive}));
     T('a fitted scope drives the magnified pass', sc1.scopeActive>0 && sc0.scopeActive===0, {bare:sc0.scopeActive, fitted:sc1.scopeActive});
 
+    // THE FOREGRIP DOES SOMETHING TO THE GUN'S HANDLING. tmp-recoil's own trick is used here: pitch is reset between
+    // bursts, because recoil in this game CLIMBS AND STAYS and a second burst measured on top of the first runs into
+    // the look clamp and reports zero.
+    const burst=async()=>{ await p.evaluate("__hc.aim(false)"); const r=await p.evaluate("__hc.handFire('main',8,'ar15')"); return r.camClimb; };
+    await p.evaluate("__hc.handFire('main',1,'ar15')"); await sleep(300);   // hand the harness its gun BEFORE anything is fitted to it
+    await p.evaluate("__hc.hold('ar15'); __hc.attFit('grip',null)"); await sleep(400);
+    const climbBare=await burst();
+    await p.evaluate("__hc.attFit('grip','foregrip')"); await sleep(400);
+    const climbGrip=await burst();
+    await p.evaluate("__hc.attFit('grip',null)"); await sleep(200);
+    console.log('recoil', JSON.stringify({bare:climbBare, grip:climbGrip}));
+    T('a foregrip takes the climb down', Math.abs(climbGrip) < Math.abs(climbBare)*0.9, {bare:climbBare, grip:climbGrip});
+
     // EVERY GUN, NOT JUST THE ONE WITH AN AUTHORED MOUNT. The rail plane is derived from each gun's own rear-sight
     // root, so this is the check that the derivation holds across the rack: an optic that lands under the receiver
     // line or a metre down the barrel is a mount that needs authoring, and this names which gun.
