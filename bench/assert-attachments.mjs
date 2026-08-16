@@ -153,6 +153,15 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     console.log('lamp', JSON.stringify(lamp));
     T('a fitted weapon light lights the world', lamp.fitted>0 && lamp.bare===0, lamp);
 
+    // THE LASER DRAWS A BEAM. Geometry down the bore rather than a per-frame march: the world occludes it, which is
+    // both how it terminates and why it costs one draw call.
+    await p.evaluate("__hc.hold('ar15'); __hc.attFit('laser',null)"); await sleep(400);
+    const lz0=await p.evaluate("__hc.attProbe()");
+    await p.evaluate("__hc.attFit('laser','laser_sight')"); await sleep(400);
+    const lz1=await p.evaluate("__hc.attProbe()");
+    console.log('laser', JSON.stringify({bare:lz0.laser, fitted:lz1.laser, lit:lz1.laserLit}));
+    T('a fitted laser has a beam', lz1.laser===true && lz0.laser===false, {bare:lz0.laser, fitted:lz1.laser});
+
     // EVERY GUN, NOT JUST THE ONE WITH AN AUTHORED MOUNT. The rail plane is derived from each gun's own rear-sight
     // root, so this is the check that the derivation holds across the rack: an optic that lands under the receiver
     // line or a metre down the barrel is a mount that needs authoring, and this names which gun.
