@@ -69,6 +69,9 @@ async function boot(b, base, tag){
     // HER FOOT LANDS FOR EVERYONE. The impact crosses the wire and each client resolves it against its own player,
     // so a guest standing where the sole comes down takes the blow the owner's player would have taken. Driven from
     // the probe rather than by waiting for her to choose a stomp, which she only does within reach of HER target.
+    // HEAL FIRST: she has been walking the guest down for the whole run and a dead player takes no blow at all —
+    // the first version of this check read 0 -> 0 and called it a failure of the stomp.
+    await B.evaluate("__hc.cmdRun('/heal 20')"); await sleep(400);
     const hurt=await B.evaluate("(()=>{ const h0=__hc.vitals?__hc.vitals().health:null; __hc.girlStompAt&&__hc.girlStompAt();"+
       "return {h0}; })()").catch(()=>null);
     if(hurt){ await sleep(900);
