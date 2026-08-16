@@ -34,16 +34,19 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:300000});
     await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:420000});
     await page.evaluate(`__hc.lock(true); __hc.cmdRun('/gamemode creative'); __hc.freezeAnimals(true);`);
-    // FIND REAL WATER RATHER THAN ASSUMING THE SEA IS WHERE SPAWN IS. A bench standing on a beach measures a
-    // walking player and reports the swim as broken.
-    const sea=await page.evaluate(`(()=>{ const S=__hc.st(); const sx=Math.round(S.sx), sz=Math.round(S.sz);
-      for(let r=8;r<=260;r+=8) for(let a=0;a<24;a++){
+    // FIND REAL WATER BY STANDING IN IT, not by reading a height off the terrain. Sea level is a number the game
+    // knows and the shoreline is not: a column whose ground is below sea level can still be a cave, an overhang or
+    // a beach the generator raised after the fact. Teleporting in and asking inWater is the ground truth, and it is
+    // the same predicate the physics itself branches on.
+    const SEA=(await page.evaluate(`__hc.swimProbe()`)).sea;
+    const sea=await page.evaluate(`(()=>{ const S=__hc.st(), sea=__hc.swimProbe().sea;
+      const sx=Math.round(S.sx), sz=Math.round(S.sz);
+      for(let r=8;r<=300;r+=8) for(let a=0;a<24;a++){
         const x=Math.round(sx+Math.cos(a*Math.PI/12)*r), z=Math.round(sz+Math.sin(a*Math.PI/12)*r);
-        const g=__hc.groundY(x,z); if(g>0 && g<__hc.st().sea-3) return {x,z,g}; }
+        const g=__hc.groundY(x,z); if(g>0 && g<sea-3) return {x,z,g}; }
       return null; })()`).catch(()=>null);
-    check('open water was found to swim in', !!sea, JSON.stringify(sea));
+    check('open water was found to swim in', !!sea, JSON.stringify({sea,SEA}));
     if(!sea) throw new Error('no water near spawn');
-    const SEA=await page.evaluate(`__hc.st().sea`);
     const dive=async()=>{ await page.evaluate(`__hc.swimStop(); __hc.tpAt(${sea.x}.5, ${SEA-2}, ${sea.z}.5)`); await sleep(700);
       return await page.evaluate(`__hc.swimProbe()`); };
     let P=await dive();
