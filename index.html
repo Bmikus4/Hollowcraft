@@ -6770,6 +6770,188 @@ const _uPineFog=new THREE.Color(0.1,0.13,0.2), _stormBlue=new THREE.Color(0.09,0
 // ridged ranges at different distances, the far one mixed much harder toward the sky. The depth was in the aerial
 // perspective and not in the geometry — a single ridge silhouette reads as a cut-out whatever shape it is given.
 // =====================================================================
+//  THE COAST PINES — the coastline running on past the render wall (Ben 08-12)
+// =====================================================================
+// WHAT THEY ARE FOR, in his words: "the skybox pines purpose is to make the coast look like it extends well beyond the
+// render distance". That is a stronger brief than the one the scrapped version was built to, and it changes the shape
+// of the answer. Hiding the render wall only needs something standing AT the wall; making the COAST run on needs land
+// that keeps going out there — headlands, bays, and a treeline that recedes — so what is drawn is a coastline at three
+// distances rather than a ring of trees at one.
+//
+// AND THE TREES ARE THE GAME'S OWN TREES ("hyperrealistic recreations of the trees"). Every number in the silhouette is
+// read off the generator rather than chosen: _pineShape builds an 18-to-31 block conical conifer, pineAt plants about
+// one column in ten, and a canopy reaches PINE_MAXR = 10, so crowns stand roughly seven blocks apart. Because those are
+// WORLD units projected at a known distance, the far band's crowns come out finer than the near band's by arithmetic
+// instead of by a hand-tuned frequency. That is the whole of the hyperrealism here: the backdrop is the same forest,
+// further away.
+//
+// WHERE THE LAND COMES FROM PAST THE ISLAND. surfaceH IS the island — a radial falloff sinks everything past ISLE_R —
+// so sampling it beyond the coast returns open sea and there is no coast to continue. _openH is that same terrain with
+// the one falloff removed: identical noise, identical constants, identical character, so the continent carries on for
+// ever with the island's own ridges and inlets. Five noise calls per sample, no chunks, deterministic — which is what
+// makes the far coast a PLACE. It lies on the same bearing every time you look at it, and it moves in parallax against
+// the near band because the two are genuinely at different distances.
+// Its mountain term is dropped and its profile capped, deliberately: Ben wants "hyperrealistic mountains INLAND ONLY",
+// and those are a separate job he wants to build with me.
+//
+// THE THREE THINGS THE SCRAPPED VERSION GOT RIGHT, kept whole: anchored to the WALL DISTANCE and not to the camera or
+// to the island; hazed with the TERRAIN'S OWN fog term evaluated at that distance rather than a colour chosen by eye;
+// and the far band mixed much harder toward the air than the near one, because the depth is in the aerial perspective
+// and not in the geometry — a single ridge silhouette reads as a cut-out whatever shape it is given.
+const _CPN=192;                                     // azimuth steps
+const _CP_BAND=[1.0, 2.3, 4.6];                     // per-layer distance, in render walls
+const _cpData=new Uint8Array(_CPN*3*4);
+const _cpTex=new THREE.DataTexture(_cpData,_CPN,3,THREE.RGBAFormat);
+_cpTex.wrapS=THREE.RepeatWrapping; _cpTex.minFilter=_cpTex.magFilter=THREE.LinearFilter; _cpTex.needsUpdate=true;
+// The island's terrain with the island taken out of it. The constants are copied from surfaceH rather than factored out
+// of it on purpose: surfaceH is the hottest function in the generator and is not paying for a branch so this can share
+// it. If its noise ever changes, this has to change with it or the far coast stops being the same country.
+function _openH(wx,wz){
+  const wxo = wx + 34*fbm2(wx*0.0041, wz*0.0041, 701, 4);
+  const wzo = wz + 34*fbm2(wx*0.0041+11.3, wz*0.0041+7.7, 733, 4);
+  const cont = fbm2(wxo*0.0015, wzo*0.0015, 11, 5);
+  const ero  = fbm2(wxo*0.0060, wzo*0.0060, 23, 4);
+  const rdg  = ridged(wxo*0.0075, wzo*0.0075, 37, 5);
+  const elev = CFG.SEA + 2 + cont*24 + (rdg-0.4)*30*smooth(0.15,0.6,cont+0.3) - ero*7;
+  return Math.min(elev, CFG.SEA+34);                // a coast, not a range
+}
+let _cpLastX=1e9, _cpLastZ=1e9, _cpLastRD=-1;
+function _coastPineMask(){
+  const px=camera.position.x, pz=camera.position.z, wall=CFG.RENDER_DIST*CK;
+  // Recomputed on MOVEMENT, not on a schedule: the mask is a function of where you stand and how far you see, and at
+  // the horizon 24 blocks of parallax is under a pixel. 192 azimuths x 3 bands x 6 samples is ~3500 heightfield calls —
+  // a few milliseconds once every couple of hundred blocks, and a stutter every frame.
+  if(Math.abs(px-_cpLastX)+Math.abs(pz-_cpLastZ) < 24 && CFG.RENDER_DIST===_cpLastRD) return;
+  _cpLastX=px; _cpLastZ=pz; _cpLastRD=CFG.RENDER_DIST;
+  const SEA=CFG.SEA;
+  for(let b=0;b<3;b++){
+    const d0=wall*_CP_BAND[b], step=(b===0?26:d0*0.16);
+    for(let i=0;i<_CPN;i++){
+      const az=(i/_CPN)*6.2831853-3.14159265, dx=Math.cos(az), dz=Math.sin(az);
+      let forest=0, hSum=0, hN=0;
+      for(let k=0;k<6;k++){
+        const r=d0-step*1.5+step*k, x=px+dx*r, z=pz+dz*r;
+        // The NEAR band reads the REAL island, so the backdrop lines up with the forest whose edge you can actually see
+        // at the wall; the far bands read the open continent, which is the coast that is supposed to be out past
+        // everything. The same tree-capability gate isGrassSurface applies to real pines: above the beach, below the
+        // bare rock, so no trees stand where none could grow.
+        const h = b===0 ? surfaceH(Math.round(x), Math.round(z)) : _openH(x,z);
+        if(h>SEA+4 && h<SEA+38){ forest++; hSum+=h; hN++; }
+      }
+      const vis=forest/6, gh=hN?hSum/hN:(SEA+6);
+      const o=(b*_CPN+i)*4;
+      _cpData[o]=Math.round(clamp(vis,0,1)*255);
+      _cpData[o+1]=Math.round(clamp(gh/WH,0,1)*255);
+      // The canopy TAPERS where the land thins, so a headland ends by descending into the water instead of being cut
+      // off vertically. This is the one read kept whole from the scrapped version: the last trees have to slip under
+      // the horizon or the run ends on a wall (Ben 07-20).
+      _cpData[o+2]=Math.round(clamp(vis*vis*1.35,0,1)*255);
+      _cpData[o+3]=255;
+    }
+  }
+  _cpTex.needsUpdate=true;
+}
+const _uCoastPine={ value:new THREE.Color(0.034,0.090,0.029) };   // PINE_GREEN, the approved treeline green; driven by the hour below
+const _uCoastAir ={ value:new THREE.Color(0.6,0.68,0.76) };
+const _cpU={ uMask:{value:_cpTex}, uPine:_uCoastPine, uAir:_uCoastAir, uFogCol:{value:_uPineFog}, uFogD:{value:0.01},
+  uWall:{value:CFG.RENDER_DIST*CK}, uCamY:{value:CFG.SEA+2}, uWx:{value:0}, uDay:globalU.uDay,
+  uSunXZ:{value:new THREE.Vector2(1,0)}, uSunUp:{value:0}, uSunCol:globalU.uSunCol,
+  uFogMul:{value:0.55}, uGain:{value:0.42}, uScotG:{value:_scotG}, uScotH:{value:_scotH} };
+const coastPineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, side:THREE.BackSide, fog:false,
+  uniforms:_cpU, vertexShader:_horizVert, fragmentShader:[
+  'precision highp float; varying vec3 vPos;',
+  'uniform sampler2D uMask; uniform vec3 uPine, uAir, uFogCol, uSunCol; uniform vec2 uSunXZ;',
+  'uniform float uFogD, uWall, uCamY, uWx, uDay, uSunUp, uFogMul, uGain; uniform vec4 uScotG, uScotH;',
+  'float hash(float n){ return fract(sin(n)*43758.5453); }',
+  'float nz(float x){ float i=floor(x), f=fract(x); return mix(hash(i),hash(i+1.0),f*f*(3.0-2.0*f)); }',
+  'void main(){',
+  '  vec3 d=normalize(vPos); float elev=d.y; float az=atan(vPos.z,vPos.x);',
+  '  float u=(az+3.14159265)/6.2831853;',
+  '  vec3 outc=vec3(0.0); float outa=0.0;',
+  // FAR TO NEAR, so a nearer coast paints over the one behind it — which is also the only ordering in which the
+  // aerial-perspective haze reads as distance instead of as a wash.
+  '  for(int b=2; b>=0; b--){',
+  '    vec4 m=texture2D(uMask, vec2(u, (float(b)+0.5)/3.0));',
+  '    if(m.r<0.10) continue;',
+  '    float dist=uWall*(b==0?1.0:(b==1?2.3:4.6));',
+  '    float haze=(b==0?0.0:(b==1?0.38:0.66));',
+  '    float gnd=m.g*WORLD_H-uCamY;',
+  '    float hs=m.b;',
+  // ---- THE TREES, IN WORLD UNITS ----
+  // Crowns every ~7 blocks subtend 7/dist radians at this band. TWO crown series half a period apart, taken as a max,
+  // because real canopies overlap: one series alone is a picket fence.
+  '    float f=dist/7.0;',
+  '    float c1=nz(az*f), c2=nz(az*f+37.7);',
+  '    float p1=fract(az*f), p2=fract(az*f+0.5);',
+  '    float cone1=1.0-abs(p1*2.0-1.0), cone2=1.0-abs(p2*2.0-1.0);',
+  // The generator's own envelope, 18 + 0..13 blocks, scaled by the taper. The stand term is the slow one: whole stands
+  // stand taller than their neighbours, which is what stops a treeline reading as a comb.
+  '    float stand=nz(az*(dist/40.0))*0.5+0.5;',
+  '    float h1=(18.0+13.0*c1)*(0.75+0.5*stand), h2=(18.0+13.0*c2)*(0.75+0.5*stand);',
+  '    float tip=max(h1*(0.42+0.58*cone1), h2*(0.42+0.58*cone2))*hs;',
+  '    if(tip<1.0) continue;',
+  '    float base=gnd/dist;',
+  '    float top=(gnd+tip)/dist;',
+  // The skirt runs BELOW the ground line. Real terrain and the sea stand in front of this band and win the depth test,
+  // so a generous underhang costs nothing and guarantees no sliver of sky between the trees and the water.
+  '    float bottom=base-0.28;',
+  '    if(elev>top || elev<bottom) continue;',
+  '    float t=clamp((elev-base)/max(top-base,1e-5),0.0,1.0);',
+  // ---- AND THE LIGHT ON THEM ----
+  // A treeline is not a flat colour: the side of the wood facing the sun is lit, the side facing away is a silhouette
+  // with a rim. uSunXZ is the sun's bearing, so this is the same light the trees in front of it take, resolved per
+  // azimuth instead of per fragment normal.
+  '    float face=clamp(-dot(normalize(vec2(d.x,d.z)), uSunXZ), -1.0, 1.0);',
+  '    float lit=clamp(face,0.0,1.0)*uSunUp;',
+  '    float per=0.62+0.44*nz(az*f*3.1);',
+  '    vec3 col=uPine*per*(0.58+0.55*t)*uGain;',
+  '    col*=mix(0.66, 1.5, lit);',
+  '    col+=uSunCol*0.16*pow(clamp(-face,0.0,1.0),3.0)*uSunUp*smoothstep(0.55,1.0,t);',
+  '    col*=mix(1.0,0.34,1.0-smoothstep(0.0,0.14,t));',
+  // ---- FOG, WEATHER, AND THE AIR IT STANDS IN ----
+  // The haze is the terrain's own exp2 fog evaluated at this band's distance, never a colour picked by eye: every
+  // version that picked its own read as a sticker on the sky. On top of it the band is mixed toward the air by its
+  // distance, which is the aerial perspective the scrapped mountains left behind as their one finding.
+  '    float fg=1.0-exp2(-uFogD*uFogD*dist*dist*1.442695);',
+  '    col=mix(col, uFogCol, clamp(fg*uFogMul,0.0,0.94));',
+  '    col=mix(col, uAir*mix(0.30,0.86,uDay), haze);',
+  '    float a=smoothstep(0.10,0.30,m.r)*clamp(1.0-uWx*1.25,0.0,1.0);',
+  '    outc=mix(outc, col, a); outa=max(outa, a);',
+  '  }',
+  '  if(outa<0.004) discard;',
+  // The same scotopic wash the land and the sea take, by reference to the same vectors, so the treeline desaturates
+  // into night with the wood in front of it instead of holding its daylight chroma.
+  '  { float _nw=1.0-smoothstep(uScotG.y,uScotG.z,uScotG.w);',
+  '    float _nl=dot(outc, vec3(0.2126,0.7152,0.0722));',
+  '    outc=mix(outc, vec3(_nl), uScotG.x*_nw); }',
+  '  gl_FragColor=vec4(outc, outa);',
+  '}'].join('\n').replace(/WORLD_H/g, WH.toFixed(1)) });
+// A CHILD OF oceanLayer, and not for tidiness: that mesh already follows the camera position without rotating, and a
+// dozen places in this file hide it for the menu diorama, the Backrooms, the peel and the death void. A child inherits
+// every one of them. renderOrder -5 puts it over the ocean band and under the terrain.
+const coastPines=new THREE.Mesh(_horizGeo, coastPineMat);
+coastPines.frustumCulled=false; coastPines.renderOrder=-5; oceanLayer.add(coastPines);
+let _cpWant=!(Q.get('pines')==='0');
+function updateCoastPines(){
+  coastPines.visible=_cpWant;
+  if(!_cpWant) return;
+  _coastPineMask();
+  const day=globalU.uDay.value;
+  _cpU.uWall.value=CFG.RENDER_DIST*CK;
+  _cpU.uCamY.value=camera.position.y;
+  _cpU.uFogD.value=scene.fog?scene.fog.density:0.01;
+  _cpU.uWx.value=(typeof weather!=='undefined'?(weather.fog||0):0);
+  // The canopy green goes down with the hour exactly as real foliage does — the same 0.10..1.0 ramp _uPineFog carries —
+  // so the backdrop and the wood in front of it sink into the night together. That parity is why both used to be
+  // derived from one expression, and it is the artefact if they ever drift.
+  const dim=0.10+0.90*day;
+  _uCoastPine.value.setRGB(0.034*dim, 0.090*dim, 0.029*dim);
+  _uCoastAir.value.copy(scene.fog?scene.fog.color:_uPineFog);
+  { const sd=globalU.uSunDir.value, L=Math.hypot(sd.x,sd.z)||1;
+    _cpU.uSunXZ.value.set(sd.x/L, sd.z/L);
+    _cpU.uSunUp.value=Math.max(0, Math.min(1, (sd.y+0.02)/0.18))*day; }
+}
+// =====================================================================
 //  THE THREE.JS OCEAN (webgl_shaders_ocean), Ben 08-12: "redo water shader and texture using the one I showed you"
 // =====================================================================
 // This is the example's own Water: a flat mirror plus a scrolling normal map. What it brings that our shader cannot is
@@ -10239,6 +10421,12 @@ function updateFlashlight(t){
   let px, py, pz;
   if(_tpsAct && _tpsBody && _tpsBody.group.visible){ px=_tpsHandW.x; py=_tpsHandW.y; pz=_tpsHandW.z; }
   else { px=camera.position.x + m[0]*0.30*side; py=camera.position.y-0.18 + m[1]*0.30*side; pz=camera.position.z + m[2]*0.30*side; }
+  // AND IT SITS IN FRONT OF THE TORCH IT IS COMING OUT OF (Ben 08-12: "flashlights light up the whole flashlight
+  // item when they are on"). The lamp was placed at the held model's own position, so a 150-intensity source was
+  // inside the viewmodel and every face of it read as white. A spot lights nothing behind its own origin, so moving
+  // the origin a hand's length down the beam puts the whole item behind the lamp. The pool moves 45 cm further out,
+  // which at the range a beam is read is not a difference anyone can see.
+  px+=dx*0.45; py+=dy*0.45; pz+=dz*0.45;
   flashLight.position.set(px,py,pz);
   flashLight.target.position.set(px+dx*8, py+dy*8, pz+dz*8);
   flashLight.target.updateMatrixWorld();
@@ -11203,7 +11391,8 @@ function updateSky(dt){
   // hide the SKY behind the fog (and fade it back gradually as the bank clears)
   fogShell.position.copy(camera.position); fogShell.material.color.copy(fc);
   const fo=Math.min(0.985, wf*1.25); fogShell.material.opacity=fo; fogShell.visible=fo>0.01;
-  updateHorizon();                                                                          // 2-layer island horizon (ocean seaward / pines landward)
+  updateHorizon();
+  updateCoastPines();                                                                        // the coast running on past the render wall — see THE COAST PINES                                                                          // 2-layer island horizon (ocean seaward / pines landward)
   // THE OCEAN MAY NOT BE ABLE TO KILL THE SKY. This call sits INSIDE updateSky, so anything it throws aborts every
   // line of sky work after it — the dome stops being moved to the camera and stops being given the hour, which reads
   // as a sky that is correct on load and then goes fog-grey by day and black at night, exactly what Ben reports. The
@@ -19396,7 +19585,14 @@ const WORN_SHELL={leather_chestplate:{model:'misc/armor-leather',yaw:0}, iron_ch
 // 0.14 and 0.86 put the hem near the belt and give the leather somewhere to hang.
 // The GRID size was already 3x3 and the inventory icon is auto-fitted to its frame (icon3DURL scales the model to 0.95
 // of the tile whatever its own size), so neither of those was ever the thing to change.
-const WORN_CLEAR=0.14, WORN_COVER=0.86;   // how far the shell stands off the torso, and how much of the torso's height a cuirass covers
+// BIGGER AGAIN, AND IT CAPS THE SHOULDERS (Ben 08-12: "iron and leather chestpieces are too small, and not centered
+// on the players body, with the cuffs over the shoulders"). 0.14/0.86 still fitted inside the torso box and hung
+// under the shoulder line, so the shell read as a small panel on the chest with the pauldron cuffs floating below
+// the joints they belong on. Standing off 0.26 and covering the torso's whole height is what makes it a garment the
+// body is inside rather than a plate laid on it, and the collar goes ABOVE the shoulder line so the cuffs sit over
+// the shoulders instead of beneath them.
+const WORN_CLEAR=0.26, WORN_COVER=1.00;   // how far the shell stands off the torso, and how much of the torso's height a cuirass covers
+const WORN_COLLAR=0.05;                   // how far the collar rides ABOVE the shoulder line - this is what puts the cuffs on the shoulders
 function _wornShellMesh(id,torso){
   const spec=WORN_SHELL[id]; if(!spec||typeof glbHas!=='function'||!glbHas(spec.model)) return null;
   let m=null; try{ m=glbBuild(spec.model,{style:(nm,mat)=>({color:_glbLift(mat.color,1.0)})}); }catch(e){ return null; }
@@ -19405,7 +19601,8 @@ function _wornShellMesh(id,torso){
   const bb=new THREE.Box3().setFromObject(w), sz=bb.getSize(new THREE.Vector3()), ctr=bb.getCenter(new THREE.Vector3());
   const s=Math.max((torso.w+WORN_CLEAR)/(sz.x||1), (torso.h*WORN_COVER)/(sz.y||1), (torso.d+WORN_CLEAR)/(sz.z||1));
   w.scale.setScalar(s); w.position.set(-ctr.x*s,-ctr.y*s,-ctr.z*s);          // centred on its own bounds, the same treatment buildGlbItem gives the held one
-  const g=new THREE.Group(); g.add(w); g.position.y=torso.top-0.02-sz.y*s/2;  // the collar lands just under the shoulder line, whatever the model's proportions are
+  const g=new THREE.Group(); g.add(w); g.position.y=torso.top+WORN_COLLAR-sz.y*s/2;   // collar above the shoulder line, whatever the model's proportions are
+  g.position.x=0; g.position.z=0;                                             // centred on the BODY, never on the model's own off-centre bounds
   g.traverse(o=>{ o.userData.keepColor=true; if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
   return g;
 }
@@ -22490,21 +22687,12 @@ function setViewItem(id){ if(view.id===id)return; view.id=id;
   else if(it.tool && TOOL_BUILDERS[it.tool.kind]){   // SAME builder table itemModel uses — only the POSE is the viewmodel's own
     const P=TOOL_POSE[it.tool.kind]||TOOL_POSE.pickaxe, grp=new THREE.Group(), tm=TOOL_BUILDERS[it.tool.kind](it.tool);
     tm.position.set(P.x,P.y,0); grp.add(tm); grp.scale.setScalar(P.s); grp.rotation.set(P.rx,0.18+Math.PI/2,P.rz); view.mesh=grp;
-    // A TOOL IS HELD BY A HAND, the same one every gun gets (Ben 08-12: "none of the tool items are held in the
-    // players hand"). Every builder puts the GRIP AT THE MODEL'S ORIGIN — buildGlbTool slides the measured grip
-    // point there and the procedural ones are built from the hand up — so the grip that attachGunHand solves for is
-    // the origin, and the arm rides the pose because it hangs off the tool rather than off the camera.
-    if(typeof attachGunHand==='function'){
-      // THE ARM GOES OUTSIDE THE POSE, NOT INSIDE IT. attachGunHand runs the forearm back along +z toward the
-      // shoulder, and that direction is only "backwards" in the VIEW's space — hung inside the tool group it is
-      // turned by the pose's own 100 degrees of yaw and the elbow swings out across the screen instead of behind
-      // the eye. So the tool group is wrapped, the grip is transformed up into the wrapper, and the arm is solved
-      // there.
-      const outer=new THREE.Group(); outer.add(grp);
-      const gp=new THREE.Vector3(P.x,P.y+0.03,0).multiplyScalar(P.s).applyEuler(grp.rotation);
-      outer.userData.gripAt=[gp.x,gp.y,gp.z];
-      attachGunHand(outer,1);
-      view.mesh=outer; } }   // handle-bottom near the pivot → swings from the base (1.5x bigger in hand)
+    // NO HAND ON A TOOL YET (Ben 08-12: "none of the tool items are held in the players hand"). attachGunHand solves
+    // for an arm whose forearm runs back past the eye, and that only works because a gun's grip sits a few
+    // centimetres in front of the camera. TOOL_POSE puts the haft 0.30 out and yaws the whole tool 100 degrees, so
+    // the grip lands off to the side and the same arm crosses the frame as a beam — tried, photographed, reverted.
+    // What this needs is a grip authored per tool off its own haft, which is a pose pass, not a hand attachment.
+  }   // handle-bottom near the pivot → swings from the base (1.5x bigger in hand)
   // THE VIEWMODEL IS A SECOND DISPATCH, and this is the branch that proves it matters: itemModel already returned a real
   // 3D shell for the drop and a peer's hand, and the held form still came out as the flat extruded sprite because THIS
   // list never heard about it. Adding a model to itemModel alone changes nothing you can see in your own hands.
@@ -38977,6 +39165,12 @@ window.__hc={
   // the frame goes wrong is a different fault from one where both are flat.
   // QA/bench: what the shared-uniform guard has caught this session, newest last. Empty is the healthy answer.
   nanWatch(){ try{ return { hits:_uniHits.slice(), watched:_uniShadow.size, frames:_uniFrame }; }catch(e){ return { err:String(e.message||e) }; } },
+  // QA/bench + the A/B: the coast pines on or off, and their dials. ?pines=0 is the same switch at load.
+  pines(v,o){ try{ if(v!=null) _cpWant=!!v;
+      if(o){ if(o.gain!=null) _cpU.uGain.value=+o.gain; if(o.fogMul!=null) _cpU.uFogMul.value=+o.fogMul;
+             if(o.force) { _cpLastX=1e9; _cpLastZ=1e9; } }
+      return { on:_cpWant, gain:_cpU.uGain.value, fogMul:_cpU.uFogMul.value, wall:_cpU.uWall.value }; }
+    catch(e){ return String(e.message||e); } },
   gpuInfo(){ try{ const I=renderer.info; const h=(performance.memory)?+(performance.memory.usedJSHeapSize/1048576).toFixed(1):null;
     return { calls:I.render.calls, tris:I.render.triangles, geo:I.memory.geometries, tex:I.memory.textures,
              prog:(I.programs||[]).length, heapMB:h }; }catch(e){ return { err:String(e.message||e) }; } },
