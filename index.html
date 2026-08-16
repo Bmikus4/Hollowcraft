@@ -18460,8 +18460,44 @@ function placeWretch(dt,moving){
   // the output, sampled where the position is written, so a probe can put movement and pose side by side ON THE SAME
   // FRAME instead of inferring one from the other.
   if(dt>1e-4){ const _p=wretch._mvLast;
-    if(_p) wretch._mvSpeed=Math.hypot(wretch.pos.x-_p.x, wretch.pos.z-_p.z)/dt;
+    if(_p){ const _d=Math.hypot(wretch.pos.x-_p.x, wretch.pos.z-_p.z);
+      // A TELEPORT IS NOT TRAVEL. blink, yank, the crypt drop and every QA hook move the body a long way in one frame; scored as
+      // speed they read as 300 blocks/s and would both fake a violation and force a pose the creature never ran into. Over 3
+      // blocks in a frame is not locomotion at any speed this creature has, so the sample is discarded rather than believed.
+      wretch._mvTp = (_d>3);
+      wretch._mvSpeed = wretch._mvTp ? 0 : _d/dt; }
     wretch._mvLast={x:wretch.pos.x,z:wretch.pos.z}; }
+  // RUNNING IS ALWAYS ON ALL FOURS, ENFORCED WHERE EVERY PATH PASSES. Ben, three times now, most recently 08-16: "the wretch is
+  // still running at the player without being in his animation, this needs to be fixed once and for all".
+  //   Why the previous statement of this same rule did not hold. It lived at the foot of updateWretch's main body and it was keyed
+  // on _advRate. Both halves leak. updateWretch RETURNS EARLY for the drag, the grab scenes, the intimidation run, the ambient
+  // vignettes, the crypt descent, the daytime lurk, the boss and — in co-op — for every guest, so none of those frames ever reached
+  // the rule. And _advRate is not a measurement: eleven branches assign it by hand (`wretch._advRate=8` in the intimidate run,
+  // `=6`, `=3`, `=0`), so a branch that sprints while declaring 0 is exempt from a rule that exists to catch it.
+  //   placeWretch is the one function every one of those paths calls, and _mvSpeed above is the ground the body actually covered.
+  // Stating it here means a branch cannot opt out by returning early and cannot opt out by lying about its speed. The exclusions are
+  // the scripted poses that own the rig outright — a drag, a scoop, a vigil, a parked creature — and they are excluded from the
+  // audit for the same reason, so the counter below only ever counts free locomotion.
+  wretch._poseFree = !wretch.dragging && !player.grabbed && !wretch._scooping && !wretch._vigAct && !wretch._park
+                     && !wretch.boss && wretch.active && !wretch._mvTp;
+  if(wretch._poseFree && (wretch._mvSpeed||0)>5){
+    // THE AUDIT RUNS BEFORE THE CORRECTION, so it sees the frame as the branch left it. Counting after the fix would report zero
+    // forever and prove nothing — which is exactly how a bench can pass while the player still sees it.
+    if(((wretch.crawl||0)-0.45)/0.55 < 0.5){
+      // THE GRACE IS THE DIVE, and it is why this counts TIME rather than frames. The correction below is a ramp, so the first
+      // fifth of a second of any sprint is legitimately fast and not yet down — that is the creature throwing itself forward, and
+      // counting it would make the bench unpassable by any fix that does not snap the pose, which looks worse than the bug. What
+      // Ben sees is not three frames; it is a creature that crosses a clearing at you upright. So a violation is fast-and-upright
+      // SUSTAINED past the ramp, and 0.30s is comfortably longer than the 0.20s the ramp needs from a dead stop.
+      wretch._poseBadT=(wretch._poseBadT||0)+dt;
+      if(wretch._poseBadT>0.30){
+        wretch._poseViolN=(wretch._poseViolN||0)+1;
+        (wretch._poseViol=wretch._poseViol||[]).push({mv:+(wretch._mvSpeed).toFixed(2), crawl:+(wretch.crawl||0).toFixed(3), badT:+wretch._poseBadT.toFixed(2),
+          state:wretch.state, gp:wretch.grabPhase, intim:!!wretch._intim, vig:!!wretch._vig, net:!!(NET.on&&wretchOwner()!==NET.id), t:+(wretch.phase||0).toFixed(2)});
+        if(wretch._poseViol.length>40) wretch._poseViol.shift(); }
+    } else wretch._poseBadT=0;
+    wretch.crawl=Math.min(1,(wretch.crawl||0)+dt*6);   // ~0.2s to the full gallop: reads as diving forward, not as a snap
+  } else wretch._poseBadT=0;
   // NaN recovery: if any pathing/ground math produced a bad position, don't let it thrash the
   // rig (visual spasm) or leak into the audio panner — respawn cleanly instead.
   if(!(Number.isFinite(wretch.pos.x)&&Number.isFinite(wretch.pos.y)&&Number.isFinite(wretch.pos.z))){ despawnWretch(true); return; }
@@ -40420,6 +40456,23 @@ window.__hc={
       parts.sort((a,b)=>Math.max(b.w,b.h,b.d)-Math.max(a.w,a.h,a.d));
       return { id, box:[+sz.x.toFixed(3),+sz.y.toFixed(3),+sz.z.toFixed(3)], parts:parts.slice(0,4) }; });
     }catch(e){ return {err:String(e.message||e)}; } },
+  // WHAT IS THE ARMOUR MADE OF, AND HOW BIG IS IT? "Texture all armor" is checkable — a piece either carries a map
+  // or it does not — and "bigger" is a measurement against the body it is worn on. Walks the third-person body's own
+  // armour groups AND their limb parts, because a sleeve rides the arm and a boot rides the leg: a check that only
+  // looked at the group would call a fully-textured set half-done.
+  armorProbe(id){ try{ const P=(typeof _tpsBody!=='undefined')?_tpsBody:null; if(!P) return {err:'no body built'};
+      if(id){ armor[ITEMS[id]&&ITEMS[id].armor?ITEMS[id].armor.slot:1]={id,n:1}; if(typeof updateArmorView==='function')updateArmorView(); }
+      const out=[]; const names=['helm','chest','legs','boots'];
+      for(let i=0;i<4;i++){ const g=P.armorMesh[i]; if(!g) continue;
+        const parts=[]; const push=(o)=>{ if(o&&o.isMesh&&o.material&&!Array.isArray(o.material)) parts.push(o); };
+        g.traverse(push); for(const e of (g.userData.extra||[])) e.traverse?e.traverse(push):push(e);
+        const bb=new THREE.Box3(); for(const m of parts) bb.expandByObject(m);
+        const sz=bb.isEmpty()?[0,0,0]:bb.getSize(new THREE.Vector3()).toArray().map(v=>+v.toFixed(3));
+        out.push({ slot:names[i], meshes:parts.length, mapped:parts.filter(m=>!!m.material.map).length,
+                   worn:!!g.visible, size:sz }); }
+      const shell=P.armorMesh[1]&&P._shells?Object.keys(P._shells).length:0;
+      return { pieces:out, shells:shell, allMapped:out.every(o=>o.meshes>0&&o.mapped===o.meshes) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   // POSE AND MOVEMENT, ON ONE FRAME. The charge bug is not "he is in the wrong state" — it is that the state
   // machine commits to closing the distance while the RIG is left in whatever pose it was in, so a body that is
   // travelling at four blocks a second is standing upright with its arms down. Reading the two from different
