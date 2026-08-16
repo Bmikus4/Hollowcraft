@@ -11296,7 +11296,7 @@ hlMesh.visible=false; scene.add(hlMesh);
 // =====================================================================
 //  DAY / NIGHT + SUN/MOON KEY LIGHT (texel-snapped shadow fit)
 // =====================================================================
-let worldTime = CFG.DAY_LEN*0.30, _dayCount=0;   // start morning; _dayCount = how many full cycles have passed (see updateSky)
+let worldTime = CFG.DAY_LEN*0.30, _dayCount=0; let _dayLock=null;   // __hc.dayLock — the clock hold, see updateSky   // start morning; _dayCount = how many full cycles have passed (see updateSky)
 if(Q.get('t')) worldTime=+Q.get('t');
 const _sunDir=new THREE.Vector3(), _keyDir=new THREE.Vector3(), _tmp=new THREE.Vector3();
 // floor = the key light's minimum height above the player as a fraction of its distance, i.e. how low it may rake (0.45
@@ -11313,7 +11313,12 @@ function updateSky(dt){
   // wrap IS sunrise — the clock's zero is dawn (0.25 of the cycle is noon) — so the counter's own increment is the only event needed, and
   // it comes through flashName so the label is typed out with the clicks like every other message. _dayCount is cycles WRAPPED, so the
   // morning after the first night is Day 2.
-  { const _wt=worldTime+dt; if(_wt>=CFG.DAY_LEN){ _dayCount++; if(started && typeof flashName==='function') flashName('Day '+(_dayCount+1)); } worldTime=_wt%CFG.DAY_LEN; }
+  // THE CLOCK CAN BE HELD, and it is a harness tool rather than a game feature. freezeT pins the SHADER time only, so
+  // every measurement at dawn or dusk was drifting: two shots of an identical dusk setup measured canopy saturation
+  // 0.19 and 0.124 with nothing else changed, which is larger than the effect being looked for. __hc.dayLock(f) pins
+  // worldTime to a fraction of the day; dayLock(null) releases it.
+  if(_dayLock!=null) worldTime=CFG.DAY_LEN*_dayLock;
+  else { const _wt=worldTime+dt; if(_wt>=CFG.DAY_LEN){ _dayCount++; if(started && typeof flashName==='function') flashName('Day '+(_dayCount+1)); } worldTime=_wt%CFG.DAY_LEN; }
   const ang=worldTime/CFG.DAY_LEN*Math.PI*2;
   _sunDir.set(Math.cos(ang), Math.sin(ang), 0.35).normalize();
   const elev=_sunDir.y;
@@ -35947,6 +35952,29 @@ window.__hc={
       const u=icon3DURL(id); delete _icon3D[id]; if(was) ICON_FILES.add(id);
       return (typeof u==='string'&&u.slice(0,10)==='data:image')?u:null; }catch(e){ return null; } },
   iconList(){ try{ return Object.keys(ITEMS).filter(i=>!ITEMS[i].hidden); }catch(e){ return []; } },
+  // WHICH WAY IS THIS GUN POINTING IN THE HAND? Ben 08-12 reported "some guns are sideways" and never named one,
+  // and the two places that could mean are answered differently: sideways in the inventory TILE is the icon bake's
+  // orientation, sideways in the HAND is a model-axis or a `rot` problem. This answers the second, for every gun at
+  // once, by measuring the held mesh's extents in CAMERA space — a gun points down the camera's -z, so its longest
+  // axis must be z and its length must dominate its width.
+  heldAxis(id){ try{ if(id){ inv[selSlot]={id,n:1}; refreshHotbar(); setViewItem(id); }
+      const m=view.mesh; if(!m) return {err:'nothing held'};
+      m.updateWorldMatrix(true,true); camera.updateMatrixWorld(true);
+      const inv4=new THREE.Matrix4().copy(camera.matrixWorld).invert();
+      const v=new THREE.Vector3(); let x0=1e9,y0=1e9,z0=1e9,x1=-1e9,y1=-1e9,z1=-1e9, n=0;
+      const hand=m.userData._gunHand;
+      m.traverse(o=>{ if(!o.isMesh||!o.visible||!o.geometry) return;
+        if(hand&&(o===hand||o.parent===hand)) return;                       // the arm is not the gun
+        const g=o.geometry; if(!g.boundingBox) g.computeBoundingBox(); const bb=g.boundingBox;
+        for(let i=0;i<8;i++){ v.set(i&1?bb.max.x:bb.min.x, i&2?bb.max.y:bb.min.y, i&4?bb.max.z:bb.min.z);
+          o.localToWorld(v); v.applyMatrix4(inv4); n++;
+          if(v.x<x0)x0=v.x; if(v.x>x1)x1=v.x; if(v.y<y0)y0=v.y; if(v.y>y1)y1=v.y; if(v.z<z0)z0=v.z; if(v.z>z1)z1=v.z; } });
+      if(!n) return {err:'no geometry'};
+      const w=x1-x0, h=y1-y0, d=z1-z0;
+      const axis=(d>=w&&d>=h)?'z':(w>=h?'x':'y');
+      return { id:view.id, size:[+w.toFixed(3),+h.toFixed(3),+d.toFixed(3)], axis,
+               ratio:+(d/Math.max(w,h,1e-6)).toFixed(2) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   // WHAT FINISH IS THIS GUN WEARING? Holds it and reads the material off the built mesh — which texture, how glossy,
   // and whether the map actually decoded — so "shiny guns are shiny" is a number per gun rather than a screenshot.
   gunFinish(id){ try{ if(id){ inv[selSlot]={id,n:1}; refreshHotbar(); setViewItem(id); }
@@ -40434,6 +40462,10 @@ window.__hc={
     const face=(player.pos.x<bx)?[-1,0,0]:[1,0,0], px=bx+0.5+face[0]*0.5, py=by+0.5, pz=bz+0.5+face[2]*0.5;
     addBulletHole(px,py,pz,face[0],face[1],face[2]);
     return { holes:_bholes.length, bx, by, bz, px:+px.toFixed(2), py:+py.toFixed(2), pz:+pz.toFixed(2), face }; },
+  // QA/bench: hold the world clock at a fraction of the day, or release it with null. The day advances every frame
+  // and dusk light changes fast enough that an A/B across two shots measures the sunset rather than the change.
+  dayLock(f){ try{ _dayLock=(f==null?null:+f); if(_dayLock!=null) worldTime=CFG.DAY_LEN*_dayLock;
+    return { locked:_dayLock, day:+globalU.uDay.value.toFixed(3) }; }catch(e){ return String(e.message||e); } },
   setTime(frac){ worldTime=CFG.DAY_LEN*frac; return +globalU.uDay.value.toFixed(3); },   // QA: jump the clock. 0 = SUNRISE, 0.25 = noon, 0.5 = sunset, 0.75 = midnight — the sun is (cos,sin) of the fraction, so it is on the horizon at 0 and at 0.5. (The old note here said 0=midnight and it is wrong; it cost an hour of reading a scheduler that was right.)
   // QA: the three colours that must agree either side of the sea line — the water surface's own far-edge fog target, the
   // backdrop ring, and the sky's horizon anchor. Compared PER CHANNEL: a luminance-only check passes over a saturated blue
