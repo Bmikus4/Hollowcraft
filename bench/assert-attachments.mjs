@@ -115,6 +115,18 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     T('the pose does not reach into z itself', Math.abs(d(rest,held,'z'))<0.12, {dz:d(rest,held,'z')});
     T('it lets go when the screen closes', back.attT<0.1, {attT:back.attT});
 
+    // THE ATTACHMENT HAS TO DO SOMETHING. A fitted can makes the gun quiet (and takes the suppressed damage
+    // penalty with it), and an optic takes the rear iron sight off the rail it is standing on.
+    const fx=await p.evaluate("(()=>{__hc.hold('ar15'); __hc.attFit('optic',null); __hc.attFit('muzzle',null);"+
+      "const bare=__hc.sightPix?JSON.parse(JSON.stringify(__hc.sightPix())):null;"+
+      "__hc.attFit('optic','red_dot'); const withOptic=__hc.sightPix?JSON.parse(JSON.stringify(__hc.sightPix())):null;"+
+      "return {bare, withOptic};})()");
+    // sightPix lists every drawn sight element under `parts`, each tagged with what it is (post/wing/ring/
+    // notch/ear/base). The REAR pieces are the ones an optic replaces.
+    const rearOf=o=>((o&&o.parts)||[]).filter(e=>/ring|notch|ear|base/.test(e.t||e.tag||e.name||'')).length;
+    console.log('irons', JSON.stringify({bare:rearOf(fx.bare), optic:rearOf(fx.withOptic)}));
+    T('an optic takes the rear iron sight off', rearOf(fx.withOptic) < rearOf(fx.bare), {bare:rearOf(fx.bare), optic:rearOf(fx.withOptic)});
+
     // EVERY GUN, NOT JUST THE ONE WITH AN AUTHORED MOUNT. The rail plane is derived from each gun's own rear-sight
     // root, so this is the check that the derivation holds across the rack: an optic that lands under the receiver
     // line or a metre down the barrel is a mount that needs authoring, and this names which gun.
