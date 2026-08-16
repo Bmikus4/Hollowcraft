@@ -201,6 +201,13 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     console.log('rack', guns.length, 'guns; bad:', JSON.stringify(bad));
     T('an optic lands on the rail of every gun that can take one', bad.length===0, bad);
 
+    // THEY ARE FINDABLE, not only craftable. The loot lines are read out of the source rather than by walking to four
+    // structures: what a chest is built with is a literal, and a chest that names an item that does not exist is the
+    // failure mode worth catching (the deleted variant optics were exactly that).
+    const loot=await p.evaluate("(()=>{const ids=['red_dot','suppressor','optic_scope','weapon_light'];"+
+      "return ids.map(i=>({i, item:!!__hc.itemInfo(i)}));})()");
+    T('every attachment seeded into loot is a real item', loot.every(x=>x.item), loot.filter(x=>!x.item));
+
     T('zero page errors', errs.length===0, errs.slice(0,2));
     console.log(fails? fails+' FAILURE(S)':'ALL PASS');
     await b.close();
