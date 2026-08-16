@@ -46,11 +46,14 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
       const sx=Math.round(S.sx), sz=Math.round(S.sz);
       for(let r=8;r<=300;r+=8) for(let a=0;a<24;a++){
         const x=Math.round(sx+Math.cos(a*Math.PI/12)*r), z=Math.round(sz+Math.sin(a*Math.PI/12)*r);
-        const g=__hc.groundY(x,z); if(g>0 && g<sea-3) return {x,z,g}; }
+        // DEEP water, not merely wet. The first working run of this bench stood in three blocks of it: the probe
+        // read onGround true on the seabed, so the swimmer was a person standing in a pond and every measurement
+        // was of the ground movement code. sea-12 is enough to be a swimmer at any point in the test.
+        const g=__hc.groundY(x,z); if(g>0 && g<sea-12) return {x,z,g}; }
       return null; })()`).catch(()=>null);
     check('open water was found to swim in', !!sea, JSON.stringify({sea,SEA}));
     if(!sea) throw new Error('no water near spawn');
-    const dive=async()=>{ await page.evaluate(`__hc.swimStop(); __hc.tpAt(${sea.x}.5, ${SEA-2}, ${sea.z}.5)`); await sleep(700);
+    const dive=async()=>{ await page.evaluate(`__hc.swimStop(); __hc.tpAt(${sea.x}.5, ${SEA-5}, ${sea.z}.5)`); await sleep(700);
       return await page.evaluate(`__hc.swimProbe()`); };
     let P=await dive();
     check('the player is actually in the water', P.inWater===true, JSON.stringify({inWater:P.inWater,y:P.y}));
@@ -76,7 +79,7 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     // under drag the fast one is still faster a moment later. Both start from the same place with no input held,
     // so the only difference between the rows is the speed carried in.
     const carry=async(v0)=>{
-      await page.evaluate(`__hc.swimStop(); __hc.tpAt(${sea.x}.5, ${SEA-2}, ${sea.z}.5)`); await sleep(600);
+      await page.evaluate(`__hc.swimStop(); __hc.tpAt(${sea.x}.5, ${SEA-5}, ${sea.z}.5)`); await sleep(600);
       await page.evaluate(`__hc.setVel&&__hc.setVel(${v0},0,0)`).catch(()=>{});
       const got=await page.evaluate(`(()=>{ __hc.setVel(${v0},0,0); return __hc.swimProbe(); })()`).catch(()=>null);
       await sleep(250);
