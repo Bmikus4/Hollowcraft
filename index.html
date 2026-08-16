@@ -6865,11 +6865,12 @@ function _coastPineMask(){
     if(Math.abs(px-_cpLastX)+Math.abs(pz-_cpLastZ) < 24 && CFG.RENDER_DIST===_cpLastRD) return;
     _cpLastX=px; _cpLastZ=pz; _cpLastRD=CFG.RENDER_DIST;
     _cpOx=px; _cpOz=pz; _cpOWall=wall;
-    _cpPend=[0,1,2];
+    _cpPend=[0,1,2,3,4];   // 3 and 4 are the two inland mountain ranges, rebuilt on the same schedule and from the same recorded origin
   }
   const _cpT0=performance.now();
   const SEA=CFG.SEA;
   { const b=_cpPend.shift();
+    if(b>=3){ _mtnMask(b-3); _cpMs=performance.now()-_cpT0; return; }
     // THE RADIAL WINDOW IS SHORT, AND THAT IS WHAT MAKES A COASTLINE. At d0*0.16 the six samples of the far band spanned
     // seven hundred blocks of radius, so each azimuth averaged a different swath of continent and neighbouring cells had
     // nothing to do with each other: the horizon came out as isolated pale columns one mask cell wide, standing alone
@@ -7025,6 +7026,160 @@ const coastPineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false
 // every one of them. renderOrder -5 puts it over the ocean band and under the terrain.
 const coastPines=new THREE.Mesh(_horizGeo, coastPineMat);
 coastPines.frustumCulled=false; coastPines.renderOrder=-5; oceanLayer.add(coastPines);
+// =====================================================================
+//  THE INLAND MOUNTAINS — two ranges standing behind the island (Ben 08-16, built with him)
+// =====================================================================
+// His brief, twice: "hyperrealistic mountains INLAND ONLY", and hyperrealistic means "it fits in with our existing
+// lighting". Decided together: a BACKDROP beyond the render wall rather than terrain the generator grows (about twenty
+// structures site off surfaceH — the cathedral wants the highest flat dry ground, the village wants a real mountain —
+// so moving land moves all of them, and that is its own careful pass); TWO ranges rather than one; and banded by
+// height into treeline, bare rock and snow so the backdrop agrees with the snow-capped interior the generator already
+// paints and the player can already walk to.
+//
+// THE ONE FINDING THE SCRAPPED VERSION LEFT, and the reason there are two ranges: the depth was in the AERIAL
+// PERSPECTIVE, not in the geometry. Two ridged ranges at different distances with the far one mixed much harder toward
+// the air is what reads as distance; a single ridge silhouette reads as a cut-out whatever shape it is given.
+//
+// INLAND ONLY, and the gate is a bearing rather than a place: a range is drawn toward the azimuths that point at the
+// island, faded out toward the sea. Standing at the centre every bearing is inland, so the gate opens all round — which
+// is right, because from the middle of the island the interior IS all round you. It closes as you walk out to the coast
+// and is shut looking seaward from the beach, where the coast pines own the horizon instead.
+//
+// They ride the coast pines' own machinery: the same rebuild schedule (one band per frame, from the origin recorded
+// when it was scheduled), the same haze rule (the air's luminance carrying a third of the surface's hue, clamped under
+// the air so nothing on the horizon is brighter than the sky), the same fog, weather, hour and scotopic wash.
+const _MTN_BAND=[2.0, 3.6];                 // range distance, in render walls — inside the pines' 4.6 far band
+const _mtData=new Uint8Array(_CPN*2*4);
+const _mtTex=new THREE.DataTexture(_mtData,_CPN,2,THREE.RGBAFormat);
+_mtTex.wrapS=THREE.RepeatWrapping; _mtTex.minFilter=_mtTex.magFilter=THREE.LinearFilter; _mtTex.needsUpdate=true;
+// The range's own profile. ridged() is the generator's own multifractal — the same one surfaceH uses for the island's
+// ridges — so the backdrop peaks are cut from the same cloth as the land underfoot, at a coarser frequency because a
+// range is a bigger thing than a hill. Sampled along the band rather than at a point so a peak spans several azimuths.
+function _mtnH(wx,wz){
+  const r1=ridged(wx*0.0021, wz*0.0021, 91, 5);
+  const r2=ridged(wx*0.0057, wz*0.0057, 137, 4);
+  return CFG.SEA + 34 + Math.pow(Math.max(0, r1*0.78+r2*0.22), 1.35)*150;   // 34 up to ~184 above sea
+}
+function _mtnMask(b){
+  const px=_cpOx, pz=_cpOz, wall=_cpOWall, SEA=CFG.SEA;
+  const IS=(typeof islandStats==='function')?islandStats():{x:px,z:pz,R:320};
+  const vx=IS.x-px, vz=IS.z-pz, vd=Math.hypot(vx,vz);
+  const outFrac=Math.min(1, vd/Math.max(1,IS.R));       // 0 at the island's centre, 1 at the coast and beyond
+  const d0=wall*_MTN_BAND[b], row=b*_CPN;
+  for(let i=0;i<_CPN;i++){
+    const az=(i/_CPN)*6.2831853-3.14159265, dx=Math.cos(az), dz=Math.sin(az);
+    // The inland gate. cosA is 1 looking straight at the island's middle and -1 looking out to sea; the smoothstep is
+    // the cone that opens toward it, and outFrac fades the whole gate away as you approach the centre, where every
+    // bearing is inland.
+    const cosA = vd>1 ? (dx*vx+dz*vz)/vd : 1;
+    const gate = 1 - outFrac + outFrac*smooth(-0.15, 0.55, cosA);
+    let hMax=0;
+    for(let k=0;k<4;k++){ const r=d0-33+k*22, h=_mtnH(px+dx*r, pz+dz*r); if(h>hMax) hMax=h; }
+    const rise=Math.max(0, hMax-(SEA+34))/150;          // 0..1 of the range's own envelope
+    const o=(row+i)*4;
+    _mtData[o]   = Math.round(clamp(gate*smooth(0.06,0.30,rise), 0, 1)*255);
+    _mtData[o+1] = Math.round(clamp(hMax/WH, 0, 1)*255);
+    _mtData[o+2] = 255;
+    _mtData[o+3] = 255;
+  }
+  // Smoothed across azimuth for the same reason the coast mask is: four samples per cell is a coarse estimate, and a
+  // cell that catches one extra peak stands a mountain up where its neighbours have none.
+  { const R=2, N=_CPN, tmp=new Float32Array(N*2);
+    for(let ch=0; ch<2; ch++){
+      for(let i=0;i<N;i++){ let a=0;
+        for(let k=-R;k<=R;k++) a+=_mtData[(row+((i+k+N)%N))*4+ch];
+        tmp[ch*N+i]=a/(2*R+1); } }
+    for(let ch=0; ch<2; ch++) for(let i=0;i<N;i++) _mtData[(row+i)*4+ch]=Math.round(tmp[ch*N+i]); }
+  _mtTex.needsUpdate=true;
+}
+const _uMtnRock={ value:new THREE.Color(0.055,0.057,0.062) };   // wet slate, not blue-grey: the island's own cliffs
+const _uMtnSnow={ value:new THREE.Color(0.62,0.66,0.72) };      // driven by the hour below, and CLAMPED under the air in the shader
+const _mtU={ uMask:{value:_mtTex}, uPine:_uCoastPine, uRock:_uMtnRock, uSnow:_uMtnSnow, uAir:_uCoastAir,
+  uFogCol:{value:_uPineFog}, uFogD:{value:0.01}, uWall:{value:CFG.RENDER_DIST*CK}, uCamY:{value:CFG.SEA+2},
+  uWx:{value:0}, uDay:globalU.uDay, uSunXZ:_cpU.uSunXZ, uSunUp:_cpU.uSunUp, uSunCol:globalU.uSunCol,
+  uFogMul:{value:0.10}, uGain:{value:0.62}, uPixAng:_cpU.uPixAng, uScotG:{value:_scotG}, uScotH:{value:_scotH} };
+const mountainMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, side:THREE.BackSide, fog:false,
+  uniforms:_mtU, vertexShader:_horizVert, fragmentShader:[
+  'precision highp float; varying vec3 vPos;',
+  'uniform sampler2D uMask; uniform vec3 uPine, uRock, uSnow, uAir, uFogCol, uSunCol; uniform vec2 uSunXZ;',
+  'uniform float uFogD, uWall, uCamY, uWx, uDay, uSunUp, uFogMul, uGain, uPixAng; uniform vec4 uScotG, uScotH;',
+  'float hash(float n){ return fract(sin(n)*43758.5453); }',
+  'float nz(float x){ float i=floor(x), f=fract(x); return mix(hash(i),hash(i+1.0),f*f*(3.0-2.0*f)); }',
+  'void main(){',
+  '  vec3 d=normalize(vPos); float elev=d.y; float az=atan(vPos.z,vPos.x);',
+  '  float u=(az+3.14159265)/6.2831853;',
+  '  vec3 outc=vec3(0.0); float outa=0.0;',
+  '  for(int b=1; b>=0; b--){',                                    // far range first, so the near one paints over it
+  '    vec4 m=texture2D(uMask, vec2(u, (float(b)+0.5)/2.0));',
+  '    if(m.r<0.08) continue;',
+  '    float dist=uWall*(b==0?2.0:3.6);',
+  '    float haze=(b==0?0.35:0.62);',
+  '    float peak=m.g*WORLD_H-uCamY;',
+  // The ridge line, with a fine crest riding it. The crest is bandlimited the same way the pine crowns are: a feature
+  // narrower than a pixel is not a feature, it is noise, and at these distances a 40-block crag is close to that.
+  '    float cpx=(40.0/dist)/max(uPixAng,1e-6);',
+  '    float det=smoothstep(1.4, 4.0, cpx);',
+  '    float crest=(nz(az*(dist/40.0))-0.5)*0.22 + (nz(az*(dist/12.0))-0.5)*0.10*det;',
+  '    float top=(peak*(1.0+crest))/dist;',
+  '    if(elev>top) continue;',
+  '    float footY=' + (CFG.SEA+18).toFixed(1) + '-uCamY;',        // the range stands on the island's own high ground
+  '    float foot=footY/dist;',
+  '    if(elev<foot-0.10) continue;',
+  '    float t=clamp((elev-foot)/max(top-foot,1e-5),0.0,1.0);',    // 0 at the foot, 1 at the summit
+  // ---- TREELINE, ROCK, SNOW ----
+  // The three bands the generator already paints on the real interior: forest to about two fifths of the way up, bare
+  // rock above it, snow on the top quarter, each edge softened so a range does not read as three stacked stripes. The
+  // snow line RISES with the sun the way a real one does across a day, which is also what keeps a white cap off the
+  // horizon at dawn and dusk when it would be the brightest thing in the frame.
+  '    float snowLine=mix(0.82, 0.70, uDay);',
+  '    vec3 col=mix(uPine*1.15, uRock, smoothstep(0.34,0.52,t));',
+  '    col=mix(col, uSnow, smoothstep(snowLine-0.06, snowLine+0.05, t)*smoothstep(0.15,0.5,uDay+0.15));',
+  '    float per=0.80+0.34*mix(0.5, nz(az*(dist/18.0)), det);',    // face-to-face brightness across the range
+  '    col*=per*uGain;',
+  // The same key light the coast pines take, resolved per azimuth: the flank facing the sun is lit, the one away is a
+  // silhouette. A range is a bigger, flatter thing than a treeline, so the contrast is wider.
+  '    float face=clamp(-dot(normalize(vec2(d.x,d.z)), uSunXZ), -1.0, 1.0);',
+  '    col*=mix(0.58, 1.30, clamp(face,0.0,1.0)*uSunUp);',
+  '    col*=mix(1.0, 0.42, 1.0-smoothstep(0.0,0.18,t));',          // the valley floor at the foot is the darkest part
+  // ---- HAZE ----
+  // The terrain's own fog at this distance, then the aerial perspective toward the air's luminance carrying a third of
+  // the range's hue - the same rule the coast bands use, and the same clamp under the air, so no part of a mountain can
+  // ever be brighter than the sky behind it. That clamp is what keeps the snow from becoming the white slab this whole
+  // programme has spent a week removing.
+  '    float fg=1.0-exp2(-uFogD*uFogD*dist*dist*1.442695);',
+  '    col=mix(col, uFogCol, clamp(fg*uFogMul,0.0,0.94));',
+  '    float _aL=dot(uAir, vec3(0.2126,0.7152,0.0722));',
+  '    float _cL=max(dot(col, vec3(0.2126,0.7152,0.0722)), 1e-4);',
+  '    vec3 _hz=mix(uAir, col*(_aL/_cL), 0.35);',
+  '    col=mix(col, _hz, haze);',
+  '    col=min(col, uAir*0.85);',
+  '    float a=smoothstep(0.08,0.26,m.r)*clamp(1.0-uWx*1.25,0.0,1.0)*(1.0-0.45*haze);',
+  '    outc=mix(outc, col, a); outa=max(outa, a);',
+  '  }',
+  '  if(outa<0.004) discard;',
+  '  { float _nw=1.0-smoothstep(uScotG.y,uScotG.z,uScotG.w);',
+  '    float _nl=dot(outc, vec3(0.2126,0.7152,0.0722));',
+  '    outc=mix(outc, vec3(_nl), uScotG.x*_nw); }',
+  '  gl_FragColor=vec4(outc, outa);',
+  '}'].join('\n').replace(/WORLD_H/g, WH.toFixed(1)) });
+// BEHIND the pines (-5) and in front of the ocean band (-6): a coast stands in front of its own mountains.
+const inlandMountains=new THREE.Mesh(_horizGeo, mountainMat);
+inlandMountains.frustumCulled=false; inlandMountains.renderOrder=-5.4; oceanLayer.add(inlandMountains);
+let _mtWant=!(Q.get('mtn')==='0');
+function updateInlandMountains(){
+  inlandMountains.visible=_mtWant;
+  if(!_mtWant) return;
+  const day=globalU.uDay.value;
+  _mtU.uWall.value=CFG.RENDER_DIST*CK;
+  _mtU.uCamY.value=camera.position.y;
+  _mtU.uFogD.value=scene.fog?scene.fog.density:0.01;
+  _mtU.uWx.value=(typeof weather!=='undefined'?(weather.fog||0):0);
+  // Rock and snow go down with the hour on the same ramp the canopy uses, so the whole horizon sinks into the night
+  // together rather than the snow hanging on as a pale band after everything else has gone.
+  const dim=0.10+0.90*day;
+  _uMtnRock.value.setRGB(0.055*dim, 0.057*dim, 0.062*dim);
+  _uMtnSnow.value.setRGB(0.62*dim, 0.66*dim, 0.72*dim);
+}
 let _cpWant=!(Q.get('pines')==='0');
 function updateCoastPines(){
   coastPines.visible=_cpWant;
@@ -11559,7 +11714,8 @@ function updateSky(dt){
   fogShell.position.copy(camera.position); fogShell.material.color.copy(fc);
   const fo=Math.min(0.985, wf*1.25); fogShell.material.opacity=fo; fogShell.visible=fo>0.01;
   updateHorizon();
-  updateCoastPines();                                                                        // the coast running on past the render wall — see THE COAST PINES                                                                          // 2-layer island horizon (ocean seaward / pines landward)
+  updateCoastPines();
+  updateInlandMountains();                                                                  // the two ranges standing behind the island — see THE INLAND MOUNTAINS                                                                        // the coast running on past the render wall — see THE COAST PINES                                                                          // 2-layer island horizon (ocean seaward / pines landward)
   // THE OCEAN MAY NOT BE ABLE TO KILL THE SKY. This call sits INSIDE updateSky, so anything it throws aborts every
   // line of sky work after it — the dome stops being moved to the camera and stops being given the hour, which reads
   // as a sky that is correct on load and then goes fog-grey by day and black at night, exactly what Ben reports. The
@@ -20673,8 +20829,7 @@ const _SRGB8=(()=>{ const t=new Uint8Array(256);
 // empty slots in the hotbar. The ICON alone gets a short-shafted, thickened spear — same head, same materials,
 // which is what a spear icon is in every game that has one. The ground drop, a peer's hand and the thrown
 // projectile all keep the real pike.
-const ICON_MODEL={
-  wooden_spear:()=>_stubSpear('wooden_spear'), rusty_spear:()=>_stubSpear('rusty_spear') };
+const ICON_MODEL={};
 function _stubSpear(id){ const m=buildSpear(Object.assign({},ITEMS[id].spear,{len:2.2}));
   m.scale.set(3,3,1); return m; }   // X/Y are the shaft's cross-section (it is built along Z), so this fattens without stretching
 // ICONS ON DISK BEAT ICONS BAKED AT RUN TIME (Ben's ask). Every icon here is a render-target pass plus a readback
@@ -39958,6 +40113,12 @@ window.__hc={
   // QA/bench: what the shared-uniform guard has caught this session, newest last. Empty is the healthy answer.
   nanWatch(){ try{ return { hits:_uniHits.slice(), watched:_uniShadow.size, frames:_uniFrame }; }catch(e){ return { err:String(e.message||e) }; } },
   // QA/bench + the A/B: the coast pines on or off, and their dials. ?pines=0 is the same switch at load.
+  // QA/bench + the A/B: the inland ranges on or off. ?mtn=0 is the same switch at load.
+  mtn(v,o){ try{ if(v!=null) _mtWant=!!v;
+      if(o){ if(o.gain!=null) _mtU.uGain.value=+o.gain; if(o.fogMul!=null) _mtU.uFogMul.value=+o.fogMul;
+             if(o.force){ _cpLastX=1e9; _cpLastZ=1e9; } }
+      return { on:_mtWant, gain:_mtU.uGain.value, fogMul:_mtU.uFogMul.value }; }
+    catch(e){ return String(e.message||e); } },
   pines(v,o){ try{ if(v!=null) _cpWant=!!v;
       if(o){ if(o.gain!=null) _cpU.uGain.value=+o.gain; if(o.fogMul!=null) _cpU.uFogMul.value=+o.fogMul;
              if(o.force) { _cpLastX=1e9; _cpLastZ=1e9; } }

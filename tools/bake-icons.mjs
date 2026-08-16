@@ -38,7 +38,10 @@ function waitHttp(url,t=15000){ return new Promise((res,rej)=>{ const t0=Date.no
     await p.waitForFunction("(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()",null,{timeout:300000});
     await p.waitForFunction("(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()",null,{timeout:420000});
     await sleep(1500);
-    const ids=await p.evaluate("__hc.iconList()");
+    // Named ids bake only those, which is what a measurement wants; no argument bakes the lot and rewrites the
+    // manifest. A partial run must NOT rewrite it, or the 300 icons it did not touch would be dropped from it.
+    const only=process.argv.slice(2);
+    const ids=only.length?only:await p.evaluate("__hc.iconList()");
     console.log(ids.length,'items');
     const done=[], blank=[]; let failed=0;
     // In batches, because a data URL for a 100x100 PNG is ~10 KB and all of them at once is a single CDP message
@@ -59,7 +62,7 @@ function waitHttp(url,t=15000){ return new Promise((res,rej)=>{ const t0=Date.no
       }
       process.stdout.write('.');
     }
-    fs.writeFileSync(path.join(OUT,'manifest.json'), JSON.stringify({icons:done.sort()},null,1));
+    if(!only.length) fs.writeFileSync(path.join(OUT,'manifest.json'), JSON.stringify({icons:done.sort()},null,1));
     console.log('\nwrote',done.length,'icons,',failed,'items had no 3D icon (drawn ones — they cost nothing)');
     await b.close();
   } finally { try{ server.kill(); }catch(e){} }
