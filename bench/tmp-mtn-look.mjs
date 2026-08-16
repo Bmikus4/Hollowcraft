@@ -54,6 +54,9 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     let d1=0,d2=0,ch=0; const n=on.length;
     for(let i=0;i<n;i++){ const a=Math.abs(on[i]-off[i]); d1+=a; if(a>4) ch++; d2+=Math.abs(on[i]-on2[i]); }
     console.log(`  ridge strip: mean |on-off| ${(d1/n).toFixed(2)}   noise |on-on| ${(d2/n).toFixed(2)}   pixels changed >4 levels: ${(100*ch/n).toFixed(1)}%`);
+    await page.evaluate('__hc.mtnDbg(1)'); await sleep(1200); await page.screenshot({path:path.join(OUT,'mtn-dbg-snowT.png')});
+    await page.evaluate('__hc.mtnDbg(2)'); await sleep(1200); await page.screenshot({path:path.join(OUT,'mtn-dbg-wy.png')});
+    await page.evaluate('__hc.mtnDbg(0)'); await sleep(900);
     for(const [when,t] of [['noon',0.28],['dusk',0.46],['night',0.75]]){
       await page.evaluate(`__hc.dayLock(${t})`); await sleep(1200);
       await page.screenshot({path:path.join(OUT,'mtn-'+when+'.png')}); }
