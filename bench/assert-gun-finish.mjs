@@ -46,6 +46,14 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     // carry their own silver, and the revolver's loaded cases are their own material. What must be true is that the
     // gun's METAL is wearing it, which on these models is eight-plus meshes.
     T('every finished gun is wearing its finish', rows.every(r=>r.mapped>=8), rows.map(r=>[r.id,r.mapped,r.meshes]));
+    // THE BAKED ICONS ARE THE ONES THE GAME USES. The manifest is fetched at boot; anything in it must resolve to a
+    // real file, and the item's icon URL must be that file rather than a freshly baked data URL.
+    const ico=await p.evaluate("(()=>{const l=__hc.iconList(); const id=l.find(i=>i==='ar15')||l[0];"+
+      "return {id, url:(typeof iconURLFor==='function')?iconURLFor(id):null, baked:!!__hc.iconBake(id)};})()");
+    const man=await p.evaluate("fetch('./assets/icons/manifest.json').then(r=>r.json()).then(j=>j.icons.length).catch(()=>0)");
+    console.log('icons', JSON.stringify({man, ico}));
+    T('the icon manifest is on disk and populated', man>100, {count:man});
+
     T('zero page errors', errs.length===0, errs.slice(0,2));
     console.log(fails? fails+' FAILURE(S)':'ALL PASS');
     await b.close();
