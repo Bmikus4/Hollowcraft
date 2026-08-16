@@ -67,7 +67,7 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     // half-fires the sky is a flat wash afterwards, which is the report.
     await page.evaluate(`__hc.peel({begin:1})`); await sleep(6000);
     await sample('peel-on');
-    await page.evaluate(`__hc.peel({begin:0})`); await sleep(6000);
+    await page.evaluate(`__hc.peel({end:1})`); await sleep(6000);
     await sample('peel-off');
     await sleep(20000); await sample('peel-off-plus20');
     await sleep(40000); await sample('peel-off-plus60');
