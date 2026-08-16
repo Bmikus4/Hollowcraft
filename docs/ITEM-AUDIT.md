@@ -7,7 +7,7 @@ Two questions per item, both answered from the code and the running game rather 
 dispatch `itemModel`, and the separate viewmodel dispatch for your own hands).
 
 - items: **390**
-- with no source in the world (nothing crafts, loots, drops or mines them): **114**
+- with no source in the world (nothing crafts, loots, drops or mines them): **99**
 - inert (no flag any dispatch tests, and no id-specific branch): **36**
 - a flat sprite in your own hands: **89**
 - the two dispatches DISAGREE (real object one side, sprite the other): **8**
@@ -46,10 +46,6 @@ separate decision, and Ben's own words are that they are all meant to be obtaina
 | `corndog` | nowhere |
 | `croissant` | nowhere |
 | `cupcake` | nowhere |
-| `diamond_axe` | nowhere |
-| `diamond_pickaxe` | nowhere |
-| `diamond_shovel` | nowhere |
-| `diamond_sword` | nowhere |
 | `donut` | nowhere |
 | `egg` | KINDS, drawIcon |
 | `egg_ceraphim` | nowhere |
@@ -82,10 +78,6 @@ separate decision, and Ben's own words are that they are all meant to be obtaina
 | `hunting_knife` | nowhere |
 | `hunting_rifle` | KINDS, tryTakeCabinRifle, _gpWrap |
 | `ice_cream` | nowhere |
-| `iron_axe` | nowhere |
-| `iron_pickaxe` | nowhere |
-| `iron_shovel` | nowhere |
-| `iron_sword` | nowhere |
 | `ketchup_bottle` | nowhere |
 | `lettuce` | nowhere |
 | `loot_bag` | KINDS, netMsg, killWretch |
@@ -115,10 +107,6 @@ separate decision, and Ben's own words are that they are all meant to be obtaina
 | `skin_water` | PACK_MAX, COOK, BOOK_PAGES, _buildPeakTower |
 | `soda` | nowhere |
 | `spoon` | nowhere |
-| `stone_axe` | nowhere |
-| `stone_pickaxe` | nowhere |
-| `stone_shovel` | nowhere |
-| `stone_sword` | nowhere |
 | `sushi` | nowhere |
 | `sushi_nigiri` | nowhere |
 | `tentacle` | nowhere |
@@ -128,9 +116,6 @@ separate decision, and Ben's own words are that they are all meant to be obtaina
 | `waffle` | nowhere |
 | `water_bottle` | nowhere |
 | `water_bucket` | PACK_MAX, drawIcon |
-| `wood_axe` | STARTER_ITEMS |
-| `wood_shovel` | nowhere |
-| `wood_sword` | nowhere |
 | `wooden_torch` | nowhere |
 | `wretch_bag` | KINDS, netMsg, killWretch |
 
@@ -285,11 +270,11 @@ Nothing reads these. You can hold one and there is no dispatch that does anythin
 | `croissant` | food | **none** | model 1/132 | model 1/132 |
 | `cupcake` | food | **none** | model 3/412 | model 3/412 |
 | `diamond` | **inert** | mine loot craft | sprite 1/240 | sprite 1/240 |
-| `diamond_axe` | tool | **none** | model 3/236 | model 4/248 |
+| `diamond_axe` | tool | craft | model 3/236 | model 4/248 |
 | `diamond_ore` | place | mine | model 1/12 | model 1/12 |
-| `diamond_pickaxe` | tool | **none** | model 1/176 | model 2/188 |
-| `diamond_shovel` | tool | **none** | model 3/322 | model 4/334 |
-| `diamond_sword` | tool | **none** | model 11/1056 | model 12/1068 |
+| `diamond_pickaxe` | tool | craft | model 1/176 | model 2/188 |
+| `diamond_shovel` | tool | craft | model 3/322 | model 4/334 |
+| `diamond_sword` | tool | craft | model 11/1056 | model 12/1068 |
 | `dirt` | place | mine | model 1/12 | model 1/12 |
 | `donut` | food | **none** | model 5/984 | model 5/984 |
 | `door` | place | mine craft drop | model 1/36 | model 1/36 |
@@ -368,7 +353,7 @@ Nothing reads these. You can hold one and there is no dispatch that does anythin
 | `ice` | place | mine | model 1/12 | model 1/12 |
 | `ice_cream` | food | **none** | model 3/1278 | model 3/1278 |
 | `industrial_pipe` | place | craft mine | model 1/12 | model 1/12 |
-| `iron_axe` | tool | **none** | model 3/236 | model 4/248 |
+| `iron_axe` | tool | craft | model 3/236 | model 4/248 |
 | `iron_bars` | place | craft mine | model 1/108 | model 1/108 |
 | `iron_boots` | armor | craft | sprite 1/496 | sprite 1/496 |
 | `iron_chestplate` | armor | craft | model 1/704 | model 1/704 |
@@ -376,9 +361,9 @@ Nothing reads these. You can hold one and there is no dispatch that does anythin
 | `iron_ingot` | **inert** | craft loot | sprite 1/308 | sprite 1/308 |
 | `iron_leggings` | armor | craft | sprite 1/532 | sprite 1/532 |
 | `iron_ore` | place | craft mine | model 1/12 | model 1/12 |
-| `iron_pickaxe` | tool | **none** | model 1/176 | model 2/188 |
-| `iron_shovel` | tool | **none** | model 3/322 | model 4/334 |
-| `iron_sword` | tool | **none** | model 11/1056 | model 12/1068 |
+| `iron_pickaxe` | tool | craft | model 1/176 | model 2/188 |
+| `iron_shovel` | tool | craft | model 3/322 | model 4/334 |
+| `iron_sword` | tool | craft | model 11/1056 | model 12/1068 |
 | `jam_jar` | **inert** | craft | sprite 1/392 | sprite 1/392 |
 | `ketchup_bottle` | **inert** | **none** | model 1/236 | model 1/236 |
 | `ladder` | place | mine craft | model 1/84 | model 1/84 |
@@ -531,11 +516,11 @@ Nothing reads these. You can hold one and there is no dispatch that does anythin
 | `stick` | **inert** | craft drop | model 2/202 | model 2/202 |
 | `stim_syringe` | syringe consume | craft drop loot | model 7/368 | model 7/368 |
 | `stone` | place | mine | model 1/12 | model 1/12 |
-| `stone_axe` | tool | **none** | model 3/236 | model 4/248 |
-| `stone_pickaxe` | tool | **none** | model 1/176 | model 2/188 |
+| `stone_axe` | tool | craft | model 3/236 | model 4/248 |
+| `stone_pickaxe` | tool | craft | model 1/176 | model 2/188 |
 | `stone_rock` | **inert** | mine craft | sprite 1/220 | sprite 1/220 |
-| `stone_shovel` | tool | **none** | model 3/322 | model 4/334 |
-| `stone_sword` | tool | **none** | model 11/1056 | model 12/1068 |
+| `stone_shovel` | tool | craft | model 3/322 | model 4/334 |
+| `stone_sword` | tool | craft | model 11/1056 | model 12/1068 |
 | `straw_hat` | armor | craft | sprite 1/392 | sprite 1/392 |
 | `string` | **inert** | loot craft drop | sprite 1/412 | sprite 1/412 |
 | `sulfur` | **inert** | mine | sprite 1/220 | sprite 1/220 |
@@ -575,10 +560,10 @@ Nothing reads these. You can hold one and there is no dispatch that does anythin
 | `wattle` | place | craft mine | model 1/12 | model 1/12 |
 | `weapon_light` | att | craft loot | model 3/360 | sprite 1/308 |
 | `wine` | drink | drop | model 4/220 | model 4/220 |
-| `wood_axe` | tool | **none** | model 3/236 | model 4/248 |
-| `wood_pickaxe` | tool | loot | model 1/176 | model 2/188 |
-| `wood_shovel` | tool | **none** | model 3/322 | model 4/334 |
-| `wood_sword` | tool | **none** | model 11/1056 | model 12/1068 |
+| `wood_axe` | tool | craft | model 3/236 | model 4/248 |
+| `wood_pickaxe` | tool | loot craft | model 1/176 | model 2/188 |
+| `wood_shovel` | tool | craft | model 3/322 | model 4/334 |
+| `wood_sword` | tool | craft | model 11/1056 | model 12/1068 |
 | `wooden_bowl` | **inert** | craft | sprite 1/296 | sprite 1/296 |
 | `wooden_spear` | tool spear | craft | model 8/894 | model 8/894 |
 | `wooden_torch` | **inert** | **none** | model 3/448 | model 3/448 |
