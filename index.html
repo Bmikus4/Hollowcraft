@@ -18170,75 +18170,49 @@ const KIND_BODY={
 // reason this is nine lines instead of a second copy of buildWretch drifting out of step with the first.
 function kindBody(inst, kind){
   const B=KIND_BODY[kind], P=inst.P; if(!B||!P) return;
-  // SCALE COMPOUNDS DOWN A CHAIN, and the first version of this ignored that. Every arm segment is a child of the one above,
-  // so setting 1.30 thickness on three of them gave 2.2, the hand's own 1.60 rode on top of that, and the length multiplier
-  // rode on all of it. Measured: a Burrower 8.5 blocks wide with arms 8.2 blocks long, and a Tenant 13.3 blocks tall — a
-  // giantess, not a creature that has to stoop under a beam. Every ratio the bench asserted was still correct, which is why
-  // it passed; ratios cannot see an absolute size, so the bench now checks both.
-  //   The fix is to write the scale ONCE, at the top of each chain, and let inheritance do what it was going to do anyway:
-  // thickness at the shoulder is thickness all the way down, and length at the shoulder moves every joint below it. Where
-  // inheritance gives something unwanted — a foot stretched by the leg's length, a head stretched by the torso — it is
-  // divided back out on that part alone.
+  // NON-UNIFORM SCALE ON A JOINT THAT HAS ROTATING CHILDREN DOES NOT STRETCH THEM, IT SHEARS THEM. The child's rotation is
+  // applied inside the parent's squashed space, so a limb whose angles are perfectly correct comes out skewed and changes
+  // shape as it swings. That is what Ben saw when he said the models and animations are broken, and it is why every bone-angle
+  // bench stayed green: angles were never the thing that was wrong.
+  //   Measured with __hc.rigSkew, which reads the perpendicularity of each bone's world matrix: the Wretch scores 0 across 26
+  // bones; the first version of this function gave the Meek 16 sheared bones, the Tenant 15, and the Burrower 21 with 0.47 on
+  // the head and jaw — a 28 degree skew on the face of the thing.
+  //   So: the only scale applied to a JOINT is the uniform one on the root. Length comes from moving the child joints down
+  // their parent's axis, thickness from scaling the MESHES inside a joint — and a mesh has no rotating children, so scaling
+  // it can never shear anything.
   if(inst.group) inst.group.scale.multiplyScalar(B.scale);
   const [legT, legL]=B.leg, [armT, armL]=B.arm, [torT, torL]=B.torso;
+  const meshesOf=o=>o?o.children.filter(c=>c.isMesh):[];
+  // Scale a joint's own boxes and move them with the scaling, so a lengthened bone's box still starts at the joint.
+  const shape=(joint,t,len)=>{ for(const m of meshesOf(joint)){
+      m.scale.set(m.scale.x*t, m.scale.y*len, m.scale.z*t);
+      m.position.set(m.position.x*t, m.position.y*len, m.position.z*t); } };
   for(const L of (P.legs||[])){
-    if(L.thigh) L.thigh.scale.set(legT, legL, legT);                    // carries the whole leg
-    if(L.shin)  L.shin.scale.set(1,1,1);
-    if(L.foot)  L.foot.scale.set(1, 1/legL, 1);                          // a foot is not longer because the leg is
+    shape(L.thigh, legT, legL);
+    if(L.shin){ L.shin.position.y*=legL; shape(L.shin, legT, legL); }
+    if(L.foot){ L.foot.position.y*=legL; shape(L.foot, legT, 1); }
   }
   for(const c of (P.arms||[])){
-    if(c[1]) c[1].scale.set(armT, armL, armT);                           // carries the whole arm
-    for(let i=2;i<c.length-1;i++) c[i].scale.set(1,1,1);
-    const hand=c[c.length-1]; if(hand) hand.scale.set(B.hand/armT, B.hand/armL, B.hand/armT);   // hand size is the hand's own
+    shape(c[0], armT, 1);                                        // the shoulder block: thicker, not longer
+    for(let i=1;i<c.length;i++) c[i].position.y*=armL;           // every joint below sits further down the arm
+    for(let i=1;i<c.length-1;i++) shape(c[i], armT, armL);
+    const hand=c[c.length-1];
+    for(const m of meshesOf(hand)){ m.scale.multiplyScalar(B.hand); m.position.multiplyScalar(B.hand); }
   }
   const sp=P.spine||[];
-  if(sp[0]) sp[0].scale.set(torT, torL, torT);                           // carries the torso, the neck and the head
-  for(let i=1;i<sp.length;i++) sp[i].scale.set(1,1,1);
-  if(P.neck) P.neck.scale.set(1/torT, B.neck/torL, 1/torT);
-  if(P.head) P.head.scale.set(B.head[0]/torT, B.head[1]/torL, B.head[2]/torT);
-}
-// A DEATH IS AN ANIMATION, NOT A DESPAWN. killWretch belongs to the Wretch — it carries the boss bar, the drop, the encounter
-// bookkeeping and a corpse that stays. None of that is right for these three, and hiding the group instead is the thing this
-// whole terminal has spent the day removing: a creature that stops existing between two frames while you are looking at it.
-// Each fork dies its own way, in its own time, and only then leaves.
-function kindDie(inst){
-  if(inst._dead) return;
-  inst._dead=0.0001; inst.state='DEAD'; inst.hp=0;
-  inst._deadY=inst.pos.y;
-  if(typeof wretchVoice==='function' && inst.kind!=='burrower') wretchVoice('grunt',{x:inst.pos.x,y:inst.pos.y+1,z:inst.pos.z});
-  if(inst.kind==='burrower' && typeof burrowVoice==='function') burrowVoice('cry',{x:inst.pos.x,y:inst.pos.y+0.6,z:inst.pos.z},0);
-}
-// Runs INSTEAD of the creature's brain once it is dying, from that creature's own update. Returns true while the death owns
-// the body, so each update can simply hand over. The timings are the character: the Meek is instant because it is small and
-// its death must be cheap enough to happen six times a night; the Tenant is slow because a thing that never moved in life
-// cannot suddenly become agile in the moment it stops.
-const KIND_DEATH={ burrower:1.4, meek:1.1, tenant:2.6 };
-function kindDeathTick(dt){
-  const w=wretch; if(!w._dead) return false;
-  w._dead+=dt;
-  const dur=KIND_DEATH[w.kind]||1.2, u=Math.min(1, w._dead/dur);
-  if(w.kind==='burrower'){
-    // IT GOES BACK INTO THE GROUND, which is the only place it has ever been. Half a second of collapse and then it sinks
-    // through the hole it came out of, so what the player is left with is a hole rather than a body.
-    w.pos.y = w._deadY - Math.max(0, (u-0.35)/0.65)*2.6;
-    if(u<0.4 && typeof spawnParticles==='function' && Math.random()<dt*20) spawnParticles(w.pos.x, w._deadY+0.2, w.pos.z, 0x4a3a28, 3, 0.5, 1.0);
-  } else if(w.kind==='meek'){
-    // IT DROPS. No stagger, no reaching, no reaction shot — the whole point of these is that nothing about them is a set
-    // piece, and a small thing that dies with ceremony would be asking to be looked at, which is the one thing it must not do.
-    w.pos.y = w._deadY - u*0.35;
-  } else if(w.kind==='tenant'){
-    // IT GOES OVER LIKE A PLANK. No fold at the knees, no arm out to catch itself: it topples from the ankles, holds most of
-    // the way, and only accelerates at the end, which is what a body does when nothing in it is trying to stay upright.
-    w.pos.y = w._deadY - u*u*0.4;
-  }
-  if(typeof placeWretch==='function') placeWretch(dt,false);
-  if(u>=1){
-    if(w.kind==='burrower') burRetire();
-    else if(w.kind==='tenant') tenRetire();
-    else meekRetire(w);
-    w._dead=0;
-  }
-  return true;
+  for(let i=0;i<sp.length;i++){ if(i>0) sp[i].position.y*=torL; shape(sp[i], torT, torL); }
+  if(P.neck){ P.neck.position.y*=torL;
+    for(const m of meshesOf(P.neck)){ m.scale.set(m.scale.x, m.scale.y*B.neck, m.scale.z); m.position.y*=B.neck; } }
+  // The head is the one that was worst, because the jaw hangs off it and rotates. The head GROUP keeps an identity scale and
+  // the flattening is carried by its own boxes; the jaw is moved to follow them and scaled the same way, so the mouth still
+  // sits on the face without the face being a parallelogram.
+  const [hx,hy,hz]=B.head;
+  if(P.head){ P.head.position.y*=B.neck;
+    for(const m of meshesOf(P.head)){ m.scale.set(m.scale.x*hx, m.scale.y*hy, m.scale.z*hz);
+      m.position.set(m.position.x*hx, m.position.y*hy, m.position.z*hz); } }
+  if(P.jaw){ P.jaw.position.set(P.jaw.position.x*hx, P.jaw.position.y*hy, P.jaw.position.z*hz);
+    for(const m of meshesOf(P.jaw)){ m.scale.set(m.scale.x*hx, m.scale.y*hy, m.scale.z*hz);
+      m.position.set(m.position.x*hx, m.position.y*hy, m.position.z*hz); } }
 }
 function kindDress(inst, kind){
   const m=kindSkinMat(kind); if(!m||!inst.group) return;
