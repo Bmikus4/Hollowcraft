@@ -162,6 +162,16 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     console.log('laser', JSON.stringify({bare:lz0.laser, fitted:lz1.laser, lit:lz1.laserLit}));
     T('a fitted laser has a beam', lz1.laser===true && lz0.laser===false, {bare:lz0.laser, fitted:lz1.laser});
 
+    // A FITTED SCOPE MAGNIFIES. The bolt rifle's render-target pass is the machinery; the gate used to name that one
+    // gun, so a scope bolted to a carbine fitted, hid the irons and then aimed at 1x.
+    await p.evaluate("__hc.hold('ar15'); __hc.attFit('optic',null)"); await sleep(500);
+    const sc0=await p.evaluate("__hc.attProbe()");
+    await p.evaluate("__hc.attFit('optic','optic_scope')"); await sleep(600);
+    const sc1=await p.evaluate("__hc.attProbe()");
+    await p.evaluate("__hc.attFit('optic',null)"); await sleep(300);
+    console.log('scope', JSON.stringify({bare:sc0.scopeActive, fitted:sc1.scopeActive}));
+    T('a fitted scope drives the magnified pass', sc1.scopeActive>0 && sc0.scopeActive===0, {bare:sc0.scopeActive, fitted:sc1.scopeActive});
+
     // EVERY GUN, NOT JUST THE ONE WITH AN AUTHORED MOUNT. The rail plane is derived from each gun's own rear-sight
     // root, so this is the check that the derivation holds across the rack: an optic that lands under the receiver
     // line or a metre down the barrel is a mount that needs authoring, and this names which gun.
