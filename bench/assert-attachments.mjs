@@ -312,6 +312,19 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     T('idling ~90 frames rebuilds the string at most twice', (b1-b0)<=2, {idle:b1-b0});
     T('fitting something rebuilds it', (b2-b1)>=1, {onFit:b2-b1});
 
+    // THE CAN'S ACTUAL EFFECT ON THE GAME, not on a flag: the range at which the Wretch hears the shot and the size
+    // of the noise it makes. Both are decided inside fireGun, so this is the only way to see a suppressor working.
+    await p.evaluate("__hc.handFire('main',1,'ar15'); __hc.attFit('muzzle',null)"); await sleep(300);
+    await p.evaluate("__hc.handFire('main',1,'ar15')"); await sleep(300);
+    const loud=await p.evaluate("__hc.shotNoise()");
+    await p.evaluate("__hc.attFit('muzzle','suppressor')"); await sleep(300);
+    await p.evaluate("__hc.handFire('main',1,'ar15')"); await sleep(300);
+    const quiet=await p.evaluate("__hc.shotNoise()");
+    await p.evaluate("__hc.attFit('muzzle',null)");
+    console.log('noise', JSON.stringify({loud, quiet}));
+    T('a fitted can shortens the range the shot is heard at', quiet.range < loud.range*0.7, {loud:loud.range, quiet:quiet.range});
+    T('and it makes a smaller noise where it is heard', quiet.noise < loud.noise, {loud:loud.noise, quiet:quiet.noise});
+
     T('zero page errors', errs.length===0, errs.slice(0,2));
     console.log(fails? fails+' FAILURE(S)':'ALL PASS');
     await b.close();
