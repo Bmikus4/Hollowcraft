@@ -5564,6 +5564,10 @@ const _uFolNight={ value:new THREE.Color(0.006,0.008,0.014) };
 // 2.0 / 3.0 / 5.9 / 14.7 with the sky held at 73.3. 1.5 puts a canopy at about a ninth of the sky it stands against:
 // a dark mass with its tree shapes readable, which is what Ben means by rendering, and still far darker than the air.
 const _uFolAmb={ value:1.5 };
+// The night FADE strength, live, for the same reason the ambient has one: the pair are gated identically and sit in
+// the same display-referred place, so the only way to know whether the fade carries the ambient's fault is to be
+// able to switch it off at an hour and look. 0.72 is the shipped value; __hc.folFade(n).
+const _uFolFade={ value:0.72 };
 // ?nofolnight=1 compiles the foliage shaders WITHOUT the night term, so bench/assert-foliage-night.mjs can prove itself
 // capable of failing against this build. A check that has only ever run on working code is not evidence.
 const _NO_FOL_NIGHT = Q.get('nofolnight')!=null;
@@ -5600,7 +5604,7 @@ function injectAtlas(mat, opts={}){
     sh.uniforms.uAtlas = { value: arrayTex };
     sh.uniforms.uLight3D = { value: _emptyLight3D };   // per-chunk block-light volume — a per-chunk material clone overrides this at compile (see _chunkMat)
     if(globalU.uWhiteTile.value<0 && typeof TILEIDX!=='undefined' && TILEIDX.vantawhite!=null) globalU.uWhiteTile.value=TILEIDX.vantawhite;   // latch the real tile index the first time it's known
-    if(opts.nightFoliage && !_NO_FOL_NIGHT){ sh.uniforms.uDayF = globalU.uDay; sh.uniforms.uFolNight = _uFolNight; sh.uniforms.uFolAmb = _uFolAmb; }   // SHARED refs, so per-chunk material clones all track the same live value
+    if(opts.nightFoliage && !_NO_FOL_NIGHT){ sh.uniforms.uDayF = globalU.uDay; sh.uniforms.uFolNight = _uFolNight; sh.uniforms.uFolAmb = _uFolAmb; sh.uniforms.uFolFade = _uFolFade; }   // SHARED refs, so per-chunk material clones all track the same live value
     if(opts.leafTrans) sh.uniforms.uFolTrans = _uFolTrans;   // SHARED ref, so __hc.folTrans moves every per-chunk clone at once
     // SHARED refs, same reason as uWhiteTile: the A/B flag has to move every chunk clone at once or half the world keeps its
     // cloud shadows and the measurement is of nothing.
@@ -5668,14 +5672,20 @@ function injectAtlas(mat, opts={}){
       // is genuinely distance-weighted rather than a flat tint: near leaves are untouched, far ones sink to the same
       // target the horizon pines use. fogFactor is still in scope after <fog_fragment> because three declares it inside
       // main(), so this needs no second depth computation of its own.
-      .replace('uniform float uWhiteTile;', 'uniform float uWhiteTile;'+(opts.nightFoliage?'\nuniform float uDayF;\nuniform vec3 uFolNight;\nuniform float uFolAmb;':''))
+      .replace('uniform float uWhiteTile;', 'uniform float uWhiteTile;'+(opts.nightFoliage?'\nuniform float uDayF;\nuniform vec3 uFolNight;\nuniform float uFolAmb;\nuniform float uFolFade;':''))
       .replace('#include <fog_fragment>', '#include <fog_fragment>'+((opts.nightFoliage&&!_NO_FOL_NIGHT)?
+        // AND CUBED, LIKE THE AMBIENT BESIDE IT. Measured at the dusk vantage this term LIFTS a distant canopy by 1.6
+        // luminance against a 1.0 noise floor - the same fault as the ambient (a linear colour used where the pixel is
+        // already display-referred, gated on 1-day which is 0.25 at dusk), but bounded by fogFactor and so small rather
+        // than sixty levels. It is cubed for the same reason and at no cost: this term exists to make a wood sink FASTER
+        // than the fog at NIGHT, and (1-day) cubed is exactly 1 at midnight. Ordinary fog still fades foliage at dusk -
+        // the material carries three own fog - this just stops adding to it while the sun is up.
         // 0.94 -> 0.72 (Ben 08-12: "leaves arent rendering at night... its because of the fog"). At 0.94 a leaf standing
         // in fog at night is 94% the fade target and 6% itself, so the canopy stops being foliage and becomes a flat
         // silhouette of whatever colour the target is. 0.72 leaves better than a quarter of the leaf's own lit colour at
         // every distance, so a fogged night wood still reads as leaves. Daylight is untouched: the term is gated on
         // (1-uDayF) and is exactly zero at noon.
-        '\n{ float _nt=1.0-uDayF; gl_FragColor.rgb=mix(gl_FragColor.rgb, uFolNight, clamp(fogFactor*_nt*0.72,0.0,1.0));\n  float _na=_nt*_nt*_nt; float _nl2=dot(gl_FragColor.rgb, vec3(0.2126,0.7152,0.0722)); gl_FragColor.rgb += uFolNight*uFolAmb*_na*clamp(vSky,0.0,1.0)*(1.0-clamp(_nl2*2.2,0.0,1.0)); }':''))
+        '\n{ float _nt=1.0-uDayF; gl_FragColor.rgb=mix(gl_FragColor.rgb, uFolNight, clamp(fogFactor*_nt*_nt*_nt*uFolFade,0.0,1.0));\n  float _na=_nt*_nt*_nt; float _nl2=dot(gl_FragColor.rgb, vec3(0.2126,0.7152,0.0722)); gl_FragColor.rgb += uFolNight*uFolAmb*_na*clamp(vSky,0.0,1.0)*(1.0-clamp(_nl2*2.2,0.0,1.0)); }':''))
       // THE SHADED SIDE OF A LEAF IS STILL GREEN (Ben 08-05: "make the un-lit side of foliage look not solid black"). These quads
       // are DoubleSide, so one of every crossed pair faces away from the sun; with N·L negative that face keeps only ambient and
       // goes to black, and a blade of grass turns into a black slit. Real foliage does not do this because it is thin enough to
@@ -15479,7 +15489,11 @@ function updateTpsBody(dt){
   // THE HELD ITEM IS IN THE HAND (Ben: "should render from the hand"), which is also where a gun has to be for the arm pose to
   // mean anything: holding a rifle raises the right arm to point it down the look direction instead of letting it swing.
   const hs=inv[selSlot], hid=hs?hs.id:null;
-  if(P.held!==hid){ P.held=hid; try{ setAvatarHeld(P,hid); }catch(e){} }
+  // AND IT WEARS WHAT YOU BOLTED TO IT. Your own third-person body goes through the same builder a peer's does, so
+  // it needs the same attachment string — without it, the one player guaranteed to know a scope is fitted is the
+  // one whose body renders without it.
+  const hat=(hs&&ITEMS[hid]&&ITEMS[hid].gun&&typeof attOf==='function')?(Object.entries(attOf(hs)||{}).map(e=>e[0]+':'+e[1]).sort().join('|')||null):null;
+  if(P.held!==hid || (P._at||null)!==hat){ P.held=hid; P._at=hat; try{ setAvatarHeld(P,hid,hat); }catch(e){} }
   const oid=(armor[EQ_OFF]&&armor[EQ_OFF].id)||null;                            // BOTH HANDS (Ben 08-04): the offhand carries too
   if(P.offHeld!==oid){ P.offHeld=oid; try{ _tpsSetOff(P,oid); }catch(e){} }
   const it=hid?ITEMS[hid]:null, oit=oid?ITEMS[oid]:null;
@@ -35986,6 +36000,12 @@ window.__hc={
       GRID.items=GRID.items.filter(g=>g!==stack);
       return { before, saved:row?row.att:null, savedMag:row?row.mag:null }; }
     catch(e){ return {err:String(e.message||e)}; } },
+  // QA: what the THIRD-PERSON body is holding, and what that gun is wearing. The same builder serves a peer and
+  // your own body, so this is how the second of those is checked without a second machine.
+  tpsHeld(){ try{ const P=(typeof _tpsBody!=='undefined')?_tpsBody:null; if(!P) return {err:'no third-person body'};
+      const w=[]; P.heldMesh&&P.heldMesh.traverse(o=>{ if(o.userData&&o.userData.att) w.push(o.userData.att); });
+      return { active:!!_tpsAct, held:P.held||null, at:P._at||null, wearing:w, mesh:!!P.heldMesh }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   // CO-OP, FROM A HARNESS. Replication cannot be tested from one page: the thing under test is what crosses the
   // wire. These two let a bench open two real clients against the local relay and ask one of them what it built for
   // the other — mpConnect joins the same websocket the menu would, mpPeers reports each avatar as it was RECEIVED.
@@ -39795,6 +39815,7 @@ window.__hc={
   // front of it sink at different rates, which is the artefact. A near/far brightness comparison CANNOT see this — it
   // measures fog density, and passed identically with the fix compiled out.
   // QA/bench: the night SKY-AMBIENT on foliage (see _uFolAmb). 0 is the pre-dial build — leaves with no light at night.
+  folFade(v){ try{ if(v!=null) _uFolFade.value=+v; return +_uFolFade.value.toFixed(3); }catch(e){ return String(e.message||e); } },
   folAmb(v){ try{ if(v!=null) _uFolAmb.value=+v; return +_uFolAmb.value.toFixed(3); }catch(e){ return String(e.message||e); } },
   fadeTargets(){ try{ const L=(c)=>c.r*0.2126+c.g*0.7152+c.b*0.0722;
     const on=!_NO_FOL_NIGHT, k=on?0.94:0.0, nt=1-globalU.uDay.value, m=Math.min(1,Math.max(0,k*nt));

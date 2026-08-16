@@ -231,6 +231,15 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     console.log('save', JSON.stringify(trip));
     T('a bagged gun keeps its attachments through a save', trip.saved && trip.saved.optic==='red_dot' && trip.saved.muzzle==='suppressor', trip);
 
+    // YOUR OWN BODY IN THIRD PERSON goes through the same builder a peer does, so it needs the same string — the
+    // one player certain to know a scope is fitted should not be the one whose body renders without it.
+    await p.evaluate("__hc.hold('ar15'); __hc.attFit('optic','red_dot'); __hc.tpsProbe(true)"); await sleep(1200);
+    const tps=await p.evaluate("__hc.tpsHeld()");
+    await p.evaluate("__hc.tpsProbe(false)"); await sleep(300);
+    console.log('tps', JSON.stringify(tps));
+    T('the third-person body holds the gun', tps.held==='ar15', tps);
+    T('and it wears the fitted optic', (tps.wearing||[]).indexOf('red_dot')>=0, tps);
+
     T('zero page errors', errs.length===0, errs.slice(0,2));
     console.log(fails? fails+' FAILURE(S)':'ALL PASS');
     await b.close();
