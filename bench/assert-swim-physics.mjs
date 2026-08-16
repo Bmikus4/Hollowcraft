@@ -88,7 +88,7 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     const fastIn=await carry(9), slowIn=await carry(1.5);
     if(fastIn.set==null){ console.log('  (momentum rows skipped — no __hc.setVel to inject an entry speed)'); }
     else {
-      console.log(`  entered at 9.0 -> ${fastIn.after} after 0.25 s   fly ${fastIn.probe.fly} inWater ${fastIn.probe.inWater} onGround ${fastIn.probe.onGround}`);
+      console.log(`  entered at 9.0 -> ${fastIn.after} after 0.25 s   ${JSON.stringify(fastIn.probe)}`);
       console.log(`  entered at 1.5 -> ${slowIn.after} after 0.25 s   fly ${slowIn.probe.fly} inWater ${slowIn.probe.inWater}`);
       check('MOMENTUM CARRIES IN: a fast entry is still faster a quarter-second later', fastIn.after>slowIn.after+0.3, `${fastIn.after} against ${slowIn.after}`);
       check('and it is bleeding off rather than holding', fastIn.after<9, `${fastIn.after} from 9.0`);
