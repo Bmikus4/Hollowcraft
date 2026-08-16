@@ -82,12 +82,19 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
       await page.evaluate(`__hc.tpAt(${shore.x}+0.5, ${g}+3, ${shore.z}+0.5); __hc.cam({yaw:${YAW_OUT}, pitch:-0.02}); __hc.fog(0); __hc.freezeT(0); __hc.setTime(0.25)`);
       for(let i=0;i<30;i++){ const f=await page.evaluate('__hc.fill()'); if(f&&f.meshed>=f.want) break; await sleep(400); }
       await sleep(4000); await page.evaluate('__hc.setTime(0.25)'); await sleep(600);
-      const on=await grab('on'); await page.evaluate('__hc.pines(0)'); await sleep(900);
+      const on=await grab('on'); const fs_b64=fs.readFileSync(path.join(OUT,'cp-on.png')).toString('base64'); await page.evaluate('__hc.pines(0)'); await sleep(900);
       const off=await grab('off'); await page.evaluate('__hc.pines(1)'); await sleep(900);
       const on2=await grab('on2');
       let d1=0,d2=0,n=on.length,changed=0;
       for(let i=0;i<n;i++){ const a=Math.abs(on[i]-off[i]); d1+=a; if(a>4) changed++; d2+=Math.abs(on[i]-on2[i]); }
       console.log('    horizon strip: mean |on-off| '+(d1/n).toFixed(2)+'   noise |on-on| '+(d2/n).toFixed(2)+'   pixels changed >4 levels: '+(100*changed/n).toFixed(1)+'%');
+      // AND WHAT COLOUR THE BAND IS. The luminance A/B says the pines are drawing; this says whether what they drew is
+      // a wood or a grey smear - the green dominance of the pixels the pines actually changed.
+      const grn=await page.evaluate(`(async()=>{ const im=new Image(); im.src='data:image/png;base64,${fs_b64}';
+        await im.decode(); const c=document.createElement('canvas'); c.width=im.width; c.height=im.height;
+        const g=c.getContext('2d'); g.drawImage(im,0,0); const d=g.getImageData(0,300,1280,140).data;
+        let s=0,n=0; for(let i=0;i<d.length;i+=4){ s+=d[i+1]-(d[i]+d[i+2])/2; n++; } return +(s/n).toFixed(2); })()`);
+      console.log('    band green dominance (on frame): '+grn);
       for(const [when,t] of [['noon',0.25],['dusk',0.46],['night',0.75]]){
         await page.evaluate(`__hc.setTime(${t})`); await sleep(900); await page.evaluate(`__hc.setTime(${t})`); await sleep(400);
         await page.screenshot({path:path.join(OUT,'cp-shore-'+when+'.png')}); }
