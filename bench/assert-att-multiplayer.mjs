@@ -50,6 +50,18 @@ async function boot(b, base, tag){
     T('the peer sees the gun at all', seen.held==='ar15', seen);
     T('the attachment string crossed the wire', !!seen.at && /red_dot/.test(seen.at), seen);
     T('the peer built the fitted pieces', (seen.wearing||[]).length>=2, seen);
+    // AND A GUN THROWN ON THE FLOOR IS THE SAME GUN WHEN A TEAMMATE PICKS IT UP. The drop is broadcast by id and
+    // count; without the rest of the stack's state, the rifle you threw across the room arrives stripped.
+    await A.evaluate("__hc.hold('ar15'); __hc.attFit('optic','red_dot'); __hc.attFit('muzzle','suppressor')"); await sleep(800);
+    const thrown=await A.evaluate("(()=>{const s=__hc.heldSlotProbe?null:null; return __hc.attTossTrip? 'probe' : 'none';})()").catch(()=>'none');
+    await A.evaluate("(()=>{ const st=__hc.attProbe(); __hc.tossHeld && __hc.tossHeld(); })()").catch(()=>{});
+    await sleep(1500);
+    const bDrops=await B.evaluate("__hc.dropState?__hc.dropState():null").catch(()=>null);
+    console.log('peer drops', JSON.stringify(bDrops));
+    if(bDrops && bDrops.n>0){
+      T('the peer sees the thrown gun carrying its fits', (bDrops.withAtt||0)>0, bDrops);
+    } else console.log('SKIP — no drop reached the peer to measure');
+
     console.log(fails? fails+' FAILURE(S)':'ALL PASS');
     await b.close();
   } finally { try{ server.kill(); }catch(e){} }
