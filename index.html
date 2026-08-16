@@ -17625,6 +17625,103 @@ function hwBindGrabber(){
 // check on how the thing LOOKS has to be able to stop it acting first.
 const DUN_HUNT_DELAY=7;   // seconds inside the dungeon before it comes for you (Ben)
 let _hwHold=false;
+// ============================================================================================
+//  THE BURROWER — its dread is that the ground is not yours. (docs/CREATURES-RESEARCH.md §5)
+//
+//  IT IS NOT A SECOND WRETCH WITH A DIGGING ANIMATION. The Wretch frightens by pursuit and by
+//  capture: you can see it coming, you can break line of sight, and losing it is a skill. None of
+//  that applies here, and that is the entire point of the creature. It is never in the open, so
+//  there is nothing to see and nothing to break; it does not take you, so there is no ritual to
+//  survive. What it does is remove your footing as a safe assumption: any soft ground you are
+//  standing on is a door it can open, and the only counter is to know what you are standing on.
+//
+//  THE CHANNEL IS SOUND WITHOUT A DIRECTION, taken from Dead by Daylight's terror radius (range
+//  without bearing) and from RE9 Requiem's stalker, whose whole terror is that she travels through
+//  a layer of the level you cannot walk in. The dig is emitted at the SURFACE above it, jittered by
+//  up to three blocks, so volume tells you how close it is and nothing tells you where. Emitting at
+//  its true position would be quieter and, worse, precise.
+//
+//  IT BORROWS NO LIGHT SLOT, EVER. The pool is 16 and one lantern already lights 14 of them; the
+//  Horrific Wretch fork stranded its eye light on death and never released the slot at all, so the
+//  world got darker the longer you played and nothing on screen said why. Nothing here holds a
+//  light: eyes are emissive material only, and being underground there is nothing to light anyway.
+const BUR_DEPTH=3.2;        // blocks below the surface. Deep enough that no part of the rig pokes through a hillside.
+const BUR_SPEED=6.4;        // faster than a walk, slower than the charge — it does not need speed, it needs to already be there
+const BUR_STRIKE_R=2.6;     // horizontal reach of the emergence
+const BUR_COOL=7.0;         // after a strike it withdraws and will not come up again for this long
+let BUR=null;               // ONE alive at a time (population budget, docs §6) — the instance is reused, never accumulated
+// SOFT GROUND IS THE WHOLE GAME OF IT. Stone, wood, anything built: it cannot come up through. Standing on a floor you laid is
+// the counter, and it has to be legible from the block under your feet alone, so the test is deliberately a short whitelist
+// rather than "not solid" — a clever test nobody can see through is not a mechanic, it is a lottery.
+function burSoft(x,z){ try{ const fx=Math.floor(x), fz=Math.floor(z), gy=surfaceH(fx,fz);
+    const b=getBlock(fx,gy,fz);
+    return b===BID.grass||b===BID.dirt||b===BID.sand||b===BID.gravel||(typeof isGrassBlock==='function'&&isGrassBlock(b));
+  }catch(e){ return false; } }
+function spawnBurrower(dist){
+  const d=Math.max(6,+dist||22), a=Math.random()*Math.PI*2;
+  const x=player.pos.x+Math.cos(a)*d, z=player.pos.z+Math.sin(a)*d;
+  if(!BUR){ BUR=newWretchState(); BUR.kind='burrower';
+    const built=buildWretch(); BUR.group=built.group; BUR.P=built.P;
+    built.group.scale.multiplyScalar(0.9);                       // squatter than the Wretch: this thing digs, it does not stalk
+    if(built.P.eyeMat){ built.P.eyeMat.color.setHex(0x1a1512); built.P.eyeMat.emissive=new THREE.Color(0x000000); }   // eyeless — no glow, no light
+    wretchExtra.push(BUR); }
+  BUR.active=true; BUR.group.visible=false; BUR._sub=true; BUR._bst='DOWN'; BUR._bt=0; BUR._cool=0; BUR._life=0;
+  BUR.crawl=1; BUR.state='SUBMERGED'; BUR.hp=900; BUR.pos.set(x, surfaceH(Math.floor(x),Math.floor(z))-BUR_DEPTH, z);
+  BUR._mvLast=null;
+  return {x:+x.toFixed(1), z:+z.toFixed(1), y:+BUR.pos.y.toFixed(1)};
+}
+function burRetire(){ if(!BUR)return; BUR.active=false; BUR._sub=false; if(BUR.group)BUR.group.visible=false; BUR.state='DORMANT'; }
+// Runs INSTEAD of updateWretch for this instance. It reuses the rig, placeWretch and the animator — that is what forking the
+// Wretch buys — and nothing else: the state ladder, the sneak, the grab and the lair are all Wretch behaviour and none of it
+// belongs to a thing that lives under the floor.
+function updateBurrower(dt){
+  const w=wretch, cam=(typeof huntCam!=='undefined'&&huntCam)?huntCam:camera.position;
+  w.phase+=dt; w._life=(w._life||0)+dt; w._cool=Math.max(0,(w._cool||0)-dt);
+  const dx=cam.x-w.pos.x, dz=cam.z-w.pos.z; w.dist=Math.hypot(dx,dz);
+  if(w.dist>72){ burRetire(); return; }                                   // out of the region → gone; nothing accumulates
+  const surf=surfaceH(Math.floor(w.pos.x),Math.floor(w.pos.z));
+  const st=w._bst||'DOWN'; w._bt=(w._bt||0)+dt;
+  if(st==='DOWN'){
+    w._sub=true; if(w.group)w.group.visible=false;
+    // IT AIMS WHERE YOU ARE GOING, not where you are. A thing you cannot see does not need to follow you; the whole feeling of
+    // it is that it was already waiting. One second of lead is enough to make walking in a straight line the wrong answer.
+    const lead=1.0, tx=cam.x+(player.vel?player.vel.x*lead:0), tz=cam.z+(player.vel?player.vel.z*lead:0);
+    const ax=tx-w.pos.x, az=tz-w.pos.z, L=Math.hypot(ax,az)||1;
+    const closing = (w._cool>0) ? -1 : 1;                                  // fresh from a strike → back away before circling in again
+    w.pos.x+=(ax/L)*BUR_SPEED*dt*closing; w.pos.z+=(az/L)*BUR_SPEED*dt*closing;
+    w.pos.y=surfaceH(Math.floor(w.pos.x),Math.floor(w.pos.z))-BUR_DEPTH;
+    w.yaw=Math.atan2(-ax,-az);
+    // The heave: soil lifting along its path. This is the ONLY thing you can see, and only when it is close enough that the
+    // sound has already told you. Cheap on purpose — it runs at about six a second and only inside 26 blocks.
+    if(w.dist<26 && Math.random()<dt*6 && typeof spawnParticles==='function'){
+      const hx=w.pos.x, hz=w.pos.z, hy=surfaceH(Math.floor(hx),Math.floor(hz))+0.1;
+      spawnParticles(hx,hy,hz,0x4a3a28,3,0.35,1.1); }
+    if(w.dist<34 && typeof wretchVoice==='function'){
+      w._digT=(w._digT||0)-dt;
+      if(w._digT<=0){ w._digT=0.55+Math.random()*0.7;
+        // JITTERED BY UP TO THREE BLOCKS so the ear gets range and not bearing (see the header). A precise dig sound turns the
+        // creature into a marker on a map, and a thing you can locate is a thing you can simply walk away from.
+        wretchVoice('close_clicks',{x:w.pos.x+(Math.random()*6-3), y:surf+0.5, z:w.pos.z+(Math.random()*6-3)}); } }
+    if(w._cool<=0 && w.dist<BUR_STRIKE_R && burSoft(cam.x,cam.z)){ w._bst='RISE'; w._bt=0;
+      if(typeof wretchVoice==='function') wretchVoice('shriek',{x:w.pos.x,y:surf+1,z:w.pos.z}); }
+  }
+  else if(st==='RISE'){
+    // 0.5s of coming up. The rig is visible from the first frame of it, because half a creature out of the soil is the shot.
+    w._sub=false; if(w.group)w.group.visible=true; w.crawl=1;
+    const u=Math.min(1,w._bt/0.5);
+    w.pos.y = (surf-BUR_DEPTH) + (BUR_DEPTH)*u;
+    if(typeof spawnParticles==='function' && Math.random()<dt*30) spawnParticles(w.pos.x,surf+0.2,w.pos.z,0x4a3a28,4,0.6,2.2);
+    if(u>=1){ w._bst='STRIKE'; w._bt=0;
+      if(w.dist<3.4 && typeof damage==='function') damage(6,'something came up out of the ground'); }
+  }
+  else if(st==='STRIKE'){ w.pos.y=surf; if(w._bt>0.8){ w._bst='DIVE'; w._bt=0; } }   // a beat reared up, then it is gone again
+  else if(st==='DIVE'){
+    const u=Math.min(1,w._bt/0.6); w.pos.y=surf-BUR_DEPTH*u;
+    if(u>=1){ w._bst='DOWN'; w._bt=0; w._cool=BUR_COOL; w._sub=true; if(w.group)w.group.visible=false; }
+  }
+  w.state = (st==='DOWN') ? 'SUBMERGED' : st;
+  placeWretch(dt, st==='DOWN');
+}
 function updateWretchExtras(dt){
   // Held: skip the AI but STILL place the rig, exactly as the daytime-peek path does. Skipping placeWretch too leaves the
   // group at the origin and the drift loop renders empty air.
@@ -17632,7 +17729,11 @@ function updateWretchExtras(dt){
       wretch=inst; try{ placeWretch(dt,false); }catch(e){} finally{ wretch=wretchPrime; } } return; }
   for(const inst of wretchExtra){
     wretch=inst;
-    try{ updateWretch(dt); }
+    // A FORK OF THE WRETCH IS A SHARED BODY, NOT A SHARED BRAIN. The rig, placeWretch and the animator are reused verbatim —
+    // that is what the fork pattern buys and it is why a new creature costs a day instead of a week — but each kind runs its
+    // own update. Sharing updateWretch would mean every new creature inherits the state ladder, the sneak, the grab and the
+    // lair, and would have to opt out of each one by hand.
+    try{ if(inst.kind==='burrower'){ if(inst.active) updateBurrower(dt); } else updateWretch(dt); }
     catch(e){ if(!window._hwErr){ window._hwErr=String(e&&e.stack||e); console.error('[horrific] update crashed — caught so the game keeps running:', e); } }
     finally{ wretch=wretchPrime; } }
 }
@@ -18589,7 +18690,10 @@ function placeWretch(dt,moving){
   // happens inside the lair; anywhere else the flag is confiscated on sight — no terrain can roll the body.
   if(wretch._clingN && !wretch.boss && !((typeof inDungeon==='function')&&inDungeon(Math.floor(wretch.pos.x),Math.floor(wretch.pos.y),Math.floor(wretch.pos.z)))){ wretch._clingN=null; wretch._tunPursue=false; }
   // NEVER UNDER THE WORLD: buried beneath solid ground outside the dungeon (beam carves, pathing slips) → surface it
-  if(!wretch.boss && !wretch.dragging){ wretch._burT=(wretch._burT||0)+dt; if(wretch._burT>0.6){ wretch._burT=0;
+  // _sub is the Burrower saying it is under the ground ON PURPOSE. Everything below this line exists to rescue a creature that
+  // pathing or a beam carve has buried by accident, and it works by teleporting it to groundYAt — which is precisely the wrong
+  // thing to do to something whose whole design is to be three blocks down.
+  if(!wretch.boss && !wretch.dragging && !wretch._sub){ wretch._burT=(wretch._burT||0)+dt; if(wretch._burT>0.6){ wretch._burT=0;
     const fx=Math.floor(wretch.pos.x), fy=Math.floor(wretch.pos.y), fz=Math.floor(wretch.pos.z);
     // BURIED means its own cell is SOLID, not "something solid is overhead". The old test was a roof scan, and a
     // roof describes every cave, every tunnel and every inch of the labyrinth that falls outside the dungeon box
@@ -39104,6 +39208,23 @@ window.__hc={
       return { n:wretch._poseViolN||0, badT:+(wretch._poseBadT||0).toFixed(2), mv:+(wretch._mvSpeed||0).toFixed(2),
                crawl:+(wretch.crawl||0).toFixed(3), free:!!wretch._poseFree, hold:!!wretch._poseHold,
                samples:(wretch._poseViol||[]).slice(-6) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // QA: the Burrower as numbers. Nothing about this creature can be judged from a frame — for most of its life it is three
+  // blocks under the floor and the only honest questions are where it is, how deep, which phase it is in, and whether the
+  // ground the player is standing on is one it can come up through.
+  burrower(dist){ try{ if(dist!=null) spawnBurrower(dist);
+      if(!BUR) return {alive:false};
+      const cam=(typeof huntCam!=='undefined'&&huntCam)?huntCam:camera.position;
+      const surf=surfaceH(Math.floor(BUR.pos.x),Math.floor(BUR.pos.z));
+      return { alive:!!BUR.active, phase:BUR._bst, t:+(BUR._bt||0).toFixed(2), cool:+(BUR._cool||0).toFixed(2),
+               dist:+(BUR.dist||0).toFixed(2), depth:+(surf-BUR.pos.y).toFixed(2), visible:!!(BUR.group&&BUR.group.visible),
+               softUnderPlayer:burSoft(cam.x,cam.z), softUnderIt:burSoft(BUR.pos.x,BUR.pos.z),
+               playerHealth:+(player.health||0).toFixed(2), lightSlots:(typeof pointPool!=='undefined')?pointPool.length:null }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // QA: put the player on ground the creature cannot open, without needing a build. Returns what is now underfoot.
+  burFloor(id){ try{ const fx=Math.floor(player.pos.x), fz=Math.floor(player.pos.z), gy=surfaceH(fx,fz);
+      for(let dx=-3;dx<=3;dx++) for(let dz=-3;dz<=3;dz++) setBlockWorld(fx+dx, surfaceH(fx+dx,fz+dz), fz+dz, BID[id||'stone'], true);
+      return { under:getBlock(fx,surfaceH(fx,fz),fz), soft:burSoft(player.pos.x,player.pos.z) }; }
     catch(e){ return {err:String(e.message||e)}; } },
   wretchCommit(){ try{ wretch.committed=true; wretch.commitT=0;
       return {committed:true, state:wretch.state, dist:+(wretch.dist||0).toFixed(2)}; }catch(e){ return {err:String(e.message||e)}; } },
