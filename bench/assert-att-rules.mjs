@@ -69,16 +69,19 @@ const HANDGUNS=['flare_gun','machine_pistol','pistol','pistol_compact','pistol_h
     // ---- 3. ONE PER SLOT, PROVED BY TRYING TO FIT TWO ----
     // Structurally it is keyed by slot, which is an argument rather than a test. So: fit a red dot, fit a holo
     // sight over it, and count the optics on the gun afterwards.
+    // THE SLOT IS A NAME, NOT AN INDEX. The first version of this passed 0, which created a slot called "0" holding
+    // one attachment at a time — and then reported that a suppressor evicts an optic, which is a bug in the test
+    // that reads exactly like a bug in the game.
     await page.evaluate(`__hc.hold('ar15')`); await sleep(300);
-    const one=await page.evaluate(`__hc.attFit(0,'red_dot')`);
-    const two=await page.evaluate(`__hc.attFit(0,'holo_sight')`);
+    const one=await page.evaluate(`__hc.attFit('optic','red_dot')`);
+    const two=await page.evaluate(`__hc.attFit('optic','holo_sight')`);
     const W=await page.evaluate(`(()=>{ const p=__hc.attProbe(); return JSON.parse(JSON.stringify(p.wearing||{})); })()`);
     console.log('  after fitting red_dot then holo_sight: '+JSON.stringify(W));
     const optics=Object.values(W).filter(v=>v==='red_dot'||v==='holo_sight').length;
     check('TWO OPTICS CANNOT BE FITTED AT ONCE', optics===1, `${optics} optics on the gun: ${JSON.stringify(W)}`);
     check('and the second one replaced the first rather than being ignored', W.optic==='holo_sight', `optic slot holds ${W.optic}`);
     // The other slots are untouched by that, which is what makes it one per SLOT rather than one per gun.
-    await page.evaluate(`__hc.attFit(0,'suppressor')`);
+    await page.evaluate(`__hc.attFit('muzzle','suppressor')`);
     const W2=await page.evaluate(`(()=>{ const p=__hc.attProbe(); return JSON.parse(JSON.stringify(p.wearing||{})); })()`);
     check('a muzzle device does not evict the optic', W2.optic==='holo_sight' && W2.muzzle==='suppressor', JSON.stringify(W2));
   }catch(e){ console.log('  HARNESS ERROR: '+(e&&e.message||e)); fails++; checks++; }
