@@ -55,7 +55,8 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
       const v=await check('lantern 4 blocks ahead, fog bank');
       if(!v.chosen || !v.chosen.length){ bad++; console.log('      <== NOTHING SELECTED with a lantern in reach - the positive case FAILS'); } }
     const dun=await page.evaluate(`(()=>{ try{ const d=__hc.dungeon&&__hc.dungeon(); return d&&d.pos?d.pos:null; }catch(e){ return null; } })()`);
-    if(dun){ await page.evaluate(`__hc.tpAt(${dun.x}, ${dun.y}+2, ${dun.z}); __hc.fog(0)`); await sleep(3000); await check('dungeon interior'); }
+    if(dun){ await page.evaluate(`__hc.tpAt(${dun.x}, ${dun.y}+2, ${dun.z}); __hc.fog(0)`); for(let i=0;i<40;i++){ const f=await page.evaluate('__hc.fill()'); if(f&&f.meshed>=f.want) break; await sleep(400); }
+      await sleep(3000); await check('dungeon interior (streamed)'); }
     else console.log('    dungeon: no __hc hook for its position, skipped');
     console.log(bad? `\n  ${bad} rows BROKE the rule` : `\n  every row obeyed the budget, the range and the intensity floor`);
   } finally { try{ if(browser) await browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }
