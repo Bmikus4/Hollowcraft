@@ -65,6 +65,39 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     check('the stack is bottom left', geo && geo.left<40 && geo.bottom<40, JSON.stringify(geo&&{left:geo.left,bottom:geo.bottom}));
     check('and the voice row is the topmost of them', geo && geo.rows[0] && /v-voice/.test(geo.rows[0].cls), geo&&geo.rows[0]&&geo.rows[0].cls);
 
+    // ---- THE BOOT PATH, IN THE THREE CASES THAT ARE NOT "GRANTED" ----
+    // Ben could not play: the mic request rode the pointerlockchange handler, and opening a permission prompt EXITS
+    // POINTER LOCK — so clicking to start the game asked for the mic, the prompt took the lock away, the pause
+    // overlay came back, and he sat on the menu image forever. Granted was the only path that had been tested, and
+    // granted is the one path where the prompt closes itself immediately.
+    // THESE THREE ARE THE UNTESTED ONES. Each boots a fresh page with getUserMedia stubbed, and the check is not
+    // "voice works" — it is THE GAME REACHES PLAYABLE, which is the rule voice broke.
+    const bootWith=async(name, stub)=>{
+      const c=await browser.newContext({viewport:{width:800,height:480}});
+      const pg=await c.newPage();
+      await pg.addInitScript(stub);
+      await pg.goto('http://127.0.0.1:'+port+'/index.html?debug=1&rd=4',{waitUntil:'load',timeout:120000});
+      let ok=false;
+      try{ await pg.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:180000});
+           await pg.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:240000});
+           ok=true; }catch(e){ ok=false; }
+      // Armed and left to run: the request fires three seconds after the game is up, so this waits past that and
+      // then asks whether the game is STILL playable rather than whether the mic answered.
+      await sleep(5000);
+      const st=await pg.evaluate(`(()=>{try{ return {started:__hc.st().started, voice:__hc.voiceProbe().state}; }catch(e){ return {err:String(e)}; }})()`);
+      await c.close();
+      return { ok, st }; };
+    const DENIED=`try{ Object.defineProperty(navigator,'mediaDevices',{ value:{ getUserMedia:()=>Promise.reject(Object.assign(new Error('no'),{name:'NotAllowedError'})) }, configurable:true }); }catch(e){}`;
+    const NODEV =`try{ Object.defineProperty(navigator,'mediaDevices',{ value:{ getUserMedia:()=>Promise.reject(Object.assign(new Error('no'),{name:'NotFoundError'})) }, configurable:true }); }catch(e){}`;
+    // THE HARDEST ONE, and the one the old code could never have survived: a prompt that is opened and never
+    // answered. The promise never settles, so anything on the boot path that waits for it waits forever.
+    const NEVER =`try{ Object.defineProperty(navigator,'mediaDevices',{ value:{ getUserMedia:()=>new Promise(()=>{}) }, configurable:true }); }catch(e){}`;
+    for(const [nm,stub,want] of [['permission DENIED',DENIED,'denied'],['NO DEVICE',NODEV,'nodevice'],['prompt never answered',NEVER,'idle']]){
+      const r=await bootWith(nm,stub);
+      console.log(`  boot with ${nm}: reached playable ${r.ok}, voice ${JSON.stringify(r.st)}`);
+      check(`THE GAME BOOTS TO PLAYABLE with ${nm}`, r.ok===true && r.st.started===true, JSON.stringify(r.st));
+    }
+
     // ---- REFUSED: the game carries on and the meter says so ----
     // A SEPARATE CONTEXT, because a permission cannot be taken back inside one. This is the half a fake-accepted
     // device can never reach, and it is the half where a mistake breaks the whole game rather than one feature.
