@@ -11386,7 +11386,11 @@ const PRONE_EYE=0.32;
 // it is a build-time number used by peers, mobs and worldgen — but the LOCAL body's collision height and the capsule a
 // bullet is tested against are postures, not constants. Prone is 0.62: low enough to crawl under a one-block gap, which
 // is the whole point of lying down, and low enough that a shot aimed at a standing man passes over you.
-function bodyH(){ return player.prone?0.62:(player.sneak?1.45:PH); }
+// SWIMMING IS A POSTURE, so it is here and not in a rendering file. f242a78 settled this for prone and the rule is
+// the same one: a horizontal body that keeps a standing hitbox is a body you can shoot in the head while it lies
+// flat, and a swimmer stretched out along the surface is exactly that shape. 0.72 rather than prone's 0.62 because
+// a swimmer's stroke lifts the shoulders and the head clears the water — it is a swim, not a corpse.
+function bodyH(){ return player.swimming?0.72:(player.prone?0.62:(player.sneak?1.45:PH)); }
 const player={ pos:new THREE.Vector3(), vel:new THREE.Vector3(), yaw:0, pitch:0,
   onGround:false, fly:false, sneak:false, sprint:false, inWater:false,
   health:20, hunger:20, water:20, sat:5, creative:false, bob:0, fov:74, dead:false,
@@ -17943,6 +17947,49 @@ function kindBody(inst, kind){
   if(P.neck) P.neck.scale.set(1/torT, B.neck/torL, 1/torT);
   if(P.head) P.head.scale.set(B.head[0]/torT, B.head[1]/torL, B.head[2]/torT);
 }
+// A DEATH IS AN ANIMATION, NOT A DESPAWN. killWretch belongs to the Wretch — it carries the boss bar, the drop, the encounter
+// bookkeeping and a corpse that stays. None of that is right for these three, and hiding the group instead is the thing this
+// whole terminal has spent the day removing: a creature that stops existing between two frames while you are looking at it.
+// Each fork dies its own way, in its own time, and only then leaves.
+function kindDie(inst){
+  if(inst._dead) return;
+  inst._dead=0.0001; inst.state='DEAD'; inst.hp=0;
+  inst._deadY=inst.pos.y;
+  if(typeof wretchVoice==='function' && inst.kind!=='burrower') wretchVoice('grunt',{x:inst.pos.x,y:inst.pos.y+1,z:inst.pos.z});
+  if(inst.kind==='burrower' && typeof burrowVoice==='function') burrowVoice('cry',{x:inst.pos.x,y:inst.pos.y+0.6,z:inst.pos.z},0);
+}
+// Runs INSTEAD of the creature's brain once it is dying, from that creature's own update. Returns true while the death owns
+// the body, so each update can simply hand over. The timings are the character: the Meek is instant because it is small and
+// its death must be cheap enough to happen six times a night; the Tenant is slow because a thing that never moved in life
+// cannot suddenly become agile in the moment it stops.
+const KIND_DEATH={ burrower:1.4, meek:1.1, tenant:2.6 };
+function kindDeathTick(dt){
+  const w=wretch; if(!w._dead) return false;
+  w._dead+=dt;
+  const dur=KIND_DEATH[w.kind]||1.2, u=Math.min(1, w._dead/dur);
+  if(w.kind==='burrower'){
+    // IT GOES BACK INTO THE GROUND, which is the only place it has ever been. Half a second of collapse and then it sinks
+    // through the hole it came out of, so what the player is left with is a hole rather than a body.
+    w.pos.y = w._deadY - Math.max(0, (u-0.35)/0.65)*2.6;
+    if(u<0.4 && typeof spawnParticles==='function' && Math.random()<dt*20) spawnParticles(w.pos.x, w._deadY+0.2, w.pos.z, 0x4a3a28, 3, 0.5, 1.0);
+  } else if(w.kind==='meek'){
+    // IT DROPS. No stagger, no reaching, no reaction shot — the whole point of these is that nothing about them is a set
+    // piece, and a small thing that dies with ceremony would be asking to be looked at, which is the one thing it must not do.
+    w.pos.y = w._deadY - u*0.35;
+  } else if(w.kind==='tenant'){
+    // IT GOES OVER LIKE A PLANK. No fold at the knees, no arm out to catch itself: it topples from the ankles, holds most of
+    // the way, and only accelerates at the end, which is what a body does when nothing in it is trying to stay upright.
+    w.pos.y = w._deadY - u*u*0.4;
+  }
+  if(typeof placeWretch==='function') placeWretch(dt,false);
+  if(u>=1){
+    if(w.kind==='burrower') burRetire();
+    else if(w.kind==='tenant') tenRetire();
+    else meekRetire(w);
+    w._dead=0;
+  }
+  return true;
+}
 function kindDress(inst, kind){
   const m=kindSkinMat(kind); if(!m||!inst.group) return;
   inst.group.traverse(o=>{ if(o.isMesh && o.material===wretchMat) o.material=m; });
@@ -17977,7 +18024,8 @@ function burRetire(){ if(!BUR)return; BUR.active=false; BUR._sub=false; if(BUR.g
 // Wretch buys — and nothing else: the state ladder, the sneak, the grab and the lair are all Wretch behaviour and none of it
 // belongs to a thing that lives under the floor.
 function updateBurrower(dt){
-  const w=wretch, cam=(typeof huntCam!=='undefined'&&huntCam)?huntCam:camera.position;
+  if(kindDeathTick(dt)) return;                          // dying owns the body; the brain stops here
+    const w=wretch, cam=(typeof huntCam!=='undefined'&&huntCam)?huntCam:camera.position;
   w.phase+=dt; w._life=(w._life||0)+dt; w._cool=Math.max(0,(w._cool||0)-dt);
   const dx=cam.x-w.pos.x, dz=cam.z-w.pos.z; w.dist=Math.hypot(dx,dz);
   if(w.dist>72){ burRetire(); return; }                                   // out of the region → gone; nothing accumulates
@@ -18084,7 +18132,8 @@ function meekWatched(m){
   return !losBlocked(cam.x,cam.y,cam.z, ex,ey,ez);
 }
 function updateMeek(dt){
-  const m=wretch, cam=(typeof huntCam!=='undefined'&&huntCam)?huntCam:camera.position;
+  if(kindDeathTick(dt)) return;                          // dying owns the body; the brain stops here
+    const m=wretch, cam=(typeof huntCam!=='undefined'&&huntCam)?huntCam:camera.position;
   m.phase+=dt; m._life=(m._life||0)+dt;
   const dx=cam.x-m.pos.x, dz=cam.z-m.pos.z; m.dist=Math.hypot(dx,dz);
   if(m.dist>64 || globalU.uDay.value>0.6){ meekRetire(m); return; }          // out of range, or the sun is up
@@ -18199,11 +18248,13 @@ function tenPlace(t){
   return false;
 }
 function updateTenant(dt){
-  const t=wretch, cam=(typeof huntCam!=='undefined'&&huntCam)?huntCam:camera.position;
+  if(kindDeathTick(dt)) return;                          // dying owns the body; the brain stops here
+    const t=wretch, cam=(typeof huntCam!=='undefined'&&huntCam)?huntCam:camera.position;
   t.phase+=dt;
   t._ticks=(t._ticks||0)+1;
   const dx=cam.x-t.pos.x, dz=cam.z-t.pos.z; t.dist=Math.hypot(dx,dz);
   if(!tenInside()){ tenRetire(); return; }                                  // you went outside. That is the escape, and it is total.
+  if(t._touch>0){ t._touch-=dt; t.state='TOUCH'; if(t._touch<=0) tenRetire(); placeWretch(dt,false); return; }
   const watched=meekWatched(t);
   // THE ENGINE AUDITS ITS OWN CLAIM. "It never moves while you can see it" is not something a bench can check by polling four
   // times a second — a relocation takes one frame and would sit in the gap. So the comparison is made here, every frame,
@@ -18220,10 +18271,13 @@ function updateTenant(dt){
   t._still=0;
   if(t.dist<TEN_NEAR){
     // It has been standing where you were about to walk, in the dark, and you walked into it. One blow, then it is not there.
-    t.state='TOUCH';
+    // THE BLOW IS A BEAT, NOT A FRAME. It used to damage and retire on the same tick, so the player took eight and the room
+    // was empty before the hit even registered — which reads as an unexplained wound rather than as a creature. It holds for
+    // three quarters of a second with its head down at you, and leaves after.
+    t.state='TOUCH'; t._touch=0.75;
     if(typeof damage==='function') damage(8,'it was already in the room');
     if(typeof wretchVoice==='function') wretchVoice('sting',{x:t.pos.x,y:t.pos.y+1.4,z:t.pos.z});
-    tenRetire(); return; }
+    placeWretch(dt,false); return; }
   // Unwatched → it is simply somewhere else the next time you look. It never travels in view, so relocation is the whole motion
   // model: no path, no gait, nothing to catch mid-stride.
   t._moveT=(t._moveT||0)-dt;
@@ -20556,6 +20610,14 @@ function kindPose(dt){
     for(let li=0;li<legs.length;li++){ const L=legs[li];
       if(L.thigh) L.thigh.rotation.x=0; if(L.shin) L.shin.rotation.x=0;
       if(L.foot)  L.foot.rotation.x=0;  if(L.hip)  L.hip.rotation.z=0; }
+    if(wretch._touch>0){
+      // ITS ATTACK IS THE ONLY TIME IT BENDS. Everything else about this creature is a vertical line, so folding down over you
+      // for three quarters of a second is the whole of its violence — no swing, no claw, just the line breaking.
+      const k=Math.min(1, (0.75-wretch._touch)/0.18);
+      for(let i=0;i<sp.length;i++) sp[i].rotation.x = -0.02 + 0.42*k;
+      setArm(0, -0.9*k, 0.35*k); setArm(1, -0.9*k, -0.35*k);
+      if(P.head){ P.head.rotation.x = 0.05 + 0.85*k; P.head.rotation.z=0; }
+    } else
     if(P.head){ const low=(typeof opaqueTop==='function') && (opaqueTop(Math.floor(wretch.pos.x),Math.floor(wretch.pos.z)) < wretch.pos.y+3.4);
       P.head.rotation.x = low?0.45:0.05; P.head.rotation.z=0; }                    // the ceiling is what bows it
     // Breathing, and only breathing. Two centimetres at a tenth of a hertz: under the threshold of something you would call
@@ -20565,6 +20627,38 @@ function kindPose(dt){
   // ONE INDIVIDUAL PER TRACE, latched on the first frame recorded. Four Meek share a kind and each carries its own phase
   // clock, so a trace keyed on the kind alone interleaves several bodies: measured, the span of a ten-flush recording came
   // back as MINUS 4.568 seconds and every crossing count with it was noise.
+  // THE DEATH POSE OVERRIDES THE GAIT, and it is written last so it cannot be half-applied on top of a walk cycle.
+  if(wretch._dead){
+    const u=Math.min(1, wretch._dead/(KIND_DEATH[wretch.kind]||1.2));
+    if(wretch.kind==='meek'){
+      // Folded under itself, face down. A dead animal is smaller than a live one.
+      for(const L of (P.legs||[])){ if(L.thigh) L.thigh.rotation.x=1.9*u+0.9*(1-u); if(L.shin) L.shin.rotation.x=-2.2*u-1.4*(1-u); }
+      setArm(0, -0.1*u, 0.5*u); setArm(1, -0.1*u, -0.5*u);
+      for(let i=0;i<sp.length;i++) sp[i].rotation.x = 0.22+0.55*u;
+      if(P.head) P.head.rotation.x = 0.35+0.9*u;
+      if(g) g.rotation.x = 1.25*u;                                   // face into the ground
+    } else if(wretch.kind==='burrower'){
+      // It pulls itself back in: arms fold under the chest, head last.
+      const k=Math.min(1,u/0.4);
+      setArm(0, -0.5-1.6*k, 0.1); setArm(1, -0.5-1.6*k, -0.1);
+      for(let i=0;i<sp.length;i++) sp[i].rotation.x = 0.30 + 0.6*k;
+      if(P.head) P.head.rotation.x = 0.22 + 0.7*k;
+      if(g) g.rotation.x = 0.5*k;
+    } else if(wretch.kind==='tenant'){
+      // Stiff. The knees do not bend and the arms do not come up, and the fall is quadratic so it hangs and then goes.
+      for(const L of (P.legs||[])){ if(L.thigh) L.thigh.rotation.x=0; if(L.shin) L.shin.rotation.x=0; }
+      setArm(0, 0.04, 0.06); setArm(1, 0.04, -0.06);
+      for(let i=0;i<sp.length;i++) sp[i].rotation.x = -0.02;
+      if(P.head) P.head.rotation.x = 0.05;
+      if(g) g.rotation.x = 1.57*u*u;                                 // over from the ankles, all in one piece
+    }
+    if(RIGTRACE.kind===wretch.kind && !RIGTRACE.inst) RIGTRACE.inst=wretch;
+    if(RIGTRACE.kind===wretch.kind && RIGTRACE.inst===wretch && RIGTRACE.buf.length<1200){
+      const L0=(P.legs&&P.legs[0])||null, A0=(P.arms&&P.arms[0]&&P.arms[0][1])||null;
+      RIGTRACE.buf.push([+(wretch.phase||0).toFixed(4), L0?+L0.thigh.rotation.x.toFixed(4):0, A0?+A0.rotation.x.toFixed(4):0, g?+g.position.y.toFixed(4):0]); }
+    return;
+  }
+  if(g) g.rotation.x = 0;                                            // a body that got up again is upright again
   if(RIGTRACE.kind===wretch.kind && !RIGTRACE.inst) RIGTRACE.inst=wretch;
   if(RIGTRACE.kind===wretch.kind && RIGTRACE.inst===wretch && RIGTRACE.buf.length<1200){
     const L0=(P.legs&&P.legs[0])||null, A0=(P.arms&&P.arms[0]&&P.arms[0][1])||null;
@@ -26387,7 +26481,7 @@ function hurtWretch(dmg){ if(wretch.hp==null){ wretch.hpMax=2700; wretch.hp=2700
       else { wretch.fleeing=true; wretch.committed=false; wretch.state='FLEE'; } } }      // grace night / wounded / bright day → it bolts instead. Either way the show NEVER resumes
   wretchVoice&&wretchVoice('scream',wretch.pos); spawnParticles(wretch.pos.x,wretch.pos.y+1.4,wretch.pos.z,0x3a0608,10,2,1.4);
   const dx=wretch.pos.x-player.pos.x, dz=wretch.pos.z-player.pos.z, dd=Math.hypot(dx,dz)||1; wretch.pos.x+=dx/dd*0.3; wretch.pos.z+=dz/dd*0.3;   // small knockback
-  if(wretch.hp<=0){ if(wretch.boss && (wretch._bossPhase||1)<BOSS_PHASES.length) startBossRegen(); else killWretch(); } }   // the CERAPHIM sheds a life and SURGES; only the third bar's end is the true death
+  if(wretch.hp<=0){ if(wretch.kind) kindDie(wretch); else if(wretch.boss && (wretch._bossPhase||1)<BOSS_PHASES.length) startBossRegen(); else killWretch(); } }   // the CERAPHIM sheds a life and SURGES; only the third bar's end is the true death
 // CERAPHIM PHASE SHIFT — the drained bar dies, the next (greater) one FLOODS back in while the body is untouchable.
 // The SURGE is a moment: a holy shockwave slams every nearby player back, the sky whites out, the wings flare
 // into a hard beat, and the toll rings — then the new bar floods and the retaliation beam follows.
