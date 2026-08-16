@@ -70,10 +70,15 @@ function brightCount(f,crop,level){
     // ---- THE DROPPED ITEM, AS SEEN ----
     // A rifle, because it is the shape that made the old system look wrong: long, thin, and spinning in the air.
     await page.evaluate(`__hc.dropClear()`);
-    await page.evaluate(`__hc.tpAt(${SX+0.5},${gy+1.6},${SZ+2.6}); __hc.cam({yaw:${Math.PI}, pitch:-0.55})`);
+    // AWAY FROM THE SPAWN CHEST. The first frame of this test landed the rifle on the lid of the chest that sits at
+    // spawn, so the item was half behind it and read as a pale sliver — the picture said the feature looked wrong
+    // when what was wrong was where the bench put it. Ten blocks out is open ground.
+    const DX=SX+10, DZ=SZ+10;
+    const dgy=await page.evaluate(`__hc.groundY(${DX},${DZ})`);
+    await page.evaluate(`__hc.tpAt(${DX+0.5},${dgy+1.6},${DZ+2.6}); __hc.cam({yaw:${Math.PI}, pitch:-0.55})`);
     for(let i=0;i<20;i++){ const f=await page.evaluate(`__hc.fill()`); if(f&&f.meshed>=f.want) break; await sleep(400); }
     await sleep(1200);
-    await page.evaluate(`__hc.dropSpawn('ak', ${SX+0.5}, ${gy+1.2}, ${SZ+0.5})`);
+    await page.evaluate(`__hc.dropSpawn('ak', ${DX+0.5}, ${dgy+1.2}, ${DZ+0.5})`);
     await sleep(4000);
     const D=await page.evaluate(`__hc.dropPhys()`);
     check('a rifle settled to look at', D.drops.length===1 && D.drops[0].rest, JSON.stringify(D.drops[0]&&{rest:D.drops[0].rest,gap:D.drops[0].gap,pitch:D.drops[0].pitch,roll:D.drops[0].roll}));
@@ -88,18 +93,29 @@ function brightCount(f,crop,level){
     // measured was the camera turning. The item is removed and the frame retaken from the identical transform, so
     // the only thing that differs between the two pictures is the rifle.
     const P0=await page.evaluate(`__hc.dropPhys()`);
+    // AND THE OUTLINE IS NOT THE ITEM. The first version diffed the PICKED frame against the empty one, so the
+    // highlight box — which is large, and which vanishes with the drop — counted as the rifle being visible. Looking
+    // a few degrees off drops the pick while leaving the item in frame, so `unpicked` vs `empty` is the object alone.
+    if(P0.drops.length){ const d=P0.drops[0], e=P0.eye;
+      const yaw=Math.atan2(-(d.x-e.x), -(d.z-e.z))+0.16, pitch=Math.atan2(d.y-e.y, Math.hypot(d.x-e.x,d.z-e.z));
+      await page.evaluate(`__hc.cam({yaw:${yaw}, pitch:${pitch}})`); await sleep(450); }
+    const off=await page.evaluate(`__hc.dropPhys()`);
+    check('looking off it drops the pick, leaving the item in frame', !off.picked, JSON.stringify(off.picked));
+    const unpicked=path.join(OUT,'look-drop-unpicked.png'); await page.screenshot({path:unpicked});
     await page.evaluate(`__hc.dropClear()`); await sleep(500);
     const empty=path.join(OUT,'look-drop-none.png'); await page.screenshot({path:empty});
-    const seen=diffCount(empty,laid,CROP,30);
+    const seen=diffCount(empty,unpicked,CROP,30);
     console.log(`  the item against the empty view: ${seen.px} px changed (${seen.pct}%), mean diff ${seen.meanDiff}`);
     // IT IS ON SCREEN AND IT IS AN OBJECT, not a speck. A rifle at two blocks fills a real part of the crop; a
     // hovering sprite the size of a coin would pass a "something changed" check and fail this one.
     check('THE DROPPED RIFLE IS VISIBLY THERE', seen.pct>0.35 && seen.pct<25, `${seen.pct}% of the crop`);
     // ---- AND THE HIGHLIGHT READS ----
     check('the crosshair is on it', !!P0.picked, JSON.stringify(P0.picked));
-    const gold=brightCount(laid,CROP,150);
-    console.log(`  outline pixels while picked: ${gold.px} (${gold.pct}% of crop)`);
-    check('the highlight puts pale gold on the screen', gold.px>40, `${gold.px} px`);
+    // The outline measured as the DIFFERENCE between the picked and unpicked frames of the same view, which is the
+    // only thing that is unambiguously the highlight.
+    const gold=diffCount(unpicked,laid,CROP,24);
+    console.log(`  the highlight against the same view unpicked: ${gold.px} px (${gold.pct}%)`);
+    check('the highlight is drawn and is the only thing that changed', gold.px>40, `${gold.px} px`);
 
     // ---- THE VOICE METER, AS SEEN ----
     await page.evaluate(`__hc.voiceAsk()`);
