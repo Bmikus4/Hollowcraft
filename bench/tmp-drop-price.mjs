@@ -45,12 +45,20 @@ const N=[0,50,120,200];
         if(t.length<400) requestAnimationFrame(f);
         else { t.sort((a,b)=>a-b); res({ med:+t[t.length>>1].toFixed(3), p90:+t[(t.length*0.9)|0].toFixed(3) }); } }
       requestAnimationFrame(f); }))()`;
+    // A WARMUP ROW THAT IS THROWN AWAY. The first measured row read 20.5 ms with ZERO bodies and every loaded row
+    // after it read 15 — the scene was still streaming and compiling on the first pass, so row one was pricing the
+    // warmup and would have made 200 rigid bodies look like a saving.
+    await page.evaluate(frames);
     console.log('  n      median   p90     drops');
     for(const n of N){
       await page.evaluate(`__hc.dropClear()`);
-      if(n){ await page.evaluate(`(()=>{ for(let i=0;i<${n};i++){ const a=i*0.618*6.283;
-          __hc.dropSpawn('coal', ${SX}+Math.cos(a)*(2+i*0.03), ${gy}+2.5, ${SZ}+Math.sin(a)*(2+i*0.03)); } })()`);
-        await sleep(6000); }
+      // DROPS OF THE SAME ID MERGE WHEN THEY REST WITHIN A BLOCK OF EACH OTHER, which is a feature and which
+      // silently turned 200 spawns into 60 bodies on the first run — the harness was pricing a third of what it
+      // said. Four ids on a wide spiral so the count on the floor is the count asked for.
+      if(n){ await page.evaluate(`(()=>{ const IDS=['coal','iron_ingot','bone','string'];
+          for(let i=0;i<${n};i++){ const a=i*2.399, r=3+i*0.12;
+            __hc.dropSpawn(IDS[i%4], ${SX}+Math.cos(a)*r, ${gy}+2.5, ${SZ}+Math.sin(a)*r); } })()`);
+        await sleep(7000); }
       const r=await page.evaluate(frames);
       const P=await page.evaluate(`(()=>{ const p=__hc.dropPhys(); return { n:p.n, resting:p.drops.filter(d=>d.rest).length }; })()`);
       console.log(`  ${String(n).padStart(3)}    ${String(r.med).padStart(6)}  ${String(r.p90).padStart(6)}   ${P.n} live, ${P.resting} settled`);
