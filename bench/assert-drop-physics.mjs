@@ -85,13 +85,16 @@ const ITEMS=['ak','red_dot','coal','lantern','buckshot'];
     await sleep(400);
     await page.evaluate(`__hc.dropSpawn('ak', ${SX+0.5}, ${gy+1.6}, ${SZ+0.5})`);
     await sleep(3500);
+    // AIM AT THE BODY, geometrically, rather than nudging the camera until something lights up. The ray starts at
+    // the EYE and the probe reports it — deriving it as player.pos plus an eye height is wrong whenever the player
+    // is crouched, prone or mid-fall, and a pick check that misses by a degree reads as a broken feature.
     const look=await page.evaluate(`(()=>{ const p=__hc.dropPhys(); if(!p.drops.length) return {err:'no drop'};
       const d=p.drops[0];
-      // AIM AT THE BODY, geometrically, rather than nudging the camera until something lights up: the yaw and pitch
-      // from the eye to the body's centre is the one aim that is definitely on it.
-      const ex=__hc.st().px, ey=__hc.st().py, ez=__hc.st().pz;
-      return { d, aim:{ dx:d.x-ex, dy:d.y-(ey+1.62), dz:d.z-ez } }; })()`);
+      return { d, reach:p.reach, dist:Math.hypot(d.x-p.eye.x,d.y-p.eye.y,d.z-p.eye.z),
+               aim:{ dx:d.x-p.eye.x, dy:d.y-p.eye.y, dz:d.z-p.eye.z } }; })()`);
     if(!look.err){
+      console.log(`  aiming at the body from ${look.dist.toFixed(2)} blocks (reach ${look.reach})`);
+      check('the body is inside the pick reach to begin with', look.dist<look.reach, `${look.dist.toFixed(2)} against ${look.reach}`);
       const yaw=Math.atan2(-look.aim.dx, -look.aim.dz);
       const pitch=Math.atan2(look.aim.dy, Math.hypot(look.aim.dx,look.aim.dz));
       await page.evaluate(`__hc.cam({yaw:${yaw}, pitch:${pitch}})`); await sleep(250);
