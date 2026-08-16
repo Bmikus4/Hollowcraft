@@ -5485,6 +5485,52 @@ const _uHorizonBlend={value:new THREE.Color(0.10,0.14,0.20)};
 // inject texture-array sampling + skylight darkening (+ optional wind) into a Lambert material
 // The night target for real foliage: the SAME colour the horizon pine backdrop fades to, so the wood and the treeline
 // behind it sink into darkness together instead of at two different rates. Driven per frame in updateSky.
+// =====================================================================
+//  THE SHARED-UNIFORM GUARD — why a tree, a tuft of grass and the sky can go white and vanish together
+// =====================================================================
+// Ben 08-12: "randomly trees, foliage, and the sky are all turning white and dissapearing ... its not always all three,
+// and its not always immediate. maybe tied to resource management." Thirteen minutes of bench circuit across the whole
+// day cycle, four laps, weather stepped, never reproduced it, and the frame at every tick had white% 0.0 — so this is
+// not a reproduction, it is a guard against the one mechanism that produces exactly that pair of symptoms at once.
+//
+// A non-finite number renders as WHITE in a fragment shader and as NOTHING in a vertex shader — a triangle with a NaN
+// vertex is discarded by the rasteriser. "Turning white and disappearing", in one sentence. And what would take those
+// three surfaces together, while leaving the HUD and the water alone, is a shared uniform: trees, foliage and the sky
+// are the three consumers of globalU, every chunk material clone points at the same objects by reference (that sharing
+// is deliberate and documented at uWhiteTile), so one bad write reaches all of them on the same frame and nothing else.
+//
+// It cannot say WHERE the bad value came from — that needs the fault in hand — but it does two things that are worth
+// more than a theory: it keeps a shadow copy of every globalU value while it is finite and puts that value back when it
+// is not, so the frame recovers instead of staying broken; and it records what went bad and when, so the next report
+// comes with a name on it. __hc.nanWatch() reads the log.
+// Cost: a walk of ~30 uniforms every 12th frame. Measured at 0.02 ms, which is under the timer's own resolution.
+const _uniShadow=new Map(); const _uniHits=[]; let _uniFrame=0, _uniWarned=false;
+function _uniGuardHit(k){
+  if(_uniHits.length<12) _uniHits.push({ u:k, t:+(performance.now()/1000).toFixed(1),
+    day:+(globalU.uDay&&globalU.uDay.value!=null?globalU.uDay.value:-1).toFixed(3), restored:_uniShadow.has(k) });
+  if(!_uniWarned){ _uniWarned=true; try{ console.warn('[hc] non-finite shared uniform '+k+' — restored; see __hc.nanWatch()'); }catch(e){} }
+}
+function _uniGuard(){
+  if((++_uniFrame % 12) !== 0) return;
+  for(const k in globalU){ const u=globalU[k]; if(!u) continue; const v=u.value;
+    if(typeof v==='number'){
+      if(Number.isFinite(v)) _uniShadow.set(k,v);
+      else { u.value = _uniShadow.has(k)?_uniShadow.get(k):0; _uniGuardHit(k); }
+      continue; }
+    if(!v || typeof v!=='object') continue;
+    const comps = v.isColor ? ['r','g','b'] : (typeof v.x==='number' ? (typeof v.w==='number'?['x','y','z','w']:(typeof v.z==='number'?['x','y','z']:['x','y'])) : null);
+    if(!comps) continue;
+    let bad=false; for(let i=0;i<comps.length;i++) if(!Number.isFinite(v[comps[i]])) { bad=true; break; }
+    if(!bad){ const a=_uniShadow.get(k); if(a && a.length===comps.length){ for(let i=0;i<comps.length;i++) a[i]=v[comps[i]]; }
+              else _uniShadow.set(k, comps.map(c=>v[c])); continue; }
+    const sh=_uniShadow.get(k);
+    for(let i=0;i<comps.length;i++) v[comps[i]] = sh ? sh[i] : (comps[i]==='w'?1:0);
+    _uniGuardHit(k); }
+  // The fog is the other thing all three read, and it is not in globalU.
+  try{ const fc=scene.fog&&scene.fog.color;
+    if(fc && !(Number.isFinite(fc.r)&&Number.isFinite(fc.g)&&Number.isFinite(fc.b))){ fc.setRGB(0.6,0.66,0.72); _uniGuardHit('fog.color'); }
+    if(scene.fog && !Number.isFinite(scene.fog.density)){ scene.fog.density=0.01; _uniGuardHit('fog.density'); } }catch(e){}
+}
 const _uFolNight={ value:new THREE.Color(0.006,0.008,0.014) };
 // ---- THE NIGHT SKY IS A LIGHT ON A CANOPY (Ben 08-12: "leaves arent rendering at night") ----
 // Measured at the canopy vantage with the clock pinned: a leaf under open sky reads luminance 2 of 255 at midnight
@@ -15823,6 +15869,7 @@ function loop(){ try{
   // effect - the identical build measured 8.9 s and 13.4 s twenty minutes apart. A flag is the only way to alternate.
   const _drawWorld = (started && (_circleDone || _DRAWLOAD)) || CINE;
   if(_drawWorld){
+  _uniGuard();
   if(_rtPath){ if(PERF.on) PERF.gpu.mark(2); renderer.setRenderTarget(_sceneRT); renderer.render(scene, camera); renderer.setRenderTarget(null); }   // scene → our depth-carrying target (feeds motionPass); classic path renders inside composer
   if(PERF.on) PERF.gpu.mark(3);
   composer.render();
@@ -22442,7 +22489,22 @@ function setViewItem(id){ if(view.id===id)return; view.id=id;
   else if(it.block!=null) view.mesh=new THREE.Mesh(new THREE.BoxGeometry(0.2,0.2,0.2), new THREE.MeshLambertMaterial({map:dropTex(id)}));   // SOLID blocks → a small textured cube in hand (correct for placing)
   else if(it.tool && TOOL_BUILDERS[it.tool.kind]){   // SAME builder table itemModel uses — only the POSE is the viewmodel's own
     const P=TOOL_POSE[it.tool.kind]||TOOL_POSE.pickaxe, grp=new THREE.Group(), tm=TOOL_BUILDERS[it.tool.kind](it.tool);
-    tm.position.set(P.x,P.y,0); grp.add(tm); grp.scale.setScalar(P.s); grp.rotation.set(P.rx,0.18+Math.PI/2,P.rz); view.mesh=grp; }   // handle-bottom near the pivot → swings from the base (1.5x bigger in hand)
+    tm.position.set(P.x,P.y,0); grp.add(tm); grp.scale.setScalar(P.s); grp.rotation.set(P.rx,0.18+Math.PI/2,P.rz); view.mesh=grp;
+    // A TOOL IS HELD BY A HAND, the same one every gun gets (Ben 08-12: "none of the tool items are held in the
+    // players hand"). Every builder puts the GRIP AT THE MODEL'S ORIGIN — buildGlbTool slides the measured grip
+    // point there and the procedural ones are built from the hand up — so the grip that attachGunHand solves for is
+    // the origin, and the arm rides the pose because it hangs off the tool rather than off the camera.
+    if(typeof attachGunHand==='function'){
+      // THE ARM GOES OUTSIDE THE POSE, NOT INSIDE IT. attachGunHand runs the forearm back along +z toward the
+      // shoulder, and that direction is only "backwards" in the VIEW's space — hung inside the tool group it is
+      // turned by the pose's own 100 degrees of yaw and the elbow swings out across the screen instead of behind
+      // the eye. So the tool group is wrapped, the grip is transformed up into the wrapper, and the arm is solved
+      // there.
+      const outer=new THREE.Group(); outer.add(grp);
+      const gp=new THREE.Vector3(P.x,P.y+0.03,0).multiplyScalar(P.s).applyEuler(grp.rotation);
+      outer.userData.gripAt=[gp.x,gp.y,gp.z];
+      attachGunHand(outer,1);
+      view.mesh=outer; } }   // handle-bottom near the pivot → swings from the base (1.5x bigger in hand)
   // THE VIEWMODEL IS A SECOND DISPATCH, and this is the branch that proves it matters: itemModel already returned a real
   // 3D shell for the drop and a peer's hand, and the held form still came out as the flat extruded sprite because THIS
   // list never heard about it. Adding a model to itemModel alone changes nothing you can see in your own hands.
@@ -38913,6 +38975,8 @@ window.__hc={
   // QA/bench: what the renderer is holding. Ben 08-12 guessed the random whiteout was "tied to resource management",
   // and this is the number that answers it — a program count that climbs, or a texture count that drops, at the tick
   // the frame goes wrong is a different fault from one where both are flat.
+  // QA/bench: what the shared-uniform guard has caught this session, newest last. Empty is the healthy answer.
+  nanWatch(){ try{ return { hits:_uniHits.slice(), watched:_uniShadow.size, frames:_uniFrame }; }catch(e){ return { err:String(e.message||e) }; } },
   gpuInfo(){ try{ const I=renderer.info; const h=(performance.memory)?+(performance.memory.usedJSHeapSize/1048576).toFixed(1):null;
     return { calls:I.render.calls, tris:I.render.triangles, geo:I.memory.geometries, tex:I.memory.textures,
              prog:(I.programs||[]).length, heapMB:h }; }catch(e){ return { err:String(e.message||e) }; } },
