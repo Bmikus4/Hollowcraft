@@ -85,6 +85,12 @@ const ITEMS=['ak','red_dot','coal','lantern','buckshot'];
     await sleep(400);
     await page.evaluate(`__hc.dropSpawn('ak', ${SX+0.5}, ${gy+1.6}, ${SZ+0.5})`);
     await sleep(3500);
+    // STAND RELATIVE TO WHERE IT ACTUALLY LANDED. A body is thrown with a random impulse and lands anywhere inside
+    // a couple of blocks, and the player falls while it settles, so a camera placed before the throw sat 3.4 blocks
+    // away on one run and 4.81 on the next — outside the game's 4.5 reach, which is a real design number and not
+    // something to widen so a test goes green.
+    const at=await page.evaluate(`(()=>{ const p=__hc.dropPhys(); return p.drops[0]||null; })()`);
+    if(at){ await page.evaluate(`__hc.tpAt(${at.x}, ${at.y+1.2}, ${at.z+1.6})`); await sleep(600); }
     // AIM AT THE BODY, geometrically, rather than nudging the camera until something lights up. The ray starts at
     // the EYE and the probe reports it — deriving it as player.pos plus an eye height is wrong whenever the player
     // is crouched, prone or mid-fall, and a pick check that misses by a degree reads as a broken feature.
