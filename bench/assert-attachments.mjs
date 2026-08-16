@@ -142,6 +142,17 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     T('a fitted optic gives a reticle to aim with', dotAim.ret===true, dotAim);
     T('the optical axis moved to the optic', dotAim.dotY!=null && ironAim.dotY!=null && dotAim.dotY>ironAim.dotY, {iron:ironAim.dotY, optic:dotAim.dotY});
 
+    // THE WEAPON LIGHT LIGHTS. It drives the game's one flashlight spot rather than a second lamp, so the test is
+    // that the beam is lit with the light fitted and dark without it, on the same gun and the same switch.
+    await p.evaluate("__hc.hold('ar15'); __hc.attFit('light',null); __hc.flashlight({on:true})"); await sleep(500);
+    const lampBare=await p.evaluate("__hc.flashlight()");
+    await p.evaluate("__hc.attFit('light','weapon_light')"); await sleep(500);
+    const lampOn=await p.evaluate("__hc.flashlight()");
+    await p.evaluate("__hc.attFit('light',null); __hc.flashlight({on:false})"); await sleep(300);
+    const lamp={bare:lampBare.intensity, fitted:lampOn.intensity};
+    console.log('lamp', JSON.stringify(lamp));
+    T('a fitted weapon light lights the world', lamp.fitted>0 && lamp.bare===0, lamp);
+
     // EVERY GUN, NOT JUST THE ONE WITH AN AUTHORED MOUNT. The rail plane is derived from each gun's own rear-sight
     // root, so this is the check that the derivation holds across the rack: an optic that lands under the receiver
     // line or a metre down the barrel is a mount that needs authoring, and this names which gun.
