@@ -33,7 +33,10 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     await page.goto(base+'/index.html?debug=1&rd=6',{waitUntil:'load',timeout:120000});
     await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:300000});
     await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:420000});
-    await page.evaluate(`__hc.lock(true); __hc.cmdRun('/gamemode creative'); __hc.freezeAnimals(true);`);
+    // SURVIVAL, AND FLIGHT EXPLICITLY OFF. In creative the player flies, and the flight branch ASSIGNS velocity from
+    // the keys every frame — so with no key held a body carrying 9 m/s reads exactly 0 on the next frame. The first
+    // three runs of this bench were measuring that, not the water.
+    await page.evaluate(`__hc.lock(true); __hc.cmdRun('/gamemode survival'); __hc.cmdRun('/fly off'); __hc.freezeAnimals(true);`);
     // FIND REAL WATER BY STANDING IN IT, not by reading a height off the terrain. Sea level is a number the game
     // knows and the shoreline is not: a column whose ground is below sea level can still be a cave, an overhang or
     // a beach the generator raised after the fact. Teleporting in and asking inWater is the ground truth, and it is
@@ -81,12 +84,12 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
       // THE STATE IS PRINTED, not just the speed. The first run of this row read 0 from both entries and there was
       // no way to tell whether the velocity had been refused, drained by the ground branch because the swimmer had
       // reached the seabed, or zeroed by the no-input guard.
-      return { set:got&&got.speed, inWater:a.inWater, onGround:a.onGround, y:a.y, after:a.speed }; };
+      return { set:got&&got.speed, after:a.speed, probe:a }; };
     const fastIn=await carry(9), slowIn=await carry(1.5);
     if(fastIn.set==null){ console.log('  (momentum rows skipped — no __hc.setVel to inject an entry speed)'); }
     else {
-      console.log(`  entered at 9.0 -> ${fastIn.after} after 0.25 s   ${JSON.stringify(fastIn)}`);
-      console.log(`  entered at 1.5 -> ${slowIn.after} after 0.25 s   ${JSON.stringify(slowIn)}`);
+      console.log(`  entered at 9.0 -> ${fastIn.after} after 0.25 s   fly ${fastIn.probe.fly} inWater ${fastIn.probe.inWater} onGround ${fastIn.probe.onGround}`);
+      console.log(`  entered at 1.5 -> ${slowIn.after} after 0.25 s   fly ${slowIn.probe.fly} inWater ${slowIn.probe.inWater}`);
       check('MOMENTUM CARRIES IN: a fast entry is still faster a quarter-second later', fastIn.after>slowIn.after+0.3, `${fastIn.after} against ${slowIn.after}`);
       check('and it is bleeding off rather than holding', fastIn.after<9, `${fastIn.after} from 9.0`);
     }
