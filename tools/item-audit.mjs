@@ -54,6 +54,11 @@ function classify(fn, line){
   // that guns are found. The enclosing name is what carries the meaning there.
   if(/POOL|LOOT|CHEST|CACHE|STASH/i.test(fn||''))  return 'loot';
   if(/DROPS?$|_DROP/i.test(fn||''))                return 'drop';
+  // THE MOB DROP TABLES. ANIMALS holds `drops:[['feather',1,1]]` and killAnimal walks it at the single death
+  // chokepoint, so these are as real a source as a recipe. Missing this rule is what had the audit report feather,
+  // raw_meat and monk_cross as unobtainable — and monk_cross already drops at exactly the 12% Ben asked for, so
+  // acting on that list would have meant rebuilding a feature that works.
+  if(/\bdrops?\s*:\s*\[/.test(line))        return 'drop';
   if(/\bdrop:\s*'/.test(line))              return 'mine';       // a block that gives this item when broken
   if(/defItem\(|^ITEMS\./.test(line.trim()))return 'def';
   if(/itemModel|setViewItem|_sigModel|icon|MODEL_ITEM_BUILDERS/.test(line)) return 'model';

@@ -7,8 +7,8 @@ Two questions per item, both answered from the code and the running game rather 
 dispatch `itemModel`, and the separate viewmodel dispatch for your own hands).
 
 - items: **390**
-- with no source in the world (nothing crafts, loots, drops or mines them): **115**
-- inert (no flag any dispatch tests, and no id-specific branch): **34**
+- with no source in the world (nothing crafts, loots, drops or mines them): **114**
+- inert (no flag any dispatch tests, and no id-specific branch): **36**
 - a flat sprite in your own hands: **89**
 - the two dispatches DISAGREE (real object one side, sprite the other): **8**
 
@@ -92,7 +92,6 @@ separate decision, and Ben's own words are that they are all meant to be obtaina
 | `match` | nowhere |
 | `match_burnt` | nowhere |
 | `matchbox` | nowhere |
-| `monk_cross` | BLOCK_ITEM, itemModel, setViewItem, ANIMALS, _gpWrap |
 | `mushroom_sliced` | nowhere |
 | `pan` | nowhere |
 | `pancakes` | nowhere |
@@ -166,6 +165,7 @@ Nothing reads these. You can hold one and there is no dispatch that does anythin
 | `cooking_pot` | nowhere |
 | `cooking_pot_lid` | nowhere |
 | `dried_bundle` | PACK_MAX, shapeless |
+| `feather` | PACK_MAX, shapeless, updateSkyBirds, ANIMALS |
 | `field_pack` | BLOCK_ITEM |
 | `first_aid_hard` | nowhere |
 | `frying_pan` | nowhere |
@@ -186,6 +186,7 @@ Nothing reads these. You can hold one and there is no dispatch that does anythin
 | `radio` | nowhere |
 | `raft` | nowhere |
 | `raft_paddle` | nowhere |
+| `snail_shell` | BLOCK_ITEM, shapeless, ANIMALS |
 | `spoon` | nowhere |
 | `stone_rock` | block, BLOCK_ITEM, shapeless |
 | `tentacle` | nowhere |
@@ -228,7 +229,7 @@ Nothing reads these. You can hold one and there is no dispatch that does anythin
 | `birdhouse` | place | craft mine | model 7/124 | model 7/124 |
 | `bloodroot` | place | craft mine | sprite 1/200 | sprite 1/200 |
 | `blueberry_pie` | food | craft loot | sprite 1/560 | sprite 1/560 |
-| `bone` | **inert** | loot | sprite 1/304 | sprite 1/304 |
+| `bone` | **inert** | drop loot | sprite 1/304 | sprite 1/304 |
 | `bookshelf` | place | craft mine | model 1/12 | model 1/12 |
 | `bottle_dirty` | drink | **none** | model 3/220 | model 3/220 |
 | `bottle_water` | drink | **none** | model 3/220 | model 3/220 |
@@ -256,7 +257,7 @@ Nothing reads these. You can hold one and there is no dispatch that does anythin
 | `can_broken` | **inert** | **none** | model 2/428 | model 2/428 |
 | `can_red` | food | **none** | model 3/332 | model 3/332 |
 | `candelabra` | place | craft mine | model 12/368 | model 12/368 |
-| `candle` | place | craft loot mine | model 3/68 | model 3/68 |
+| `candle` | place | craft drop loot mine | model 3/68 | model 3/68 |
 | `carrot` | food | **none** | model 2/864 | model 2/864 |
 | `ceraphim_trophy` | place | mine loot | model 22/3678 | model 22/3678 |
 | `chainlink` | place | craft mine | model 1/120 | model 1/120 |
@@ -386,7 +387,7 @@ Nothing reads these. You can hold one and there is no dispatch that does anythin
 | `lantern_unlit` _(hidden)_ | place | mine | model 1/12 | model 1/12 |
 | `laser_sight` | att | craft | model 5/314 | sprite 1/308 |
 | `launch_console` | place | mine craft | model 5/74 | model 5/74 |
-| `leather` | **inert** | loot craft | sprite 1/400 | sprite 1/400 |
+| `leather` | **inert** | loot craft drop | sprite 1/400 | sprite 1/400 |
 | `leather_boots` | armor | craft | sprite 1/496 | sprite 1/496 |
 | `leather_chestplate` | armor | craft | model 1/288 | model 1/288 |
 | `leather_helmet` | armor | craft | sprite 1/504 | sprite 1/504 |
@@ -409,7 +410,7 @@ Nothing reads these. You can hold one and there is no dispatch that does anythin
 | `monitor` | place axial | mine | model 7/74 | model 7/74 |
 | `monitor_x` _(hidden)_ | place | mine | model 7/74 | model 7/74 |
 | `monitor_z` _(hidden)_ | place | mine | model 7/74 | model 7/74 |
-| `monk_cross` | relic | **none** | model 10/252 | model 10/252 |
+| `monk_cross` | relic | drop | model 10/252 | model 10/252 |
 | `mossy` | place | craft mine | model 1/12 | model 1/12 |
 | `mud` | place | mine | model 1/12 | model 1/12 |
 | `mush_brown` | place | craft mine | sprite 1/292 | sprite 1/292 |
@@ -477,7 +478,7 @@ Nothing reads these. You can hold one and there is no dispatch that does anythin
 | `radio` | **inert** | **none** | model 4/481 | model 4/481 |
 | `raft` | **inert** | **none** | model 2/1036 | model 2/1036 |
 | `raft_paddle` | **inert** | **none** | model 2/264 | model 2/264 |
-| `raw_meat` | food | craft | model 2/412 | model 2/412 |
+| `raw_meat` | food | craft drop | model 2/412 | model 2/412 |
 | `recipe_book` | book | craft | model 2/14 | model 2/14 |
 | `red_dot` | att | craft loot | model 4/440 | sprite 1/308 |
 | `red_torch` | place | mine loot | model 9/632 | model 9/632 |
@@ -516,7 +517,7 @@ Nothing reads these. You can hold one and there is no dispatch that does anythin
 | `skin_water` | drink | **none** | sprite 1/364 | sprite 1/364 |
 | `slab` | place | craft mine | model 1/12 | model 1/12 |
 | `smg` | gun auto rof ammo | loot | model 10/1412 | model 10/1412 |
-| `snail_shell` | **inert** | craft | sprite 1/400 | sprite 1/400 |
+| `snail_shell` | **inert** | craft drop | sprite 1/400 | sprite 1/400 |
 | `snow` | place | mine | model 1/12 | model 1/12 |
 | `soda` | drink | **none** | model 2/472 | model 2/472 |
 | `spoon` | **inert** | **none** | model 1/128 | model 1/128 |
@@ -536,7 +537,7 @@ Nothing reads these. You can hold one and there is no dispatch that does anythin
 | `stone_shovel` | tool | **none** | model 3/322 | model 4/334 |
 | `stone_sword` | tool | **none** | model 11/1056 | model 12/1068 |
 | `straw_hat` | armor | craft | sprite 1/392 | sprite 1/392 |
-| `string` | **inert** | loot craft | sprite 1/412 | sprite 1/412 |
+| `string` | **inert** | loot craft drop | sprite 1/412 | sprite 1/412 |
 | `sulfur` | **inert** | mine | sprite 1/220 | sprite 1/220 |
 | `sulfur_ore` | place | mine | model 1/72 | model 1/72 |
 | `sulfur_powder` | **inert** | craft | sprite 1/400 | sprite 1/400 |
@@ -581,7 +582,7 @@ Nothing reads these. You can hold one and there is no dispatch that does anythin
 | `wooden_bowl` | **inert** | craft | sprite 1/296 | sprite 1/296 |
 | `wooden_spear` | tool spear | craft | model 8/894 | model 8/894 |
 | `wooden_torch` | **inert** | **none** | model 3/448 | model 3/448 |
-| `wool` | place | craft loot mine | model 1/12 | model 1/12 |
+| `wool` | place | craft drop loot mine | model 1/12 | model 1/12 |
 | `wraith_tincture` | consume | craft loot | sprite 1/192 | sprite 1/192 |
 | `wretch_bag` | loot | **none** | sprite 1/548 | sprite 1/548 |
 | `wretch_trophy` | place | mine loot | model 132/11774 | model 132/11774 |
