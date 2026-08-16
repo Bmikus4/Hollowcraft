@@ -127,6 +127,21 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     console.log('irons', JSON.stringify({bare:rearOf(fx.bare), optic:rearOf(fx.withOptic)}));
     T('an optic takes the rear iron sight off', rearOf(fx.withOptic) < rearOf(fx.bare), {bare:rearOf(fx.bare), optic:rearOf(fx.withOptic)});
 
+    // AN OPTIC HAS TO BE AIMABLE. The collimated reticle and the look-THROUGH aimed pose were reached by an item
+    // flag that no item sets any more, so a fitted red dot would otherwise be a lump on the rail: `isDotG` reads the
+    // instance now, and dotY moves to the optic's own window instead of staying on the iron line.
+    await p.evaluate("__hc.hold('ar15'); __hc.attFit('optic',null)"); await sleep(300);
+    await p.evaluate("__hc.aim(true)"); await sleep(1400);
+    const ironAim=await p.evaluate("(()=>{const h=__hc.holoAlign?__hc.holoAlign():null; return {ret:!!(h&&h.retVisible), ads:h&&h.adsT, dotY:__hc.sightPix().dotY};})()");
+    await p.evaluate("__hc.aim(false)"); await sleep(400);
+    await p.evaluate("__hc.attFit('optic','red_dot')"); await sleep(300);
+    await p.evaluate("__hc.aim(true)"); await sleep(1400);
+    const dotAim=await p.evaluate("(()=>{const h=__hc.holoAlign?__hc.holoAlign():null; return {ret:!!(h&&h.retVisible), ads:h&&h.adsT, dotY:__hc.attProbe().opticTop};})()");
+    await p.evaluate("__hc.aim(false)"); await sleep(300);
+    console.log('aim', JSON.stringify({ironAim, dotAim}));
+    T('a fitted optic gives a reticle to aim with', dotAim.ret===true, dotAim);
+    T('the optical axis moved to the optic', dotAim.dotY!=null && ironAim.dotY!=null && dotAim.dotY>ironAim.dotY, {iron:ironAim.dotY, optic:dotAim.dotY});
+
     // EVERY GUN, NOT JUST THE ONE WITH AN AUTHORED MOUNT. The rail plane is derived from each gun's own rear-sight
     // root, so this is the check that the derivation holds across the rack: an optic that lands under the receiver
     // line or a metre down the barrel is a mount that needs authoring, and this names which gun.
