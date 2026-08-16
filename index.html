@@ -11457,6 +11457,11 @@ function waterSurfaceY(x,y,z){
 // float point. Float any higher and the probe comes up dry, physics hands you to the ground/gravity path for a frame,
 // you fall back in, and that alternation IS the pogo this item exists to kill.
 const SWIM_FLOAT = 1.30;
+// THE DRAG COEFFICIENT, and it is the only number in the swim that is not derived from something else. Quadratic:
+// the force is WATER_DRAG * v^2, so terminal speed is sqrt(thrust/WATER_DRAG) and the two swim speeds fall out of
+// the two thrusts rather than being written down as speeds. Raising this makes water thicker and SLOWER to enter
+// as well as slower to cross, which is the coupling that makes it feel like water rather than like a speed cap.
+const WATER_DRAG = 1.10;
 function physics(dt){
   if(_resumeHold){ const c=getChunk(Math.floor(player.pos.x)>>4,Math.floor(player.pos.z)>>4);   // resumed game — hold still until the ground under you exists
     if(!c||!c.generated||!c.meshed){ player.vel.set(0,0,0); return; } _resumeHold=false; }
@@ -11541,7 +11546,28 @@ function physics(dt){
     //     ~0.12s to reach 90% of a sprint, ~0.24s to shed it, and that trailing quarter-second is what a body does
     // The top speeds are deliberately untouched: they are balanced against stamina drain and the Wretch's own 4.0-6.5,
     // and "slightly more pronounced" is not a licence to make the player faster.
-    if(air){ if(mag>0){ const k=Math.min(1,dt*0.85); p.vel.x+=(tx-p.vel.x)*k; p.vel.z+=(tz-p.vel.z)*k;
+    // ---- WATER IS THRUST AGAINST DRAG, NOT A SLOWER WALK (Ben 08-16: "redo water physics and make it
+    // hyperreealistic ... momentum ... sprint starts the animation, and speeds the player up underwater") ----
+    // WHAT WAS WRONG. Water reused the ground lerp with `base` scaled to 0.18, so hitting the surface at a sprint
+    // snapped you to 0.83 m/s inside two frames. That is a CLAMP, and it is exactly what Ben's "momentum" is asking
+    // to remove: a body entering water carries its speed in and loses it to the water, which takes seconds.
+    // SO: a swimmer accelerates by pushing and is slowed by drag, and neither is a target speed.
+    //   · thrust is an acceleration, applied only while you are asking for one;
+    //   · drag is QUADRATIC in speed — the honest model for a body in a fluid, and the one that makes entering fast
+    //     feel different from entering slow, because a linear drag sheds every speed in the same time;
+    //   · top speed is therefore not written down anywhere. It is where thrust and drag meet: sqrt(T/D), which is
+    //     1.20 m/s swimming and 2.20 sprinting. Sprint is the swim input, and it is a real 83% more speed.
+    //   · direction changes cost momentum for free, because turning means thrusting against what you already have.
+    // The drag integration is exact rather than v -= D*v*v*dt: at a long frame the naive form can overshoot through
+    // zero and push a swimmer BACKWARDS, which is a rare bug that looks like the water shoving you.
+    if(p.inWater){
+      const T=(p.sprint?5.32:1.58);                       // acceleration, m/s^2 — the two terminal speeds above
+      if(mag>0){ p.vel.x+=mvx*T*dt; p.vel.z+=mvz*T*dt; }
+      const sp=Math.hypot(p.vel.x,p.vel.z);
+      if(sp>1e-4){ const f=1/(1+WATER_DRAG*sp*dt); p.vel.x*=f; p.vel.z*=f; }
+      p._airSpd=sp;                                      // what you leave the water carrying
+    }
+    else if(air){ if(mag>0){ const k=Math.min(1,dt*0.85); p.vel.x+=(tx-p.vel.x)*k; p.vel.z+=(tz-p.vel.z)*k;
         const sp=Math.hypot(p.vel.x,p.vel.z), cap=Math.max(p._airSpd||0, 0.6);
         if(sp>cap){ const f=cap/sp; p.vel.x*=f; p.vel.z*=f; } } }
     else { const k=Math.min(1, dt*(mag>0?19:9.5)); p.vel.x+=(tx-p.vel.x)*k; p.vel.z+=(tz-p.vel.z)*k;
@@ -11572,7 +11598,15 @@ function physics(dt){
         p.vel.y = bank ? 5.2 : clamp(gap*Math.min(7.5,0.9/Math.max(dt,1e-4)), -2.4, 2.6);
         if(!bank && Math.abs(gap)<0.02){ p.pos.y=_float; p.vel.y=0; } } }   // an exponential never arrives; a treading player must actually be still
     else if(p.sneak) p.vel.y=-9.6;                                                 // deliberate dive still outruns the passive sink
-    else { p.vel.y-=21*dt; if(p.vel.y<-7.8)p.vel.y=-7.8; p.vel.y*=0.9; } }         // 3× sink rate (Ben 07-20): water pulls you DOWN — floating is work now, not the default
+    // THE PASSIVE SINK, AND THE PLUNGE THAT PRECEDES IT. The old form clamped vel.y to -7.8 the instant you were in
+    // water, so a fall from any height became the same slow sink in one frame — the vertical half of the same clamp
+    // the horizontal momentum work removed. A body that hits water at 20 m/s carries most of that under the surface
+    // and the water takes it away over about a second, which is the plunge you can see and hear.
+    // The sink still wins in the end: gravity is unchanged at 21 and the drag only bounds how fast you arrive at it.
+    else { p.vel.y-=21*dt;
+      if(p.vel.y<-7.8){ const _ex=-p.vel.y;               // sinking faster than the settled rate — bleed it, do not clip it
+        p.vel.y = -(7.8 + (_ex-7.8)/(1+WATER_DRAG*(_ex-7.8)*dt)); }
+      p.vel.y*=0.9; } }                                    // 3× sink rate (Ben 07-20): water pulls you DOWN — floating is work now, not the default
   else if(p.onLadder){ // LADDER — cling to the rungs and climb. Horizontal is DAMPED so pressing W (or strafing) can't
     // shove you out of the 1-wide ladder column mid-climb (the old bug: W ejected you off the ladder so you never rose).
     p.vel.x*=0.35; p.vel.z*=0.35;
@@ -38843,6 +38877,19 @@ window.__hc={
       held:heldSlot()?{id:heldSlot().id,n:heldSlot().n}:null }; }catch(e){ return {err:String(e.message||e)}; } },
   // QA: eat() refuses at full hunger, and it is right to — but it means a bench on a fresh spawn measures the
   // refusal and reports the whole feature as broken. There was no way to make the player hungry from outside.
+  // THE SWIM, IN NUMBERS. "Hyperrealistic" is a feel word and the only way to argue about it is with the speeds:
+  // terminal speed is sqrt(thrust/drag) and is never written down in the code, so a harness has to measure it the
+  // way a player experiences it — push until it stops accelerating.
+  swimProbe(){ try{ return { inWater:!!player.inWater, wading:!!player.wading, sprint:!!player.sprint,
+      vx:+player.vel.x.toFixed(3), vy:+player.vel.y.toFixed(3), vz:+player.vel.z.toFixed(3),
+      speed:+Math.hypot(player.vel.x,player.vel.z).toFixed(3), drag:WATER_DRAG,
+      y:+player.pos.y.toFixed(3), onGround:!!player.onGround }; }catch(e){ return {err:String(e.message||e)}; } },
+  // Push the player as the keyboard would, so a bench measures the same path a player drives. `s` is the sprint
+  // flag, because sprint IS the swim input and a probe that could not set it could not measure the feature.
+  swimPush(fx,fz,s){ try{ keys.KeyW=false; keys.KeyS=false; keys.KeyA=false; keys.KeyD=false;
+      if(fz>0)keys.KeyW=true; if(fz<0)keys.KeyS=true; if(fx>0)keys.KeyD=true; if(fx<0)keys.KeyA=true;
+      player.sprint=!!s; return { fx,fz,sprint:player.sprint }; }catch(e){ return {err:String(e.message||e)}; } },
+  swimStop(){ try{ keys.KeyW=keys.KeyS=keys.KeyA=keys.KeyD=false; player.sprint=false; return true; }catch(e){ return {err:String(e.message||e)}; } },
   setHunger(n){ try{ if(n!=null) player.hunger=Math.max(0,Math.min(20,+n)); if(player.sat>player.hunger)player.sat=player.hunger;
       return { hunger:player.hunger, sat:player.sat }; }catch(e){ return {err:String(e.message||e)}; } },
   eatStart(){ try{ const s=heldSlot(); if(!s) return {err:'holding nothing'}; const it=ITEMS[s.id];
