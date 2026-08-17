@@ -5668,6 +5668,58 @@ function buildLightTexture(c){
 const _emptyLight3D = (()=>{ const t=new THREE.Data3DTexture(new Uint8Array(1), 1,1,1); t.format=THREE.RedFormat; t.type=THREE.UnsignedByteType; t.needsUpdate=true; return t; })();   // fallback sampled by chunks with no nearby light
 
 // =====================================================================
+//  THE OCCUPANCY VOLUME — the voxel world as a ray-tracing structure
+// =====================================================================
+// A voxel world is the ideal target for a marched ray: stepping through a uniform grid is a few integer operations
+// per block with no acceleration structure to build, which is why a shipped voxel game (Teardown) can afford one
+// shadow ray and two AO rays per pixel. What it needs that this game did not have is a volume the GPU can READ.
+//
+// WHY NOT THE LIGHT VOLUME THAT ALREADY EXISTS. Two reasons, and both are fatal on their own. It is PER CHUNK, so a
+// ray that leaves the chunk it started in has no data to march into — and an AO ray leaving the chunk is the normal
+// case, not the corner. And it is LinearFilter, because a light level must interpolate; a marcher needs point
+// sampling, and one texture cannot be sampled two ways in WebGL2 without sampler objects three does not expose.
+//
+// SO IT IS ONE GLOBAL VOLUME CENTRED ON THE PLAYER, and it is small on purpose. Ambient occlusion is a SHORT-range
+// query — Teardown gives a ray full ambient by 24 units — so 64 blocks on a side covers every ray this will ever
+// cast, at 262 KB. Covering the whole render distance would be 8 MB to answer a question that never looks past a
+// dozen blocks.
+// Snapped to an 8-block grid and rebuilt only when the player leaves that cell, so walking does not rebuild it every
+// frame. THE COST IS A HITCH, NOT A PER-FRAME LOAD, and it is stated rather than hidden: a full fill is 262144 cells
+// and runs in one go every 8 blocks walked. Amortising it across frames is the obvious next step if it shows up.
+const OCC_N = 64, OCC_HALF = OCC_N>>1;
+const _occData = new Uint8Array(OCC_N*OCC_N*OCC_N);
+let _occOx=1e9, _occOy=0, _occOz=1e9, _occValid=false, _occBuilds=0, _occMs=0, _occWant=true;
+const _occTex = (()=>{ const t=new THREE.Data3DTexture(_occData, OCC_N, OCC_N, OCC_N);
+  t.format=THREE.RedFormat; t.type=THREE.UnsignedByteType;
+  t.minFilter=THREE.NearestFilter; t.magFilter=THREE.NearestFilter;   // point sampling: a marcher asks "is this cell solid", not "what is the average around here"
+  t.wrapR=t.wrapS=t.wrapT=THREE.ClampToEdgeWrapping; t.unpackAlignment=1; t.needsUpdate=true; return t; })();
+// SOLID MEANS OPAQUE TO LIGHT, not "you cannot walk through it". isOpaque is the same table the mesher uses to decide
+// whether a face is hidden, so the volume agrees with what is actually drawn: glass and leaves do not occlude here,
+// which is right for AO and matches occludesSky's reasoning one system over.
+function buildOccVolume(force){
+  const px=Math.floor(player.pos.x), py=Math.floor(player.pos.y), pz=Math.floor(player.pos.z);
+  const ox=(Math.floor((px-OCC_HALF)/8)*8), oz=(Math.floor((pz-OCC_HALF)/8)*8);
+  let oy=Math.floor((py-OCC_HALF)/8)*8; if(oy<0) oy=0; if(oy+OCC_N>WH) oy=Math.max(0, WH-OCC_N);
+  if(!force && _occValid && ox===_occOx && oy===_occOy && oz===_occOz) return false;
+  const t0=performance.now();
+  _occData.fill(0);
+  let ck=null, ckx=1e9, ckz=1e9;
+  for(let z=0;z<OCC_N;z++){ const wz=oz+z;
+    for(let x=0;x<OCC_N;x++){ const wx=ox+x;
+      const cx=wx>>4, cz=wz>>4;
+      if(cx!==ckx||cz!==ckz){ ck=world.get(key(cx,cz)); ckx=cx; ckz=cz; if(ck && !ck.generated) ck=null; }
+      if(!ck) continue;                                    // an unstreamed chunk reads as EMPTY, so a ray into it is unoccluded rather than falsely shadowed
+      const lx=wx&15, lz=wz&15, base=z*OCC_N*OCC_N + x;
+      for(let y=0;y<OCC_N;y++){ const wy=oy+y; if(wy>=WH) break;
+        const b=ck.blocks[idx(lx,wy,lz)];
+        if(b!==AIR && isOpaque[b]) _occData[base + y*OCC_N] = 255; } } }
+  _occOx=ox; _occOy=oy; _occOz=oz; _occValid=true; _occBuilds++;
+  _occTex.needsUpdate=true;
+  _occMs=performance.now()-t0;
+  return true;
+}
+
+// =====================================================================
 //  GREEDY MESHER
 //  Merges coplanar faces of equal (blockid, tile, skylevel, orientation).
 //  Face payload packed to an int for O(1) merge equality.
@@ -19191,6 +19243,9 @@ function loop(){ try{
   globalU.uTime.value = (_pinT!=null) ? _pinT : clock.elapsedTime;
   T.begin(TID.sky);
   updateSky(dt);
+  // The occupancy volume only rebuilds when the player leaves its 8-block cell, so this is a handful of integer ops
+  // on the frames that do not rebuild. See buildOccVolume for why it is 64 blocks and not the render distance.
+  if(_occWant) buildOccVolume(false);
   updateWeather(dt);                                                     // rain/overcast/lightning + fog banks (after sky so it can dim the fresh light values)
   updateSubmerge();                                                        // murky underwater view (overrides fog while the eye is submerged)
   T.end(TID.sky);
@@ -21285,30 +21340,6 @@ function placeWretch(dt,moving){
      && !wretch._scooping && !wretch._vigAct && !wretch._park && !wretch.boss){
     const _h=wretch._mvLast;
     if(Math.hypot(wretch.pos.x-_h.x, wretch.pos.z-_h.z) <= 3){ wretch.pos.x=_h.x; wretch.pos.z=_h.z; } }
-  // ---- THE CHEST DOES NOT GO INTO THE WALL (Ben 08-17: "make it so that the wretch cant clip his body through blocks") ----
-  // Its collision is a capsule about the feet, and the torso is not over the feet: it leans, it rears, it goes down on
-  // all fours, so the chest reaches a long way past whatever the capsule allowed. Measured with the creature standing
-  // 1.5 blocks off a stone wall, which is arm's reach and not body's reach: the chest joint was inside the stone on 400
-  // of 70 samples' meshes, and while it is in there an arm tucked against it is in there too -- which is why the arm
-  // clamp alone could not finish the job.
-  // BACKWARDS ALONG ITS OWN FACING, because that is the direction a lean buries it in, and in small steps: a hard
-  // depenetration would fight moveEntity for the same frame and read as a shove. 0.06 a frame clears a typical lean in
-  // about three frames and is under the eye's threshold.
-  // CAPPED, so a creature that cannot get out does not walk backwards for ever -- in a tunnel or a doorway the chest can
-  // be inside stone with nowhere better to be, and the anti-wedge rule above owns that case.
-  if(_BODY_PUSH && wretch.active && wretch.P && wretch.P.spine && wretch.P.spine.length && !wretch.dragging && !player.grabbed
-     && !wretch._scooping && !wretch._vigAct && !wretch._park && !wretch.boss){
-    // EVERY SPINE JOINT, not the last one. Which end of P.spine is the chest is a fact about how the rig was built, and
-    // guessing it wrong tests the pelvis -- which is over the feet and therefore almost never buried, so the push would
-    // never fire. Asking all of them is four world positions and cannot be wrong.
-    let _bur=false;
-    for(let i=0;i<wretch.P.spine.length && !_bur;i++){ const _j=wretch.P.spine[i];
-      if(_j){ _j.getWorldPosition(_clV); if(_clipBuried(_clV)) _bur=true; } }
-    { if(_bur){
-        if((wretch._chestPush||0) < 0.42){ const st=0.06;
-          wretch.pos.x += Math.sin(wretch.yaw)*st; wretch.pos.z += Math.cos(wretch.yaw)*st;
-          wretch._chestPush=(wretch._chestPush||0)+st; }
-      } else wretch._chestPush=0; } }
   if(dt>1e-4){ const _p=wretch._mvLast;
     if(_p){ const _d=Math.hypot(wretch.pos.x-_p.x, wretch.pos.z-_p.z);
       // A TELEPORT IS NOT TRAVEL. blink, yank, the crypt drop and every QA hook move the body a long way in one frame; scored as
@@ -22324,64 +22355,23 @@ const WDFX=[ {amp:1.00,ph: 0.00,rest: 0.00,duty:0.00},
 //  _smooth/WDFX) to be defined above this function in file scope.
 //  MUST be called AFTER placeWretch sets g.position (it is: line 3075→3076).
 // ============================================================================
-// ---- ARMS STOP AT SURFACES (Ben 08-17: it "likes to wave his arms through trees") ----
-// The complaint and "make it so that the wretch cant clip his body through blocks" are one mechanism. Measured over a
-// 140-sample stalk through the forest before this existed: 89% of samples had some part of the rig inside the world,
-// and the arms accounted for 155 of them -- an arm swinging through a trunk on almost every other frame.
-// WHY IT IS A POST-PASS AND NOT A FIX AT THE POSE SITES. The arms are FK: forty-odd places set these rotations -- the
-// gait, the gestures, the reach, the window press, the vignettes, the intimidation poses -- and a rule written into any
-// one of them is a rule the other thirty-nine do not have. This runs after all of them, so a pose cannot opt out.
-// RETRACTED, NOT STOPPED DEAD. The shoulder and elbow are eased back toward the tucked rest a step at a time and the
-// hand is re-tested after each; the first step that clears the world wins, so an arm that is barely inside a trunk
-// barely moves and one that is halfway through it comes most of the way home. Six steps is enough to reach the tuck
-// from any pose in the library, and the whole thing costs at most six matrix updates of a four-joint chain, twice.
-// IT DOES NOT ACCUMULATE: every frame starts from the pose the animation just wrote, so this can never drift the arms
-// out of a pose that is legal -- the moment the trunk is gone the arm is wherever the animation put it.
-// THE HAND IS THE TEST POINT because it is the end of the chain: an elbow inside a wall with the hand outside it is a
-// geometry no rotation of this chain can produce.
-// NOT THE LEGS. The same census says the feet and shins are inside the ground on most samples, which is a different
-// fault with a different fix -- the legs are pure FK with no world target, so a foot is placed by the gait and nothing
-// puts it on the surface. Retracting a leg the way this retracts an arm would break the walk. It wants foot IK and it
-// is written down rather than half-done.
-const _clV=new THREE.Vector3();
-// THE SAME TEST THE HIDER USES, on the same meshes. The first version of this asked whether the HAND JOINT's origin was
-// inside a block, and a joint origin is a point on a limb whose meshes are 20cm thick: with the whole forearm in a stone
-// wall the origin sat in open air on the far side of the face, the clamp declined, and it moved the count by 3%.
-// _meshBuried walks a mesh's own bounding box, which is what updateCreatureClip hides on, so the two can never disagree
-// about what "inside" means.
-function _chainBuried(root){ let hit=false;
-  root.traverse(o=>{ if(hit || !o.isMesh) return; if(_meshBuried(o)) hit=true; });
-  return hit; }
-let _ARM_CLAMP=true;   // __hc.armClamp(false) is the A/B for the arms
-let _BODY_PUSH=true;   // __hc.bodyPush(false) is the A/B for the chest correction in placeWretch
-function _clampArmsToWorld(P){
-  if(!_ARM_CLAMP) return;
-  if(!P || !P.arms || !wretch.active || wretch.dragging || player.grabbed) return;
-  const dx=wretch.pos.x-player.pos.x, dz=wretch.pos.z-player.pos.z;
-  if(dx*dx+dz*dz > 48*48) return;                       // too far to read: not worth the matrices
-  for(let ai=0;ai<P.arms.length;ai++){
-    const c=P.arms[ai], sh=c[1], el=c[2];
-    if(!sh) continue;
-    sh.updateWorldMatrix(true,true);
-    if(!_chainBuried(sh)) continue;
-    // THE RETRACTION IS ONLY KEPT IF IT WORKS. Tucking an arm moves it toward the body, and where the body stands
-    // between the arm and open air -- back to a wall, inside a doorway -- that is toward the stone rather than away from
-    // it. Measured on the parked scene: without this the clamp made it worse, 161 buried arm meshes becoming 396,
-    // because six steps of tuck walked the forearm further in. There is no surface normal to push along here, so the
-    // honest rule is to try and to put it back: the pose the animation wrote is never replaced by a worse one.
-    const s=ai?1:-1, restX=-0.12, restZ=s*0.13, restEl=-0.5;
-    const _sx=sh.rotation.x, _sz=sh.rotation.z, _ex=el?el.rotation.x:0;
-    let cleared=false;
-    for(let k=0;k<6;k++){
-      sh.rotation.x += (restX-sh.rotation.x)*0.35;
-      sh.rotation.z += (restZ-sh.rotation.z)*0.35;
-      if(el) el.rotation.x += (restEl-el.rotation.x)*0.35;
-      sh.updateWorldMatrix(false,true);
-      if(!_chainBuried(sh)){ cleared=true; break; }
-    }
-    if(!cleared){ sh.rotation.x=_sx; sh.rotation.z=_sz; if(el) el.rotation.x=_ex; sh.updateWorldMatrix(false,true); }
-  }
-}
+// ---- ARMS AND BODY INSIDE BLOCKS: MEASURED, NOT FIXED (Ben 08-17: it "likes to wave his arms through trees ... make
+// it so that the wretch cant clip his body through blocks") ----
+// __hc.rigBuried counts every mesh of the rig that is inside the world, using the same _meshBuried the part-hider uses,
+// and attributes each to a limb through the rig's own joints. Over a 140-sample stalk through the forest: 89% of
+// samples had some part inside the world, the arms in 155 of them and the feet and shins in most of the rest.
+// TWO CHEAP CORRECTIONS WERE BUILT AND BACKED OUT, and the reason is worth more than the code was. Retracting an arm
+// toward its tucked rest whenever its meshes are buried, and pushing the body backwards along its own facing whenever
+// the chest is, both LOOK right and neither survives an A/B: parked against a stone wall, the same condition run twice
+// scored 285 and 357 buried arm meshes, and the correction scored 253 -- inside the noise. The reason is structural: at
+// the range where its arms reach a trunk, its ARM'S REST POSE is already inside the trunk, so folding the arm moves it
+// from one buried place to another. There is no surface normal in hand to push along, and a rotation cannot shorten a
+// limb.
+// WHAT WOULD ACTUALLY FIX IT, in the order it should be tried: a collision envelope that fits the creature it carries,
+// rather than a capsule about its feet -- it leans, it rears and it goes down on all fours, so the chest and the arm
+// swing reach a long way past whatever keeps the feet out; and, for the feet, foot IK, since the legs are FK with no
+// world target and nothing puts a foot on the surface. Both are rig work and neither is a post-pass.
+// THE INSTRUMENT STAYS. Whatever is tried next has to beat 89%, and it has to beat it against a control pair.
 // hoisted constant spring tables — these are read-only tuning arrays; keeping them at module scope avoids re-allocating ~7 small arrays every animation frame (GC pressure while the Wretch is on-screen)
 const _wSag=[0.10,0.16,0.13,0.05,0.03], _wHump=[0.62,0.40,0.18,0,0], _wLeanW=[0.42,0.36,0.30,0,0], _wLegOm=[26,20,16], _wLegZe=[0.7,0.55,0.45], _wArmOm=[32,24,18,14,10], _wArmZe=[0.75,0.6,0.5,0.4,0.28];
 function animateWretch(dt, moving){
@@ -22676,7 +22666,6 @@ function animateWretch(dt, moving){
   if(isFinite(yb)) g.position.y += yb;
 
   animateExtra(dt);                                                                   // demon extra-arm flail (unchanged)
-  _clampArmsToWorld(P);                                                               // arms stop at surfaces instead of sweeping through them
   // THE GAIT RECORDER'S COLLECTOR. It used to live in kindPose and went out with the forks, which would have left
   // __hc.rigTrace returning an empty buffer for ever — a probe that answers "no movement" whatever the rig is doing, and
   // this file has been bitten four times in one day by exactly that. It records the Wretch's own bones now.
@@ -28401,8 +28390,19 @@ const RECOIL={tp:0,ty:0};   // pending impulse (rad). NO auto-recovery (Ben 07-2
 // A CHEEK WELD ONLY SOAKS RECOIL FOR THE GUN THAT IS IN IT (Ben 08-05). adsm read the MAIN hand's adsT whichever hand fired, so
 // aiming a rifle in the right hand quietly took 25% off the kick of the pistol in your left — and the left hand never aims at all,
 // so its shots should always kick like the hip-fire they are. `soak` is passed by the caller, which knows which hand fired.
-function kickRecoil(up,side,soak){ const adsm=1-0.25*(soak!=null?soak:((typeof view!=='undefined'&&view.adsT)||0));   // cheek weld soaks ~25% — hip-fire bucks hardest
-  RECOIL.tp+=up*adsm*(0.85+Math.random()*0.3); RECOIL.ty+=side*adsm*(Math.random()<0.5?-1:1)*(0.5+Math.random()); }
+// ---- THE KICK CLIMBS ALONG THE GUN'S UP AXIS, NOT THE SCREEN'S (Ben: "recoil must follow the lean. It is being
+// applied in world or screen space; put it in the weapon's own space so the kick climbs along the gun's up axis.
+// Fixes every canted pose at once.") ----
+// The aim climb went straight into player.pitch, which is screen-vertical by definition — so a rifle carried across the
+// chest at a sprint, a gun rolled by the strafe lean and a blocked-out weapon all bucked as if they were level. `roll`
+// is the firing hand's own cant, and the (up, side) pair is rotated by it before it becomes pitch and yaw: a gun canted
+// 30 degrees puts 13% of its climb into yaw and takes it out of pitch, which is what a real canted rifle does to your
+// point of aim. At roll 0 — standing, and at full ADS, which is where every recoil number in this file was tuned —
+// this is bit-identical to the build before it.
+function kickRecoil(up,side,soak,roll){ const adsm=1-0.25*(soak!=null?soak:((typeof view!=='undefined'&&view.adsT)||0));
+  const _u=up*adsm*(0.85+Math.random()*0.3), _s=side*adsm*(Math.random()<0.5?-1:1)*(0.5+Math.random());
+  const r=+roll||0, c=Math.cos(r), sn=Math.sin(r);
+  RECOIL.tp+=_u*c - _s*sn; RECOIL.ty+=_u*sn + _s*c; }
 function updateRecoil(dt){ if(!(RECOIL.tp||RECOIL.ty))return;
   const kk=1-Math.exp(-dt*34);                                                // kick ramp ~50ms — smooth, never a one-frame snap; then it simply STAYS
   const ap=RECOIL.tp*kk, ay=RECOIL.ty*kk; RECOIL.tp-=ap; RECOIL.ty-=ay;
@@ -29144,7 +29144,14 @@ function updateView(dt){ updateRecoil(dt);                                      
       view.group.position.x -= clamp(_gw.x,-0.06,0.06)*_ce;
       view.group.position.y -= clamp(_gw.y,-0.06,0.06)*_ce; }
     captureAim(view);   // the pose IS the aim (see captureAim) — read before the buck, the reload dip and the block-out below
-    if(view.gunKick){ view.group.position.z+=view.gunKick*0.09; view.group.rotation.x-=view.gunKick*0.5; }   // viewmodel bucks: rearward shove + muzzle rise, springs back independent of the camera (the glass climbing off the camera-locked reticle is what carries the dot out of the glass — the reticle is now clipped to the aperture so it VANISHES at the rim, see holoRet below)
+    // THE MODEL BUCKS IN ITS OWN SPACE (Ben: "put it in the weapon's own space so the kick climbs along the gun's up
+    // axis. Fixes every canted pose at once."). `rotation.x -=` is an outer rotation in the group's Euler order, so a
+    // gun already rolled by the strafe lean, the sprint carry across the chest or the block-out rose about the CAMERA's
+    // right axis rather than its own — the muzzle swung sideways out of a canted pose instead of climbing out of it.
+    // rotateX and translateZ post-multiply, so the axis is the gun's. Where the pose has no roll and no yaw — standing,
+    // and at full ADS, which is where these two numbers were tuned — the result is identical to the build before this;
+    // the only frames that move are the canted ones, which are the frames that were wrong.
+    if(view.gunKick){ view.group.translateZ(view.gunKick*0.09); view.group.rotateX(-view.gunKick*0.5); }   // viewmodel bucks: rearward shove + muzzle rise, springs back independent of the camera (the glass climbing off the camera-locked reticle is what carries the dot out of the glass — the reticle is now clipped to the aperture so it VANISHES at the rim, see holoRet below)
     // ---- RELOAD ANIMATION (minimal realism): gun drops toward the chest + tilts inward while the hands work the action ----
     if(view.reloadT>0 && view.reloadDur && !view._rlOff){ const u=clamp(1-view.reloadT/view.reloadDur,0,1), ez=Math.sin(u*Math.PI);
       view.group.position.y-=ez*0.07; view.group.position.z+=ez*0.05; view.group.position.x-=ez*0.03;
@@ -29502,8 +29509,6 @@ function updateView(dt){ updateRecoil(dt);                                      
     // throw its shots high. Base first, capture, then the animation.
     offView.group.position.z = bz; offView.group.rotation.x = brx - oswArc*1.2;
     captureAim(offView);
-    offView.group.position.z += offView.gunKick*0.09;
-    offView.group.rotation.x -= offView.gunKick*0.5;
     // .x IS NOW REBASED TOO, for the same reason the paragraph above rebases z: the block-out pivot correction below adds an
     // offset on all three axes (the group carries yaw and roll, so a tilt about its x axis does not stay in the yz plane), and
     // x was the one component nothing else assigned. baseX is captured wherever setOffItem lays a pose down.
@@ -29526,6 +29531,13 @@ function updateView(dt){ updateRecoil(dt);                                      
       offView.group.rotation.x += -osy*0.078;
       offView.group.rotation.y = (offView.baseRY||0) + osx*0.05;
       offView.group.rotation.z = (offView.baseRZ||0) - osx*0.055; }
+    // THE BUCK, IN THE OFFHAND'S OWN SPACE, AND IT HAS TO BE AFTER THE LEAN (Ben: "put it in the weapon's own space so
+    // the kick climbs along the gun's up axis"). A left-hand pistol is canted where the main hand is not, so this is the
+    // model it matters most on — but placed with the rest of the animation, before the two lines above, a rotateX's
+    // cross-axis share is written into y and z and then those two are ASSIGNED from their base, which throws it away
+    // and leaves the buck no better than the `rotation.x -=` it replaced. Applied here, after the pose is final, the
+    // roll is in the euler the buck turns about. Where the offhand has no lean, this is the old arithmetic exactly.
+    if(offView.gunKick){ offView.group.translateZ(offView.gunKick*0.09); offView.group.rotateX(-offView.gunKick*0.5); }
     // THE LEFT HAND BENDS TOO (Ben 08-04: "for offhand items"). Same probed signal as the right, same pivot arithmetic, at full
     // strength: the offhand never aims, so there is no cheek-weld to relax the tilt toward.
     blockOutHand(offView, view.gunBend||0, BLOCKOUT_TILT, BLOCKOUT_PULL, -BLOCKOUT_CANT); }
@@ -29802,7 +29814,10 @@ function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id
   // sideways wander, applied to the kick rather than to the damage, so the trade is handling for a rail slot and
   // nothing else. Hip and aimed alike, because that leverage does not care where your cheek is.
   const _fg=!!(held && typeof attOf==='function' && (attOf(held)||{}).grip==='foregrip'), _fgV=_fg?0.75:1, _fgH=_fg?0.66:1;
-  kickRecoil(KP*_mgAds*_fgV, KP*_mgAds*0.32*_fgH, _offFire?0:((view&&view.adsT)||0));                                                          // every shot climbs the aim for keeps — manage your muzzle
+  // THE CANT IS THE FIRING HAND'S, read off the finished pose of whichever viewmodel went off — the offhand carries its
+  // own roll and a pistol held out to the left is canted where the main hand is not.
+  kickRecoil(KP*_mgAds*_fgV, KP*_mgAds*0.32*_fgH, _offFire?0:((view&&view.adsT)||0),
+             _offFire ? ((offView&&offView.group)?offView.group.rotation.z:0) : ((view&&view.group)?view.group.rotation.z:0));   // every shot climbs the aim for keeps — manage your muzzle
   // THE HAND THAT FIRED IS THE HAND THAT SHOWS IT (Ben 08-04: "when two guns are equipped, and the off hand slotted one is fired,
   // it looks like the main hand gun is shooting, muzzle flash, recoil, all of it"). fireGun takes the SLOT it is firing, so it
   // already knows which gun went off — but every visual it triggered was written to `view`, the main-hand model, because that was
@@ -45390,8 +45405,6 @@ window.__hc={
   // counts them with the same _meshBuried the hider uses, so the number and the hiding can never disagree, and it names
   // them, because "an arm" and "a foot" are different bugs -- a foot in the floor is a creature standing on the ground.
   wpos(){ try{ return [+wretch.pos.x.toFixed(3), +wretch.pos.y.toFixed(3), +wretch.pos.z.toFixed(3)]; }catch(e){ return null; } },   // QA: where the creature actually is, for a harness that must not teleport it back on top of a correction it is measuring
-  armClamp(on){ try{ if(on!=null) _ARM_CLAMP=!!on; return { on:_ARM_CLAMP }; }catch(e){ return {err:String(e.message||e)}; } },
-  bodyPush(on){ try{ if(on!=null) _BODY_PUSH=!!on; return { on:_BODY_PUSH, pushed:+(wretch._chestPush||0).toFixed(3) }; }catch(e){ return {err:String(e.message||e)}; } },
   rigBuried(){ try{ const g=wretch.group; if(!g||!wretch.active) return {err:'not active'};
       g.updateMatrixWorld(true);
       // BY LIMB, NOT BY MESH NAME. Every mesh in this rig is unnamed, so a count alone cannot tell an arm through a
@@ -45636,6 +45649,19 @@ window.__hc={
         g.drawImage(atlasCanvas,(idx%ATLAS_TILES)*TILE,((idx/ATLAS_TILES)|0)*TILE,TILE,TILE, i*TILE*scale,0,TILE*scale,TILE*scale); });
       return cv.toDataURL('image/png'); }catch(e){ return {err:String(e.message||e)}; } },
   trigger(btn,on){ try{ locked=true; if(btn===2)rmbHeld=!!on; else lmbHeld=!!on; return {lmb:lmbHeld,rmb:rmbHeld}; }catch(e){ return e.message; } },
+  // QA: WHICH WAY DOES THE KICK GO? Zeroes the pending recoil, asks kickRecoil for a pure vertical kick at a given
+  // weapon cant, and reports the direction it actually landed in. The side term is randomised per shot, so it is set to
+  // zero here on purpose: with only `up` asked for, the answer must come back at exactly the cant, and the ratio
+  // ty/tp is tan(cant) whatever the per-shot magnitude jitter does. rollDeg 0 returning 0 is the positive control,
+  // and it is also the whole guarantee that standing and full-ADS recoil is unchanged.
+  recoilAxis(rollDeg){ try{ const r=(+rollDeg||0)/57.29578;
+    RECOIL.tp=0; RECOIL.ty=0;
+    kickRecoil(0.25, 0, 0, r);
+    const deg=Math.atan2(RECOIL.ty, RECOIL.tp)*57.29578;
+    const out={ rollDeg:+(+rollDeg||0).toFixed(2), tp:+RECOIL.tp.toFixed(5), ty:+RECOIL.ty.toFixed(5),
+                kickDeg:+deg.toFixed(2), offBy:+(deg-(+rollDeg||0)).toFixed(3) };
+    RECOIL.tp=0; RECOIL.ty=0; return out;
+  }catch(e){ return {err:String(e&&e.message||e)}; } },
   shoot(){ try{ locked=true; return !!fireGun(); }catch(e){ return e.message; } },             // QA: pull the trigger once
   // QA/bench: the direction the LAST round actually took, in world space, plus the camera's own forward at the moment it is read.
   // "Guns fire where they point" is a claim about the bullet; every other reading in xhProbe is an input to it.
@@ -45995,6 +46021,31 @@ window.__hc={
                near:r('uNear'), far:r('uFar'), tanHalf:r('uTanHalf'), aspect:r('uAspect'),
                camY:+U.uCamPos.value.y.toFixed(2) };
     }catch(e){ return {err:String(e.message||e)}; } },
+  // THE OCCUPANCY VOLUME, CHECKED AGAINST THE WORLD IT CLAIMS TO COPY. n cells are sampled at random and each one's
+  // stored byte is compared with getBlock at the same world coordinate — the same question asked of two different
+  // data structures, which is the only form of check that can actually fail.
+  // AND IT CARRIES ITS OWN CONTROL. `ctlWrong` runs the identical comparison with the world coordinate shifted by one
+  // cell in x, which MUST disagree often (adjacent cells differ wherever there is a surface). A wrong count of 0 next
+  // to a ctlWrong of 0 means the comparator is blind, not that the volume is right.
+  occVolume(n){ try{ n=n||4000;
+      if(!_occValid) return { valid:false, note:'not built yet' };
+      let wrong=0, ctlWrong=0, solid=0;
+      for(let i=0;i<n;i++){
+        const x=(Math.random()*OCC_N)|0, y=(Math.random()*OCC_N)|0, z=(Math.random()*OCC_N)|0;
+        const wx=_occOx+x, wy=_occOy+y, wz=_occOz+z;
+        const got=_occData[x + OCC_N*(y + OCC_N*z)]>0 ? 1 : 0;
+        if(got) solid++;
+        const b=getBlock(wx,wy,wz); const want=(b!==AIR && isOpaque[b]) ? 1 : 0;
+        if(got!==want) wrong++;
+        const b2=getBlock(wx+1,wy,wz); const want2=(b2!==AIR && isOpaque[b2]) ? 1 : 0;
+        if(got!==want2) ctlWrong++; }
+      return { valid:true, n, wrong, ctlWrong, solidPct:+(100*solid/n).toFixed(2),
+               origin:[_occOx,_occOy,_occOz], size:OCC_N, builds:_occBuilds, lastBuildMs:+_occMs.toFixed(2), on:_occWant }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // Force a rebuild, or switch the volume off entirely — the A/B for anything that consumes it.
+  occBuild(on){ try{ if(on!=null) _occWant=!!on; if(_occWant) buildOccVolume(true);
+      return { on:_occWant, builds:_occBuilds, lastBuildMs:+_occMs.toFixed(2), origin:[_occOx,_occOy,_occOz] }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   // DEPTH OF FIELD, as dials and a readout. amt 0 is the A/B off; maxCoC is the widest blur in PIXELS; the four range
   // numbers are metres either side of the focus. focusM reports where the autofocus actually landed this frame, which
   // is the one thing a screenshot of a blurred frame cannot tell you.
