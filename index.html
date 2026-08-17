@@ -7335,10 +7335,14 @@ const skyMat = new THREE.ShaderMaterial({
     // interleaved to cancel drift, reads lum 45.6/53.9 at vib 1 against 68.8/87.8 at vib 3, with the red channel
     // moving twice as far as the blue. That is the red cast on terrain his instruction on this item explicitly
     // forbids, so the default may not be 3.0 until the path is found and cut.
-    // WHERE IT IS NOT: holding the term out of the sky-cube bake (see bakeSky) does not close it, so the world is not
-    // taking this through the baked environment. The untested candidate is the bloom pass spreading a much brighter
-    // sky over the frame — bloom is enabled, additive, and its mip chain is wide enough to lift a whole frame.
-    // Reaching it needs a bloom toggle from outside the module, which does not exist yet.
+    // THE PATH IS BLOOM, and it is now measured rather than suspected. Holding the term out of the sky-cube bake does
+    // NOT close it, so the world is not taking this through the baked environment. Toggling the bloom pass does: with
+    // bloom OFF the same vib 1 -> 3 A/B moves near ground by 0.16 of 255 (38.17 -> 38.33), and with bloom ON by 32
+    // (50.8 -> 82.8). So the sky term IS sky-only exactly as designed; a brighter sky over bloom's threshold spreads
+    // across the frame and lands on the terrain.
+    // The fix therefore belongs to bloom, not to this term: the sunset sky needs to stop seeding it, by threshold or
+    // by keeping the dome out of the bloom input, while the sun disc itself must keep blooming. That is the next step
+    // and it is not taken here. A saturation-based dodge was tried and does not work — see the note at the term.
     uDuskVib:{value:1.0}, uDuskRed:{value:0.55}
   },
   vertexShader:`
@@ -7450,31 +7454,22 @@ const skyMat = new THREE.ShaderMaterial({
       // vibrancy is, so uDuskVib=1 is bit-identical to the sky that shipped and the A/B is a real off switch.
       float _vk = clamp((uDuskVib-1.0)*0.5, 0.0, 1.0);
       vec3 _warm = mix(vec3(1.00,0.41,0.13), vec3(1.00,0.22,0.05), uDuskRed*_vk);
-      col += _warm*dusk*lowBand*(0.18+0.95*pow(sd,2.0));
+      col += _warm*dusk*lowBand*(0.18+0.95*pow(sd,2.0))*uDuskVib;
       // The violet counter-term rises WITH the warm side rather than staying put, because the richness Ben is asking
       // for is the gradient across the sky, not a hotter band on one edge: an orange horizon under an unchanged
       // blue-grey reads as a brighter stripe, and it is the deep violet opposite the sun that makes it read as depth.
-      col += vec3(0.28,0.15,0.42)*dusk*lowBand*(1.0-sd)*0.38;
-      // ---- THE VIBRANCY IS A CHROMA PUSH AT CONSTANT LUMINANCE, AND THAT IS THE WHOLE FIX ----
-      // The first version multiplied the two dusk terms' AMPLITUDE. It gave Ben the colour he asked for and it also
-      // lifted near ground by 32 of 255 at vib 3. Measured with the bloom pass toggled, the cause was not the sky
-      // lighting the world at all: with bloom OFF the same A/B moves near ground by 0.16 of 255, and with bloom ON by
-      // 32. A brighter sky over the bloom threshold spreads across the whole frame, and that is the red cast on
-      // terrain his instruction on this item forbids.
-      // mix(vec3(luminance), col, s) with s > 1 is exactly saturation: luminance is preserved by construction, since
-      // lum(mix(grey,col,s)) = lum*(1-s) + lum*s = lum for any s. So the sky gets more saturated, the frame's energy
-      // does not change, bloom sees what it always saw, and the ground cannot move. It is also what "vibrant" means —
-      // he asked for vividness, not for a brighter sky, and the amplitude version was answering the wrong question.
-      // THE GATE HAS TO BE THE SHAPE THE COLOUR IS, not merely the shape of the horizon band. Gating on dusk*lowBand
-      // alone was measured and it is nearly inert where it matters: facing the sun at dusk it moved saturation 0.1873
-      // to 0.1901 at vib 3, because lowBand has already fallen off by the height the sunset's warm glow reaches. The
-      // warm term above carries a sun-proximity factor (0.18+0.95*sd^2) and lives well above the band, so the push is
-      // given the same reach: the horizon band OR the sun's own surround, whichever is stronger.
-      // The max() only guards a channel driven negative by a strong push; it is the one place luminance can rise, and
-      // only in pixels that were already near-monochrome, where there is no chroma to push in the first place.
-      { float _vg = dusk*clamp(lowBand + 0.9*pow(sd,2.0), 0.0, 1.0);
-        float _vl = dot(col, vec3(0.2126,0.7152,0.0722));
-        col = max(vec3(0.0), mix(vec3(_vl), col, 1.0 + (uDuskVib-1.0)*_vg)); }
+      col += vec3(0.28,0.15,0.42)*dusk*lowBand*(1.0-sd)*0.38*uDuskVib;
+      // ---- WHY THIS IS AN AMPLITUDE PUSH AND NOT A SATURATION PUSH, WHICH WAS TRIED AND MEASURED ----
+      // A constant-luminance chroma push is the obvious answer to the bloom leak below, and it is written down here
+      // because it looks so obviously right that it will be tried again otherwise. mix(vec3(lum), col, s) with s > 1
+      // preserves luminance exactly, so bloom sees unchanged energy and the ground cannot move — and the ground did
+      // not move: near ground read 84.0/85.2 and 84.2/85.2 across the A/B, inside its own drift.
+      // IT MAKES THE SKY LESS COLOURFUL, WHICH IS THE OPPOSITE OF THE ASK. Facing the sun at dusk, saturation went
+      // 0.1828 -> 0.1258 -> 0.0956 for vib 1 -> 2 -> 3, and R-B fell 34.1 -> 13.4. The near-sun sky is bright, so
+      // pushing its chroma drives the high channel into AgX's shoulder where the operator flattens it while the low
+      // channels are pulled down and left there — the frame gets whiter, not richer. Gated tightly to the horizon
+      // band instead it is merely inert (0.1873 -> 0.1901). The operator's shoulder is why this cannot work on a
+      // bright sky, and it is the same desaturation property the research pass recorded for AgX.
       // ---- NIGHT ---- gated, so a clear day pays none of it
       if(uDay < 0.55){
         float nt = 1.0-uDay;
@@ -22102,6 +22097,9 @@ function animateWretch(dt, moving){
     else if(r<0.70) wretch._stumbleT=0.16;                         // stumble lurch
     else wretch._hitchT=0.1+Math.random()*0.2; }                   // hitch (freeze; plants preserved by frozen phase)
   if((wretch._hitchT||0)>0){ wretch._hitchT-=dt; gf=0; }
+  // AFTER the hitch, not before it. The hitch and the stalk gate are the two things that stop the legs, and a debug
+  // value read upstream of them says the legs are cycling during exactly the frames the slide is made of.
+  wretch._gfDbg=gf;
   const arr = 0.18*vnoise(mph*3.1);
   wretch.gaitPhase += dt*gf*6.283*(1+arr);
   if(!isFinite(wretch.gaitPhase)) wretch.gaitPhase=0;
@@ -22334,10 +22332,14 @@ function animateWretch(dt, moving){
   // this file has been bitten four times in one day by exactly that. It records the Wretch's own bones now.
   if(RIGTRACE.kind){
     const _L0=P.legs&&P.legs[0], _A0=P.arms&&P.arms[0];
+    // WHERE IT IS, TOO, and the gait's own frequency. "It walks away sliding" is a claim about travel against leg
+    // motion, and neither number alone can carry it: a frozen leg is fine while the body is still, and a moving body is
+    // fine while the legs cycle. The pair, at frame rate, is the measurement -- distance covered while gf is zero is
+    // the slide, in blocks.
     RIGTRACE.buf.push([+wretch.phase.toFixed(4),
       _L0&&_L0.thigh?+_L0.thigh.rotation.x.toFixed(4):0,
       _A0&&_A0[1]?+_A0[1].rotation.x.toFixed(4):0,
-      g.position.y]);
+      g.position.y, +wretch.pos.x.toFixed(4), +wretch.pos.z.toFixed(4), +(wretch._gfDbg||0).toFixed(4), +dt.toFixed(5)]);
     if(RIGTRACE.buf.length>4000) RIGTRACE.buf.shift(); }
 }
 // A GAIT SAMPLED FROM OUTSIDE IS A GAIT MEASURED WRONG. Polling rigSample over the wire lands about 25 times a second with
@@ -42256,9 +42258,14 @@ window.__hc={
       const bare=[];
       view.mesh&&view.mesh.traverse(o=>{ if(!o.isMesh||!o.material||Array.isArray(o.material)) return;
         const m=o.material; if(m===scopeLensMat) return;
-        meshes++; if(m.map){ mapped++; if(!size&&m.map.image) size=[m.map.image.width|0,m.map.image.height|0]; }
-        else bare.push((o.name||m.type)+' #'+(m.color?m.color.getHexString():'--'));
-        if((m.shininess||0)>shin) shin=m.shininess||0; });
+        meshes++;
+        // THE GLOSS IS THE METAL'S, and it is read only off the parts wearing the finish. Taken as the max over every
+        // mesh it was the LENS's 220 — _glbGunStyle gives glass its own unmapped material — so this hook reported the
+        // forest rifle and the chassis rifle, the two guns authored matte on purpose, as the glossiest in the game.
+        // An instrument that cannot report "matte" cannot be used to check "shiny guns should be shiny".
+        if(m.map){ mapped++; if(!size&&m.map.image) size=[m.map.image.width|0,m.map.image.height|0];
+          if((m.shininess||0)>shin) shin=m.shininess||0; }
+        else bare.push((o.name||m.type)+' #'+(m.color?m.color.getHexString():'--')); });
       for(const k in GUN_TEX) if(F && k===F.tex && GUN_TEX[k]) tex=k;
       return { id:view.id, tex:tex||(F?F.tex:null), want:F?F.tex:null, shin, meshes, mapped, texSize:size,
                texOK:F?!!GUN_TEX[F.tex]:true, bare }; }
