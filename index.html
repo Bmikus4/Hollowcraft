@@ -8785,6 +8785,10 @@ const waterMat = new THREE.ShaderMaterial({
     // costs one comparison per water pixel when it is 0. Every black pixel in that band is ISOLATED - it has a lit
     // neighbour - which is the signature of a per-pixel NaN, not of an unlit surface. __hc.waterNan(1) turns it on.
     uNanDbg:{value:0},
+    // BYPASS THE CUSTOM VERTEX STAGE. A plain material draws the well's water quad and this one does not, and the
+    // fragment-stage magenta never appears -- so the loss is before rasterisation. 1 skips every displacement here and
+    // does the transform three's own vertex shader would do, which localises it to this stage or clears it. Ships at 0.
+    uDbgFlat:{value:0},
     uDbgT:{value:0.004},
     uNormFade:{value:0},
     uSeaNight:_uSeaNight,    // night-only in-scatter floor; see the shader note beside "NIGHT IN-SCATTER FLOOR". 0,0,0 is the A/B off
@@ -8839,6 +8843,7 @@ const waterMat = new THREE.ShaderMaterial({
     uniform float uTime; uniform vec3 uCamPos; uniform float uCurveR, uCurveK, uCurveClamp, uCurveCap, uFlow;   // uCamPos is the SAME uniform the fragment stage already uses; declaring it in both stages costs nothing and avoids a second copy that could drift
     void main(){
       vFar=aFar; vTop=aTop; vDepth=aDepth; vFlow=aFlow*uFlow; vec3 p=position; vec3 wp=(modelMatrix*vec4(p,1.0)).xyz;
+      if(uDbgFlat>0.5){ vN=vec3(0.0,1.0,0.0); vCrest=0.0; vW=wp; vec4 mv0=modelViewMatrix*vec4(p,1.0); vFog=-mv0.z; gl_Position=projectionMatrix*mv0; return; }
       // WATER THAT MOVES SOMEWHERE (#74). aFlow is a velocity in blocks a second, baked per column by flowVec, and the
       // only thing either stage does with it is ADVECT THE SAMPLE POINT: every pattern on this surface is a function of
       // xz, so evaluating it at xz - v*t makes the whole thing travel at v without a single new octave of noise. Where
@@ -8920,7 +8925,7 @@ const waterMat = new THREE.ShaderMaterial({
     varying float vFar; uniform float uMeshR;
     varying float vTop; varying float vDepth; varying vec3 vW; varying vec3 vN; varying float vFog; varying float vCrest; varying vec2 vFlow;
     uniform vec3 uSunDir,uMoonDir,uCamPos; uniform float uDay,uTime; uniform vec3 uFogColor; uniform vec3 uBody; uniform float uFogDensity, uDeep, uWx; uniform vec3 uRing; uniform float uRingFade; uniform vec3 uSeaNight;
-    uniform float uGladeAfter, uGladeAmt, uFresCap, uFoam, uNanDbg, uNormFade, uDbgT;
+    uniform float uGladeAfter, uGladeAmt, uFresCap, uFoam, uNanDbg, uNormFade, uDbgT, uDbgFlat;
     // WATER IS DELIBERATELY NOT ON THE SHARED LIGHTING MODEL (Ben 08-16: "dont touch water lighting unless you need
     // to"). Blocks, cutout, panes, leaves and foliage all call hcAmbient now; this shader keeps its own path on
     // purpose, because its reflection-by-angle, its slant-path absorption and its shelf behaviour are the one surface
@@ -9760,7 +9765,23 @@ const VolLightShader={
   '  if(len<0.05){ gl_FragColor=src; return; }',
   '  vec3 dir=ray/len;',
   '  len=min(len, uMaxDist);',
-  '  float jitter=hash12(gl_FragCoord.xy);',
+  // ---- THE ORANGE DOTS WERE THIS JITTER (Ben, over many sessions; narrowed by him to "all lighting not just torches
+  // ... only at night, and not from the moon") ----
+  // A ten-step march through a 1/d2 kernel is coarse, so the samples are offset per pixel to break the banding — and the
+  // offset was hash12(gl_FragCoord.xy), WHITE NOISE. Neighbouring pixels then sample wildly different parts of a very
+  // peaked function and the result is speckle, in the lamp's own warm colour, one dot per device pixel.
+  // EVERY ONE OF HIS FIVE OBSERVATIONS IS A PROPERTY OF THAT LINE, which is why no particle system ever explained them:
+  // night-only, because uDensity is 0 by day and the pass disables itself; from every point light and never the moon,
+  // because the march loops uVLPos, the POINT-light selection, and a directional light is not in it; evenly spread,
+  // because a per-pixel hash is uniform over the screen; through terrain, because the accumulation is added to every
+  // pixel along the ray whatever the ray ends on; and it SCALES WITH BROWSER ZOOM, because gl_FragCoord is in DEVICE
+  // pixels — that last one is the signature of a screen-space hash and it is what named this in the end.
+  // Measured by toggling the pass at night with three torches on a wall: warm pixels 297,343 with it on against
+  // 128,662 with it off, on a control-pair spread of 24,000.
+  // INTERLEAVED GRADIENT NOISE INSTEAD, which is the standard remedy and not a fudge: it is built so that the offsets of
+  // neighbouring pixels are spread evenly rather than independently, so the sampling error becomes a fine ordered
+  // texture instead of random dots. Same one line, same cost, same banding suppression, no speckle.
+  '  float jitter=fract(52.9829189*fract(0.06711056*gl_FragCoord.x + 0.00583715*gl_FragCoord.y));',
   '  float dt=len/uSteps;',
   '  vec3 acc=vec3(0.0);',
   '  for(int s=0;s<12;s++){',
@@ -9782,7 +9803,15 @@ const VolLightShader={
   // air thin enough to see through is small. The clamp is the other half: inverse-square has no upper bound, so a
   // camera pressed against a lantern would blow out however low the strength is set.
   '  acc*=dt*uDensity*uStrength*0.0796;',
-  '  acc=min(acc, vec3(0.45));',
+  // AND THE CLAMP IS WHAT REPAINTED THE WHOLE FRAME (Ben: lights "add that red hue over everything"). 0.45 of display
+  // range is 115 levels of warm added to a pixel, and because in-scatter is accumulated along the WHOLE ray it reaches
+  // every pixel including the sky — photographed at night beside three torches, the sky went from deep blue to pink and
+  // the grass from green to salmon. Toggling the pass off restored both, which is what identified it.
+  // 0.18 keeps the near-lamp glow this pass exists for — 1/d2 means the air within a couple of blocks of a flame is
+  // where nearly all of the term lives — and takes the far field down to where it reads as air rather than as a filter
+  // over the picture. Ben asked for a smooth warm glow on the surfaces a light touches, not a tint on the ones it does
+  // not; this is the difference between those two.
+  '  acc=min(acc, vec3(0.18));',
   '  gl_FragColor=vec4(src.rgb+acc, src.a);',
   '}'].join('\n') };
 let volPass=null, _volWant=true;   // _volWant is the A/B switch: ShaderPass has no userData, and reading one threw inside the per-frame update, which silently disabled the whole pass
@@ -42259,6 +42288,30 @@ window.__hc={
               wm.material=new THREE.MeshBasicMaterial({color:0xff00ff, side:THREE.DoubleSide, depthTest:true}); }
       else if(wm.userData._realMat){ wm.material=wm.userData._realMat; wm.userData._realMat=null; }
       return { basic:wm.material.type, verts:wm.geometry.attributes.position.count }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // EVERY VERTEX ATTRIBUTE OF THE WELL'S WATER, checked for finiteness. A basic material draws this quad and waterMat
+  // does not, and the fragment-stage magenta never appears -- which together mean the loss is in the VERTEX stage, and
+  // the classic way a vertex stage loses a triangle is a non-finite value reaching gl_Position.
+  wellAttrs(){ try{ const wx=spawnX+14, wz=spawnZ+34, c=getChunk(wx>>4,wz>>4);
+      const wm=c&&c.group&&c.group.userData&&c.group.userData.water; if(!wm) return {err:'no water mesh'};
+      const out={};
+      for(const k in wm.geometry.attributes){ const at=wm.geometry.attributes[k], n=at.count*at.itemSize;
+        let bad=0, mn=1e30, mx=-1e30, sample=[];
+        for(let i=0;i<n;i++){ const v=at.array[i];
+          if(!Number.isFinite(v)) bad++; else { if(v<mn)mn=v; if(v>mx)mx=v; }
+          if(sample.length<4) sample.push(v); }
+        out[k]={ items:at.itemSize, count:at.count, nonFinite:bad,
+                 min:bad<n?+mn.toFixed(3):null, max:bad<n?+mx.toFixed(3):null, first:sample }; }
+      return out; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // BISECT waterMat ONE PROPERTY AT A TIME. A plain material draws this quad and waterMat does not; these are the
+  // knobs between the two that do not require touching the shader source.
+  waterProp(o){ try{ o=o||{}; const before={transparent:waterMat.transparent, depthWrite:waterMat.depthWrite, depthTest:waterMat.depthTest, side:waterMat.side};
+      for(const k of ['transparent','depthWrite','depthTest','side']) if(o[k]!=null) waterMat[k]=o[k];
+      if(o.curveK!=null && waterMat.uniforms.uCurveK) waterMat.uniforms.uCurveK.value=+o.curveK;
+      waterMat.needsUpdate=true;
+      return { before, now:{transparent:waterMat.transparent, depthWrite:waterMat.depthWrite, depthTest:waterMat.depthTest, side:waterMat.side,
+               curveK:waterMat.uniforms.uCurveK?waterMat.uniforms.uCurveK.value:null} }; }
     catch(e){ return {err:String(e.message||e)}; } },
   wellRect(){ try{ const wx=spawnX+14, wz=spawnZ+34, gy=surfaceH(wx,wz), y=gy+1-WATER_SURF_DROP;
       const V=new THREE.Vector3(); let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9, behind=0;
