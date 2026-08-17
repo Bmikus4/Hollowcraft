@@ -21,5 +21,14 @@ import path from 'node:path';
     // not the geometry -- which is the difference between a tuning job and a missing mesh.
     await W.page.evaluate('__hc.cam({pitch:-0.10})'); await sleep(600);
     await W.page.screenshot({path:path.join(OUT,'well-graze.png')});
+    // THE SAME CAMERA, TWICE: once normally and once with every water fragment forced magenta (uNanDbg mode 2,
+    // already in the shader). Diffing the two says exactly which pixels the water is drawn on, if any.
+    await W.page.evaluate('__hc.cam({pitch:-1.05})'); await sleep(900);
+    await W.page.evaluate('__hc.waterNan(0)'); await sleep(300);
+    console.log('rect '+JSON.stringify(await W.page.evaluate('__hc.wellRect()')));
+    await W.page.screenshot({path:path.join(OUT,'wellA.png')});
+    await W.page.evaluate('__hc.waterNan(2)'); await sleep(400);
+    await W.page.screenshot({path:path.join(OUT,'wellB.png')});
+    await W.page.evaluate('__hc.waterNan(0)');
     console.log('errors: '+(W.errors.length?W.errors.slice(0,3).join(' | '):'none'));
   } finally { await W.close(); } })();

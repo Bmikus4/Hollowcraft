@@ -11451,7 +11451,45 @@ function modelBlockMat(m, bd, colOverride){
     const mx=Math.max(r,g,b), k=mx>LIFT_CAP?LIFT_CAP/mx:1;
     return (((r*k)|0)<<16) | (((g*k)|0)<<8) | ((b*k)|0); };
   const tint = map ? tintOf(col) : col;
-  return new THREE.MeshLambertMaterial(map?{map, color:tint}:{color:col}); }
+  return _modelLit(new THREE.MeshLambertMaterial(map?{map, color:tint}:{color:col})); }
+// =====================================================================
+//  MODEL BLOCKS JOIN THE ATLAS LIGHT PATH — the SKY term first (Ben)
+// =====================================================================
+// A cat:'model' block — every door, fence, ladder, stair, trapdoor, chest, bed, scarecrow and sulfur node — is a Lambert
+// material, so it has never had any of what an atlas block gets: no baked light volume, no per-face sky access, no canopy
+// depth, and therefore none of hcAmbient's occlusion. It is lit by three's ambient and hemisphere at full strength
+// wherever it stands. That is the single structural fact behind four separate reports — black texels on doors and
+// fences, the scarecrow, and sulfur staying visible after dark — and no amount of tuning the prop fill reaches it,
+// which the attribution table in the previous commits shows dial by dial.
+//
+// THE SKY TERM IS THE ONE THAT MATTERS AND THE ONE THAT CAN BE SOURCED CLEANLY. skyExposure(x,y,z) is world-space,
+// cached, and already the mesher's own answer for how much sky a cell sees — the same quantity that becomes aSky on a
+// greedy quad. One float per INSTANCE, set where the instances are built, and hcSkyAmbient is already compiled into
+// every lit shader in the game because HC_LIGHT_GLSL is appended to lights_pars_begin. So this is one attribute and one
+// multiply, using the atlas's own function and the atlas's own curve uniform: a prop indoors or under a canopy now
+// darkens the way the block beside it does.
+//
+// WHAT IS DELIBERATELY NOT HERE, so the next reader does not think it was missed: the baked block-light volume. A model
+// block CAN be given it — the pane path already wraps its material through _chunkMat to bind a chunk's light texture —
+// but it needs the chunk origin plumbed through to turn a world position into a volume coordinate, and props near a
+// torch already receive that torch as a real PointLight from pointPool. Sky access is the term with no substitute.
+//
+// AN UNSET ATTRIBUTE READS 1.0, which is exactly the old behaviour, so anything that reaches this material without
+// per-instance sky — the held model, the inventory icon, the dropped item — is bit-identical.
+function _modelLit(m){
+  const prev=m.onBeforeCompile;
+  m.onBeforeCompile=(sh,r)=>{ if(prev) prev(sh,r);
+    sh.uniforms.uSkyCurve = globalU.uSkyCurve;
+    sh.vertexShader = 'attribute float aMSky;\nvarying float vMSky;\n' + sh.vertexShader
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\n#ifdef USE_INSTANCING\n vMSky = aMSky;\n#else\n vMSky = 1.0;\n#endif');
+    sh.fragmentShader = 'varying float vMSky;\nuniform vec2 uSkyCurve;\n' + sh.fragmentShader
+      // hcSkyAmbient is the atlas's own function and uSkyCurve its own curve, so a prop and a block cannot answer
+      // "how much of the sky does this see" with two different numbers.
+      .replace('#include <lights_fragment_end>',
+        '#include <lights_fragment_end>\n reflectedLight.indirectDiffuse *= hcSkyAmbient(clamp(vMSky,0.0,1.0), uSkyCurve);');
+    m.needsUpdate=true; };
+  m.customProgramCacheKey=()=>'modellit';
+  return m; }
 function buildModelBlocks(c,g){
   c.emitters=[];
   const list=[], flames=[]; const cx0=c.cx*CK, cz0=c.cz*CK;
@@ -11500,6 +11538,16 @@ function buildModelBlocks(c,g){
     const byId={}; for(const e of list){ (byId[e[3]]=byId[e[3]]||[]).push(e); }
     const m4=new THREE.Matrix4(), _q=new THREE.Quaternion(), _e=new THREE.Euler(), _v=new THREE.Vector3(), _one=new THREE.Vector3(1,1,1);
     const addIM=(geo,mat,yo,cast,extra)=>{ const im=new THREE.InstancedMesh(geo,mat,arr.length); im.castShadow=cast!==false; im.receiveShadow=cast!==false;
+      // PER-INSTANCE SKY ACCESS — the model block's half of the atlas light path (see _modelLit). Sampled one cell ABOVE
+      // the block, because what a prop is lit by is the sky its own air cell can see, not the sky of the solid it occupies;
+      // that is the same offset the atlas makes along the face normal for the light volume, for the same reason.
+      // A geometry is shared between chunks by the model cache, so the attribute goes on the INSTANCED MESH's own copy —
+      // setAttribute on a shared BufferGeometry would have every chunk overwriting its neighbours' sky.
+      const sky=new Float32Array(arr.length);
+      for(let i=0;i<arr.length;i++){ const a=arr[i];
+        sky[i]=(typeof skyExposure==='function')?skyExposure(a[0],a[1]+1,a[2]):1; }
+      im.geometry=geo.clone();
+      im.geometry.setAttribute('aMSky', new THREE.InstancedBufferAttribute(sky,1));
       for(let i=0;i<arr.length;i++){ const a=arr[i]; m4.makeTranslation(a[0]+0.5,a[1]+yo,a[2]+0.5); im.setMatrixAt(i,m4); }
       im.instanceMatrix.needsUpdate=true; im.userData.modelMat=mat; if(extra)extra(im); g.add(im); return im; };
     let arr;
@@ -42161,7 +42209,30 @@ window.__hc={
                nearWell:near, hasWaterFlag:!!c.hasWater,
                waterMesh:!!wm, waterVerts:(wm&&wm.geometry&&wm.geometry.attributes.position)?wm.geometry.attributes.position.count:0,
                chunksWithWaterMesh:ctlN, totalWaterVerts:ctlV,
-               meshVisible:vis, surfaceYLocal:sy, bound:bs, groupY:c.group?+c.group.position.y.toFixed(2):null }; }
+               meshVisible:vis, surfaceYLocal:sy, bound:bs,
+               // IS IT ACTUALLY IN THE SCENE, and is it culled? Everything above says the mesh is correct; the diff of a
+               // magenta frame says its fragments never run while the OCEAN's do in the same frame. That leaves the draw
+               // path, so: its parent chain, its frustum flag, and its world-space bounds.
+               groupPos:c.group?[+c.group.position.x.toFixed(1),+c.group.position.y.toFixed(1),+c.group.position.z.toFixed(1)]:null,
+               meshParented:!!(wm&&wm.parent), groupParent:(c.group&&c.group.parent)?(c.group.parent.name||c.group.parent.type):null,
+               inScene:(function(){ let o=wm; while(o){ if(o===scene) return true; o=o.parent; } return false; })(),
+               frustumCulled:wm?!!wm.frustumCulled:null,
+               worldBound:(function(){ if(!wm) return null; const b3=new THREE.Box3().setFromObject(wm);
+                 return [[+b3.min.x.toFixed(1),+b3.min.y.toFixed(2),+b3.min.z.toFixed(1)],[+b3.max.x.toFixed(1),+b3.max.y.toFixed(2),+b3.max.z.toFixed(1)]]; })(),
+               layers:wm?wm.layers.mask:null, matSide:wm?wm.material.side:null, renderOrder:wm?wm.renderOrder:null }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // WHERE THE WELL'S WATER QUAD LANDS ON SCREEN, in pixels. A frame diff over a guessed rectangle cannot tell a water
+  // surface from film grain; projecting the surface's own world corners through the live camera can.
+  wellRect(){ try{ const wx=spawnX+14, wz=spawnZ+34, gy=surfaceH(wx,wz), y=gy+1-WATER_SURF_DROP;
+      const V=new THREE.Vector3(); let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9, behind=0;
+      for(const [ax,az] of [[wx-1.5,wz-1.5],[wx+1.5,wz-1.5],[wx+1.5,wz+1.5],[wx-1.5,wz+1.5]]){
+        V.set(ax,y,az).project(camera);
+        if(V.z>1){ behind++; continue; }
+        const px=(V.x*0.5+0.5)*innerWidth, py=(-V.y*0.5+0.5)*innerHeight;
+        if(px<x0)x0=px; if(py<y0)y0=py; if(px>x1)x1=px; if(py>y1)y1=py; }
+      return { surfaceY:+y.toFixed(2), behind,
+               rect:behind===4?null:[Math.round(x0),Math.round(y0),Math.round(x1),Math.round(y1)],
+               view:[innerWidth,innerHeight] }; }
     catch(e){ return {err:String(e.message||e)}; } },
   roofFit(){ try{ roofGeos();
       const g=_roofSlab, p=g.attributes.position, n=p.count;
