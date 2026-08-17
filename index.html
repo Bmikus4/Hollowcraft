@@ -1282,6 +1282,26 @@ const HC_LIGHT_GLSL = [
   // definitions precede every use of them.
   THREE.ShaderChunk.lights_pars_begin += '\n' + HC_LIGHT_GLSL;
   THREE.ShaderChunk.lights_pars_begin += '\nuniform vec4 uScotG;\nuniform vec4 uScotH;\nuniform vec4 uScotK;\nuniform vec4 uPropFill;\nuniform vec4 uHcAux;\nuniform vec4 uHcObj;\nuniform vec4 uHcLamp;\n';
+  // ---- A LAMP HAS A BODY: THE NEAR-FIELD CLAMP (Ben 08-06: "flashlights light up thier entire model") ----
+  // three's point and spot attenuation is 1/max(pow(d,decay),0.01) — a POINT source, so as d goes to zero the light
+  // goes to a hundred times its value at one block. Every lamp in this game is mounted on, or held next to, the very
+  // model it is meant to light: the torch viewmodel sits ~0.2 from the eye and the hand light 0.34 from it, which is
+  // ×14 on a decay of 1.3. Measured at midnight with a torch in hand, that one fact is the whole of the red-brown
+  // night: killing this light took the ground from luminance 54 warmth +0.23 to 21 / +0.05, which is the empty-handed
+  // frame, while killing the atlas volume term instead changed nothing (54.8 / +0.32). The blown-out model then seeds
+  // the bloom, which is why the SKY also lifts from 42 to 62 with a torch in hand.
+  // A REAL LAMP IS NOT A POINT — it is a flame or a bulb a few centimetres across, and inside that body the
+  // illumination stops rising. Clamping the DISTANCE to a minimum is exactly that statement, and it is the whole fix:
+  // beyond the clamp every light in the game is bit-identical, so no tuning of the world's night is touched.
+  // 0.9 blocks, and it is a query dial (?nearclamp=) because only Ben can settle where a held flame stops blowing out.
+  // location.search, not Q: Q is a `const` declared seven hundred lines below this and reading it here is a temporal
+  // dead zone throw — catchable, which is worse, because the dial would silently never work.
+  { const _NC=(()=>{ try{ const q=new URLSearchParams(location.search).get('nearclamp'); const v=q!=null?parseFloat(q):NaN;
+      return isFinite(v)?Math.max(0,Math.min(4,v)):0.9; }catch(e){ return 0.9; } })();
+    const _OLD='float distanceFalloff = 1.0 / max( pow( lightDistance, decayExponent ), 0.01 );';
+    if(THREE.ShaderChunk.lights_pars_begin.indexOf(_OLD)<0) throw new Error('near-field clamp: three\'s getDistanceAttenuation is not the expected text');
+    THREE.ShaderChunk.lights_pars_begin = THREE.ShaderChunk.lights_pars_begin.replace(_OLD,
+      'float distanceFalloff = 1.0 / max( pow( max( lightDistance, '+_NC.toFixed(3)+' ), decayExponent ), 0.01 );'); }
   // ---- THE MOON IS NOT A LAMP (Ben 08-12: the wash "affects blocks it shouldnt ... it should not affect anything
   // unless a light source in its vicinity, other than the moon, is acting upon it within a certain radius") ----
   // The wash's release gate reads reflectedLight.directDiffuse, which is the sum of EVERY light three delivered —
@@ -8854,6 +8874,9 @@ function applyOverworldShadowLights(){
 applyOverworldShadowLights();
 let _heldST=0;
 const heldLight = new THREE.PointLight(0xffb060, 0, 14, 2); scene.add(heldLight);   // torch/lantern in hand — NO shadow (baked world handles occlusion; the hand light is a soft personal glow)
+// QA ONLY (__hc.handAB): the two paths a hand light reaches the frame by, separable. `range` is the volume term's reach
+// in blocks and it is the shipped value here, so a bench that does not touch this hook measures the game.
+const _handAB={ pl:1, vol:1, range:15.0 };
 // ---- THE FLASHLIGHT (Ben 08-06: "adding a flashlight item, which projects directional light, not just volumetric light") ----
 // The only DIRECTIONAL light the player can carry, and the only SpotLight in the game.
 //
@@ -11207,11 +11230,11 @@ function assignPointLights(){
     // the main hand beside it stays warm — the hue must follow the same slot the brightness came from.
     const _ht = (_offL>_mainL) ? _tintOf(armor[EQ_OFF]) : _tintOf(inv[selSlot]);
     const _H=emitterLight(hl, _ht); heldLight.color.setHex(_H.c);
-    heldLight.intensity=_H.i*(1+Math.sin(t*11)*0.07+Math.sin(t*1.9)*0.05); heldLight.distance=_H.d; heldLight.decay=EL_DECAY;
+    heldLight.intensity=_H.i*(1+Math.sin(t*11)*0.07+Math.sin(t*1.9)*0.05)*_handAB.pl; heldLight.distance=_H.d; heldLight.decay=EL_DECAY;
     heldLight.castShadow=false;
     // the same light as a volume for the atlas. FIFTEEN blocks, matching the block-light volume's own fifteen steps -
     // the PointLight's `distance` is a shorter number that also has decay 2 working on it.
-    globalU.uHeld.value.set(heldLight.position.x, heldLight.position.y, heldLight.position.z, 15.0);
+    globalU.uHeld.value.set(heldLight.position.x, heldLight.position.y, heldLight.position.z, _handAB.vol>0?_handAB.range:0);
     // ---- AND THE VOLUME TERM TAKES THE PALETTE, NOT THE HEX (the last place hand and world disagreed) ----
     // This uniform is a LINEAR multiplier in the atlas shader, sitting beside the placed emitters' own
     // `3.6 * uChunkTint * pow(_bl,1.45)`, where uChunkTint is set with setRGB straight off LIGHT_PAL. Setting it with
@@ -42759,6 +42782,16 @@ window.__hc={
   // The keydown itself is unreachable here: the Digit branch sits below the pointer-lock guard, and a headless page has no lock.
   sel(i){ try{ selSlot=Math.max(0,Math.min(HOT_N-1,i|0)); refreshHotbar(); hotWake(hotGroup(selSlot));
     return { selSlot, barIdle:hotbarEl.classList.contains('idle'), leftIdle:hotLeftEl.classList.contains('idle') }; }catch(e){ return {err:e.message}; } },
+  // ---- THE HAND LIGHT, SPLIT INTO ITS TWO PATHS (Ben: "the whole world is tinted red-brown at night") ----
+  // A torch in hand lights through two entirely separate mechanisms and they fail differently: the three.js PointLight
+  // (`pl`), which is what reaches PROPS and the viewmodel 18 cm from the eye through a 1/d2 with a 0.01 floor — a 100x
+  // ceiling — and the atlas volume term (`vol`, uHeld.w), which reaches the WORLD with no occlusion and no N.L over a
+  // flat linear falloff. Neither can be turned off from the page without this, and without turning one off you cannot
+  // say which of them is the cast. `range` overrides the volume's reach for the same frame.
+  // The values are re-applied every frame from updateHeld, so these are overrides read there, not writes to the uniform.
+  handAB(o){ try{ if(o){ if(o.pl!=null) _handAB.pl=+o.pl; if(o.vol!=null) _handAB.vol=+o.vol; if(o.range!=null) _handAB.range=+o.range; }
+    return { pl:_handAB.pl, vol:_handAB.vol, range:_handAB.range, plNow:+heldLight.intensity.toFixed(3), volNow:+globalU.uHeld.value.w.toFixed(2) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   hotRule(){ try{ const accepts=[]; for(let i=0;i<HOT_N;i++) accepts.push(slotAccepts(i,'ar15'));
       for(let i=0;i<HOT_N;i++) inv[i]=null; GRID.items=[];
       armor[EQ_PACK]={id:'alice_pack',n:1}; gridReflow();     // a bag to overflow INTO: six pockets hold no revolver
