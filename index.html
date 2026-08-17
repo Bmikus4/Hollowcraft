@@ -9901,6 +9901,81 @@ let composer, bloomPass;
 // exactly the creases, inside corners and contact lines that voxel geometry never gets from a per-cell light volume. Eight
 // taps on a rotating disc, radius scaled by 1/depth so the world-space size is constant, and the whole thing multiplies the
 // colour: no blur pass, because the taps are already spread over the disc and the noise reads as the grain that follows.
+// =====================================================================
+//  DEPTH OF FIELD — a circle of confusion, gathered, BEFORE the tone map
+// =====================================================================
+// It runs on the LINEAR buffer, ahead of bloom and OutputPass, and that placement is the whole reason it looks like
+// defocus rather than smear. Blurring display-referred pixels averages values the tone map has already compressed, so
+// a bright highlight blurs into grey mush instead of spreading into a bokeh disc; blurring linear radiance is what a
+// lens actually does. Ahead of bloom for the same reason in the other direction: a real lens defocuses first and the
+// veiling glare happens to the defocused image, so bloom should see what the lens produced.
+//
+// AUTOFOCUS FROM THE CENTRE OF THE SCREEN, sampled in the shader. There is no CPU focus value to use: raycastVoxel
+// only reaches a few blocks, so it returns nothing whenever the player looks at anything further than arm's length,
+// and reading the depth buffer back to the CPU to find the focus would cost a stall every frame. One extra fetch of
+// tDepth at (0.5,0.5) answers it for free. WHAT THIS DOES NOT HAVE IS A FOCUS PULL: focus is instant, so a flick of
+// the view re-focuses in one frame rather than racking over. Smoothing it needs a value that survives between frames,
+// which a fragment shader has nowhere to keep.
+//
+// A GATHER, WITH EACH TAP GATED ON ITS OWN CIRCLE. The naive version averages a disc of neighbours and drags sharp
+// foreground colour onto blurred background, which is the classic bleed. A tap only contributes here if ITS OWN
+// circle of confusion is wide enough to reach this pixel — smoothstep(dist-1, dist+1, tapCoC) — which is the gather
+// form of scattering and is what keeps a sharp near edge from smearing outward over the distance behind it.
+//
+// THE VIEWMODEL IS EXCLUDED. The held gun or tool is drawn a few centimetres from the eye, far nearer than anything
+// the focus will ever land on, so every frame would blur it to paste. uNearCut is in metres from the eye.
+//
+// THE FAR SIDE IS DELIBERATELY GENTLE AND THE NEAR SIDE IS NOT. A cinematic far blur fights the player's eye in a
+// first-person game — you look at the horizon because you are trying to see it — so the far falloff is long (the
+// landscape stays legible) while something held close to the face, nearer than the thing you are looking at, goes
+// soft quickly, which is what actually reads as depth.
+const DofShader={
+  uniforms:{ tDiffuse:{value:null}, tDepth:{value:null}, uResolution:{value:new THREE.Vector2(1,1)},
+             uNear:{value:0.1}, uFar:{value:1000}, uAmt:{value:1.0},
+             uMaxCoC:{value:4.0},        // the widest blur radius in PIXELS at the frame's own resolution
+             uNearDead:{value:0.8},      // metres nearer than focus that stay sharp
+             uNearFall:{value:3.0},      // metres over which the near side reaches full blur
+             uFarDead:{value:9.0},       // metres further than focus that stay sharp
+             uFarFall:{value:90.0},      // long, so distant terrain is only softened
+             uNearCut:{value:0.35} },    // anything nearer than this is the viewmodel: never blurred, never a tap
+  vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
+  fragmentShader:`varying vec2 vUv; uniform sampler2D tDiffuse, tDepth; uniform vec2 uResolution;
+    uniform float uNear, uFar, uAmt, uMaxCoC, uNearDead, uNearFall, uFarDead, uFarFall, uNearCut;
+    float lin(float d){ return (2.0*uNear*uFar)/(uFar+uNear-(2.0*d-1.0)*(uFar-uNear)); }
+    float cocOf(float z, float zf){
+      float d = z - zf;
+      float c = (d < 0.0) ? ((-d - uNearDead)/max(uNearFall,1e-3)) : ((d - uFarDead)/max(uFarFall,1e-3));
+      return clamp(c, 0.0, 1.0) * uMaxCoC;
+    }
+    void main(){
+      vec4 col = texture2D(tDiffuse, vUv);
+      if(uAmt <= 0.001){ gl_FragColor = col; return; }
+      float zf = lin(texture2D(tDepth, vec2(0.5,0.5)).x);      // autofocus: what the crosshair is on
+      float dc = texture2D(tDepth, vUv).x;
+      float zc = lin(dc);
+      if(zc < uNearCut){ gl_FragColor = col; return; }          // the held item
+      float coc = cocOf(zc, zf) * uAmt;
+      if(coc < 0.75){ gl_FragColor = col; return; }             // under a pixel of blur is not a blur
+      vec2 px = 1.0/uResolution;
+      // 16 taps on two rings, offset between rings so the pattern does not read as a hexagon at wide radii
+      vec3 acc = col.rgb; float wsum = 1.0;
+      for(int r=0;r<2;r++){
+        float rad = coc * (r==0 ? 0.55 : 1.0);
+        for(int i=0;i<8;i++){
+          float a = (float(i) + (r==0 ? 0.0 : 0.5)) * 0.7853981634;
+          vec2 o = vec2(cos(a), sin(a)) * rad;
+          vec2 uv = vUv + o*px;
+          float zt = lin(texture2D(tDepth, uv).x);
+          if(zt < uNearCut) continue;                            // never smear the viewmodel outward
+          float tc = cocOf(zt, zf) * uAmt;
+          float dist = length(o);
+          float w = smoothstep(dist-1.0, dist+1.0, tc);           // the tap reaches here only if its own circle does
+          acc += texture2D(tDiffuse, uv).rgb * w; wsum += w;
+        }
+      }
+      gl_FragColor = vec4(acc/max(wsum,1e-4), col.a);
+    }`
+};
 const SSAOShader={
   uniforms:{ tDiffuse:{value:null}, tDepth:{value:null}, uResolution:{value:new THREE.Vector2(1,1)},
              // uRadius IS IN METRES, and uFocal is what turns it into pixels. It used to be a bare pixel number
@@ -10561,6 +10636,9 @@ function buildComposer(){
   // Bloom is for LIGHTS, not for sky. Collateral measured, not assumed: a night frame on the ground reads 1.303% of pixels
   // above 110 at 0.88 and 1.306% at 1.15, mean 28.26 against 28.24 — the torches and lanterns are well above both, so
   // nothing that is supposed to glow lost anything. bench/assert-sun-hides.mjs asserts that pair.
+  // DEPTH OF FIELD, immediately before bloom and therefore still in linear light. It needs the depth texture, so it
+  // rides the same _rtPath the SSAO and the god rays do: with motion blur off there is no depth buffer and no DOF.
+  if(_rtPath && CFG.quality!=='Low'){ dofPass = new ShaderPass(DofShader); composer.addPass(dofPass); }
   bloomPass = new UnrealBloomPass(new THREE.Vector2(innerWidth/2,innerHeight/2), 0.55, 0.34, 1.15);   // HALF-RES bloom — the mip-blur chain is the heaviest post pass; half-res is visually identical for a soft glow and ~halves its cost
   if (CFG.quality!=='Low') composer.addPass(bloomPass);
   composer.addPass(new OutputPass());
@@ -15776,6 +15854,14 @@ let _lookIdle=0;           // seconds since the last real mouse event — the re
 // The look ease, in 1/s, on a dial: ?lookease=9 is heavier, ?lookease=20 is snappier. Feel call, Ben's to settle.
 const LOOK_EASE=(()=>{ try{ const q=Q.get&&Q.get('lookease'); const v=q!=null?parseFloat(q):NaN;
   return isFinite(v)?Math.max(4,Math.min(40,v)):13; }catch(e){ return 13; } })();
+// HOW THE TAIL OF A FLICK ENDS. LOOK_COAST is the rate the pending delta is multiplied down at once the hand is still,
+// and LOOK_EPS is the floor it is snapped to zero at. 12/s beside the 13/s ease means a hard flick's remainder is gone
+// in about 0.2 s; the floor is what guarantees it is gone at all, and is why this is not the 72e55bd drift. Both on
+// dials: ?lookcoast= and ?lookeps=, and __hc.lookFeel measures the tail rather than describing it.
+const LOOK_COAST=(()=>{ try{ const q=Q.get&&Q.get('lookcoast'); const v=q!=null?parseFloat(q):NaN;
+  return isFinite(v)?Math.max(1,Math.min(60,v)):12; }catch(e){ return 12; } })();
+const LOOK_EPS=(()=>{ try{ const q=Q.get&&Q.get('lookeps'); const v=q!=null?parseFloat(q):NaN;
+  return isFinite(v)?Math.max(0.02,Math.min(4,v)):0.35; }catch(e){ return 0.35; } })();
 let _lookFresh=false;      // did the mouse actually move since the last frame? (see the coast-stop in applyLook)
 document.addEventListener('mousemove',e=>{ if(!locked)return;
   if(MON.on && MON.look){ monMouse(e.movementX, e.movementY); return; }   // the pointer is captured for the CAMERA, not the player
@@ -15849,7 +15935,8 @@ function applyLook(dt){
   // moment the hand is still that same buffer is the camera turning on its own — the resistance turns into drift, and
   // a view that keeps moving after the input has ended cannot be aimed. So the remainder is kept only while the mouse
   // is STILL MOVING; the frame after it stops, whatever the cap has not spent is dropped.
-  if(!_lookFresh && Math.abs(rawY)>capYaw+1e-9){ _lookDX=0; _lookDY=0; }
+  // (the frame-after-a-capped-flick hard clear used to live here; it is the coast decay below now, because a hard
+  //  clear IS the cut Ben is describing — see the note there)
   // AND IT STOPS EVEN WHEN THE CAP IS NOT BINDING (Ben 08-16: "slightly moving on its own"). The line above only
   // clears the buffer on a frame where the cap is still refusing the turn — but the buffer is eased out at a rate,
   // so a flick's remainder falls under the cap within a frame or two and from there it decays asymptotically and
@@ -15858,7 +15945,21 @@ function applyLook(dt){
   //   THE GRACE IS NOT ZERO ON PURPOSE. mousemove does not arrive on every rendered frame — at 144 Hz with a 125 Hz
   // mouse most frames are stale — so dropping the remainder the instant a frame has no event would eat real input and
   // read as a stutter. 50 ms is longer than any gap between events from a live hand and shorter than a flick's tail.
-  if(_lookIdle>0.05 || (Math.abs(_lookDX)<0.35 && Math.abs(_lookDY)<0.35)){ _lookDX=0; _lookDY=0; }
+  //   AND THE END OF IT IS A DECAY, NOT A CUT (Ben: "look momentum does not ease out — it carries then cuts. Smooth
+  // decay to zero with an epsilon snap"). Both of the clears this replaced set the pending delta to zero outright: one
+  // the frame after a capped flick went stale, one the moment the idle grace expired. Either way the camera was still
+  // sweeping at the cap and then, on a single frame, stopped — which is exactly "carries then cuts", and it is audible
+  // as a click in the view at the end of every flick.
+  //   So once the hand is still, the remainder is multiplied down at LOOK_COAST/s instead. It compounds with the ease
+  // that is already consuming it, so a hard flick's tail runs out over about a fifth of a second: momentum that lands
+  // rather than a camera that is dropped.
+  //   THE EPSILON SNAP IS WHAT KEEPS 72e55bd FIXED, and it is the whole reason this is safe. That commit's bug was a
+  // residual that only cleared while the turn cap was binding, so anything under the cap decayed asymptotically and
+  // never arrived — a view that drifts forever. An exponential alone would reintroduce it exactly. The floor is
+  // unconditional and is tested every frame whether the mouse moved or not, so the buffer reaches zero in bounded
+  // time: 0.35 pending counts is 0.00077 rad at the default sensitivity, well under one pixel of aim.
+  if(_lookIdle>0.05){ const _cd=Math.exp(-dt*LOOK_COAST); _lookDX*=_cd; _lookDY*=_cd; }
+  if(Math.abs(_lookDX)<LOOK_EPS && Math.abs(_lookDY)<LOOK_EPS){ _lookDX=0; _lookDY=0; }
   _lookFresh=false;
   // …and the shoulders come round afterwards, which is what gives the neck back. Faster than the body's own turn cap on
   // purpose: catching up is not resisted, only leading is.
@@ -21154,6 +21255,30 @@ function placeWretch(dt,moving){
      && !wretch._scooping && !wretch._vigAct && !wretch._park && !wretch.boss){
     const _h=wretch._mvLast;
     if(Math.hypot(wretch.pos.x-_h.x, wretch.pos.z-_h.z) <= 3){ wretch.pos.x=_h.x; wretch.pos.z=_h.z; } }
+  // ---- THE CHEST DOES NOT GO INTO THE WALL (Ben 08-17: "make it so that the wretch cant clip his body through blocks") ----
+  // Its collision is a capsule about the feet, and the torso is not over the feet: it leans, it rears, it goes down on
+  // all fours, so the chest reaches a long way past whatever the capsule allowed. Measured with the creature standing
+  // 1.5 blocks off a stone wall, which is arm's reach and not body's reach: the chest joint was inside the stone on 400
+  // of 70 samples' meshes, and while it is in there an arm tucked against it is in there too -- which is why the arm
+  // clamp alone could not finish the job.
+  // BACKWARDS ALONG ITS OWN FACING, because that is the direction a lean buries it in, and in small steps: a hard
+  // depenetration would fight moveEntity for the same frame and read as a shove. 0.06 a frame clears a typical lean in
+  // about three frames and is under the eye's threshold.
+  // CAPPED, so a creature that cannot get out does not walk backwards for ever -- in a tunnel or a doorway the chest can
+  // be inside stone with nowhere better to be, and the anti-wedge rule above owns that case.
+  if(wretch.active && wretch.P && wretch.P.spine && wretch.P.spine.length && !wretch.dragging && !player.grabbed
+     && !wretch._scooping && !wretch._vigAct && !wretch._park && !wretch.boss){
+    // EVERY SPINE JOINT, not the last one. Which end of P.spine is the chest is a fact about how the rig was built, and
+    // guessing it wrong tests the pelvis -- which is over the feet and therefore almost never buried, so the push would
+    // never fire. Asking all of them is four world positions and cannot be wrong.
+    let _bur=false;
+    for(let i=0;i<wretch.P.spine.length && !_bur;i++){ const _j=wretch.P.spine[i];
+      if(_j){ _j.getWorldPosition(_clV); if(_clipBuried(_clV)) _bur=true; } }
+    { if(_bur){
+        if((wretch._chestPush||0) < 0.42){ const st=0.06;
+          wretch.pos.x += Math.sin(wretch.yaw)*st; wretch.pos.z += Math.cos(wretch.yaw)*st;
+          wretch._chestPush=(wretch._chestPush||0)+st; }
+      } else wretch._chestPush=0; } }
   if(dt>1e-4){ const _p=wretch._mvLast;
     if(_p){ const _d=Math.hypot(wretch.pos.x-_p.x, wretch.pos.z-_p.z);
       // A TELEPORT IS NOT TRAVEL. blink, yank, the crypt drop and every QA hook move the body a long way in one frame; scored as
@@ -45199,6 +45324,7 @@ window.__hc={
   // a screenshot: what you see is a limb that ends at a wall, and what is actually happening is a limb inside it. This
   // counts them with the same _meshBuried the hider uses, so the number and the hiding can never disagree, and it names
   // them, because "an arm" and "a foot" are different bugs -- a foot in the floor is a creature standing on the ground.
+  wpos(){ try{ return [+wretch.pos.x.toFixed(3), +wretch.pos.y.toFixed(3), +wretch.pos.z.toFixed(3)]; }catch(e){ return null; } },   // QA: where the creature actually is, for a harness that must not teleport it back on top of a correction it is measuring
   armClamp(on){ try{ if(on!=null) _ARM_CLAMP=!!on; return { on:_ARM_CLAMP }; }catch(e){ return {err:String(e.message||e)}; } },
   rigBuried(){ try{ const g=wretch.group; if(!g||!wretch.active) return {err:'not active'};
       g.updateMatrixWorld(true);
@@ -45569,7 +45695,32 @@ window.__hc={
     return {dx:_lookDX,dy:_lookDY,capFree:TURN_CAP_FREE,capBody:TURN_CAP_BODY,capAds:TURN_CAP_ADS,
             freeArc:TURN_FREE_ARC,follow:TURN_BODY_FOLLOW,lead:+_ld.toFixed(4),capFrame:0.28,clamped:_turnClamped,
             sens:0.0022*_sensMult,locked}; },   // sens is what turns a pending delta into radians — a harness needs it to know what a flick ASKED for; lead is how far the head is ahead of the shoulders
-  nudgeActive(){ return !!_lookNudge; },                                                      // QA: is the one-shot look-up nudge still running?
+  // QA: HOW A FLICK ENDS, measured by running it. Injects one mouse delta, steps applyLook with the hand held still,
+  // and reports the per-frame yaw steps that arrive AFTER the input stopped. The number that matters is `cut` — the
+  // last non-zero step before the buffer reaches zero — against `peak`, the largest step in the tail. A cut equal to
+  // the peak is a camera being dropped; a cut at the epsilon is a camera coming to rest. `frames` is how long the
+  // ease-out lasts, and it must be FINITE: an unbounded tail is the 72e55bd drift, so a run that never reaches zero
+  // reports frames:120 and settled:false rather than a tidy number.
+  lookFeel(dx,o){ try{ if(o&&o.dial) return {note:'dials are ?lookease= / ?lookcoast= / ?lookeps=', ease:LOOK_EASE, coast:LOOK_COAST, eps:LOOK_EPS};
+    const wasLocked=locked; locked=true;
+    _lookDX=0; _lookDY=0; _lookIdle=0; _lookFresh=true;
+    _lookDX=(dx==null?600:+dx);                                  // one hard flick's worth of mouse counts
+    const DT=1/60, steps=[]; let y0=player.yaw;
+    applyLook(DT);                                               // the frame the mouse moved on
+    const moved=Math.abs(player.yaw-y0);
+    for(let i=0;i<120;i++){ const y=player.yaw; applyLook(DT); steps.push(Math.abs(player.yaw-y));
+      if(_lookDX===0 && _lookDY===0) break; }
+    locked=wasLocked; _lookDX=0; _lookDY=0;
+    const nz=steps.filter(v=>v>1e-9);
+    return { ease:LOOK_EASE, coast:LOOK_COAST, eps:LOOK_EPS, injected:(dx==null?600:+dx),
+             onInputFrame:+moved.toFixed(5), frames:steps.length, settled:(_lookDX===0),
+             tailRad:+nz.reduce((a,b)=>a+b,0).toFixed(5),
+             peak:+(nz.length?Math.max(...nz):0).toFixed(5),
+             cut:+(nz.length?nz[nz.length-1]:0).toFixed(5),
+             cutOverPeak:nz.length?+(nz[nz.length-1]/Math.max(...nz)).toFixed(3):0,
+             first6:nz.slice(0,6).map(v=>+v.toFixed(5)) };
+  }catch(e){ return {err:String(e&&e.message||e)}; } },
+  nudgeActive(){ return !!_lookNudge; },                                                    // QA: is the one-shot look-up nudge still running?
   cineKill(){ if(typeof endBossCutscene==='function')endBossCutscene(); _lookNudge=null; return {cine:!!_cine}; },   // QA: end an arrival early
   summon(){ HORROR._firstNight=true; wretch.debug=false; if(!wretch.active){ wretch.spawnT=0; if(!spawnWretch(Math.random()*360,26)) wretch.spawnT=0.5; } return wretch.active; },
   ltest(mode){ try{ let n=0;   // QA: isolate WHY leaf canopies render black — toggle lighting terms, return what changed
