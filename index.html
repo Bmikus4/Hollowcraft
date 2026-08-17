@@ -13999,7 +13999,9 @@ const _sunDir=new THREE.Vector3(), _keyDir=new THREE.Vector3(), _tmp=new THREE.V
 const _sunArc={ floor:0.16, nb:0.45, nbMax:3.0, sinE:1, snap:1, rMin:46, rMax:46, R:46 };
 const _snapR=new THREE.Vector3(), _snapU=new THREE.Vector3(), _snapD=new THREE.Vector3(), _snapCtr=new THREE.Vector3();
 // THE CELESTIAL MODEL'S ONE PARAMETER. See the arc in updateSky for why a latitude replaces the old constant tilt.
-const _SUN={ lat:51.5 };
+// airCap = the largest air mass the key light's colour is allowed to see. 4.0 is about 14 degrees of elevation, so
+// the reddening runs the whole way down to golden hour and then stops instead of going to a pure red key on terrain.
+const _SUN={ lat:51.5, airCap:4.0, air:1, col:[1,1,1] };
 // i = the key intensity with the moon overhead, which is the old constant kept as the PEAK rather than as the whole
 // night. See the moon block in updateSky. el/cur are readouts.
 const _MOON={ i:0.42, el:0, cur:0 };
@@ -14159,8 +14161,26 @@ function updateSky(dt){
   }
   sc.updateProjectionMatrix();
   // SMOOTH sun↔moon blend across the ENTIRE twilight band — no hard boolean snap (that instant warm→blue cut was the harsh transition)
-  { const gz=smooth(0.0,0.25,Math.abs(elev));                                       // grazing (dawn/dusk orange) → high (white)
-    const wR=1.0, wG=lerp(0.74,0.96,gz), wB=lerp(0.52,0.88,gz);                      // warm key color; oranger near the horizon
+  // ---- THE SUN'S COLOUR IS EXTINCTION THROUGH AIR MASS, NOT A PAIR OF LERPS ----
+  // §2.3 asks for intensity and colour DERIVED from elevation. What was here was `lerp(0.74,0.96,gz)` and
+  // `lerp(0.52,0.88,gz)` — four numbers chosen by eye, which is exactly the "time-of-day scalar" the rebuild is
+  // replacing one system over. The physical quantity is air mass: near the horizon the light crosses far more
+  // atmosphere, Rayleigh scattering removes short wavelengths as lambda^-4, and the sun reddens. Kasten-Young gives
+  // the air mass from the elevation, and per-channel transmittance is exp(-tau*m) with sea-level Rayleigh optical
+  // depths at 650/550/450 nm. Normalised so the brightest channel is 1, because brightness belongs to the intensity
+  // term and this line owns only the hue.
+  // IT REPRODUCES THE OLD HIGH-SUN COLOUR ALMOST EXACTLY, which is the check that the model is sane rather than
+  // merely different: at the zenith it gives (1, 0.954, 0.851) against the hand-tuned (1, 0.96, 0.88).
+  // THE AIR MASS IS CAPPED, AND THAT CAP IS A LOOK DECISION MADE DELIBERATELY. Uncapped, a horizon sun reaches an air
+  // mass near 38 and the light goes to (1, 0.17, 0.002) — an almost pure red key. That is physically correct and it
+  // is exactly the red cast on terrain Ben spent a night removing, because this light lands on the ground, not on the
+  // sky. The cap is what keeps a sunset in the sky where it belongs. __hc.sun({airCap}) is the dial.
+  { const _elDeg=Math.asin(Math.max(-1,Math.min(1,elev)))*57.29578;
+    const _m=Math.min(_SUN.airCap, 1/(Math.max(0.0,elev) + 0.50572*Math.pow(Math.max(_elDeg,-5)+6.07995, -1.6364)));
+    const _tR=Math.exp(-0.0507*_m), _tG=Math.exp(-0.0975*_m), _tB=Math.exp(-0.2116*_m);
+    const _tM=Math.max(_tR,Math.max(_tG,_tB))||1;
+    const wR=_tR/_tM, wG=_tG/_tM, wB=_tB/_tM;
+    _SUN.air=_m; _SUN.col=[+wR.toFixed(3),+wG.toFixed(3),+wB.toFixed(3)];
     // THE SUN IS OUT WHEN IT IS DOWN. Both of these lines were driven by `day`, which is smooth(-0.46,0.46,elev) —
     // so at a tenth of an elevation BELOW the horizon `day` still reads 0.34, and the key sat at 1.4 intensity with a
     // third of its warm colour mixed in. That is a warm sun lighting a world whose sun has set, and it is the most
@@ -47632,12 +47652,14 @@ window.__hc={
   // through east, so sunrise reads 90 and sunset 270 — the check that the sun is on a real path and not a scalar.
   sun(o){ try{ if(o&&o.lat!=null) _SUN.lat=Math.max(-66,Math.min(66,+o.lat));
       if(o&&o.moonI!=null) _MOON.i=Math.max(0,Math.min(3,+o.moonI));   // moonI 0.42 is the shipped peak; the A/B for "is the night shaped or flat" is this against a constant
+      if(o&&o.airCap!=null) _SUN.airCap=Math.max(1,Math.min(40,+o.airCap));   // 40 is effectively uncapped: the physical horizon value
       const d=globalU.uSunDir.value, m=globalU.uMoonDir.value, R=57.29578;
       const el=(v)=>+(Math.asin(Math.max(-1,Math.min(1,v.y)))*R).toFixed(2);
       const az=(v)=>+(((Math.atan2(v.x,v.z)*R)+360)%360).toFixed(1);
       return { lat:+_SUN.lat.toFixed(2), peakElevDeg:+(90-Math.abs(_SUN.lat)).toFixed(2),
                sun:{ elevDeg:el(d), azimDeg:az(d), up:d.y>0 },
                moon:{ elevDeg:el(m), azimDeg:az(m), up:m.y>0, peakI:+_MOON.i.toFixed(3), curI:+_MOON.cur.toFixed(4) },
+               airMass:+_SUN.air.toFixed(2), airCap:_SUN.airCap, sunCol:_SUN.col,
                key:(d.y>0?'sun':'moon'), dayFactor:+globalU.uDay.value.toFixed(3),
                keyIntensity:+sunLight.intensity.toFixed(3), keyCol:'#'+sunLight.color.getHexString() }; }
     catch(e){ return {err:String(e.message||e)}; } },
