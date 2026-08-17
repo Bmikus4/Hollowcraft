@@ -1119,6 +1119,9 @@ const _hcAux = new Float32Array([0.10, 0, 0, 0.15]);
 // whether they stood in open ground or a sealed cave. This is the value they were missing, written per draw by
 // hcSkyBind and read by the non-atlas fill in lights_fragment_end.
 const _hcObj = new Float32Array([1, 0, 0, 0]);
+// x = how much of the torch's directional shaping to apply (0 restores the flat level exactly, for the A/B).
+// y = what a face pointing away from the flame keeps.
+const _hcLamp = new Float32Array([1.0, 0.35, 0, 0]);
 // _scotK[3], the rendered-luminance floor, IS THE LEVER ON BLACK TEXELS and it is blunt. Swept at the night lantern
 // (bench/tmp-lightpool-speckle.mjs), baseline row repeated last so the reading is not thermal drift:
 //   0.008 shipped  isoBlack 2.31%  crop median 16.6      0.04   isoBlack 0.38%  median 50.6
@@ -1191,6 +1194,20 @@ const HC_LIGHT_GLSL = [
 '  return pow(clamp(sky,0.0,1.0), curve.y); }',
 'float hcFlicker(float t, vec3 lp){',
 '  return 0.90 + 0.10*sin(t*7.3 + lp.x*1.7 + lp.z*1.3); }',
+'// ---- A TORCH IS A POINT IN SPACE, NOT A LEVEL ON A FACE (Ben 08-17, with the frame: torchlight on sand is a',
+'// flat pale patch with a hard straight edge, and lit foliage is individually blown-out blocks; "light looks',
+'// like an overlay not like volumetric/projected on things"). ----',
+'// The baked volume answers HOW MUCH light reaches a fragment, and it is the only thing that knows about walls:',
+'// a torch behind stone delivers zero through it, which a raw 1/d2 term from a lamp position cannot know. So the',
+'// grid keeps occlusion and this supplies the SHAPE the grid has never had - a face turned toward the flame is',
+'// brighter than one turned away, which is the single biggest tell that light is being added rather than cast.',
+'// lo is what a face pointing away still keeps: 0 would make every back face pitch black and read as a hard',
+'// stencil, which is the opposite complaint. The lamp is the nearest one the volumetric pass already selected.',
+'float hcLampShape(vec3 wpos, vec3 nrm, vec3 lp, float lo){',
+'  vec3 d=lp-wpos; float dd=dot(d,d);',
+'  if(dd<1e-6) return 1.0;',
+'  float ndl=max(0.0, dot(normalize(nrm), d*inversesqrt(dd)));',
+'  return mix(lo, 1.0, ndl); }',
 '// an emitter pool: the baked level, its own colour, the shared falloff curve.',
 'vec3 hcPointGlow(vec3 tint, float lev, float fl){',
 '  return 3.6 * tint * pow(lev,1.45) * fl; }',
@@ -1264,7 +1281,7 @@ const HC_LIGHT_GLSL = [
   // difference against a 4/255 noise floor, the world drawn by whatever survived. Appended first, so the
   // definitions precede every use of them.
   THREE.ShaderChunk.lights_pars_begin += '\n' + HC_LIGHT_GLSL;
-  THREE.ShaderChunk.lights_pars_begin += '\nuniform vec4 uScotG;\nuniform vec4 uScotH;\nuniform vec4 uScotK;\nuniform vec4 uPropFill;\nuniform vec4 uHcAux;\nuniform vec4 uHcObj;\n';
+  THREE.ShaderChunk.lights_pars_begin += '\nuniform vec4 uScotG;\nuniform vec4 uScotH;\nuniform vec4 uScotK;\nuniform vec4 uPropFill;\nuniform vec4 uHcAux;\nuniform vec4 uHcObj;\nuniform vec4 uHcLamp;\n';
   // ---- THE MOON IS NOT A LAMP (Ben 08-12: the wash "affects blocks it shouldnt ... it should not affect anything
   // unless a light source in its vicinity, other than the moon, is acting upon it within a certain radius") ----
   // The wash's release gate reads reflectedLight.directDiffuse, which is the sum of EVERY light three delivered —
@@ -1586,6 +1603,7 @@ for(const k of ['lambert','phong','standard','physical','toon','dashed','basic',
   const S=THREE.ShaderLib[k]; if(!S||!S.uniforms) continue;
   S.uniforms.uScotG={ value:_scotG }; S.uniforms.uScotH={ value:_scotH }; S.uniforms.uScotK={ value:_scotK }; S.uniforms.uPropFill={ value:_propFill }; S.uniforms.uHcAux={ value:_hcAux };
   S.uniforms.uHcObj={ value:_hcObj };
+  S.uniforms.uHcLamp={ value:_hcLamp };
 }
 
 // =====================================================================
@@ -5820,6 +5838,10 @@ function injectAtlas(mat, opts={}){
     if(opts.leafTrans) sh.uniforms.uFolTrans = _uFolTrans;   // SHARED ref, so __hc.folTrans moves every per-chunk clone at once
     // SHARED refs, same reason as uWhiteTile: the A/B flag has to move every chunk clone at once or half the world keeps its
     // cloud shadows and the measurement is of nothing.
+    // THE THREE LAMPS THE VOLUMETRIC PASS ALREADY PICKED, by reference - the same objects the motes read, so the dust
+    // in a beam and the ground under it can never disagree about where the light is. Looked up here rather than at
+    // module scope because onBeforeCompile runs after the pass exists.
+    try{ sh.uniforms.uVLPos=VolLightShader.uniforms.uVLPos; sh.uniforms.uVLI=VolLightShader.uniforms.uVLI; }catch(e){}
     sh.uniforms.uCloudTex = globalU.uCloudTex; sh.uniforms.uCloudShadow = globalU.uCloudShadow;
     sh.uniforms.uCloudScroll = globalU.uCloudScroll; sh.uniforms.uSunDirC = globalU.uSunDir;
     sh.uniforms.uChunkTint = { value:new THREE.Color(LIGHT_PAL[0][0],LIGHT_PAL[0][1],LIGHT_PAL[0][2]) };   // PER CLONE, deliberately: _chunkMat overwrites it with that chunk's own dominant light colour
@@ -5867,7 +5889,9 @@ function injectAtlas(mat, opts={}){
         // HC_SCOT_ATLAS routes the GLOBAL scotopic pass (patched into three's own lights/dithering chunks at the top of this
         // file) down the atlas branch, where `_bl` and `vSky` exist. Without it the wash still runs here, on the non-atlas
         // branch, and the cave descent would never fire on the one material that can tell a cave from a field.
-        '#include <common>\n#define HC_SCOT_ATLAS 1\n'+(opts.leafTrans?'uniform float uFolTrans;\n':'')+'precision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform vec3 uChunkTint;\nuniform float uSkyDirAmt;\nuniform float uSkyDirUp;\nuniform float uSkyDirDn;\nuniform vec2 uSkyCurve;\nuniform vec2 uDayShade;\nuniform vec2 uCanopy;\nuniform float uDayS;\nuniform float uCut;\nuniform vec4 uHeld;\nuniform vec3 uHeldC;\nuniform vec4 uFlash;\nuniform vec4 uFlashD;\nuniform vec3 uFlashC;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying float vCan;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
+        '#include <common>\n#define HC_SCOT_ATLAS 1\n'+(opts.leafTrans?'uniform float uFolTrans;\n':'')+'precision highp sampler2DArray;\nprecision highp sampler3D;\nuniform sampler2DArray uAtlas;\nuniform sampler3D uLight3D;\nuniform float uTime;\nuniform vec3 uChunkTint;\nuniform float uSkyDirAmt;\nuniform float uSkyDirUp;\nuniform float uSkyDirDn;\nuniform vec2 uSkyCurve;\nuniform vec2 uDayShade;\nuniform vec2 uCanopy;\nuniform float uDayS;\nuniform float uCut;\nuniform vec4 uHeld;\nuniform vec3 uHeldC;\nuniform vec4 uFlash;\nuniform vec4 uFlashD;\nuniform vec3 uFlashC;\nuniform float uWhiteTile;\nvarying float vTile;\nvarying float vSky;\nvarying float vCan;\nvarying vec2 vBUV;\nvarying vec3 vLP;\nvarying vec3 vObjN;\nvarying vec3 vWPos;\nuniform vec3 uVLPos[3];
+uniform float uVLI[3];
+uniform sampler2D uCloudTex;\nuniform float uCloudShadow;\nuniform vec2 uCloudScroll;\nuniform vec3 uSunDirC;')
       // ---- NIGHT VOLUMETRIC DARKNESS ON REAL FOLIAGE (Ben 07-29) ----
       // "volumetric darkness at night is applied to horizon pines, but not to forest trees." Correct, and the two fade to
       // different targets. The horizon backdrop fades to _uPineFog, which is scene.fog.color pulled toward storm blue and
@@ -6011,7 +6035,16 @@ function injectAtlas(mat, opts={}){
         // carrying a `tint:` of its own moves. uChunkTint is set per material clone from the chunk's dominant emitter (see
         // _chunkMat and buildLightTexture) — the hue must NOT ride on the sampled level, or the falloff curve gets applied to it
         // a second time and every coloured light collapses.
-        'irradiance += 3.6 * uChunkTint * pow(_bl,1.45) * _fl;'+   // warm torch glow added to indirect — falloff SOFTENED from _bl² (Ben 07-20: in truly dark chunks the squared curve collapsed the glow to an invisible puddle; ^1.45 carries the light to its full flood radius) + peak brightened ~16%
+        // AND IT IS CAST, NOT PAINTED. The level says how much arrived; hcLampShape says from WHICH WAY, using the
+        // nearest of the three lamps the volumetric pass already selected. Nothing here changes which fragments are
+        // lit - that is still the grid, and still the only thing that knows a wall is in the way.
+        'float _lsh=1.0;'+
+        'if(uHcLamp.x > 0.0){'+
+        '  float _lbest=1e9; int _li=-1;'+
+        '  for(int i=0;i<3;i++){ if(uVLI[i]<=0.0) continue; float _dd=dot(uVLPos[i]-vWPos, uVLPos[i]-vWPos); if(_dd<_lbest){ _lbest=_dd; _li=i; } }'+
+        '  if(_li>=0){ vec3 _lp=(_li==0)?uVLPos[0]:((_li==1)?uVLPos[1]:uVLPos[2]);'+
+        '    _lsh=mix(1.0, hcLampShape(vWPos, vObjN, _lp, uHcLamp.y), clamp(uHcLamp.x,0.0,1.0)); } }'+
+        'irradiance += 3.6 * uChunkTint * pow(_bl,1.45) * _fl * _lsh;'+   // warm torch glow added to indirect — falloff SOFTENED from _bl² (Ben 07-20: in truly dark chunks the squared curve collapsed the glow to an invisible puddle; ^1.45 carries the light to its full flood radius) + peak brightened ~16%
         // THE HELD LIGHT ENTERS THE SAME WAY, sampled at the fragment's position with no N.L, so it cannot fall off a
         // grazing floor. Same gain and curve as the placed term, its own colour, ATLAS ONLY - no shared chunk, no prop
         // material, not the sun. It rides on top of the PointLight, which keeps the directional shaping on walls.
@@ -41246,6 +41279,25 @@ window.__hc={
       return { present:true, alive:!a.dead, hp:a.hp, meshes,
                height:bb?+sz.y.toFixed(2):null, at:[+a.x.toFixed(1),+a.y.toFixed(1),+a.z.toFixed(1)],
                inScene:!!(a.mesh && a.mesh.parent) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // QA: the pose of three bones the idle is supposed to be moving, plus where her body is. "It sways" is a claim about bone
+  // angles over time and nothing in a frame separates a gentle idle from a still model - least of all at 7.2 blocks, where
+  // two degrees of head drift is a couple of pixels.
+  // IT LOOKS IN THE RAGDOLL LIST TOO, because the interesting question is what her bones do AFTER she dies, and by then she
+  // has left `animals` entirely.
+  foxgirlPose(){ try{
+      let mesh=null, alive=false, at=null;
+      const a=animals.find(x=>x.type==='foxgirl');
+      if(a && a.mesh){ mesh=a.mesh; alive=!a.dead; at=[a.x,a.y,a.z]; }
+      else if(typeof _ragdolls!=='undefined'){
+        const r=_ragdolls.find(r=>r && r.mesh && r.mesh.userData && r.mesh.userData.foxgirl);
+        if(r){ mesh=r.mesh; at=[mesh.position.x, mesh.position.y, mesh.position.z]; } }
+      if(!mesh) return {err:'none in the world'};
+      const B=mesh.userData && mesh.userData.bones; if(!B) return {err:'no bones'};
+      const _e=new THREE.Euler();
+      const ang=(n)=>{ const b=B[n]; if(!b) return 0; _e.setFromQuaternion(b.quaternion,'XYZ'); return _e.x+_e.y+_e.z; };
+      return { head:ang('head'), pelvis:ang('pelvis'), chest:ang('chest'), alive,
+               at:[+at[0].toFixed(3), +at[1].toFixed(3), +at[2].toFixed(3)] }; }
     catch(e){ return {err:String(e.message||e)}; } },
   // QA: hit her through hurtAnimal, which is the chokepoint every weapon routes through — a bench that subtracted from
   // a.hp itself would prove nothing about whether a bullet can reach her.
