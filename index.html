@@ -10580,6 +10580,9 @@ function buildComposer(){
   // the largest allocation any pass here makes, and it is the only one with a dispose() to call.
   if(smaaPass && smaaPass.dispose){ try{ smaaPass.dispose(); }catch(e){} }
   smaaPass = null;
+  // DOF is cleared for a different reason: it may legitimately not be rebuilt (no depth path, or quality Low), and a
+  // stale reference would leave __hc.dof reporting and driving a pass that is no longer in the chain.
+  dofPass = null;
   composer = new EffectComposer(renderer);
   // _rtPath, NOT _mbMode: this pass is also the scene→composer BRIDGE, and with uEnabled 0 it is a single texture read that
   // passes the scene through untouched. Keeping it in the chain with the blur off is what keeps the depth texture — and therefore
@@ -10643,8 +10646,16 @@ function buildComposer(){
   // above 110 at 0.88 and 1.306% at 1.15, mean 28.26 against 28.24 — the torches and lanterns are well above both, so
   // nothing that is supposed to glow lost anything. bench/assert-sun-hides.mjs asserts that pair.
   // DEPTH OF FIELD, immediately before bloom and therefore still in linear light. It needs the depth texture, so it
-  // rides the same _rtPath the SSAO and the god rays do: with motion blur off there is no depth buffer and no DOF.
-  if(_rtPath && CFG.quality!=='Low'){ dofPass = new ShaderPass(DofShader); composer.addPass(dofPass); }
+  // rides _rtPath exactly as the SSAO and the god rays do — NOT _mbMode. Those are different switches and the
+  // difference matters: turning motion blur off in Settings keeps the pass in the chain as the scene-to-composer
+  // bridge with its blur disabled, so the depth texture survives and so does this. Verified by toggling it.
+  // tDepth is bound HERE as well as per frame. Without it the first frames after a rebuild sample an unbound sampler,
+  // which is a driver-dependent read rather than an error — the kind of thing that looks fine on this machine and
+  // black on another.
+  if(_rtPath && CFG.quality!=='Low'){ dofPass = new ShaderPass(DofShader);
+    dofPass.uniforms.tDepth.value = _sceneRT ? _sceneRT.depthTexture : null;
+    dofPass.uniforms.uNear.value = camera.near; dofPass.uniforms.uFar.value = camera.far;
+    composer.addPass(dofPass); }
   bloomPass = new UnrealBloomPass(new THREE.Vector2(innerWidth/2,innerHeight/2), 0.55, 0.34, 1.15);   // HALF-RES bloom — the mip-blur chain is the heaviest post pass; half-res is visually identical for a soft glow and ~halves its cost
   if (CFG.quality!=='Low') composer.addPass(bloomPass);
   composer.addPass(new OutputPass());
@@ -22353,14 +22364,22 @@ function _clampArmsToWorld(P){
     if(!sh) continue;
     sh.updateWorldMatrix(true,true);
     if(!_chainBuried(sh)) continue;
+    // THE RETRACTION IS ONLY KEPT IF IT WORKS. Tucking an arm moves it toward the body, and where the body stands
+    // between the arm and open air -- back to a wall, inside a doorway -- that is toward the stone rather than away from
+    // it. Measured on the parked scene: without this the clamp made it worse, 161 buried arm meshes becoming 396,
+    // because six steps of tuck walked the forearm further in. There is no surface normal to push along here, so the
+    // honest rule is to try and to put it back: the pose the animation wrote is never replaced by a worse one.
     const s=ai?1:-1, restX=-0.12, restZ=s*0.13, restEl=-0.5;
+    const _sx=sh.rotation.x, _sz=sh.rotation.z, _ex=el?el.rotation.x:0;
+    let cleared=false;
     for(let k=0;k<6;k++){
       sh.rotation.x += (restX-sh.rotation.x)*0.35;
       sh.rotation.z += (restZ-sh.rotation.z)*0.35;
       if(el) el.rotation.x += (restEl-el.rotation.x)*0.35;
       sh.updateWorldMatrix(false,true);
-      if(!_chainBuried(sh)) break;
+      if(!_chainBuried(sh)){ cleared=true; break; }
     }
+    if(!cleared){ sh.rotation.x=_sx; sh.rotation.z=_sz; if(el) el.rotation.x=_ex; sh.updateWorldMatrix(false,true); }
   }
 }
 // hoisted constant spring tables — these are read-only tuning arrays; keeping them at module scope avoids re-allocating ~7 small arrays every animation frame (GC pressure while the Wretch is on-screen)
@@ -45123,6 +45142,12 @@ window.__hc={
                crouchT:+(P.crouchT||0).toFixed(3), proneT:+(P.proneT||0).toFixed(3),
                bodyRx:+P.group.rotation.x.toFixed(3), bodyY:+P.group.position.y.toFixed(3),
                legLx:+P.legL.rotation.x.toFixed(3), headRx:+P.head.rotation.x.toFixed(3),
+               // THE KNEE IS THE WHOLE OF "crouching bends the entire legs still", and it was the one angle this hook
+               // did not report — so the fold could be read only off a screenshot of a body seen from behind. A crouch
+               // with legLx negative and kneeLx zero is a leg hinging as one limb from the hip; a squat is thigh
+               // forward AND shin back, so both numbers move or the pose is the bug Ben named. knee:false means the
+               // rig has no knee at all, which is a different failure from a knee that is not being driven.
+               knee:!!P.kneeL, kneeLx:P.kneeL?+P.kneeL.rotation.x.toFixed(3):null, kneeRx:P.kneeR?+P.kneeR.rotation.x.toFixed(3):null,
                feetY:+player.pos.y.toFixed(3), hitH:bodyH(),
                armRx:+P.armR.rotation.x.toFixed(3), armRz:+P.armR.rotation.z.toFixed(3),
                handPos:P.hand.position?P.hand.position.toArray().map(n=>+n.toFixed(3)):null,
@@ -45973,7 +45998,7 @@ window.__hc={
   // DEPTH OF FIELD, as dials and a readout. amt 0 is the A/B off; maxCoC is the widest blur in PIXELS; the four range
   // numbers are metres either side of the focus. focusM reports where the autofocus actually landed this frame, which
   // is the one thing a screenshot of a blurred frame cannot tell you.
-  dof(o){ try{ if(!dofPass) return {err:'no dof pass: needs the depth path (motion blur on, quality above Low)'};
+  dof(o){ try{ if(!dofPass) return {err:'no dof pass: needs the depth path (_rtPath) and quality above Low'};
       const U=dofPass.uniforms, f=(k,u)=>{ if(o&&o[k]!=null) U[u].value=+o[k]; };
       f('amt','uAmt'); f('maxCoC','uMaxCoC'); f('nearDead','uNearDead'); f('nearFall','uNearFall');
       f('farDead','uFarDead'); f('farFall','uFarFall'); f('nearCut','uNearCut');
