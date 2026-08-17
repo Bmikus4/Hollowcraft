@@ -8741,6 +8741,7 @@ function updateOcean3(dt){
   if(!_ocean3Want){ if(_ocean3) _ocean3.visible=false;
     // Put the old sea back exactly as it was, or turning the new one off leaves a world with no water at all.
     if(waterMat.colorWrite===false){ waterMat.colorWrite=true; waterMat.depthWrite=true; }
+    if(waterMat.uniforms.uO3Cut) waterMat.uniforms.uO3Cut.value=-1e9;
     return; }
   // Built on the first frame that wants it rather than at module scope: the scene, CFG and the sea level all have to
   // exist first, and a texture fetch at parse time is one more way for a build to arrive dead.
@@ -8755,7 +8756,11 @@ function updateOcean3(dt){
   // Nothing is gained by the object flag — oceanMat.visible has been false since the band was retired, and farSea is
   // hidden on the next line — so the two parts that draw are named and the parent is left alone.
   oceanMat.visible=false; _farSeaWant=false; if(farSea) farSea.visible=false;
-  if(waterMat.colorWrite!==false){ waterMat.colorWrite=false; waterMat.depthWrite=false; }
+  // BY HEIGHT, NOT BY COLORWRITE. Clearing colorWrite here silenced every mesh that shares waterMat -- the well, the
+  // puddles, all inland water -- which is Ben's "i cant see water in wells". The cut leaves the sea to the plane and
+  // lets everything above sea level draw; see the discard at the top of waterMat's fragment stage.
+  if(waterMat.colorWrite===false){ waterMat.colorWrite=true; waterMat.depthWrite=true; }
+  if(waterMat.uniforms.uO3Cut) waterMat.uniforms.uO3Cut.value=CFG.SEA+1.5;
   _o3Mask();
   // The same underground rule the far-sea disc carries: a sea plane seen through a hole you dug is the 08-05 report.
   // The column height is recomputed here rather than borrowed: updateHorizon's "_colH" is a const inside its own body,
@@ -9012,7 +9017,7 @@ const waterMat = new THREE.ShaderMaterial({
     // and each is kept behind its dial rather than deleted, so the next attempt at "textured up close" can see what was
     // rejected: __hc.waterRefl({streak:1, fine:1}). The coarse ripple is not on a dial — it is the wave normal.
     uStreak:{value:0}, uFine:{value:0},
-    uMeshR:{value:96}, uBody:_uWaterBody, uFogDensity:{value:scene.fog.density}, uDeep:_uWaterDeep, uRing:_uWater, uRingFade:{value:2400},   // the far-sea annulus's outer radius, set per frame in updateHorizon
+    uMeshR:{value:96}, uO3Cut:{value:-1e9}, uBody:_uWaterBody, uFogDensity:{value:scene.fog.density}, uDeep:_uWaterDeep, uRing:_uWater, uRingFade:{value:2400},   // the far-sea annulus's outer radius, set per frame in updateHorizon
     // THE CURVE LIVES AT THE FAR END NOW (Ben 08-04: "i just want the ocean to look like its going on forever, and to have an
     // ever so slight world curve out at its end"). It used to be the opposite shape: R=20, k=0.0022 spends the whole fall by
     // 50 blocks out and is flat everywhere after that, so the sea bent right in front of you and then ran dead level to the
@@ -9116,7 +9121,7 @@ const waterMat = new THREE.ShaderMaterial({
     varying float vFar; uniform float uMeshR;
     varying float vTop; varying float vDepth; varying vec3 vW; varying vec3 vN; varying float vFog; varying float vCrest; varying vec2 vFlow;
     uniform vec3 uSunDir,uMoonDir,uCamPos; uniform float uDay,uTime; uniform vec3 uFogColor; uniform vec3 uBody; uniform float uFogDensity, uDeep, uWx; uniform vec3 uRing; uniform float uRingFade; uniform vec3 uSeaNight;
-    uniform float uGladeAfter, uGladeAmt, uFresCap, uFoam, uNanDbg, uNormFade, uDbgT, uDbgFlat;
+    uniform float uGladeAfter, uGladeAmt, uFresCap, uFoam, uNanDbg, uNormFade, uDbgT, uDbgFlat, uO3Cut;
     // WATER IS DELIBERATELY NOT ON THE SHARED LIGHTING MODEL (Ben 08-16: "dont touch water lighting unless you need
     // to"). Blocks, cutout, panes, leaves and foliage all call hcAmbient now; this shader keeps its own path on
     // purpose, because its reflection-by-angle, its slant-path absorption and its shelf behaviour are the one surface
@@ -9160,6 +9165,19 @@ const waterMat = new THREE.ShaderMaterial({
       // water is already there, so the disc has no work to do and is thrown away per fragment; beyond it, it is the only sea there
       // is. uMeshR is the chunk radius less a chunk, so the handover happens behind the fog rather than at the wall.
       if(vFar>0.5 && length(vW.xz-uCamPos.xz) < uMeshR) discard;
+      // ---- THE OCEAN PLANE OWNS SEA LEVEL, AND NOTHING ELSE (Ben 08-17: "i cant see water in wells") ----
+      // The new ocean is one camera-locked plane, and the voxel sea underneath it had to stop drawing or it showed
+      // through ("i can still see the old ocean underneath", 08-12). That was done by clearing colorWrite ON THE
+      // MATERIAL, which is shared: chunk water, the puddles and the well all stopped writing pixels with it. The well
+      // then drew 36 triangles and 2 draw calls and produced no fragments, which is what two turns of instruments kept
+      // measuring -- and it is also why uNanDbg mode 2 never painted anything anywhere, since a fragment stage cannot
+      // rescue a material that is not permitted to write.
+      // A HEIGHT DOES THE SAME JOB WITHOUT TAKING THE REST OF THE WATER WITH IT. The plane covers the sea and every
+      // inland channel cut down to it -- its own land mask discards it wherever the ground stands above sea level -- so
+      // the water it does NOT cover is exactly the water ABOVE sea level: a well nine blocks deep whose surface sits at
+      // SEA+6, a pond on high ground, a puddle. uO3Cut is set to SEA+1.5 while the plane is on and to -1e9 when it is
+      // off, so with the new ocean off this is not in the picture at all and the old sea comes back whole.
+      if(vW.y < uO3Cut) discard;
       // The surface texture is the item, and it is one subtraction: uv carries the column's current, so all six noise
       // octaves below travel downstream together instead of each drifting on its own fixed heading. Their little
       // hand-tuned uTime offsets stay — they are what keeps still water alive, and they are all that is left where the
@@ -13360,6 +13378,8 @@ const _sunDir=new THREE.Vector3(), _keyDir=new THREE.Vector3(), _tmp=new THREE.V
 // was the shipped value and it is why every shadow in the game was steep); nb = the noon normalBias, unchanged from what
 // the light was built with; nbMax = how far that bias may be multiplied as the light grazes. sinE is a readout.
 const _sunArc={ floor:0.16, nb:0.45, nbMax:3.0, sinE:1 };
+// THE CELESTIAL MODEL'S ONE PARAMETER. See the arc in updateSky for why a latitude replaces the old constant tilt.
+const _SUN={ lat:51.5 };
 const _fogGrey=new THREE.Color();   // scratch tint for the fog-weather event (weather.fog is driven in the existing updateWeather)
 // How enclosed the player is, EASED (see fogEnclosure and its use below). Starts at 0 = open sky, which is where every spawn is.
 let _fogEncl=0;
@@ -13391,8 +13411,31 @@ function updateSky(dt){
   // worldTime to a fraction of the day; dayLock(null) releases it.
   if(_dayLock!=null) worldTime=CFG.DAY_LEN*_dayLock;
   else { const _wt=worldTime+dt; if(_wt>=CFG.DAY_LEN){ _dayCount++; if(started && typeof flashName==='function') flashName('Day '+(_dayCount+1)); } worldTime=_wt%CFG.DAY_LEN; }
-  const ang=worldTime/CFG.DAY_LEN*Math.PI*2;
-  _sunDir.set(Math.cos(ang), Math.sin(ang), 0.35).normalize();
+  // ---- THE SUN HAS A LATITUDE, AND THAT IS WHAT MAKES THIS A PATH RATHER THAN A SCALAR ----
+  // Ben 08-17: "the sun lights the scene from its actual path, not from a time-of-day scalar". What was here was
+  // `(cos a, sin a, 0.35).normalize()` — a circle tilted by a constant with no meaning, peaking at 70.7 degrees of
+  // elevation, which is a TROPICAL noon. That is why shadows at midday were stubby whatever the shadow code did: the
+  // sun was nearly overhead every single day, so there was no long-shadow hour to find.
+  // THE REAL ARC IS A GREAT CIRCLE TILTED BY THE LATITUDE, and at equinox it is exactly this: the sun rises due east,
+  // sets due west, and its highest elevation is 90 - latitude. Take E = due east and the polar axis P tilted from the
+  // vertical by the latitude; the sun is E*cos(th) + (P x E)*sin(th), which is the two lines below with P x E worked
+  // out by hand as (0, cos lat, sin lat). It is already unit length, so the normalize() is gone with the constant.
+  // THE CLOCK CONTRACT IS UNCHANGED AND THAT IS DELIBERATE. th = 0 is sunrise, pi/2 is noon, pi is sunset, 3pi/2 is
+  // midnight — exactly what worldTime already meant, so the day counter, the "Day N" label at the wrap, uDay's band
+  // and every dusk vantage in the harnesses still point at the same hours. A declination term (season) would break
+  // that by moving sunrise off the wrap, so it is deliberately not here: this is the equinox arc, all year.
+  // THE TILT LEANS -Z, AND IT DOES NOT MATCH THE OLD CONSTANT. The old lean was +z, so preserving it would have kept
+  // noon shadows falling the way they always did — but measured, that arc runs east (azim 90) to NORTH (azim 0) to
+  // west (azim 270), which is a SOUTHERN-hemisphere sun, while the latitude below is London. Preserving an arbitrary
+  // constant's direction is preserving the thing this change exists to replace, so the sign is flipped and the sun
+  // now peaks due SOUTH (azim 180) as it does at any northern latitude. Noon shadows fall the opposite way from
+  // before; that is the correction, not a regression.
+  // 51.5 is London, and it is chosen rather than deferred: it puts noon at 38.5 degrees, which is a sun that rakes all
+  // day instead of standing overhead, and "dark days" falls out of the geometry rather than out of a dimmer. It is a
+  // look call, so it is a dial — __hc.sun({lat}) — and the readout reports elevation and azimuth in degrees.
+  const th=worldTime/CFG.DAY_LEN*Math.PI*2;
+  const _la=_SUN.lat*0.0174532925;
+  _sunDir.set(Math.cos(th), Math.sin(th)*Math.cos(_la), -Math.sin(th)*Math.sin(_la));
   const elev=_sunDir.y;
   const day=smooth(-0.46,0.46,elev);   // VERY wide twilight band → the fade to night / to morning spans a long, gradual window (the sun crosses the horizon fastest, so a wide band is what keeps it from snapping)
   globalU.uDay.value=day;
@@ -40542,10 +40585,27 @@ window.__hc={
       cx.clearRect(0,0,TILE,TILE);
       cx.drawImage(atlasCanvas,(j%ATLAS_TILES)*TILE,((j/ATLAS_TILES)|0)*TILE,TILE,TILE,0,0,TILE,TILE);
       const ctl=count(cx.getImageData(0,0,TILE,TILE).data, had)[0];
+      // AND WHAT THE CACHED CANVAS ITSELF LOOKS LIKE, because "it matches the atlas" and "it has any detail in it" are
+      // two different questions and only the second one answers "did this object lose its texture". A key whose own sd
+      // is near zero is a flat fill no matter how well it agrees with the cell it was cut from.
+      let s2=[0,0,0], q2=[0,0,0], a2=0; const nn=TILE*TILE;
+      for(let p=0;p<had.length;p+=4){ for(let c=0;c<3;c++){ s2[c]+=had[p+c]; q2[c]+=had[p+c]*had[p+c]; } a2+=had[p+3]; }
+      const mn2=s2.map(v=>v/nn), sd2=q2.map((v,c)=>Math.sqrt(Math.max(0,v/nn-mn2[c]*mn2[c])));
       rows.push({ key:k, stale:diff, pct:+(100*diff/(TILE*TILE)).toFixed(1), meanDiff:diff?+(sum/diff).toFixed(1):0,
-                  ctl, stamped:_stampedTiles.indexOf(name)>=0 }); }
+                  ctl, stamped:_stampedTiles.indexOf(name)>=0,
+                  mean:mn2.map(v=>+v.toFixed(1)), sd:+Math.max(...sd2).toFixed(2), alpha:+(a2/nn).toFixed(1),
+                  imgW:t.image.width, imgH:t.image.height, rep:[+t.repeat.x,+t.repeat.y], off:[+t.offset.x,+t.offset.y],
+                  flipY:t.flipY, cs:t.colorSpace, upd:t.needsUpdate, ver:t.version }); }
     return { cached:rows.length, stale:rows.filter(r=>r.stale>0).length, blind:rows.filter(r=>r.ctl===0).length,
              stampsLanded:_stampedTiles.length, rows };
+  }catch(e){ return {err:String(e&&e.message||e)}; } },
+  // QA: THE POSITIVE CONTROL FOR EVERY TILE MEASUREMENT ABOVE. tileTexAudit proves what is in a cached canvas; it
+  // cannot prove that canvas is what the GPU samples. This overwrites one cached key with a flat colour and pushes it,
+  // so anything wearing that key must change on the next frame. If a door does not go magenta, the door is not drawing
+  // the texture its material names — and that is a different bug from a blank tile, which is where two hours went.
+  tileTexPaint(key,css){ try{ const t=_tileTexCache[key]; if(!t) return {err:'not cached: '+key, keys:Object.keys(_tileTexCache)};
+    const g=t.image.getContext('2d'); g.fillStyle=css||'#ff00ff'; g.fillRect(0,0,t.image.width,t.image.height); t.needsUpdate=true;
+    return { key, painted:css||'#ff00ff' };
   }catch(e){ return {err:String(e&&e.message||e)}; } },
   // QA: the MODEL PACK's contract, measured off built models rather than looked at. A replaced gun has to keep
   // handing the rest of the file the same five things (grip, sight line, flash, forend, pull), and the one thing
@@ -40569,6 +40629,25 @@ window.__hc={
         if(!by[k]) by[k]={...row, n:0}; by[k].n++; } });
     const rows=Object.values(by).sort((a,b)=>a.block<b.block?-1:1);
     return { rows, noMap:rows.filter(r=>!r.map).length, noUV:rows.filter(r=>!r.uv).length };
+  }catch(e){ return {err:String(e&&e.stack||e)}; } },
+  // QA: EVERY MESH AT A POINT, not just the one you expect. modelWorldMats reads the material a chunk BUILT; this
+  // reads what is actually standing there, over the whole scene, so a second mesh drawn on top of the first — an
+  // override, a leftover bake proxy, a duplicate — cannot hide behind the material that looks right in the factory.
+  // A door photographed as flat grey while its own material carries log_side and a warm tint is that shape exactly.
+  matsAt(x,y,z,r){ try{ const P=new THREE.Vector3(+x,+y,+z), R=r==null?1.2:+r, bb=new THREE.Box3(), out=[];
+    scene.traverse(o=>{ if(!o.isMesh && !o.isInstancedMesh) return; if(!o.visible) return;
+      if(o.isInstancedMesh){ const m4=new THREE.Matrix4(), v=new THREE.Vector3(); let near=false;
+        for(let i=0;i<o.count && !near;i++){ o.getMatrixAt(i,m4); v.setFromMatrixPosition(m4).applyMatrix4(o.matrixWorld); if(v.distanceTo(P)<=R+0.9) near=true; }
+        if(!near) return; }
+      else { bb.setFromObject(o); if(!bb.isEmpty()){ const g=bb.clone().expandByScalar(R); if(!g.containsPoint(P)) return; } else return; }
+      const ms=Array.isArray(o.material)?o.material:[o.material];
+      for(const mt of ms){ if(!mt) continue;
+        bb.setFromObject(o); const c=bb.isEmpty()?null:bb.getCenter(new THREE.Vector3()), sz=bb.isEmpty()?null:bb.getSize(new THREE.Vector3());
+        out.push({ obj:o.name||o.type, mb:(o.userData&&o.userData.mbName)||null, inst:!!o.isInstancedMesh, count:o.count||1,
+                   type:mt.type, map:mt.map?(mt.map.name||'(canvas)'):null, col:mt.color?'#'+mt.color.getHexString():null,
+                   vis:o.visible, ro:o.renderOrder|0, parent:(o.parent&&(o.parent.name||o.parent.type))||null,
+                   ctr:c?[c.x,c.y,c.z].map(v=>+v.toFixed(2)):null, size:sz?[sz.x,sz.y,sz.z].map(v=>+v.toFixed(2)):null }); } });
+    return out;
   }catch(e){ return {err:String(e&&e.stack||e)}; } },
   heldBox(id){ try{ __hc.hold(id);
     const bb=new THREE.Box3().setFromObject(view.mesh), s=bb.getSize(new THREE.Vector3()), c=bb.getCenter(new THREE.Vector3());
@@ -43043,12 +43122,15 @@ window.__hc={
     catch(e){ return {err:String(e.message||e)}; } },
   // BISECT waterMat ONE PROPERTY AT A TIME. A plain material draws this quad and waterMat does not; these are the
   // knobs between the two that do not require touching the shader source.
-  waterProp(o){ try{ o=o||{}; const before={transparent:waterMat.transparent, depthWrite:waterMat.depthWrite, depthTest:waterMat.depthTest, side:waterMat.side};
-      for(const k of ['transparent','depthWrite','depthTest','side']) if(o[k]!=null) waterMat[k]=o[k];
+  // colorWrite IS IN HERE BECAUSE IT IS THE ONE THAT WAS OFF. updateOcean3 clears it to retire the old voxel sea, and a
+  // material with colorWrite false draws, counts triangles and draw calls, and writes no pixels -- which is every
+  // symptom the well hunt collected, for every mesh that shares waterMat rather than for the well.
+  waterProp(o){ try{ o=o||{}; const before={transparent:waterMat.transparent, depthWrite:waterMat.depthWrite, depthTest:waterMat.depthTest, side:waterMat.side, colorWrite:waterMat.colorWrite};
+      for(const k of ['transparent','depthWrite','depthTest','side','colorWrite']) if(o[k]!=null) waterMat[k]=o[k];
       if(o.curveK!=null && waterMat.uniforms.uCurveK) waterMat.uniforms.uCurveK.value=+o.curveK;
       if(o.flat!=null && waterMat.uniforms.uDbgFlat) waterMat.uniforms.uDbgFlat.value=o.flat?1:0;
       waterMat.needsUpdate=true;
-      return { before, now:{transparent:waterMat.transparent, depthWrite:waterMat.depthWrite, depthTest:waterMat.depthTest, side:waterMat.side,
+      return { before, now:{transparent:waterMat.transparent, depthWrite:waterMat.depthWrite, depthTest:waterMat.depthTest, side:waterMat.side, colorWrite:waterMat.colorWrite,
                curveK:waterMat.uniforms.uCurveK?waterMat.uniforms.uCurveK.value:null,
                flat:waterMat.uniforms.uDbgFlat?waterMat.uniforms.uDbgFlat.value:null} }; }
     catch(e){ return {err:String(e.message||e)}; } },
@@ -45991,6 +46073,19 @@ window.__hc={
   // arc either way). `floor` is its minimum height as a fraction of its distance from the player; `elevDeg` is what that
   // works out to on the frame you ask. Lower it and shadows lengthen at dawn and dusk; too low and grazing surfaces
   // stripe with self-shadow acne, which `nb`/`nbMax` are there to hold off.
+  // THE CELESTIAL MODEL, as a dial and a readout. lat is the only parameter: the arc is a great circle tilted by it,
+  // so peakElevDeg is 90 - lat by construction and there is nothing else to tune. azimDeg is measured from due north
+  // through east, so sunrise reads 90 and sunset 270 — the check that the sun is on a real path and not a scalar.
+  sun(o){ try{ if(o&&o.lat!=null) _SUN.lat=Math.max(-66,Math.min(66,+o.lat));
+      const d=globalU.uSunDir.value, m=globalU.uMoonDir.value, R=57.29578;
+      const el=(v)=>+(Math.asin(Math.max(-1,Math.min(1,v.y)))*R).toFixed(2);
+      const az=(v)=>+(((Math.atan2(v.x,v.z)*R)+360)%360).toFixed(1);
+      return { lat:+_SUN.lat.toFixed(2), peakElevDeg:+(90-Math.abs(_SUN.lat)).toFixed(2),
+               sun:{ elevDeg:el(d), azimDeg:az(d), up:d.y>0 },
+               moon:{ elevDeg:el(m), azimDeg:az(m), up:m.y>0 },
+               key:(d.y>0?'sun':'moon'), dayFactor:+globalU.uDay.value.toFixed(3),
+               keyIntensity:+sunLight.intensity.toFixed(3), keyCol:'#'+sunLight.color.getHexString() }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   sunArc(o){ try{ if(o){ if(o.floor!=null) _sunArc.floor=+o.floor; if(o.nb!=null) _sunArc.nb=+o.nb; if(o.nbMax!=null) _sunArc.nbMax=+o.nbMax; }
       return { floor:+_sunArc.floor.toFixed(3), nb:+_sunArc.nb.toFixed(3), nbMax:+_sunArc.nbMax.toFixed(2),
                elevDeg:+(Math.asin(Math.max(-1,Math.min(1,_sunArc.sinE)))*57.29578).toFixed(2),
