@@ -4691,25 +4691,34 @@ function _coastFringe(wx, wz){
 //     the test declines and leaves a dry notch in the bend. A Chebyshev ring includes the diagonals by construction.
 //   · NOT A RIVER. Same |_riverField|<0.075 channel test _inlandBed uses, so a river bed and this cannot disagree about
 //     where the river is. Without it a 14-block reach widens every inland channel it can see into a lake.
-//   · NOT DEEP INLAND. _isleAt>0.995 is the interior, where sea-level water is a pond rather than the coast, and the
-//     same gate keeps this off it. Recursion is why both tests are raw-only: _ringedByLand (which _inlandBed uses to
-//     decide the same question properly) calls surfaceH, and surfaceH is where this runs.
+//   · NOT A POND. Ringed by land on 8 of 12 bearings at 22 blocks is _ringedByLand's own definition of inland water,
+//     and a pond's pan must not be flooded 14 blocks outward into a lake. It is re-read RAW here: _ringedByLand calls
+//     surfaceH, and surfaceH is where this runs, so borrowing it directly would recurse.
+// NOT _isleAt, WHICH WAS TRIED AND KILLED THE WHOLE COAST. _inlandBed's cheap half gates on _isleAt<=0.995 and it does
+// not transfer: the bay at spawn sits at idist 237, well inside ISLE_CORE 340, so _isleAt reads exactly 1 over it and
+// the gate declined every column of the shoreline Ben is looking at. The file already says this at the elevation rule --
+// "no single radius separates inland from shore, height does" -- and this is the second time it has been paid for.
 // THE REACH IS 14 BECAUSE BEN SAID 14, and it is a reach and not a width: the water comes in as far as there is pan to
 // flood, and stops at the first column that stands above the sea. On the traverse above that lands the water against a
 // beach one block proud of it, which is what "contact the shore" means.
+// REACHED ALONG THE PAN, not merely near it: eight rays, and a ray is spent the moment it crosses a column standing
+// above the sea. Nearness alone floods a sea-level flat that happens to lie 14 blocks behind a ridge from the water,
+// which is a pond in a field; a ray that has to stay at or under sea level the whole way can only arrive over ground the
+// water could actually cover. Eight rays instead of a true 8-connected flood is the cheap half of the same idea and it
+// is a deliberate trade: a flood is up to 841 visited columns PER COLUMN inside surfaceH, and the pan is wide, so a ray
+// finds it. THE DIAGONALS ARE FOUR OF THE EIGHT, which is Ben's corner.
 const COAST_REACH=14;
+const _APRON_RAY=[[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
 function _coastApron(wx, wz){
   if(!_FRINGE) return false;                                  // one switch for the whole coast rule: __hc.coast(false)
   if(Math.abs(_riverField(wx,wz))<0.075) return false;
-  if(_isleAt(wx,wz)>0.995) return false;
-  for(let r=1;r<=COAST_REACH;r++){                            // nearest ring first: a real apron column answers at r=1..3 and never pays for the rest
-    for(let dx=-r;dx<=r;dx++){
-      if(_rawSurfaceH(wx+dx,wz-r)<CFG.SEA) return true;
-      if(_rawSurfaceH(wx+dx,wz+r)<CFG.SEA) return true; }
-    for(let dz=1-r;dz<=r-1;dz++){
-      if(_rawSurfaceH(wx-r,wz+dz)<CFG.SEA) return true;
-      if(_rawSurfaceH(wx+r,wz+dz)<CFG.SEA) return true; }
-  }
+  let land=0;
+  for(let k=0;k<12;k++){ const th=k*0.5236;
+    if(_rawSurfaceH(wx+Math.round(Math.cos(th)*22), wz+Math.round(Math.sin(th)*22))>CFG.SEA){ if(++land>=8) return false; } }
+  for(let i=0;i<8;i++){ const dx=_APRON_RAY[i][0], dz=_APRON_RAY[i][1];
+    for(let r=1;r<=COAST_REACH;r++){ const n=_rawSurfaceH(wx+dx*r, wz+dz*r);
+      if(n<CFG.SEA) return true;                              // open water, reached over ground no higher than the sea
+      if(n>CFG.SEA) break; } }                                // this ray is spent: something stands above the water
   return false;
 }
 // The ground everything else in the file reads — the twenty structures that site off it, groundYAt, the mud rules, the
@@ -40449,6 +40458,27 @@ function kindInst(kind, anyState){
   return null;
 }
 window.__hc={
+  // QA: "it lost its texture" as a number. A tile that reads as lost is a tile with no VARIANCE — one flat colour
+  // across its 128x128 cell — and that is measurable off the atlas without looking at a single object that wears it.
+  // Reports mean colour and per-channel sd for every tile in the atlas (or the named ones), sorted flattest first, so
+  // the question "which tiles are blank" is answered once for doors, fences, chests, guns and props together instead
+  // of once per object. sd below ~2 is a solid fill; the painter's own tiles all read well above 10.
+  tileStats(names){ try{
+    const cv=document.createElement('canvas'); cv.width=cv.height=TILE; const cx=cv.getContext('2d'); cx.imageSmoothingEnabled=false;
+    const list = names && names.length ? names : Object.keys(TILEIDX);
+    const rows=[];
+    for(const name of list){ const i=TILEIDX[name]; if(i==null||i>=ATLAS_COUNT) { rows.push({name, err:'no layer'}); continue; }
+      cx.clearRect(0,0,TILE,TILE);
+      cx.drawImage(atlasCanvas,(i%ATLAS_TILES)*TILE,((i/ATLAS_TILES)|0)*TILE,TILE,TILE,0,0,TILE,TILE);
+      const d=cx.getImageData(0,0,TILE,TILE).data, n=TILE*TILE;
+      let s=[0,0,0], q=[0,0,0], a=0;
+      for(let p=0;p<d.length;p+=4){ for(let c=0;c<3;c++){ s[c]+=d[p+c]; q[c]+=d[p+c]*d[p+c]; } a+=d[p+3]; }
+      const mean=s.map(v=>v/n), sd=q.map((v,c)=>Math.sqrt(Math.max(0,v/n-mean[c]*mean[c])));
+      rows.push({ name, idx:i, mean:mean.map(v=>+v.toFixed(1)), sd:+Math.max(...sd).toFixed(2),
+                  alpha:+(a/n).toFixed(1), stamped:_stampedTiles.indexOf(name)>=0 }); }
+    rows.sort((x,y)=>(x.sd==null?-1:x.sd)-(y.sd==null?-1:y.sd));
+    return { n:rows.length, flat:rows.filter(r=>r.sd!=null&&r.sd<2).length, rows };
+  }catch(e){ return {err:String(e&&e.message||e)}; } },
   // QA: does a cached tileTex still match the atlas cell it was cut from? tileTex snapshots a tile into its own
   // canvas ONCE and caches it forever, while stampTile/stampInto rewrite that same atlas cell asynchronously as the
   // pack images decode. Nothing connected the two, so a material built before its tile's stamp landed kept the
