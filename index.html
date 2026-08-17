@@ -7343,7 +7343,17 @@ const skyMat = new THREE.ShaderMaterial({
     // The fix therefore belongs to bloom, not to this term: the sunset sky needs to stop seeding it, by threshold or
     // by keeping the dome out of the bloom input, while the sun disc itself must keep blooming. That is the next step
     // and it is not taken here. A saturation-based dodge was tried and does not work — see the note at the term.
-    uDuskVib:{value:1.0}, uDuskRed:{value:0.55}
+    uDuskVib:{value:1.0}, uDuskRed:{value:0.55},
+    // THE SKY GRADIENT IS HELD UNDER THE BLOOM THRESHOLD, which is what lets the vibrancy exist at all. The bloom
+    // pass is built with a threshold of 1.15 and this file already designs to that number by hand -- the star term
+    // carries "peak 1.08 at uStars=2, deliberately under the 1.15 bloom threshold". The sunset push broke that rule
+    // without saying so, and bloom then spread the brighter sky across the frame and onto the terrain.
+    // A SCALE, NOT A CLAMP PER CHANNEL: dividing the colour by its own luminance ratio keeps hue and saturation
+    // exactly, so the sky stays as colourful as the push made it and only its ENERGY is capped. Per-channel clamping
+    // would drive the three channels together and grey out precisely the vivid band this is for.
+    // It applies to col, the sky GRADIENT, and never to add, which carries the sun disc, its halo and the stars --
+    // so the setting sun still blooms at its gain of 10 and only the sky behind it is held down.
+    uDuskCap:{value:1.05}
   },
   vertexShader:`
     varying vec3 vDir;
@@ -7353,7 +7363,7 @@ const skyMat = new THREE.ShaderMaterial({
     varying vec3 vDir;
     uniform vec3 uSunDir, uMoonDir; uniform float uDay, uTime, uHasMoon; uniform vec3 uFogCol, uHorizonBlend; uniform float uSkyDark, uCloud, uStars; uniform float uCamYaw;
     uniform sampler2D uMoonTex;
-    uniform float uCloudDbg, uSunGain, uSunHalo, uSunSheen, uSunWide, uSkyToSea, uOvercast, uDuskVib, uDuskRed;
+    uniform float uCloudDbg, uSunGain, uSunHalo, uSunSheen, uSunWide, uSkyToSea, uOvercast, uDuskVib, uDuskRed, uDuskCap;
     // hash noise
     float h13(vec3 p){ p=fract(p*0.3183099+0.1); p*=17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
     float n3(vec3 x){ vec3 i=floor(x),f=fract(x); f=f*f*(3.0-2.0*f);
@@ -7470,6 +7480,15 @@ const skyMat = new THREE.ShaderMaterial({
       // channels are pulled down and left there — the frame gets whiter, not richer. Gated tightly to the horizon
       // band instead it is merely inert (0.1873 -> 0.1901). The operator's shoulder is why this cannot work on a
       // bright sky, and it is the same desaturation property the research pass recorded for AgX.
+      // ---- AND THE GRADIENT IS HELD UNDER THE BLOOM THRESHOLD — see uDuskCap ----
+      // Scaled by its own luminance ratio, so hue and saturation are untouched and only energy is capped, and eased
+      // in by the dusk factor so there is no seam where the cap starts. The add accumulator is deliberately NOT
+      // capped: the sun disc, its halo and the stars live there and are supposed to bloom.
+      // NO BACKTICKS IN HERE. This shader is a template literal, so a backtick in a comment ends the string and the
+      // file stops parsing — which is exactly what the first version of this comment did.
+      { float _cl = dot(col, vec3(0.2126,0.7152,0.0722));
+        float _cs = (_cl > uDuskCap) ? uDuskCap/_cl : 1.0;
+        col *= mix(1.0, _cs, dusk); }
       // ---- NIGHT ---- gated, so a clear day pays none of it
       if(uDay < 0.55){
         float nt = 1.0-uDay;
@@ -21066,6 +21085,23 @@ function placeWretch(dt,moving){
   // advance rate, a speed it was asked to move at — and none of them says whether the thing on screen moved. This is
   // the output, sampled where the position is written, so a probe can put movement and pose side by side ON THE SAME
   // FRAME instead of inferring one from the other.
+  // ---- THE LEGS HAVE THE VETO (Ben 08-17: it "likes to ... walk away sliding") ----
+  // animateWretch freezes the gait on purpose twice -- the stalk gate and the stumble hitch -- and the body used to
+  // glide through both. The veto is applied HERE, by putting the body back where it was, for the same reason the
+  // all-fours rule is stated here: placeWretch is the one function every path calls, so no branch can opt out of it by
+  // returning early or by moving the position itself.
+  // ROLLED BACK RATHER THAN NOT MOVED, and that is not a detail. Zeroing `speed` upstream also zeroes the `moving` flag
+  // this function passes to the rig, the rig then plays an idle gesture and returns before it ever reaches the line that
+  // sets the hold, the hold clears, and the body moves again -- an oscillation at frame rate that halved the slide
+  // instead of ending it (measured: 42% of travel, then 32%). Letting the movement run and undoing it keeps every other
+  // system's view of the frame intact: moveEntity still reports success, so the anti-wedge box timer does not start, and
+  // the rig still sees a creature in locomotion, so it holds its stride instead of standing up.
+  // THE EXCLUSIONS ARE THE SCRIPTED POSES, which own the body outright, plus anything that moved it further than a step:
+  // a blink, a yank or a crypt drop is a teleport and must not be undone.
+  if(wretch._gaitHold && wretch.active && wretch._mvLast && !wretch.dragging && !player.grabbed
+     && !wretch._scooping && !wretch._vigAct && !wretch._park && !wretch.boss){
+    const _h=wretch._mvLast;
+    if(Math.hypot(wretch.pos.x-_h.x, wretch.pos.z-_h.z) <= 3){ wretch.pos.x=_h.x; wretch.pos.z=_h.z; } }
   if(dt>1e-4){ const _p=wretch._mvLast;
     if(_p){ const _d=Math.hypot(wretch.pos.x-_p.x, wretch.pos.z-_p.z);
       // A TELEPORT IS NOT TRAVEL. blink, yank, the crypt drop and every QA hook move the body a long way in one frame; scored as
@@ -22085,6 +22121,10 @@ const WDFX=[ {amp:1.00,ph: 0.00,rest: 0.00,duty:0.00},
 const _wSag=[0.10,0.16,0.13,0.05,0.03], _wHump=[0.62,0.40,0.18,0,0], _wLeanW=[0.42,0.36,0.30,0,0], _wLegOm=[26,20,16], _wLegZe=[0.7,0.55,0.45], _wArmOm=[32,24,18,14,10], _wArmZe=[0.75,0.6,0.5,0.4,0.28];
 function animateWretch(dt, moving){
   const P=wretch.P; if(!P) return;
+  // CLEARED EVERY FRAME, SET ONLY BY THE TWO THINGS THAT STOP THE LEGS (see the gate and the hitch below). The rig has
+  // several early returns -- gestures, vignettes, poses -- and a hold left standing by one of them would stop the body
+  // for good, so it is a fact about THIS frame and nothing else owns it.
+  wretch._gaitHold=0;
   dt = dt<1/30?dt:1/30;                                            // clamp before any spring integrates
   const g=wretch.group, S=g.scale.y||1, cr=wretch.crawl||0, mph=wretch.phase, st=wretch.state;
   if(!g.userData._spr) g.userData._spr={};
@@ -22131,6 +22171,19 @@ function animateWretch(dt, moving){
   // AFTER the hitch, not before it. The hitch and the stalk gate are the two things that stop the legs, and a debug
   // value read upstream of them says the legs are cycling during exactly the frames the slide is made of.
   wretch._gfDbg=gf;
+  // ---- THE BODY STOPS WITH THE LEGS (Ben 08-17: it "likes to ... walk away sliding") ----
+  // Two things here deliberately stop the legs mid-stride: the stalk gate, which freezes a creep for 38% of a 1.8s
+  // cycle, and the hitch, a 0.1-0.3s stumble that fires at up to 0.6 a second while it is fleeing. Neither stopped the
+  // BODY, so the creature glided with its legs held still -- measured over a 20-second stalk before this line existed:
+  // 42% of the frames had the legs frozen and 17.9 of the 42.7 blocks it covered were travelled that way, in glides of
+  // up to 1.56 blocks. That is the slide, and it is not a tuning miss in the gait: the gait was right and the movement
+  // was not listening to it.
+  // ONE VALUE, READ BY THE MOVEMENT, which is this file's rule for anything two systems must agree about. The rig
+  // cannot stop the body itself -- it runs after movement, from placeWretch -- so it states the fact and updateWretch
+  // multiplies its speed by it on the next frame, eight milliseconds later.
+  // NOT keyed on gf being zero, which would deadlock: gf is also 0 when the body is already still, and a hold set from
+  // that could never be lifted, because lifting it requires the movement it is preventing.
+  if((stalking && !gate) || (wretch._hitchT||0)>0) wretch._gaitHold=1;
   const arr = 0.18*vnoise(mph*3.1);
   wretch.gaitPhase += dt*gf*6.283*(1+arr);
   if(!isFinite(wretch.gaitPhase)) wretch.gaitPhase=0;
@@ -46270,7 +46323,8 @@ window.__hc={
   sunset(o){ try{ const u=skyMat.uniforms;
       if(o&&o.vib!=null) u.uDuskVib.value=Math.max(0,Math.min(8,+o.vib));
       if(o&&o.red!=null) u.uDuskRed.value=Math.max(0,Math.min(1,+o.red));
-      return { vib:+u.uDuskVib.value.toFixed(3), red:+u.uDuskRed.value.toFixed(3),
+      if(o&&o.cap!=null) u.uDuskCap.value=Math.max(0.05,Math.min(64,+o.cap));   // 64 is effectively "no cap", for the A/B
+      return { vib:+u.uDuskVib.value.toFixed(3), red:+u.uDuskRed.value.toFixed(3), cap:+u.uDuskCap.value.toFixed(3),
                sunElevDeg:+(Math.asin(Math.max(-1,Math.min(1,globalU.uSunDir.value.y)))*57.29578).toFixed(2) }; }
     catch(e){ return {err:String(e.message||e)}; } },
   sunArc(o){ try{ if(o){ if(o.floor!=null) _sunArc.floor=+o.floor; if(o.nb!=null) _sunArc.nb=+o.nb; if(o.nbMax!=null) _sunArc.nbMax=+o.nbMax;
