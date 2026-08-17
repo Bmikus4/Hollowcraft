@@ -7562,9 +7562,12 @@ const _mtU={ uMask:{value:_mtTex}, uPine:_uCoastPine, uRock:_uMtnRock, uSnow:_uM
   uFogMul:{value:0.10}, uGain:{value:0.7}, uPixAng:_cpU.uPixAng, uMaskOff:_cpU.uMaskOff, uDbg:{value:0}, uScotG:{value:_scotG}, uScotH:{value:_scotH},
   // THE SNOW LINE IN WORLD HEIGHT, low sun and high sun, and it has to live inside the spread of peaks the mask
   // actually holds: __hc.mtnMask() reads 281 at the tallest bearing against a MEAN of 190, over a foot at sea+18 = 58.
-  // 235/255 leaves the average ridge bare and caps the tall ones — measured, 12k of the band's pixels are snow at noon
-  // where sea+72/88 gave 36k and the pre-08-17 build gave all of them. Below about 200 it is a sheet again.
-  uSnowY:{value:new THREE.Vector2(CFG.SEA+195, CFG.SEA+215)},
+  // A RANGE WEARS ITS CAP ON THE TOP FIFTH. 235/255 left snow over 31 per cent of the range at noon and 46 at dawn,
+  // and a cap that large is a white band however honestly it is lit — the pale cap Ben kept seeing. 258/272 puts it at
+  // 12 to 19 per cent, which is measured against the same three hours with the shipped setting repeated last as a
+  // noise floor (dusk moves the sky crop by ten levels between boots). Below about 200 it stops being a cap at all and
+  // goes back to being a sheet.
+  uSnowY:{value:new THREE.Vector2(CFG.SEA+218, CFG.SEA+232)},
   uBandOnly:{value:-1},   // QA: -1 both ranges, 0 near only, 1 far only. __hc.mtn({band:n})
   // AERIAL PERSPECTIVE, NEAR AND FAR BAND — and 0.12 was the pale wash above the treeline all along. The mix is in
   // linear light toward the air, and the band is nearly black there, so twelve per cent of the air lifted the finished
@@ -7706,7 +7709,19 @@ const mountainMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false,
   // exists to sit a WOODED, rocky mass down into the scene; putting snow through it took a 0.62 white to 0.35 and then
   // the haze took what was left, which is why three tries at the snow LINE changed nothing visible. Snow has its own
   // exposure, still clamped under the air below like everything else on this horizon.
-  '    col=mix(col, uSnow*(0.45+0.55*uSunUp)*per, snowT*smoothstep(0.15,0.5,uDay+0.15)*(0.45+0.55*uSunUp));',
+  // THE COVERAGE GATE IS NAMED ONCE AND USED TWICE. It was written inline here and the air-clamp exemption below was
+  // gated on raw snowT instead, so the two disagreed: at dusk this gate blends about a third of a cap in, and the
+  // exemption then lifted that same fragment to 1.12 of the air as though it were a full one. Measured before this
+  // line existed, the cap ran at 1.07 of the sky at dusk and 1.13 at dawn — brightest at the hours with the least
+  // light on it, which is precisely the fault d0da9c8 named: an unlit cap must not out-read the rock.
+  // THE FLOOR ON THE SUN TERM IS 0.15, NOT 0.45, and that is the coverage half of the dusk fix. At 0.45 a cap with no
+  // light on it was still laid down at nearly half strength, which is a white band arriving exactly when the rest of
+  // the horizon has gone dark — measured at 1.06 of the sky at dusk with the exemption already gated. It is not that
+  // a low sun melts snow; it is that snow with nothing lighting it has no value to show, so it sinks back into the
+  // rock instead of floating over it. The snow's own COLOUR keeps its 0.45 floor on the line below: the cap is not
+  // being dulled to grey, there is simply less of it while the sun is down.
+  '    float snowCov=snowT*smoothstep(0.15,0.5,uDay+0.15)*(0.15+0.85*uSunUp);',
+  '    col=mix(col, uSnow*(0.45+0.55*uSunUp)*per, snowCov);',
   '    vec3 _s2=col;',
   // The same key light the coast pines take, resolved per azimuth: the flank facing the sun is lit, the one away is a
   // silhouette. A range is a bigger, flatter thing than a treeline, so the contrast is wider.
@@ -7736,7 +7751,12 @@ const mountainMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false,
   // brighter than the haze in front of it, so it gets a bounded exemption: up to 12 per cent over the air, only where
   // snowT is on, and only in proportion to the sun lighting it. Rock and treeline stay clamped, and at a low sun the
   // exemption closes with the coverage gate, so the pale-band fault cannot come back through it at dusk.
-  '    col=mix(col, max(col, uAir*1.12), snowT*uSunUp);',
+  // ...AND IT PUNCHES THROUGH ONLY WHERE THE SUN IS ON IT. 1.12 stays — Ben wants a cap that out-reads the air, not
+  // one dulled to grey — but it is now weighted by the coverage that actually laid snow down and by `face`, the
+  // same per-azimuth sun term the rock is lit with. A flank turned away from the sun is a silhouette whatever is
+  // lying on it; only the lit flank is genuinely brighter than the haze in front of it. Both gates matter: face
+  // alone would still exempt a full-strength cap at midnight, and coverage alone lifts the shaded side.
+  '    col=mix(col, max(col, uAir*1.12), snowCov*clamp(face,0.0,1.0)*uSunUp);',
   // A DEBUG VIEW OF THE TERMS, because three reasoned fixes to the snow produced no cap and the next move is to LOOK
   // at the quantity rather than argue about it. 1 paints snowT red, 2 paints the fragment's own world height against
   // the snow line green, and both are written after the haze and the clamp so nothing downstream can eat them.
@@ -33087,6 +33107,16 @@ const _leafPos=new Float32Array(LEAF_MAX*3), _leafRot=new Float32Array(LEAF_MAX*
 const _leafPalette=[0x6f8f3a,0x86a341,0x547a30,0xb98b2e,0xc8702a,0x9a5a24,0x4e6b2a].map(h=>new THREE.Color(h));
 const _leafCol=new Float32Array(LEAF_MAX*3), _leafTmpCol=new THREE.Color();   // per-leaf BASE palette rgb → so each leaf can be dimmed by its own local darkness (sky exposure) without losing its hue
 const _leafDummy=new THREE.Object3D(); let _leafInit=false;
+// _leafFade: the distance desaturation of 4f30585, on a switch so a harness can photograph the fault it fixed.
+// A fix with no off-switch cannot be shown to have been a fix — the detector that acquitted these leaves in
+// f8b5a06 was believed because nothing ever made it produce a positive.
+let _leafFade=true;
+// _leafTag: paint every leaf pure magenta and stop the day tint touching it. A leaf is a 0.42x0.34 plane in a
+// palette the world already contains — dirt is r>g>b, grass is green-dominant — so no colour test can separate
+// leaf pixels from the ground they are in front of, and the first attempt at this measurement read the entire
+// floor as one 81,383-pixel orange blob. Tagging replaces the question rather than sharpening it: magenta is a
+// hue nothing else in the game emits, so counting it is exact against ANY background at ANY zoom.
+let _leafTag=false; const _leafTagCol=new THREE.Color(1,0,1);
 function _leafRespawn(i,aroundY){ const a=Math.random()*6.283, r=Math.random()*LEAF_R;
   _leafPos[i*3]=camera.position.x+Math.cos(a)*r; _leafPos[i*3+1]=aroundY; _leafPos[i*3+2]=camera.position.z+Math.sin(a)*r;
   _leafRot[i*3]=Math.random()*6.283; _leafRot[i*3+1]=Math.random()*6.283; _leafRot[i*3+2]=Math.random()*6.283;
@@ -33112,7 +33142,7 @@ function updateLeaves(dt){ if(!_leafIM.instanceColor)return;
   const roofed = (typeof opaqueTop==='function') && opaqueTop(Math.floor(eye.x),Math.floor(eye.z)) > eye.y+2;
   const hidden = _submerged || roofed;
   if(hidden){ if(_leafIM.visible){ _leafIM.visible=false; _leafInit=false; } return; }   // and stop simulating them entirely while they cannot be seen
-  _leafMat.color.setScalar(0.22+0.78*day);
+  _leafMat.color.setScalar(_leafTag?1:(0.22+0.78*day));
   // WIND — a prevailing breeze that slowly veers, plus gusts; rain drives it harder
   const rain=(typeof weather!=='undefined'?(weather.rain||0):0);
   const spd=0.8+rain*2.6, dir=t*0.06;
@@ -33136,13 +33166,14 @@ function updateLeaves(dt){ if(!_leafIM.instanceColor)return;
       // IT DESATURATES, IT DOES NOT DIM. Fading toward luminance keeps the leaf visible as a leaf — a dimming ramp
       // would make distant leaves vanish and the canopy shed nothing, which is the feature Ben likes in the same frame
       // he reported this. Near leaves are untouched: the ramp is zero inside twelve blocks and full at LEAF_R.
-      if(_r>_g && _g>_bl){
+      if(_r>_g && _g>_bl && _leafFade){
         const _dx=_leafPos[b]-eye.x, _dy=_leafPos[b+1]-eye.y, _dz=_leafPos[b+2]-eye.z;
         const _d=Math.sqrt(_dx*_dx+_dy*_dy+_dz*_dz);
         const _f=Math.min(1,Math.max(0,(_d-12)/(LEAF_R-12)));
         if(_f>0){ const _l=0.2126*_r+0.7152*_g+0.0722*_bl;
           _r+=(_l-_r)*_f; _g+=(_l-_g)*_f; _bl+=(_l-_bl)*_f; } }
-      _leafTmpCol.setRGB(_r,_g,_bl); _leafIM.setColorAt(i,_leafTmpCol); }
+      if(_leafTag) _leafIM.setColorAt(i,_leafTagCol);
+      else { _leafTmpCol.setRGB(_r,_g,_bl); _leafIM.setColorAt(i,_leafTmpCol); } }
     if(_leafLand[i]>0){                                                        // LANDED — rest flat on the surface, then vanish forever (a fresh leaf spawns up top)
       _leafLand[i]-=dt; if(_leafLand[i]<=0){ _leafRespawn(i, eye.y+LEAF_TOP); }
       else { _leafDummy.position.set(_leafPos[b],_leafPos[b+1],_leafPos[b+2]); _leafDummy.rotation.set(-1.5708, _leafRot[b+1], 0); _leafDummy.scale.setScalar(_leafSz[i]); _leafDummy.updateMatrix(); _leafIM.setMatrixAt(i,_leafDummy.matrix); }
@@ -41183,6 +41214,18 @@ window.__hc={
     catch(e){ return {err:String(e.message||e)}; } },
   leaves(on){ try{ if(on!=null) _leafIM.visible=!!on;
     return { visible:_leafIM.visible, n:LEAF_MAX, palette:_leafPalette.map(c=>'#'+c.getHexString()) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // THE TWO SWITCHES THAT MAKE THE LEAF VERDICT FALSIFIABLE, one per signature Ben gave.
+  // leafFade(0) restores the pre-4f30585 saturation, so the orange-speckle detector can be shown producing a
+  // POSITIVE before its zero is read as an acquittal. leafDepth(0) drops the batch's depth test, which is what
+  // "drawing through terrain" would look like if the leaves were the ones doing it — a control for the occlusion
+  // frame, where the honest answer is a zero and a zero means nothing without it.
+  leafFade(v){ try{ if(v!=null) _leafFade=!!v; return { fade:_leafFade, from:12, to:LEAF_R }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  leafTag(v){ try{ if(v!=null) _leafTag=!!v; return { tag:_leafTag }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  leafDepth(v){ try{ if(v!=null){ _leafMat.depthTest=!!v; _leafMat.needsUpdate=true; }
+    return { depthTest:_leafMat.depthTest, depthWrite:_leafMat.depthWrite, renderOrder:_leafIM.renderOrder }; }
     catch(e){ return {err:String(e.message||e)}; } },
   holoHide(on){ try{ _holoHide=!!on; return {holoHide:_holoHide, vis:!!(view.holoRet&&view.holoRet.visible)}; }catch(e){ return {err:String(e.message||e)}; } },
   holoRetInfo(){ try{ const R=view.holoRet; if(!R) return {no:'no reticle'};
