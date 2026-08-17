@@ -27639,20 +27639,36 @@ function handFootfall(power){ power=power||1;
   _hand.vy -= HAND_KICK*power;                                    // the body drops onto the planted foot: hands go DOWN first
   _hand.vx += (_hand.left?1:-1)*HAND_KICK*0.55*power;             // and rock to the side of the foot that landed
   _hand.left=!_hand.left; }
-// ---- THE ADDITIVE POSE STACK WAS BUILT AND BACKED OUT, 2026-08-17. READ THIS BEFORE BUILDING IT AGAIN ----
-// Ben's ask stands: "one additive pose stack, every feature a layer, nothing writing bones directly ... dials for
-// Ben". The mechanism is easy -- a POSE.add(layer, dx,dy,dz, rx,ry,rz) that applies the offset and records who
-// applied it -- and I had five of the post-passes (bipod, sprint, swap, attach, eat) migrated onto it, with a ledger
-// and a per-layer gain that demonstrably switched one layer off on its own.
-// IT WAS NOT BEHAVIOUR-NEUTRAL AND I COULD NOT ACCOUNT FOR WHY. assert-hand-motion's "aimed amplitude is a fraction
-// of hip" went from 19/19 to 18/19 with the stack applying, and the hip figure it measures collapsed from 0.0110 to
-// 0.0000 -- and back to 19/19 the moment the stack stopped applying. Each migrated call passes the same numbers in
-// the same order at the same point in the function, so the difference is something about the ORDER or the number of
-// times these offsets land that reading the code did not reveal. A viewmodel regression is the last thing to ship
-// unexplained, so the five sites are inline again exactly as they were.
-// WHAT THE NEXT ATTEMPT SHOULD DO FIRST: make POSE record WITHOUT applying, run assert-hand-motion, and confirm the
-// ledger's per-layer totals equal the offsets the inline lines produce, frame for frame. If they match and the bench
-// still moves, the fault is in how often updateView runs -- the probes call it directly, and so does the reload path.
+// =====================================================================
+//  THE POSE LEDGER — the additive stack, recording only (Ben: "make POSE record without applying and check the
+//  totals match")
+// =====================================================================
+// AN EARLIER ATTEMPT HAD POSE.add APPLY the offset as well as record it, and it moved the gun: assert-hand-motion
+// went 19/19 -> 18/19 and the hip amplitude it measures collapsed from 0.0110 to 0.0000, recovering the instant the
+// application was skipped. Every migrated call passed the same numbers at the same point, so the arithmetic was not
+// the difference -- which left ORDER, or how many times the offsets land per frame, and neither is visible by
+// reading. So this version does not apply anything at all. The inline `+=` lines still own the pose, exactly as they
+// did; each one now also DECLARES itself here.
+//   THAT MAKES IT PROVABLY SAFE and it makes the open question answerable: mark() snapshots the group the moment the
+// base pose is finished, end() compares the group's total change since then against the sum of what the layers
+// declared, and the RESIDUAL is everything that moved the gun without saying so. Zero residual means the ledger is
+// complete and a future POSE.add can take over the application with nothing left out. A non-zero residual names the
+// sites still to find.
+const POSE={ layers:{}, on:true, res:{p:[0,0,0],r:[0,0,0]}, _m:{p:[0,0,0],r:[0,0,0]}, _marked:false, frames:0 };
+POSE.begin=function(){ this.frames++; this._marked=false;
+  for(const k in this.layers){ const L=this.layers[k]; L.p[0]=L.p[1]=L.p[2]=0; L.r[0]=L.r[1]=L.r[2]=0; } };
+POSE.mark=function(){ const g=view.group;
+  this._m.p[0]=g.position.x; this._m.p[1]=g.position.y; this._m.p[2]=g.position.z;
+  this._m.r[0]=g.rotation.x; this._m.r[1]=g.rotation.y; this._m.r[2]=g.rotation.z; this._marked=true; };
+POSE.add=function(name, px,py,pz, rx,ry,rz){          // RECORDS ONLY. It must never touch view.group.
+  let L=this.layers[name]; if(!L) L=this.layers[name]={p:[0,0,0], r:[0,0,0]};
+  L.p[0]+=px||0; L.p[1]+=py||0; L.p[2]+=pz||0; L.r[0]+=rx||0; L.r[1]+=ry||0; L.r[2]+=rz||0; };
+POSE.end=function(){ if(!this._marked){ this.res.p[0]=this.res.p[1]=this.res.p[2]=0; this.res.r[0]=this.res.r[1]=this.res.r[2]=0; return; }
+  const g=view.group, sp=[0,0,0], sr=[0,0,0];
+  for(const k in this.layers){ const L=this.layers[k];
+    sp[0]+=L.p[0]; sp[1]+=L.p[1]; sp[2]+=L.p[2]; sr[0]+=L.r[0]; sr[1]+=L.r[1]; sr[2]+=L.r[2]; }
+  this.res.p[0]=(g.position.x-this._m.p[0])-sp[0]; this.res.p[1]=(g.position.y-this._m.p[1])-sp[1]; this.res.p[2]=(g.position.z-this._m.p[2])-sp[2];
+  this.res.r[0]=(g.rotation.x-this._m.r[0])-sr[0]; this.res.r[1]=(g.rotation.y-this._m.r[1])-sr[1]; this.res.r[2]=(g.rotation.z-this._m.r[2])-sr[2]; };
 function handMotion(dt){
   dt=Math.min(dt,0.05);                                           // a long frame integrates the spring into a spasm
   _hand.t+=dt;
@@ -27931,6 +27947,7 @@ function updateCrosshair(dt, isGun){
   if(Math.abs(op-_xhLastOp)>0.01){ _xhLastOp=op; xh.style.opacity=op.toFixed(2); }
 }
 function updateView(dt){ updateRecoil(dt);                                          // camera recoil integrates every frame (kick + smooth recovery)
+  POSE.begin();                                                                     // clear the ledger; it records only — see POSE above handMotion
   if(player.grabbed){ view.group.visible=false; _hideOffHand(); if(view.holoRet)view.holoRet.visible=false; return; }   // no hands/held item during the capture — only the maw fills the screen
   if(!started || intro.active){ view.group.visible=false; _hideOffHand(); if(view.holoRet)view.holoRet.visible=false; return; }   // CINEMATICS own the camera — no floating hand/held item in the menu flythrough or the wake-up (Ben 07-20)
   // RECORDING MODE DROPS THE VIEWMODEL TOO. Hiding the DOM overlays left a first-person fist or gun parked in the
@@ -28215,6 +28232,7 @@ function updateView(dt){ updateRecoil(dt);                                      
       if(UD.dotY!=null) aPy += (SCOPE_AXIS_Y - UD.dotY); }
     view.group.position.set(hPx+(aPx-hPx)*e, hPy+(aPy-hPy)*e, hPz+(aPz-hPz)*e);
     view.group.rotation.set(hRx+(aRx-hRx)*e, hRy+(aRy-hRy)*e, hRz+(aRz-hRz)*e);
+    POSE.mark();                                        // the base pose is finished here; everything after it is a layer
     // ---- THE FEET REST ON THE GROUND, AND THE GUN FOLLOWS THEM (Ben: "legs rest on the ground; gun height and
     // pitch follow the legs, not the reverse") ----
     // Which way round this goes is the whole instruction. The other way — solving the leg ANGLE so the feet reach
@@ -28236,7 +28254,7 @@ function updateView(dt){ updateRecoil(dt);                                      
         const gnd=(typeof groundYAt==='function'?groundYAt(player.pos.x,player.pos.z):player.pos.y)-camera.position.y;
         const feet=view.group.position.y + UD.bipod.position.y + (UD.bipodLegY||0)*Math.cos(UD.bipod.rotation.x);
         const raw=gnd-feet, put=clamp(raw, -0.10, 0.32)*view.bipodT;
-        view.group.position.y += put;
+        view.group.position.y += put; POSE.add('bipod', 0,put,0);
         // BOTH NUMBERS, because they differ by a factor of eight during the drop and only one of them is the gun.
         // Reporting the raw solve alone said the weapon lurched 0.45 of a block downward on the way to prone; what
         // actually moved it was 0.055, the rest having been eaten by the clamp. An instrument that reports something
@@ -28270,6 +28288,7 @@ function updateView(dt){ updateRecoil(dt);                                      
       view.group.rotation.x += -0.55*st;    // muzzle steeply down, tucked under the armpit
       view.group.rotation.y +=  0.22*st;    // a hint of turn, so it is against the ribs and not through them
       view.group.rotation.z += -0.14*st;
+      POSE.add('sprint', -0.07*st, -0.16*st, 0.06*st, -0.55*st, 0.22*st, -0.14*st);
       // THE ARM COMES WITH IT FOR FREE: attachGunHand puts the fist ON the weapon's own grip, so the hand and forearm are
       // children of the thing being folded. Published for the probe, which is how the bench tells a fold from a sweep.
       view.sprintFold=st; }
@@ -28282,7 +28301,8 @@ function updateView(dt){ updateRecoil(dt);                                      
     // reads as the gun being yanked.
     { const _sw=swapDip();
       if(_sw>0.001){ view.group.position.y -= 0.62*_sw; view.group.rotation.x += 0.85*_sw;
-        view.group.position.z += 0.10*_sw; view.swapDip=_sw; }
+        view.group.position.z += 0.10*_sw; view.swapDip=_sw;
+        POSE.add('swap', 0, -0.62*_sw, 0.10*_sw, 0.85*_sw, 0, 0); }
       else view.swapDip=0; }
     // THE INSPECT CARRY — the attach screen's own pose (Ben 08-12: "the current running animation for held guns,
     // brings them closer to the chest ... it is the perfect animation for that attatchment system"). These are that
@@ -28307,6 +28327,7 @@ function updateView(dt){ updateRecoil(dt);                                      
       view.group.rotation.y +=  0.60*at;    // +y swings a -z muzzle LEFT: the gun turns to face the player
       view.group.rotation.z += -0.40*at;    // canted over the forearm
       view.group.rotation.x += -0.10*at;    // muzzle down, less than the carry's -0.16 so the rail faces the camera
+      POSE.add('attach', -0.11*at, 0.10*at, 0, -0.10*at, 0.60*at, -0.40*at);
       view.attPose=at; }
     else view.attPose=0;
     // ===== HANDGUNS ARE HELD, NOT SHOULDERED (Ben 08-05) =====
@@ -28465,6 +28486,10 @@ function updateView(dt){ updateRecoil(dt);                                      
       // the glass (d885b77): this moves where the eyepiece is, not what is drawn in it.
       const _sc=view.mesh.userData.scopeGun || (view.mesh.userData.attOn&&view.mesh.userData.attOn.optic==='optic_scope');
       view._nearPush=nearPlaneClear(view, VIEW_NEAR_CLEAR*(1-0.7*clamp(bend,0,1))*(1-0.5*e) - (_sc?ADS_SCOPE_PULL*e:0));
+      // THE GUARD IS A LAYER TOO, and the ledger found it: before this line was declared, the residual was 0.145 in z
+      // at full ADS and 0.080 with the attach screen up -- almost all of the undeclared movement in the game, and all
+      // of it on the axis this pushes along. It moves the gun MORE than any pose term does.
+      POSE.add('nearplane', 0, 0, -view._nearPush);
     } }
   else if(ITEMS[view.id]&&ITEMS[view.id].spear){
     // carried COCKED BEHIND THE RIGHT SHOULDER: butt high behind, tip angled up-forward. Charging winds it
@@ -28533,6 +28558,7 @@ function updateView(dt){ updateRecoil(dt);                                      
       view.group.position.y +=  0.16*_rise + 0.035*_jab;
       view.group.rotation.z +=  0.55*_rise;                                      // wrist rolled over, the way a hand holds food to the face
       view.group.rotation.x += -0.30*_rise - 0.18*_jab;
+      POSE.add('eat', -0.11*_rise, 0.16*_rise + 0.035*_jab, 0, -0.30*_rise - 0.18*_jab, 0, 0.55*_rise);
       view.eatT=_ep; }
     else view.eatT=0;
   // BLOCK-OUT FOR EVERYTHING ELSE IN THE RIGHT HAND (Ben 08-04: "any held item"). The gun branch does its own, pose-blended
@@ -28908,7 +28934,8 @@ function updateView(dt){ updateRecoil(dt);                                      
     sm.position.set(a[0],a[1],a[2]); sm.rotation.set(a[3],a[4],a[5]);
     const pl=sm.userData.plunger; if(pl)pl.position.y=-0.11*plunge;                             // clear plunger travel — the visible "injection"
     if(view.injectT<=0)sm.visible=false; }
-  else if(view.injectMesh) view.injectMesh.visible=false; }
+  else if(view.injectMesh) view.injectMesh.visible=false;
+  POSE.end(); }        // close the ledger: everything the group moved since mark(), minus what the layers declared
 
 // ---- COMBAT (left-click swing → melee the wretch or an animal in front) ----
 // The 8 in "sword 4/5/6/8" was never reachable: the tier table stopped at iron, so diamond took the ||0 and a
@@ -44708,7 +44735,13 @@ window.__hc={
   // hotbar is only nine of them: once it filled, the selected slot no longer held what was asked for, and the
   // main loop's per-frame setViewItem(inv[selSlot]) emptied the hand again a frame later. Three separate
   // measurements read the ninth tool, or nothing at all, before that was the answer.
-  hold(id){ try{ id=id||'field_guide'; inv[selSlot]={id,n:1}; refreshHotbar(); setViewItem(id); return { held:view.id, slot:selSlot }; }catch(e){ return {err:e.message}; } },
+  // AND IT IS IN YOUR HANDS WHEN IT RETURNS, not two seconds into a draw. setViewItem puts the model in the hand at
+  // once, which was the whole animation until the swap became a 2.0s lower-and-raise — and an in-flight swap started
+  // by the emptied hand a /clearinv leaves behind then keeps running underneath it: the dip displaces the viewmodel,
+  // and at its midpoint it REPLACES what was just put there. Everything measured in the first two seconds after this
+  // call was measuring a gun being drawn. It showed up as a red dot reading 1.7 NDC below the aim axis on seven guns
+  // and as assert-attachments' inspect carry failing on a pitch that belonged to the dip.
+  hold(id){ try{ id=id||'field_guide'; inv[selSlot]={id,n:1}; refreshHotbar(); _swapTo=undefined; _swapT=0; _swapMid=false; setViewItem(id); return { held:view.id, slot:selSlot }; }catch(e){ return {err:e.message}; } },
   // EVERY ITEM'S MODEL IN ONE READ — the sweep, rather than one screenshot per item.
   // itemModel is the single resolver behind the ground drop, the 3D icon, the offhand, a peer's hand and the
   // third-person body, so what it returns for an id IS what that item looks like everywhere except the main
@@ -46929,6 +46962,19 @@ window.__hc={
       return { sneak:!!player.sneak, fly:!!player.fly, keyDown:!!keys.ControlLeft, t:+(player._crouchT||0).toFixed(4), v:+(player._crouchV||0).toFixed(3),
                eyeAboveFeet:+(camera.position.y-player.pos.y).toFixed(4),
                bodyH:+bodyH().toFixed(4), standEye:EYE, crouchEye:CROUCH_EYE }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // THE POSE LEDGER. Every declared layer's contribution this frame, and the RESIDUAL -- what moved the held item
+  // between the base pose and the end of updateView without declaring itself. Zero residual means the ledger is
+  // complete and a future version can take over the application with nothing left out; a non-zero one names how much
+  // is still undeclared. Nothing here applies anything: the inline lines still own the pose.
+  pose(){ try{ const out={};
+      for(const k in POSE.layers){ const L=POSE.layers[k];
+        if(Math.hypot(L.p[0],L.p[1],L.p[2])+Math.hypot(L.r[0],L.r[1],L.r[2])<1e-9) continue;
+        out[k]={ pos:L.p.map(v=>+v.toFixed(5)), rot:L.r.map(v=>+v.toFixed(5)) }; }
+      const R=POSE.res, mag=Math.hypot(R.p[0],R.p[1],R.p[2])+Math.hypot(R.r[0],R.r[1],R.r[2]);
+      return { held:view.id, frames:POSE.frames, marked:POSE._marked, active:Object.keys(out), layers:out,
+               residual:{ pos:R.p.map(v=>+v.toFixed(5)), rot:R.r.map(v=>+v.toFixed(5)), mag:+mag.toFixed(5) },
+               known:Object.keys(POSE.layers) }; }
     catch(e){ return {err:String(e.message||e)}; } },
   frameMs(n){ try{ n=Math.max(8, Math.min(600, n|0 || 120));
       return new Promise(res=>{ const d=[]; let last=performance.now();
