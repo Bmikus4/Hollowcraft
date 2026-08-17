@@ -254,7 +254,22 @@ function stat(file,c){
     // surface and the whole point of `46381a2` was that it stops being exempt — but the amount it takes is whatever
     // the albedo divide leaves, not a fixed 0.10. A threshold of 0.03 fails the thing worth catching (the chest going
     // exempt again, which reads as 0.00) and passes the shipped 0.055 without pretending the old number still holds.
-    check('the wash reaches a non-atlas material', cOff2.sat - cOn.sat > 0.03, `sat ${cOff2.sat} -> ${cOn.sat} (delta ${(cOff2.sat-cOn.sat).toFixed(3)}, floor 0.03)`);
+    // ---- RE-AIMED AGAIN 2026-08-17, AND THE FLOOR ABOVE WAS OBSOLETE 32 MINUTES AFTER IT WAS WRITTEN ----
+    // 0.03 was set in `bb6cf3e` at 10:12 on 08-16 against a shipped reading of 0.055. At 10:44 the same morning
+    // `c9eab7e` — "noon, a low sun and midnight are three grades now" — gave midnight its own grade at sat 0.82,
+    // where there had been one flat grade at 0.96. THIS CHECK MEASURES A SATURATION DELTA AT MIDNIGHT, so a global
+    // midnight desaturation scales both readings and compresses their DIFFERENCE, with nothing in the wash changing.
+    // And nothing in the wash did change: `git log -S` over _propFill and over the albedo divide itself returns
+    // nothing since 08-16. The reading has been 0.021-0.029 ever since, straddling the floor, which is why this
+    // check has flickered pass to fail run to run on every build including the baseline.
+    // 0.015 STILL FAILS THE THING WORTH CATCHING. An exempt chest reads 0.00 — that is the regression `46381a2`
+    // exists to prevent and it is what this check is for — and 0.015 is comfortably below the current 0.021 and
+    // comfortably above zero. What it no longer does is assert a magnitude that was a property of the grade.
+    // AND THE NEXT PERSON TO TOUCH THE NIGHT GRADE WILL BREAK IT AGAIN. Any absolute threshold on a graded pixel is
+    // calibrated against a grade. The durable form measures the wash where it acts rather than after the post chain,
+    // or divides the delta by the crop's own saturation so the grade cancels; both are more work than re-aiming and
+    // neither should be done by guessing a second number.
+    check('the wash reaches a non-atlas material', cOff2.sat - cOn.sat > 0.015, `sat ${cOff2.sat} -> ${cOn.sat} (delta ${(cOff2.sat-cOn.sat).toFixed(3)}, floor 0.015)`);
     check('and it does not brighten what it greys', cOn.lum <= cOff2.lum+2.0, `lum ${cOff2.lum} -> ${cOn.lum}`);
 
     check('no page errors and no shader compile errors', errs.length===0, errs.slice(0,2).join(' | ').slice(0,200));
