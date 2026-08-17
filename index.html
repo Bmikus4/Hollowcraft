@@ -1184,10 +1184,13 @@ const _hcLamp = new Float32Array([1.0, 0.35, 18.7, 0.85]);
 // lift every shaded block face in the world with it, and the daylight frame has been signed off four times.
 // Gated on uScotG.w (the day factor) so it is gone at night, which is what Ben asked for in the same breath: extremely
 // black nights, with the light in them coming from lamps.
-// [r, g, b, BLACK-TEXEL SIZE]. The fourth was unused; it is now how much albedo-independent delivered light a texel at
-// zero albedo keeps on the non-atlas path, which is where the doors, the fences, the scarecrow and every other cat:'model'
-// block live. 0.55 of the fill, faded in over the darkest 5% of the albedo range — see the term in lights_fragment_end.
-const _propFill = new Float32Array([0.237, 0.267, 0.30, 0.55]);
+// [r, g, b, MINIMUM ALBEDO THE FILL SEES]. The fourth is the black-texel rescue on the non-atlas path — doors, fences,
+// chests, the scarecrow, blood decals, every cat:'model' block and every gun. It is a minimum LUMINANCE now and no
+// longer a flat add, so it is scale-invariant and hue-preserving: see the term in lights_fragment_end for why that
+// distinction is the whole of "doors chests guns fences have all lost their textures".
+// 0.03 is the atlas path's own measured knee for the same job (the note at _scotK[2]), so the two paths rescue a black
+// texel at the same albedo instead of by two unrelated numbers. __hc.propFill({texk}) is the dial.
+const _propFill = new Float32Array([0.237, 0.267, 0.30, 0.03]);
 // THE REBUILD'S SET-ASIDE SWITCH lives here rather than beside __hc.oldLight because these are the arrays it moves,
 // and the snapshot has to be taken from their SHIPPED values — captured on first use, so a dial swept before the
 // switch is thrown still restores to what the sweep chose rather than to a literal written twice.
@@ -1499,11 +1502,29 @@ const HC_LIGHT_GLSL = [
     // distance, because the mip chain averages texels across it and the average lands on either side from frame to frame
     // — which would trade a hole for a shimmer.
     // IT IS THE DELIVERED LIGHT, so it carries the fill's own occlusion and its (1-_pfd) gate: a black texel in a cave
-    // stays black, and one on a sunlit door is left alone because the fill itself is. uPropFill.w is the size of it and 0
-    // is the build before this.
+    // stays black, and one on a sunlit door is left alone because the fill itself is.
+    // ---- AND IT IS A MINIMUM LUMINANCE, NOT A FLAT ADD. THIS IS THE NON-ATLAS TEXTURE BUG ----
+    // Ben: "doors chests guns fences have all lost their textures", and "blood also looks completely whitewashed".
+    // The rescue was written as `diffuseColor.rgb + vec3(w)`, an albedo-INDEPENDENT add of the sky fill's own colour,
+    // faded out by smoothstep(0, 0.055, luminance). Both halves of that are wrong for anything but a literal hole:
+    //   · 0.055 is a LINEAR luminance, which is sRGB 0.25 — it is not "a black texel", it is every genuinely dark
+    //     texture in the game. log_side measures 0.0129, a quarter of the way in, and modelBlockMat forces log_side
+    //     onto every door, door_top, trapdoor, ladder, fence, chest and barrel (Ben 08-05, "textured the same thing
+    //     as pine log"). So the ONE tile the whole non-atlas wooden set wears sat deep inside the fade.
+    //   · and the add is NEUTRAL, so it does not dim a texture, it REPLACES it. Measured at noon, same tile, same
+    //     light, four blocks apart: a log BLOCK (atlas path) rendered 100,84,70 — bark — while a DOOR wearing the
+    //     identical log_side rendered 109,114,120, a flat blue-grey whose channel ratios are uPropFill.rgb's own
+    //     (0.79 : 0.89 : 1.00) to two decimals. Solving out = a*albedo + f across the door's channels gives a
+    //     NEGATIVE a: the surface was 100% fill and 0% texture. That is the "lost its texture" report exactly, and
+    //     the same term is what whitewashed the blood decals, which are dark and saturated by design.
+    // A minimum luminance instead: scale the texel UP to uPropFill.w keeping its HUE, and only when it is under.
+    // Scale-invariant, monotone, and bit-identical for anything at or above the floor — the same idiom as the night
+    // grey-point above and the same reasoning as the atlas's own albedo floor. A texel at EXACTLY zero has no hue to
+    // preserve and is the one case where a neutral is the right answer, so it alone still gets the flat value.
     '    vec3 _pf = uPropFill.rgb * uScotG.w * uHcObj.x * (1.0-_pfd);\n'+
     '    float _palb = dot(diffuseColor.rgb, '+L+');\n'+
-    '    reflectedLight.indirectDiffuse += _pf * (diffuseColor.rgb + vec3(uPropFill.w) * (1.0 - smoothstep(0.0, 0.055, _palb))); }\n#endif\n';
+    '    vec3 _pa = _palb > 1e-6 ? diffuseColor.rgb * max(1.0, uPropFill.w/_palb) : vec3(uPropFill.w);\n'+
+    '    reflectedLight.indirectDiffuse += _pf * _pa; }\n#endif\n';
   // reflectedLight and totalEmissiveRadiance are both still in scope at dithering_fragment (same main(), later line), so the
   // gate is computed here only to mark the shader as lit. A #define inside main() is legal: the preprocessor is line-ordered
   // and lights_fragment_end always precedes dithering_fragment in all four shaders.
@@ -7297,7 +7318,28 @@ const skyMat = new THREE.ShaderMaterial({
     // THE STORM (Ben's note 6: "dark/overcast clouds on thunderstorms"). updateSky already dims the sun, the hemi and the
     // ambient by this and greys the sun's colour, so the SCENE goes dark in rain — but the clouds' own value never saw it, so a
     // thunderstorm read as a dim world under a cheerful white sky. Set per frame from weather.overcast.
-    uOvercast:{value:0.0}
+    uOvercast:{value:0.0},
+    // ---- SUNSET VIBRANCY (Ben 08-17: "sunset skies should be like 3x more vibrant") ----
+    // It rides the existing `dusk` gate, which is already zero above sunH 0.22, so this is SKY ONLY and at LOW SUN
+    // ONLY by construction. That constraint is the whole point: the obvious lever is exposure or the grade's
+    // saturation, and both of those put the colour back on the terrain, which is the red cast that took a night to
+    // remove. Nothing here can reach a block, because it is added inside the sky dome's own shader behind a gate that
+    // is off for all but the hour either side of the horizon crossing.
+    // AMPLITUDE ALONE WOULD NOT DO IT, and this is the AgX property from the research: the operator desaturates as it
+    // compresses, so simply tripling the warm term buys a brighter band that is LESS saturated -- brighter orange
+    // sludge rather than a vivid sunset. So vibrancy drives two things: the amplitude, and the HUE, which deepens
+    // toward red as it rises. uDuskRed is how far toward (1.00,0.22,0.05) the warm anchor travels at full vibrancy.
+    // IT SHIPS AT 1.0 — OFF — AND THAT IS A DELIBERATE REFUSAL, not an unfinished dial. At 3.0 the sky does exactly
+    // what Ben asked for (saturation 0.183 -> 0.261, R-B 34 -> 55 facing the sun at dusk, and provably nothing at
+    // noon: 0.2719 -> 0.2724). But the same A/B measured on NEAR GROUND, within a few blocks of the camera and
+    // interleaved to cancel drift, reads lum 45.6/53.9 at vib 1 against 68.8/87.8 at vib 3, with the red channel
+    // moving twice as far as the blue. That is the red cast on terrain his instruction on this item explicitly
+    // forbids, so the default may not be 3.0 until the path is found and cut.
+    // WHERE IT IS NOT: holding the term out of the sky-cube bake (see bakeSky) does not close it, so the world is not
+    // taking this through the baked environment. The untested candidate is the bloom pass spreading a much brighter
+    // sky over the frame — bloom is enabled, additive, and its mip chain is wide enough to lift a whole frame.
+    // Reaching it needs a bloom toggle from outside the module, which does not exist yet.
+    uDuskVib:{value:1.0}, uDuskRed:{value:0.55}
   },
   vertexShader:`
     varying vec3 vDir;
@@ -7307,7 +7349,7 @@ const skyMat = new THREE.ShaderMaterial({
     varying vec3 vDir;
     uniform vec3 uSunDir, uMoonDir; uniform float uDay, uTime, uHasMoon; uniform vec3 uFogCol, uHorizonBlend; uniform float uSkyDark, uCloud, uStars; uniform float uCamYaw;
     uniform sampler2D uMoonTex;
-    uniform float uCloudDbg, uSunGain, uSunHalo, uSunSheen, uSunWide, uSkyToSea, uOvercast;
+    uniform float uCloudDbg, uSunGain, uSunHalo, uSunSheen, uSunWide, uSkyToSea, uOvercast, uDuskVib, uDuskRed;
     // hash noise
     float h13(vec3 p){ p=fract(p*0.3183099+0.1); p*=17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
     float n3(vec3 x){ vec3 i=floor(x),f=fract(x); f=f*f*(3.0-2.0*f);
@@ -7404,8 +7446,15 @@ const skyMat = new THREE.ShaderMaterial({
       // line on the waterline that has been in every daytime frame. A real sky starts this below about 10 degrees.
       // Now it is zero above sunH 0.22 and reaches full strength at the horizon, so dawn and dusk keep everything they had.
       float dusk = pow(clamp(1.0-abs(sunH)/0.22, 0.0, 1.0), 1.6);
-      col += vec3(1.00,0.41,0.13)*dusk*lowBand*(0.18+0.95*pow(sd,2.0));
-      col += vec3(0.28,0.15,0.42)*dusk*lowBand*(1.0-sd)*0.38;
+      // THE WARM ANCHOR DEEPENS AS IT BRIGHTENS — see uDuskVib. The hue travel is scaled by how far above 1.0 the
+      // vibrancy is, so uDuskVib=1 is bit-identical to the sky that shipped and the A/B is a real off switch.
+      float _vk = clamp((uDuskVib-1.0)*0.5, 0.0, 1.0);
+      vec3 _warm = mix(vec3(1.00,0.41,0.13), vec3(1.00,0.22,0.05), uDuskRed*_vk);
+      col += _warm*dusk*lowBand*(0.18+0.95*pow(sd,2.0))*uDuskVib;
+      // The violet counter-term rises WITH the warm side rather than staying put, because the richness Ben is asking
+      // for is the gradient across the sky, not a hotter band on one edge: an orange horizon under an unchanged
+      // blue-grey reads as a brighter stripe, and it is the deep violet opposite the sun that makes it read as depth.
+      col += vec3(0.28,0.15,0.42)*dusk*lowBand*(1.0-sd)*0.38*uDuskVib;
       // ---- NIGHT ---- gated, so a clear day pays none of it
       if(uDay < 0.55){
         float nt = 1.0-uDay;
@@ -8955,8 +9004,21 @@ function updateHorizon(){ oceanLayer.position.copy(camera.position); const day=g
     if(_wf2>0.01){ _uPineFog.lerp(scene.fog.color, Math.min(1,_wf2*0.95));
       _uFolNight.value.lerp(scene.fog.color, Math.min(1,_wf2*0.95)); }
     oceanMat.uniforms.uWx.value=_wf2; } }
+// THE SUNSET VIBRANCY IS HELD OUT OF THE BAKE, and that is the whole of what makes it sky-only. Ben's constraint on
+// this item was explicit: more vibrant sunsets, but NOT by a lift that puts the colour back on terrain, which is the
+// red cast that took a night to remove. Adding the term inside the sky dome's own shader was NOT enough to satisfy
+// that, and assuming it was is what the measurement caught: this cube IS a light source — the world reads it — so a
+// hotter dome lit the ground with it. Measured at the shore at dusk, near ground within a few blocks of the camera,
+// interleaved: vib 1 read lum 48.4 and 55.6, vib 3 read 77.4 and 89.7, and the red channel moved twice as far as the
+// blue. That is the forbidden lift, arriving by the one path the term was assumed not to have.
+// So the bake sees vibrancy 1.0 — the sky exactly as it shipped — and only the dome drawn to the SCREEN carries the
+// push. The world's ambient, its hemisphere and its reflections are therefore bit-identical with the dial at any
+// value, and the dial can only ever change what the eye sees of the sky itself. Same shape as the tone-map hold on
+// the line below it, and for the same reason: what is baked and what is displayed are two different questions.
 function bakeSky(){ if(!USE_SKYCUBE) return; try{ const prevTone=renderer.toneMapping; renderer.toneMapping=THREE.NoToneMapping;   // bake LINEAR (background render tonemaps once, like the old dome)
-  skyCubeCam.position.set(0,0,0); skyCubeCam.update(renderer, skyScene); renderer.toneMapping=prevTone; }catch(e){} }
+  const _pv=skyMat.uniforms.uDuskVib.value; skyMat.uniforms.uDuskVib.value=1.0;
+  skyCubeCam.position.set(0,0,0); skyCubeCam.update(renderer, skyScene);
+  skyMat.uniforms.uDuskVib.value=_pv; renderer.toneMapping=prevTone; }catch(e){} }
 
 // =====================================================================
 //  WATER  — Gerstner displacement + Fresnel-Schlick + Beer depth + moonglade
@@ -40604,6 +40666,9 @@ window.__hc={
   // so anything wearing that key must change on the next frame. If a door does not go magenta, the door is not drawing
   // the texture its material names — and that is a different bug from a blank tile, which is where two hours went.
   tileTexPaint(key,css){ try{ const t=_tileTexCache[key]; if(!t) return {err:'not cached: '+key, keys:Object.keys(_tileTexCache)};
+    // 'refresh' paints nothing and only pushes the canvas again: it separates "the GPU never got these pixels" from
+    // "these pixels are not what I think they are", and those are the two halves of a texture that reads wrong.
+    if(css==='refresh'){ t.needsUpdate=true; return { key, refreshed:true }; }
     const g=t.image.getContext('2d'); g.fillStyle=css||'#ff00ff'; g.fillRect(0,0,t.image.width,t.image.height); t.needsUpdate=true;
     return { key, painted:css||'#ff00ff' };
   }catch(e){ return {err:String(e&&e.message||e)}; } },
@@ -43132,6 +43197,7 @@ window.__hc={
       waterMat.needsUpdate=true;
       return { before, now:{transparent:waterMat.transparent, depthWrite:waterMat.depthWrite, depthTest:waterMat.depthTest, side:waterMat.side, colorWrite:waterMat.colorWrite,
                curveK:waterMat.uniforms.uCurveK?waterMat.uniforms.uCurveK.value:null,
+               o3Cut:waterMat.uniforms.uO3Cut?waterMat.uniforms.uO3Cut.value:null, seaTop:CFG.SEA+1-WATER_SURF_DROP,
                flat:waterMat.uniforms.uDbgFlat?waterMat.uniforms.uDbgFlat.value:null} }; }
     catch(e){ return {err:String(e.message||e)}; } },
   // IS THE DRAW CALL EVEN ISSUED? Everything else says the mesh is correct and it still shows nothing, so this asks the
@@ -46023,8 +46089,9 @@ window.__hc={
   propFill(o){ try{ if(o&&o.on===false){ _propFill[0]=_propFill[1]=_propFill[2]=0; }
       if(o&&o.r!=null) _propFill[0]=+o.r; if(o&&o.g!=null) _propFill[1]=+o.g; if(o&&o.b!=null) _propFill[2]=+o.b;
       if(o&&o.k!=null){ _propFill[0]=+o.k*0.79; _propFill[1]=+o.k*0.89; _propFill[2]=+o.k; }   // one dial along the sky's own hue
-      // AND THE BLACK-TEXEL SIZE, which this hook did not reach: the term added to the non-atlas path lives in
-      // _propFill[3] and had no way to be swept, which is how the atlas sheen stayed inert at a value nobody could move.
+      // AND THE BLACK-TEXEL RESCUE, which this hook did not reach: it lives in _propFill[3] and had no way to be
+      // swept, which is how the atlas sheen stayed inert at a value nobody could move. It is a MINIMUM ALBEDO now,
+      // not a flat add — texk 0 turns the rescue off and leaves every texel its own value.
       if(o&&o.texk!=null) _propFill[3]=Math.max(0,+o.texk);
       if(o&&o.night!=null) _hcObj[1]=Math.max(0,Math.min(1,+o.night));   // how much this path follows the day factor after dark
       if(o&&o.grey!=null) _hcObj[2]=Math.max(0,+o.grey);                  // the mid-grey luminance the night celestial term flattens toward (0 = off)
@@ -46085,6 +46152,15 @@ window.__hc={
                moon:{ elevDeg:el(m), azimDeg:az(m), up:m.y>0 },
                key:(d.y>0?'sun':'moon'), dayFactor:+globalU.uDay.value.toFixed(3),
                keyIntensity:+sunLight.intensity.toFixed(3), keyCol:'#'+sunLight.color.getHexString() }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // SUNSET VIBRANCY, as a dial. vib 1.0 is the sky exactly as it shipped, so this is its own A/B; red is how far the
+  // warm anchor deepens toward blood-orange at full vibrancy. Sky only and low sun only — the gate is the shader's
+  // own `dusk`, which is zero above about 12 degrees of elevation, so no terrain frame at any hour can move.
+  sunset(o){ try{ const u=skyMat.uniforms;
+      if(o&&o.vib!=null) u.uDuskVib.value=Math.max(0,Math.min(8,+o.vib));
+      if(o&&o.red!=null) u.uDuskRed.value=Math.max(0,Math.min(1,+o.red));
+      return { vib:+u.uDuskVib.value.toFixed(3), red:+u.uDuskRed.value.toFixed(3),
+               sunElevDeg:+(Math.asin(Math.max(-1,Math.min(1,globalU.uSunDir.value.y)))*57.29578).toFixed(2) }; }
     catch(e){ return {err:String(e.message||e)}; } },
   sunArc(o){ try{ if(o){ if(o.floor!=null) _sunArc.floor=+o.floor; if(o.nb!=null) _sunArc.nb=+o.nb; if(o.nbMax!=null) _sunArc.nbMax=+o.nbMax; }
       return { floor:+_sunArc.floor.toFixed(3), nb:+_sunArc.nb.toFixed(3), nbMax:+_sunArc.nbMax.toFixed(2),
