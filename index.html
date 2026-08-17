@@ -5543,6 +5543,44 @@ function faceTile(id, d, back){
   return t[1];
 }
 // pack: 1 + back(1) + tile(9)<<1 + sky(4)<<10 + id(9)<<14
+// ---- SURFACE TRANSITIONS (Ben 08-17: "I want sand and dirt and sand and grass to transition smoothly into eachother
+// ... only on the surface") ----
+// SAND, DIRT AND GRASS ARE ONE FAMILY EACH, and a cell whose neighbours are all the same family is untouched, which is
+// every cell in the world except the seams.
+const _TRANS_FAM={};   // block id -> family, built after the registry exists
+function _transInit(){ if(_TRANS_FAM._i) return; _TRANS_FAM._i=1;
+  const put=(n,f)=>{ if(BID[n]!=null) _TRANS_FAM[BID[n]]=f; };
+  put('grass',1); put('grass_leaf1',1); put('grass_leaf2',1); put('grass_leaf3',1);
+  put('dirt',2); put('path',2); put('mud',2);
+  put('sand',3); put('sand_leaf1',3); put('sand_leaf2',3); put('sand_leaf3',3); }
+// A HASH OF THE WORLD COLUMN, not of the chunk cell: the pattern has to be continuous across a chunk border or the
+// transition draws a straight line down every boundary, which is the one artefact that would be worse than the hard
+// edge this replaces.
+function _transHash(wx,wz){ let h=Math.imul(wx|0,374761393) ^ Math.imul(wz|0,668265263); h=Math.imul(h^(h>>>13),1274126177); return ((h^(h>>>16))>>>0)/4294967296; }
+// IT IS DONE IN THE MESHER AND NOT IN THE SHADER, and that is a departure from the instruction worth stating. The
+// surface pass is a GREEDY mesher: a run of identical grass tops becomes ONE quad with four corners, so there are no
+// per-block vertices to hang a per-block blend weight on, and a blend interpolated across a merged quad would fade a
+// whole hillside toward sand rather than its edge. Doing it per CELL, before the merge, gets the same read with no new
+// attributes and no shader change -- and because the merge keys on the tile, the seam simply stops merging and the
+// interior still merges exactly as before.
+// NO NEW BLOCK IDS, which is the constraint that mattered: the BLOCK stays grass and only the TILE it draws changes.
+// Saves store numbers and nothing here touches them.
+// ONE CELL DEEP AND SPARSE, and both numbers were set by looking. The first version reached two cells at 55% and 22%
+// and turned a beach into a chequerboard: where sand and dirt already interlock, almost every cell is within two of a
+// different family, so almost every cell was substituted and the result read as noise rather than as a seam.
+// 0.34 on the touching row only, with the hash taken at HALF RESOLUTION so substituted cells clump into 2x2 fingers
+// instead of salt and pepper -- an interlocking edge, which is what a transition looks like, rather than a dither.
+function _transTop(id, wx, wy, wz, g, lx, ly, lz){
+  const fam=_TRANS_FAM[id]; if(!fam) return -1;
+  let oid=0;
+  for(const [ox,oz] of [[1,0],[-1,0],[0,1],[0,-1]]){
+    const nid=g(lx+ox,ly,lz+oz), nf=_TRANS_FAM[nid];
+    if(nf && nf!==fam){ oid=nid; break; } }
+  if(!oid) return -1;
+  if(_transHash(wx>>1, wz>>1) >= 0.34) return -1;
+  const t=B[oid] && B[oid].tiles;
+  return t ? t[0] : -1;
+}
 function packFace(id,tile,sky,back){ return 1 + (back?1:0) + (tile<<1) + (sky<<10) + (id<<14); }
 
 // REUSED mesh scratch — the mesher writes vertices straight into these typed arrays instead of growing boxed
@@ -5733,7 +5771,10 @@ let _CANOPY_BAKE = true;    // __hc.canopy({bake:false}) + a world remesh is the
 let _SPRIGS_ON = true;      // __hc.sprigs(false) + a remesh drops the canopy fringe entirely: the pixels that change ARE the sprigs, which is the only way to measure them against the canopy they cover
 let _SPRIG_FACE_N = true;   // __hc.sprigNormals(false) + a remesh is the A/B for the canopy sprig's own face normal
 let _LEAF_UV_MIRROR = true;   // __hc.leafUV(false) + a world remesh is the A/B for the per-layer tile mirror below
+let _TRANS_ON=true;   // __hc.transitions(false) + a world remesh is the A/B
 function greedyMesh(c, pass){
+  _transInit();
+  const cx0=c.cx*CK, cz0=c.cz*CK;   // the world column, for a hash that is continuous across chunk borders
   // pass: 'opaque' | 'cutout'
   const _leafUV = _LEAF_UV_MIRROR && pass==='leaf';
   // A FOREST THAT DOES NOT MOVE READS DEAD, and until now only the cross blocks swayed: leafMat never carried the wind
@@ -5767,7 +5808,12 @@ function greedyMesh(c, pass){
       for (x[v]=0; x[v]<dV; x[v]++){
         for (x[u]=0; x[u]<dU; x[u]++, n++){
           let a=0,b=0;
-          if (x[d]>=0){ const id=g(x[0],x[1],x[2]); if(isSrc(id)){ const nid=g(x[0]+q[0],x[1]+q[1],x[2]+q[2]); if(!hides(nid,id)){ const sky=Math.round((d===1?_sskyTop(x[0]+q[0],x[1]+q[1],x[2]+q[2]):_sskyOpen(x[0]+q[0],x[1]+q[1],x[2]+q[2]))*15); a=packFace(id,faceTile(id,d,false),sky,false);} } }
+          if (x[d]>=0){ const id=g(x[0],x[1],x[2]); if(isSrc(id)){ const nid=g(x[0]+q[0],x[1]+q[1],x[2]+q[2]); if(!hides(nid,id)){ const sky=Math.round((d===1?_sskyTop(x[0]+q[0],x[1]+q[1],x[2]+q[2]):_sskyOpen(x[0]+q[0],x[1]+q[1],x[2]+q[2]))*15);
+            // ONLY THE TOP FACE, AND ONLY IN THE OPAQUE PASS. d===1 with back=false IS the upward face -- a side face
+            // blended this way would paint sand up a cliff, and Ben's instruction is "only on the surface".
+            let _tt=faceTile(id,d,false);
+            if(_TRANS_ON && d===1 && pass==='opaque'){ const _s=_transTop(id, cx0+x[0], x[1], cz0+x[2], g, x[0],x[1],x[2]); if(_s>=0) _tt=_s; }
+            a=packFace(id,_tt,sky,false);} } }
           if (x[d]<dD-1){ const xx=x[0]+q[0],xy=x[1]+q[1],xz=x[2]+q[2]; const id=g(xx,xy,xz); if(isSrc(id)){ const nid=g(x[0],x[1],x[2]); if(!hides(nid,id)){ const sky=Math.round((d===1?_sskyTop(x[0],x[1],x[2]):_sskyOpen(x[0],x[1],x[2]))*15); b=packFace(id,faceTile(id,d,true),sky,true);} } }
           // only one side wins (a face belongs to the solid side facing air)
           mask[n] = a ? a : b;
@@ -22341,7 +22387,17 @@ document.addEventListener('mousemove',ev=>{ if(cursor){
 //   MOUSEUP, NOT MOUSEDOWN. The gesture is a drag, so it ends where the button comes up; on mousedown the player is
 // still holding the stack and has not chosen anything yet, and a slip on the way to a slot would throw a rifle on the
 // floor. The whole stack goes, with its uid, attachments and magazine, through the one drop function.
-const _DROP_PANELS='#invui,#chestui,#creative,#cursor,#attui,#cmdline,#pause,#griditems,.gitem,.gslot,#hotbar';
+// ---- AND IT COULD NEVER FIRE (Ben: "dropping an item in the inventory over emptiness doesnt drop the item") ----
+// The guard listed `#invui`, and `.modal` is `position:fixed; inset:0` — the inventory container covers the entire
+// viewport. So `closest('#invui')` matched EVERY release while the inventory was open and the handler returned early
+// every single time. Q and E are lean now, so this was the only drop path in the game and it had never worked once.
+// THE BACKDROP IS THE EMPTINESS. What the list wants is the interactive widgets, not the screens that hold them: a
+// release on `#invui` or `#chestui` ITSELF is a release on the darkened backdrop, which is exactly the gesture. So the
+// full-screen containers come out and `.panel` goes in, which is the box every slot, the crafting grid and the armour
+// column live inside — one selector for all of them instead of a list that has to be kept in step with the markup.
+// #griditems, .gitem, .gslot and #hotbar stay named because the markup deliberately puts them OUTSIDE .panel (see the
+// note at #invui: they are unzoomed so the grid and the bar keep one scale), so .panel does not cover them.
+const _DROP_PANELS='.panel,#cursor,#attui,#cmdline,#pause,#griditems,.gitem,.gslot,#hotbar,#pview';
 document.addEventListener('mouseup',ev=>{
   if(!cursor || !openUI) return;
   if(ev.button!==0) return;
@@ -46608,6 +46664,12 @@ window.__hc={
   //   A MAGAZINE IS TALL AND NARROW AND HANGS DOWN. A trigger guard is long, shallow and sits at the bore line. So the
   // ratio of a part's drop below the receiver to its length along the barrel is what tells them apart, and it is
   // reported rather than judged here.
+  // THE A/B FOR THE SURFACE TRANSITIONS. Off is the build before them, and it has to remesh every loaded chunk or the
+  // frame is of the old geometry -- which is how a change to a MESHER gets called "no visible difference".
+  transitions(on){ try{ if(on!=null) _TRANS_ON=!!on;
+      let n=0; for(const [,c] of world){ if(!c||!c.generated) continue; c.dirty=true; markRemesh(c.cx,c.cz); n++; }
+      return { on:_TRANS_ON, remeshQueued:n }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   magAudit(){ try{ const out=[];
       for(const id in ITEMS){ const it=ITEMS[id]; if(!it||!it.gun) continue;
         const m=itemModel(id); if(!m){ out.push({id,err:'no model'}); continue; }
