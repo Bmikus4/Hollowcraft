@@ -7037,17 +7037,28 @@ function _coastPineMask(){
   _cpTex.needsUpdate=true;
   _cpMs=performance.now()-_cpT0;   // what one rebuild costs, for __hc.pines() — this runs on the frame you cross 24 blocks, so it is a hitch if it is large
 }
+// BEN'S TREELINE STRIP. Wrapped in x because the horizon is a cylinder; CLAMPED in y because the strip's top row is sky
+// and its bottom row is forest floor, and wrapping either would put crowns under the trunks. Mipmaps are the point rather
+// than an option: at this angular size a crown is a couple of pixels, and unmipmapped it aliases into exactly the hard
+// vertical streaks the procedural version spent a `det` term fading out by hand. Cut by scripts/cut-horizon-treeline.mjs.
+const _treeTex=new THREE.TextureLoader().load('assets/horizon/treeline.png');
+_treeTex.wrapS=THREE.RepeatWrapping; _treeTex.wrapT=THREE.ClampToEdgeWrapping;
+_treeTex.colorSpace=THREE.SRGBColorSpace; _treeTex.generateMipmaps=true;
+_treeTex.minFilter=THREE.LinearMipmapLinearFilter; _treeTex.magFilter=THREE.LinearFilter;
+_treeTex.anisotropy=8;
 const _uCoastPine={ value:new THREE.Color(0.034,0.090,0.029) };   // PINE_GREEN, the approved treeline green; driven by the hour below
 const _uCoastAir ={ value:new THREE.Color(0.6,0.68,0.76) };
 const _cpU={ uMask:{value:_cpTex}, uPine:_uCoastPine, uAir:_uCoastAir, uFogCol:{value:_uPineFog}, uFogD:{value:0.01},
   uWall:{value:CFG.RENDER_DIST*CK}, uCamY:{value:CFG.SEA+2}, uWx:{value:0}, uDay:globalU.uDay,
   uSunXZ:{value:new THREE.Vector2(1,0)}, uSunUp:{value:0}, uSunCol:globalU.uSunCol,
-  uFogMul:{value:0.10}, uGain:{value:0.42}, uPixAng:{value:0.0015}, uMaskOff:{value:new THREE.Vector2()}, uBandOnly:{value:-1}, uScotG:{value:_scotG}, uScotH:{value:_scotH} };
+  uFogMul:{value:0.10}, uGain:{value:0.42}, uPixAng:{value:0.0015}, uMaskOff:{value:new THREE.Vector2()}, uBandOnly:{value:-1}, uScotG:{value:_scotG}, uScotH:{value:_scotH},
+  uTree:{value:_treeTex}, uHorizD:{value:2600.0}, uTreeH:{value:30.0}, uTreeP:{value:320.0} };
 const coastPineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, side:THREE.BackSide, fog:false,
   uniforms:_cpU, vertexShader:_horizVert, fragmentShader:[
   'precision highp float; varying vec3 vPos;',
   'uniform sampler2D uMask; uniform vec3 uPine, uAir, uFogCol, uSunCol; uniform vec2 uSunXZ;',
   'uniform float uFogD, uWall, uCamY, uWx, uDay, uSunUp, uFogMul, uGain, uPixAng, uBandOnly; uniform vec2 uMaskOff; uniform vec4 uScotG, uScotH;',
+  'uniform sampler2D uTree; uniform float uHorizD, uTreeH, uTreeP;',
   'float hash(float n){ return fract(sin(n)*43758.5453); }',
   'float nz(float x){ float i=floor(x), f=fract(x); return mix(hash(i),hash(i+1.0),f*f*(3.0-2.0*f)); }',
   'void main(){',
@@ -7091,59 +7102,57 @@ const coastPineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false
   '    float gnd=mix(SEA_H, m.g*WORLD_H, endT)-uCamY;',
   '    float hs=m.b*mix(0.30,1.0,endT);',
   // ---- THE TREES, IN WORLD UNITS ----
-  // Crowns every ~7 blocks subtend 7/dist radians at this band. TWO crown series half a period apart, taken as a max,
-  // because real canopies overlap: one series alone is a picket fence.
-  '    float f=dist/7.0;',
-  // A CROWN NARROWER THAN A PIXEL IS NOT A CROWN, IT IS NOISE. The far band puts about 126 crowns in a radian, which
-  // is a twentieth of a pixel each: sampled once per fragment, the cone term and the per-tree jitter alias into hard
-  // vertical streaks and flat slabs of colour standing on the horizon, which is exactly what the first frames showed
-  // (bench/results/cdist-near-60.png, first run). Detail is faded toward its own mean as the crown width approaches a
-  // pixel, so a band that cannot be resolved becomes the smooth treeline it would average to. uPixAng is the angle one
-  // pixel subtends, handed in from the live fov and drawing height.
-  '    float cpx=(7.0/dist)/max(uPixAng,1e-6);',
-  '    float det=smoothstep(1.4, 4.0, cpx);',
-  '    float c1=mix(0.5, nz(az*f), det), c2=mix(0.5, nz(az*f+37.7), det);',
-  '    float p1=fract(az*f), p2=fract(az*f+0.5);',
-  '    float cone1=mix(0.62, 1.0-abs(p1*2.0-1.0), det), cone2=mix(0.62, 1.0-abs(p2*2.0-1.0), det);',
-  // The generator's own envelope, 18 + 0..13 blocks, scaled by the taper. The stand term is the slow one: whole stands
-  // stand taller than their neighbours, which is what stops a treeline reading as a comb.
-  '    float stand=nz(az*(dist/40.0))*0.5+0.5;',
-  '    float h1=(18.0+13.0*c1)*(0.75+0.5*stand), h2=(18.0+13.0*c2)*(0.75+0.5*stand);',
-  // AND THE FURTHER BANDS SIT LOWER. Not a cheat: a coast at four render walls is over the curve of what this world
-  // draws, and more to the point a 30-block canopy at that range is two degrees of frame that the eye reads as a
-  // MESA when its crowns cannot be resolved. Held down, the far bands become low land at the waterline, which is what
-  // a coast running on past the render wall looks like.
-  '    float tip=max(h1*(0.42+0.58*cone1), h2*(0.42+0.58*cone2))*hs*(1.0-0.45*haze);',
-  '    if(tip<1.0) continue;',
-  '    float base=gnd/dist;',
-  '    float top=(gnd+tip)/dist;',
+  // ---- HOW BIG IT IS ON SCREEN IS A FACT ABOUT THE WORLD, NOT A RENDER SETTING ----
+  // This band was projected at uWall, the render wall, which at the boot default of six chunks is 96 blocks: a 24-block
+  // canopy there subtends 0.25 rad, FOURTEEN DEGREES of sky. That is Ben's "they extend well out into the sky" as plain
+  // arithmetic, and it also meant the treeline changed size whenever the render-distance slider moved. It is projected at
+  // a stated apparent distance now — 2600 blocks, where a 30-block pine is two thirds of a degree, a hairline standing on
+  // the horizon, which is what a coast at that range actually looks like.
+  // THE PARALLAX AND THE FOG STILL USE `dist`, and deliberately. The slide Ben approved was measured against it at 62 px
+  // per 15 blocks, and the haze is the terrain's own fog evaluated at the band's real distance. Neither of those is a
+  // question about apparent size, and moving them would throw away a behaviour he has already signed off.
+  '    float tip=uTreeH*hs*(1.0-0.45*haze);',
+  '    float base=gnd/uHorizD;',
+  '    float top=(gnd+tip)/uHorizD;',
   // ---- AND THE RUN SINKS AS IT ENDS, WHICH IS THE CURVE HE IS DESCRIBING ----
-  // Ben 08-16: they "dont fade downward like they curve with the earth. The old skybox pines did this." The old
-  // shader had it as a SINK: as the taper runs out, the whole silhouette - base and top together - is pushed down
-  // below the horizon line, so the last of the coast slips under the water instead of shortening in place. Ending by
-  // getting smaller reads as a row of trees running out; ending by going DOWN reads as land curving away from you.
-  '    float sink=(1.0-smoothstep(0.05,0.5,hs))*0.06;',
+  // Ben 08-16: they "dont fade downward like they curve with the earth. The old skybox pines did this." As the taper runs
+  // out the whole silhouette — base and top together — is pushed below the horizon line, so the last of the coast slips
+  // under the water instead of shortening in place. Ending by getting smaller reads as a row of trees running out; ending
+  // by going DOWN reads as land curving away from you. Scaled with the band: 0.06 rad was three and a half degrees of
+  // drop under a fourteen-degree band, and would be five times the height of the trees under this one.
+  '    float sink=(1.0-smoothstep(0.05,0.5,hs))*0.008;',
   '    base-=sink; top-=sink;',
-  // The skirt runs BELOW the ground line. Real terrain and the sea stand in front of this band and win the depth test,
-  // so a generous underhang costs nothing and guarantees no sliver of sky between the trees and the water.
-  // 0.28 RADIANS IS SIXTEEN DEGREES OF FRAME, and the depth test does not always take it back. The underhang exists so
-  // no sliver of sky shows between the trees and the water, and it was made generous because real terrain and the sea
-  // stand in front of this shell and win depth - true when you are ON the island looking along the coast. From out at
-  // sea there is nothing in front of it, so the skirt draws in full and the band reads as a solid dark curtain hanging
-  // off the treeline across open water, ending in a hard vertical cut where the mask runs out. That is Ben's "downward
-  // sink" and his "edges" in one artefact: bench/results/audit-sweep6-on.png, and the audit measured the treeline 95
-  // rows below the horizon. A skirt only has to cover the seam, not the sea.
-  '    float bottom=base-0.035;',
+  // The skirt runs BELOW the ground line so no sliver of sky shows between the trees and the water. It scales with the
+  // band for the same reason the sink does: 0.035 rad under a two-thirds-of-a-degree treeline is a dark curtain three
+  // times the height of the trees hanging over the sea.
+  '    float bottom=base-0.004;',
   '    if(elev>top || elev<bottom) continue;',
   '    float t=clamp((elev-base)/max(top-base,1e-5),0.0,1.0);',
+  // ---- THE TREES ARE BEN'S PHOTOGRAPH NOW, NOT A PAIR OF COSINE CONES ----
+  // Ben: "Clear the existing horizon pines, and use this instead", and his verdict on what was here was "skybox pines
+  // look trash". What was here: two crown series of 1-|2*fract(az*f)-1| taken as a max, a noise height envelope, and a
+  // `det` term that faded the whole thing toward its own mean once a crown fell under a pixel. That is a lot of machinery
+  // for a comb, and it was never going to be beautiful. The strip is a real stand with real crowns, trunks and internal
+  // shadow, and it costs one texture read instead of six noise evaluations.
+  // MIPMAPS REPLACE THE `det` FADE. The old code faded detail by hand as crowns approached a pixel, because a sampled
+  // procedural aliases into hard vertical streaks; a mipmapped texture does that averaging correctly and for free, so a
+  // band too far to resolve becomes the smooth treeline it would average to with no constant for anyone to tune.
+  '    float rep=uHorizD*6.2831853/uTreeP;',
+  '    vec4 tex=texture2D(uTree, vec2(fract(u*rep), 1.0-t));',
+  '    if(tex.a<0.35) continue;',
   // ---- AND THE LIGHT ON THEM ----
   // A treeline is not a flat colour: the side of the wood facing the sun is lit, the side facing away is a silhouette
   // with a rim. uSunXZ is the sun's bearing, so this is the same light the trees in front of it take, resolved per
   // azimuth instead of per fragment normal.
   '    float face=clamp(-dot(normalize(vec2(d.x,d.z)), uSunXZ), -1.0, 1.0);',
   '    float lit=clamp(face,0.0,1.0)*uSunUp;',
-  '    float per=0.62+0.44*mix(0.5, nz(az*f*3.1), det);',
-  '    vec3 col=uPine*per*(0.58+0.55*t)*uGain;',
+  // ITS LIGHT AND SHADE, OUR GREEN. The photograph is a lit daytime forest, and uPine is the approved treeline colour that
+  // the real foliage's night target is pinned to — feeding the photograph's chroma in raw would stand a brighter, warmer
+  // band on the horizon than the wood in front of it, which is the "sticker on the sky" this shader has been burned by
+  // twice. So the strip supplies the SILHOUETTE and the VALUE; the hue stays the one already agreed. 0.20 is the strip's
+  // own mean luminance, so `per` comes out around 1 and uGain keeps the meaning it had.
+  '    float per=dot(tex.rgb, vec3(0.2126,0.7152,0.0722))/0.20;',
+  '    vec3 col=uPine*per*uGain;',
   '    col*=mix(0.72, 1.18, lit);',
   '    col+=uSunCol*0.05*pow(clamp(-face,0.0,1.0),3.0)*uSunUp*smoothstep(0.55,1.0,t);',
   '    col*=mix(1.0,0.34,1.0-smoothstep(0.0,0.14,t));',
