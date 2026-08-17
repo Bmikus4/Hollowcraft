@@ -1129,7 +1129,11 @@ const _hcAux = new Float32Array([0.10, 0, 0.12, 0.15]);
 const _hcObj = new Float32Array([1, 0, 0, 0]);
 // x = how much of the torch's directional shaping to apply (0 restores the flat level exactly, for the A/B).
 // y = what a face pointing away from the flame keeps.
-const _hcLamp = new Float32Array([1.0, 0.35, 0, 0]);
+// [directional amount, back-face floor, REACH in blocks, smooth-radial blend]. The last two are the smooth falloff that
+// replaces the baked volume's per-block facets as the glow's SHAPE — see the block-light sample in the atlas shader. The
+// reach is written per frame from the same table the point-light pool reads, so the analytic curve and the light that
+// casts alongside it cannot describe different sized lamps.
+const _hcLamp = new Float32Array([1.0, 0.35, 18.7, 0.85]);
 // _scotK[3], the rendered-luminance floor, IS THE LEVER ON BLACK TEXELS and it is blunt. Swept at the night lantern
 // (bench/tmp-lightpool-speckle.mjs), baseline row repeated last so the reading is not thermal drift:
 //   0.008 shipped  isoBlack 2.31%  crop median 16.6      0.04   isoBlack 0.38%  median 50.6
@@ -1199,8 +1203,16 @@ const HC_LIGHT_GLSL = [
 '  return curve.x + (1.0-curve.x)*pow(sky,curve.y); }',
 'float hcSkyDirect(float sky, vec2 curve){',
 '  return pow(clamp(sky,0.0,1.0), curve.y); }',
+'// ---- A FLAME IS NOT A SINE (Ben: "flames should flicker ... never a clean sine") ----',
+'// This was one sine at 7.3 Hz, so every lamp in the world breathed in and out at the same steady rate — which reads as',
+'// a pulse, not a fire. Three incommensurate rates (7.3, 17.1, 29.7 are not simple multiples of one another) plus a',
+'// per-lamp phase from its own position, so the sum never repeats over any span anybody watches and no two lamps agree.',
+'// The FAST term is the important one: a flame moves in tenths of a second, and a slow wobble alone is a dimmer being',
+'// turned. Kept cheap — three sines, the same cost class as the one it replaces — and the mean is still 1.0, so no lamp',
+'// changes brightness on average and nothing that was tuned against this term has moved.',
 'float hcFlicker(float t, vec3 lp){',
-'  return 0.90 + 0.10*sin(t*7.3 + lp.x*1.7 + lp.z*1.3); }',
+'  float ph = lp.x*1.7 + lp.z*1.3 + lp.y*0.9;',
+'  return 1.0 + 0.055*sin(t*7.3 + ph) + 0.040*sin(t*17.1 + ph*2.3) + 0.028*sin(t*29.7 + ph*0.7); }',
 '// ---- A TORCH IS A POINT IN SPACE, NOT A LEVEL ON A FACE (Ben 08-17, with the frame: torchlight on sand is a',
 '// flat pale patch with a hard straight edge, and lit foliage is individually blown-out blocks; "light looks',
 '// like an overlay not like volumetric/projected on things"). ----',
@@ -3039,9 +3051,17 @@ function _leafGround(stage, off, baseFn){
     return baseFn(x,y,r); }; }
 const _grassBase=(x,y,r)=>{ const v=jit(r,0,26); return [56+v*0.7, 92+v, 46+v*0.6]; };   // the same grass_top and sand the world is already made of: what
 const _sandBase =(x,y,r)=>{ const v=jit(r,0,18); return [170+v,158+v,122+v]; };          // shows at the corners must be the ground it is lying on
-paintTile('grass_leaf1', _leafGround(0, 0.0, _grassBase));   // fresh fall, still green
-paintTile('grass_leaf2', _leafGround(1, 1.0, _grassBase));   // dried out, gone over to brown
-paintTile('grass_leaf3', _leafGround(2, 2.0, _grassBase));   // dead litter, grey-brown, nearly soil again
+// THE GROUND SHOWING BETWEEN THE LEAVES IS MARKED (Ben 08-17: "the iterations of grass blocks with leaves need updated
+// to thier new textures"). Once grass_top became the pack's tile, these three still had the PAINTED green at every gap
+// in the litter, so a leaf-strewn block sat next to a textured one wearing the old flat lawn — the base tile changed
+// and its variants did not, which is the doors rule.
+// ALPHA 254 IS A MARK, NOT A HOLE. A transparent base would be correct and dangerous: if the PNG never decodes, a
+// SOLID block renders with see-through gaps. 254 is opaque to every alpha test and to the eye, so a failed stamp
+// degrades to exactly today's look, and stampInto knows precisely which texels are ground and which are leaf.
+const _grassBaseMark=(x,y,r)=>{ const c=_grassBase(x,y,r); c[3]=254; return c; };
+paintTile('grass_leaf1', _leafGround(0, 0.0, _grassBaseMark));   // fresh fall, still green
+paintTile('grass_leaf2', _leafGround(1, 1.0, _grassBaseMark));   // dried out, gone over to brown
+paintTile('grass_leaf3', _leafGround(2, 2.0, _grassBaseMark));   // dead litter, grey-brown, nearly soil again
 paintTile('sand_leaf1',  _leafGround(0, 0.5, _sandBase));
 paintTile('sand_leaf2',  _leafGround(1, 1.5, _sandBase));
 paintTile('sand_leaf3',  _leafGround(2, 2.5, _sandBase));
@@ -3644,8 +3664,38 @@ function stampTile(name, file){
 // change, and stampTile stays a plain drawImage with no per-pixel pass in it.
 // The pack's lip hangs 55% down the side face where our painted one stopped at 28%. That is the pack's design and it
 // is the visible difference; it is a look call, and the tiles regenerate with one command if Ben wants it shorter.
+// STAMP UNDERNEATH WHAT IS ALREADY PAINTED, texel by texel, where the painter marked ground with alpha 254. The leaf
+// tiles are litter drawn OVER grass, so a whole-cell drawImage would throw the litter away — which is why these three
+// could not simply join the list above. Everything else about it is stampTile: async, arrData written beside the
+// canvas, one upload per stamp.
+function stampInto(name, file){
+  const i = TILEIDX[name];
+  if(i===undefined || i>=ATLAS_COUNT) return;
+  const im = new Image();
+  im.onload = ()=>{
+    try{
+      const tx=(i%ATLAS_TILES)*TILE, ty=((i/ATLAS_TILES)|0)*TILE;
+      const cur=actx.getImageData(tx,ty,TILE,TILE);
+      const sc=document.createElement('canvas'); sc.width=sc.height=TILE;
+      const sx=sc.getContext('2d'); sx.imageSmoothingEnabled=false; sx.drawImage(im,0,0,TILE,TILE);
+      const src=sx.getImageData(0,0,TILE,TILE).data, d=cur.data;
+      let n=0;
+      for(let p=0;p<d.length;p+=4){ if(d[p+3]!==254) continue;
+        d[p]=src[p]; d[p+1]=src[p+1]; d[p+2]=src[p+2]; d[p+3]=255; n++; }
+      actx.putImageData(cur,tx,ty);
+      arrData.set(d, i*LAYER_TEXELS*4);
+      arrayTex.needsUpdate=true;
+      _stampedTiles.push(name); _stampInto[name]=n;
+    }catch(e){}
+  };
+  im.src = file;
+}
+const _stampInto={};
 const _stampWant=['barrel_side','barrel_top','bedrock','birch_side','birch_top','bookshelf','coal_ore','cobble','diamond_ore','dirt','furnace_front','furnace_top','glass','gold_block','grass_side','grass_top','gravel','hay','hay_top','ice','ind_concrete','ind_grate','ind_metal','ind_panel','ind_rust','iron_ore','ladder','lantern','log_side','log_top','mossy','mud','netherite','netherrack','oak_side','oak_top','planks','planks_white','sand','snow','stone','thatch','torch','wool'];
 _stampWant.forEach(n=>stampTile(n, 'assets/blocks/'+n+'.png'));
+// The leaf variants take the SAME grass_top image, under their own litter.
+const _stampIntoWant=['grass_leaf1','grass_leaf2','grass_leaf3'];
+_stampIntoWant.forEach(n=>stampInto(n, 'assets/blocks/grass_top.png'));
 
 // =====================================================================
 //  BLOCK REGISTRY
@@ -6654,7 +6704,21 @@ function injectAtlas(mat, opts={}){
         '  float _lbest=1e9; int _li=-1;'+
         '  for(int i=0;i<3;i++){ if(uVLI[i]<=0.0) continue; float _dd=dot(uVLPos[i]-vWPos, uVLPos[i]-vWPos); if(_dd<_lbest){ _lbest=_dd; _li=i; } }'+
         '  if(_li>=0){ vec3 _lp=(_li==0)?uVLPos[0]:((_li==1)?uVLPos[1]:uVLPos[2]);'+
-        '    _lsh=mix(1.0, hcLampShape(vWPos, vObjN, _lp, uHcLamp.y), clamp(uHcLamp.x,0.0,1.0)); } }'+
+        '    _lsh=mix(1.0, hcLampShape(vWPos, vObjN, _lp, uHcLamp.y), clamp(uHcLamp.x,0.0,1.0));'+
+        // ---- AND THE FALLOFF IS SMOOTH, NOT PER-BLOCK (Ben: lights "are blocky not smooth ... should project
+        // beautiful warm light in a smooth glow on all the surfaces they contact") ----
+        // The baked volume stores one value per BLOCK. It is sampled trilinearly, which makes it continuous but
+        // piecewise LINEAR between block centres — so the glow around a torch is a faceted polygon with a visible
+        // crease every metre, which is exactly "blocky". No filter setting fixes that: the facets are in the data.
+        // The distance to the lamp is a smooth quantity and the shader already has the lamp's position for the
+        // directional term above, so the SHAPE is taken from that instead. The baked value keeps the job only it can
+        // do — saying whether the light gets here at all, which is the only thing that knows about walls — and is
+        // used as a mask rather than as a curve.
+        // SQUARED, so it is a real radial falloff rather than a linear ramp, and multiplied by the baked mask so a
+        // torch behind stone still delivers nothing through it. uHcLamp.z is the reach in blocks and .w the blend, so
+        // 0 in .w is the pre-change build exactly.
+        '    if(uHcLamp.z > 0.0){ float _ld=length(_lp-vWPos); float _lr=clamp(1.0-_ld/uHcLamp.z,0.0,1.0); _lr*=_lr;'+
+        '      _bl = mix(_bl, _lr*smoothstep(0.0,0.10,_bl), clamp(uHcLamp.w,0.0,1.0)); } } }'+
         'irradiance += 3.6 * uChunkTint * pow(_bl,1.45) * _fl * _lsh;'+   // warm torch glow added to indirect — falloff SOFTENED from _bl² (Ben 07-20: in truly dark chunks the squared curve collapsed the glow to an invisible puddle; ^1.45 carries the light to its full flood radius) + peak brightened ~16%
         // THE HELD LIGHT ENTERS THE SAME WAY, sampled at the fragment's position with no N.L, so it cannot fall off a
         // grazing floor. Same gain and curve as the placed term, its own colour, ATLAS ONLY - no shared chunk, no prop
@@ -9205,7 +9269,14 @@ scene.add(nvLight); scene.add(nvLight.target);
 // The multipliers stay on the two paths and are NOT part of the table: the hand keeps its 12% two-note flicker (61fe516, deliberate)
 // and the pool keeps `fl` (the flame's own curve, per-emitter seed) and `edge` (the fade that stops a lamp popping in at the pool's
 // range limit). Those describe how a light behaves, not how much light it is.
-const EL_DECAY = 1.3;
+// ---- HOW FAST A LAMP'S LIGHT DIES WITH DISTANCE (Ben: lights "add that red hue over everything") ----
+// 1.3 is well short of the 2 real light falls off at, and the difference is not subtle at range: at 20 blocks a decay of
+// 1.3 delivers about three times what 2 does, all of it 0xff9838 warm — so every torch laid a red-brown wash over
+// everything within its whole 34-block table reach instead of lighting a pool around itself. That wash is the "weird
+// nighttime colours", and it is the lamps rather than the night: it is the one term in the frame that is orange.
+// 1.9 rather than a flat 2 because these are enclosed flames in a game where you must be able to see to play; the near
+// field is barely touched (at 3 blocks the change is under 5%) and the far tail is where it all comes off.
+const EL_DECAY = 1.9;
 // ---- AND A LIGHT IS ONE COLOUR IN EVERY SYSTEM THAT DRAWS IT (Ben 08-06: "tinted lights should reflect their colour") ----
 // The level tiers below say how MUCH light an emitter is; they never said what colour it is, and the hard-coded warm hex on
 // each tier is why. The baked block-light volume has carried a per-block tint (LIGHT_PAL, `tint:` on the block def) since the
@@ -11644,6 +11715,10 @@ function assignPointLights(){
         const dist=Math.sqrt(_plCand[i][0]), edge=clamp((34-dist)/12,0,1);
         const _E=emitterLight(e[3], e[6]);   // e[6] is the emitter's colour class — see the push in buildModelBlocks
         pl.color.setHex(_E.c); pl.intensity=_E.i*fl*edge; pl.distance=_E.d*_lampReach.k; pl.decay=EL_DECAY;
+        // THE ANALYTIC GLOW USES THE SAME REACH THIS LAMP DOES. Written from the nearest lamp (i===0), so the smooth
+        // radial in the atlas shader describes the lamp you are standing next to rather than a constant that disagrees
+        // with it — a curve and a light of two different sizes is how the glow and the cast light drift apart.
+        if(i===0) _hcLamp[2]=_E.d*_lampReach.k;
         // A caster that HAS a light re-renders its cube on the sun's cadence — creatures move, so a one-shot map would
         // freeze their shadow in place. Gated on intensity because a torch faded out at the edge of the pool has nothing
         // to cast, and on _streamMeshed for the same reason the sun's cadence is: don't stack a shadow pass on a meshing frame.
@@ -24064,8 +24139,17 @@ function updateEmbers(dt){
     _emPos[i3]+=(_emVel[i3]+sw*0.4+wind*0.30)*dt; _emPos[i3+1]+=_emVel[i3+1]*dt; _emPos[i3+2]+=(_emVel[i3+2]+Math.cos(_emPh[i]+_emAge[i]*4.7)*0.35*0.4)*dt;
     // COOLING: yellow-white → orange → a dull red that fades out. The colour IS the age, which is why there is no
     // separate fade term: an ember that went out with its colour still bright would pop.
+    // ---- AND IT ACTUALLY GOES OUT (Ben: "the orange pixels/bulbs are still there, only at night") ----
+    // The comment above says an ember that went out with its colour still bright would pop, and the RED CHANNEL did
+    // exactly that: 0.35 + k*0.85 floors at 0.35 when k reaches zero, so the last stretch of every spark's life was a
+    // solid orange additive cube that then vanished in one frame. Multiply the whole colour by the same k the other two
+    // channels already carry and the ember cools to black before it is recycled — which is what makes it an ember rather
+    // than an orange dot.
+    // NIGHT-ONLY, EVENLY SPREAD, AND SEEMINGLY THROUGH TERRAIN all follow from where they come from: emberEmit rides the
+    // nearest LIT emitters, so there is one of these over every torch in the world the moment torches are worth lighting,
+    // and they are additive with depthWrite off, so a spark above a torch behind a wall reads as a dot on the wall.
     const k=1.0-a;
-    CA[i3]=Math.min(1,0.35+k*0.85); CA[i3+1]=k*k*0.80; CA[i3+2]=k*k*k*0.42;
+    CA[i3]=Math.min(1,(0.35+k*0.85)*k); CA[i3+1]=k*k*k*0.80; CA[i3+2]=k*k*k*k*0.42;
   }
   for(let i=0;i<_emN;i++){ const i3=i*3, o=i*16, r=_emR[i]*(1.0-_emAge[i]/_emTtl[i]*0.45);
     MA[o]=r;    MA[o+1]=0;  MA[o+2]=0;  MA[o+3]=0;
@@ -41575,8 +41659,9 @@ window.__hc={
   leanSet(v){ try{ player._lean=+v||0; player._leanShown=+v||0;
       return { lean:player._lean, shown:player._leanShown }; }catch(e){ return {err:String(e.message||e)}; } },
   stamped(){ try{ const got=_stampedTiles.slice().sort();
-      return { got:got.length, list:got,
-               missing:_stampWant.filter(n=>got.indexOf(n)<0), want:_stampWant.length }; }
+      const want=_stampWant.concat(_stampIntoWant);
+      return { got:got.length, list:got, into:_stampInto,
+               missing:want.filter(n=>got.indexOf(n)<0), want:want.length }; }
     catch(e){ return {err:String(e.message||e)}; } },
   toolDmg(id){ try{ const it=ITEMS[id]; if(!it) return null;
       if(it.tool) return WEAPON_DMG(it.tool);
@@ -44472,8 +44557,8 @@ window.__hc={
     catch(e){ return {err:String(e.message||e)}; } },
   // THE TORCH'S DIRECTIONAL SHAPING. amt 0 is the flat level exactly as it shipped, which is the A/B; lo is what a
   // face pointing away from the flame keeps.
-  lampShape(o){ try{ if(o&&o.amt!=null) _hcLamp[0]=+o.amt; if(o&&o.lo!=null) _hcLamp[1]=+o.lo;
-      return { amt:+_hcLamp[0].toFixed(3), lo:+_hcLamp[1].toFixed(3) }; }catch(e){ return {err:String(e.message||e)}; } },
+  lampShape(o){ try{ if(o&&o.amt!=null) _hcLamp[0]=+o.amt; if(o&&o.lo!=null) _hcLamp[1]=+o.lo; if(o&&o.reach!=null) _hcLamp[2]=+o.reach; if(o&&o.smooth!=null) _hcLamp[3]=+o.smooth;
+      return { amt:+_hcLamp[0].toFixed(3), lo:+_hcLamp[1].toFixed(3), reach:+_hcLamp[2].toFixed(2), smooth:+_hcLamp[3].toFixed(3), decay:EL_DECAY }; }catch(e){ return {err:String(e.message||e)}; } },
   baseAmb(v){ try{ if(v!=null) _hcAux[0]=+v; return _hcAux[0]; }catch(e){ return String(e.message||e); } },
   // THE ALBEDO-INDEPENDENT SHEEN: k is how much of the delivered light a black texel returns, knee is the albedo it
   // has faded out by. Both live in the spare halves of the same vec4, so the dial costs no new uniform.
