@@ -1112,6 +1112,13 @@ const _scotK = new Float32Array([0.45, 0, 0, 0]);
 // that keeps a lit black texel visible; w = the albedo it fades out by. z starts at 0: it is a look change and
 // only Ben can set its size, so __hc.sheen({k,knee}) is the dial and the frames come to him.
 const _hcAux = new Float32Array([0.10, 0, 0, 0.15]);
+// ---- WHAT THE SKY CAN SEE OF THIS OBJECT (per-draw) ----
+// x is the sky-and-canopy multiplier for the object about to be drawn, and it DEFAULTS TO 1 so nothing changes until
+// something sets it. The world's blocks carry this per vertex (vSky/vCan, baked by the mesher); a creature, a prop, a
+// dropped item and the viewmodel are not chunk geometry and carried nothing, so they all took the same FLAT sky fill
+// whether they stood in open ground or a sealed cave. This is the value they were missing, written per draw by
+// hcSkyBind and read by the non-atlas fill in lights_fragment_end.
+const _hcObj = new Float32Array([1, 0, 0, 0]);
 // _scotK[3], the rendered-luminance floor, IS THE LEVER ON BLACK TEXELS and it is blunt. Swept at the night lantern
 // (bench/tmp-lightpool-speckle.mjs), baseline row repeated last so the reading is not thermal drift:
 //   0.008 shipped  isoBlack 2.31%  crop median 16.6      0.04   isoBlack 0.38%  median 50.6
@@ -1257,7 +1264,7 @@ const HC_LIGHT_GLSL = [
   // difference against a 4/255 noise floor, the world drawn by whatever survived. Appended first, so the
   // definitions precede every use of them.
   THREE.ShaderChunk.lights_pars_begin += '\n' + HC_LIGHT_GLSL;
-  THREE.ShaderChunk.lights_pars_begin += '\nuniform vec4 uScotG;\nuniform vec4 uScotH;\nuniform vec4 uScotK;\nuniform vec4 uPropFill;\nuniform vec4 uHcAux;\n';
+  THREE.ShaderChunk.lights_pars_begin += '\nuniform vec4 uScotG;\nuniform vec4 uScotH;\nuniform vec4 uScotK;\nuniform vec4 uPropFill;\nuniform vec4 uHcAux;\nuniform vec4 uHcObj;\n';
   // ---- THE MOON IS NOT A LAMP (Ben 08-12: the wash "affects blocks it shouldnt ... it should not affect anything
   // unless a light source in its vicinity, other than the moon, is acting upon it within a certain radius") ----
   // The wash's release gate reads reflectedLight.directDiffuse, which is the sum of EVERY light three delivered —
@@ -1286,7 +1293,9 @@ const HC_LIGHT_GLSL = [
   // therefore scaled by what the direct lights did not deliver, so a sunlit face is left as it was and only shade is filled.
   THREE.ShaderChunk.lights_fragment_end += '\n#ifndef HC_SCOT_ATLAS\n'+
     '  { float _pfd=clamp(dot(reflectedLight.directDiffuse,'+L+'),0.0,1.0);\n'+
-    '    reflectedLight.indirectDiffuse += diffuseColor.rgb * uPropFill.rgb * uScotG.w * (1.0-_pfd); }\n#endif\n';
+    // AND IT IS OCCLUDED LIKE EVERYTHING ELSE. uHcObj.x is the object's own sky-and-canopy term, written per draw
+    // (hcSkyBind) and 1 for anything that has not been bound - so an unbound object behaves exactly as it did.
+    '    reflectedLight.indirectDiffuse += diffuseColor.rgb * uPropFill.rgb * uScotG.w * uHcObj.x * (1.0-_pfd); }\n#endif\n';
   // reflectedLight and totalEmissiveRadiance are both still in scope at dithering_fragment (same main(), later line), so the
   // gate is computed here only to mark the shader as lit. A #define inside main() is legal: the preprocessor is line-ordered
   // and lights_fragment_end always precedes dithering_fragment in all four shaders.
@@ -1576,6 +1585,7 @@ const HC_LIGHT_GLSL = [
 for(const k of ['lambert','phong','standard','physical','toon','dashed','basic','points','sprite']){
   const S=THREE.ShaderLib[k]; if(!S||!S.uniforms) continue;
   S.uniforms.uScotG={ value:_scotG }; S.uniforms.uScotH={ value:_scotH }; S.uniforms.uScotK={ value:_scotK }; S.uniforms.uPropFill={ value:_propFill }; S.uniforms.uHcAux={ value:_hcAux };
+  S.uniforms.uHcObj={ value:_hcObj };
 }
 
 // =====================================================================
@@ -3720,6 +3730,64 @@ function _mudSpots(px,pz,R,limit){
       out.push({x,z,h,wx,wz:wz2, d:+Math.hypot(x-px,z-pz).toFixed(1)}); }
   return out;
 }
+// =====================================================================
+//  SKY ACCESS AT AN ARBITRARY WORLD POINT — what a non-chunk object was missing
+// =====================================================================
+// Every block in the world carries vSky and vCan, baked per vertex by the mesher. Nothing else does: a creature, a
+// prop, a dropped item and the viewmodel are not chunk geometry, so they took the non-atlas prop fill FLAT — a Wretch
+// in a sealed cave and a Wretch on open ground were filled by the sky identically while every block around them was
+// not. _ssky cannot answer for them: it is chunk-local and only live while a chunk is being meshed.
+//
+// So this walks the column, and it uses THE SAME RULE the mesher uses rather than a second one: occludesSky, which is
+// isOpaque minus the things you can see through — leaves and glass are NOT sky occluders (Ben 07-23), which is why a
+// forest floor is "open sky" to the cave gate and why the canopy is a separate optical depth rather than a wall.
+// Leaf layers are counted on the way up and returned as `can`, exactly what vCan means.
+//
+// THE COST IS THE CACHE. A column walk is up to 128 getBlock calls, which is nothing once and ruinous per object per
+// frame, so a sample is keyed to its own block cell and lives for CACHE_MS. Objects mostly stand still or move within
+// a cell; the ones that do not are creatures, and a creature crossing a block boundary is exactly when its light
+// should change. Cleared wholesale on a block edit, because a placed block above you is the one case a stale answer
+// is visibly wrong.
+const _objSky=new Map(); const _OBJSKY_MS=400; let _objSkyN=0, _objSkyHit=0;
+function objSkyRaw(wx,wy,wz){
+  const x=Math.floor(wx), y=Math.floor(wy), z=Math.floor(wz);
+  const k=x+','+y+','+z, now=performance.now();
+  const c=_objSky.get(k);
+  if(c && now-c.t < _OBJSKY_MS){ _objSkyHit++; return c; }
+  let sky=1, can=0;
+  const top=Math.min(CFG.WORLD_H-1, y+64);          // 64 blocks is deeper than any canopy or roof in this world and bounds the walk
+  for(let yy=y+1; yy<=top; yy++){
+    const id=getBlock(x,yy,z); if(!id) continue;
+    if(occludesSky[id]){ sky=0; break; }
+    const b=B[id]; if(b && b.cat==='cutout' && /leaf|leaves/i.test(b.name||'')) can++;
+  }
+  const out={ sky, can, t:now }; _objSky.set(k,out); _objSkyN++;
+  if(_objSky.size>4096) _objSky.clear();
+  return out; }
+// THE SAME TWO CURVES THE BLOCKS TAKE, and they are the shader's own: hcSkyAmbient(sky,curve) and hcCanopy(can,canopy,
+// dayS) from HC_LIGHT_GLSL, evaluated here because a per-object value cannot be a varying. Written against the SAME
+// uniforms the GPU reads, so the two cannot drift to different numbers even though they are two implementations —
+// which is the honest cost of a per-draw scalar, and is why the formula is quoted here rather than re-derived.
+function objSkyFill(wx,wy,wz){
+  const r=objSkyRaw(wx,wy,wz);
+  const cv=globalU.uSkyCurve.value, cp=globalU.uCanopy.value, dayS=Math.max(0,Math.min(1,globalU.uDay.value));
+  const amb = cv.x + (1.0-cv.x)*Math.pow(r.sky, cv.y);                       // hcSkyAmbient
+  const canT = 1.0 + (Math.max(cp.y, Math.pow(cp.x, r.can)) - 1.0)*dayS;     // hcCanopy: mix(1, max(floor, k^layers), dayS)
+  return { fill: amb*canT, sky:r.sky, can:r.can }; }
+// BIND IT TO A DRAW. three calls onBeforeRender per object per frame with the material about to be used, and _hcObj is
+// a shared Float32Array, so writing it here sets it for THIS draw and the next object overwrites it for its own. An
+// object that is never bound keeps 1 and behaves exactly as it did before any of this.
+const _hcObjV=new THREE.Vector3();
+function hcSkyBind(obj){ if(!obj || obj.userData._hcBound) return obj; obj.userData._hcBound=true;
+  const prev=obj.onBeforeRender;
+  obj.onBeforeRender=function(r,sc,cam,geo,mat,grp){
+    try{ this.getWorldPosition(_hcObjV); _hcObj[0]=objSkyFill(_hcObjV.x,_hcObjV.y,_hcObjV.z).fill; }catch(e){ _hcObj[0]=1; }
+    if(prev) prev.call(this,r,sc,cam,geo,mat,grp); };
+  // AND PUT IT BACK AFTERWARDS, or every object drawn after a bound one inherits its cave. onAfterRender is the only
+  // hook that runs between this draw and the next object's, and an unbound object never touches the value at all.
+  const prevA=obj.onAfterRender;
+  obj.onAfterRender=function(r,sc,cam,geo,mat,grp){ _hcObj[0]=1; if(prevA) prevA.call(this,r,sc,cam,geo,mat,grp); };
+  return obj; }
 function surfaceH(wx, wz){
   const kk = wx+','+wz; let h=_hmCache.get(kk); if (h!==undefined) return h;
   // domain warp
@@ -22385,7 +22453,7 @@ function spawnDrop(id,n,x,y,z,delay,did,st){ if(!ITEMS[id])return; n=n||1;
   { const bb=_visBox(_mdl), sz=bb.getSize(new THREE.Vector3()), c=bb.getCenter(new THREE.Vector3());
     _mdl.position.sub(c);
     var _half={ x:Math.max(0.045,sz.x/2), y:Math.max(0.045,sz.y/2), z:Math.max(0.045,sz.z/2) }; }   // a floor of 4.5 cm: a flat card has no thickness to collide with or to pick against
-  dropGroup.add(m);
+  dropGroup.add(m); hcSkyBind(m);   // a dropped item under a canopy is lit like the ground under it, not like open sky
   const a=Math.random()*6.283;   // pop out of the block with a little random impulse
   // THE STATE TRAVELS WITH THE DROP. A gun on the floor is a specific gun — its brand, its attachments, its
   // loaded magazine — and a teammate who picks it up gets the stack THEIR client builds. Broadcasting only the
@@ -41172,6 +41240,23 @@ window.__hc={
   waterSim(on){ try{ if(on!=null){ _wOn=!!on; if(!_wOn){ _wQ.clear(); } }
       return { on:_wOn, queue:_wQ.size, cells:_wLev.size, ticks:_wRan, moved:_wMoved, cap:WATER_CAP, hz:WATER_HZ, max:WATER_MAX }; }
     catch(e){ return {err:String(e.message||e)}; } },
+  // QA: stand the player on the nearest shore, facing inland. The bench cannot do this itself — surfaceH, CFG and player
+  // are module scope and a page eval cannot see any of them, which is the same wall ITEMS and `scene` sit behind — and a
+  // water bench that assumes spawn is on a beach is a bench about one seed.
+  toShore(maxR){ try{
+      const p=player.pos, R=+maxR||160;
+      for(let r=2;r<R;r+=2) for(let a=0;a<16;a++){
+        const th=a*Math.PI/8, x=Math.round(p.x+Math.cos(th)*r), z=Math.round(p.z+Math.sin(th)*r);
+        if(surfaceH(x,z)>CFG.SEA) continue;
+        // Stand two blocks BACK from the water, on dry land, looking at it: that is where a person digs from.
+        const bx=Math.round(x-Math.cos(th)*2), bz=Math.round(z-Math.sin(th)*2);
+        const by=surfaceH(bx,bz);
+        if(by<=CFG.SEA) continue;
+        player.pos.set(bx+0.5, by+1, bz+0.5); player.vel.set(0,0,0);
+        player.yaw=Math.atan2(-(x-bx), -(z-bz));
+        return { at:[bx,by,bz], water:[x,surfaceH(x,z),z], r, sea:CFG.SEA }; }
+      return {err:'no coast within '+R}; }
+    catch(e){ return {err:String(e.message||e)}; } },
   // QA: cut a channel from a point, in a straight line, one block wide and one deep — the thing Ben described doing by
   // hand. Returns what was dug so a bench can watch those exact cells fill rather than hunting for water.
   waterChannel(len, dir){ try{
@@ -41183,6 +41268,17 @@ window.__hc={
         const x=x0+dx*i, z=z0+dz*i, gy=surfaceH(x,z);
         setBlockWorld(x,gy,z,AIR,true); dug.push([x,gy,z]); }
       return { dug:dug.length, from:[x0,z0], first:dug[0]||null, last:dug[dug.length-1]||null, queue:_wQ.size }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // QA: pour a source and watch what it does, which is the direct test of "downward and outward". A dug trench does not
+  // test it unless the trench is BELOW the water it is dug from — the first version of this bench cut a channel at
+  // surfaceH on ground standing two blocks proud of the sea and then reported the simulation dead, when the simulation had
+  // correctly declined to run water uphill.
+  waterPour(up, dist){ try{
+      const d=+dist||2, L=lookDir();
+      const x=Math.round(player.pos.x+L.x*d), z=Math.round(player.pos.z+L.z*d);
+      const y=surfaceH(x,z)+(up==null?2:+up);
+      setBlockWorld(x,y,z,WATER,true);
+      return { at:[x,y,z], ground:surfaceH(x,z), queue:_wQ.size }; }
     catch(e){ return {err:String(e.message||e)}; } },
   humanGone(){ try{ if(_humanOne){ scene.remove(_humanOne); _humanOne=null; return {removed:true}; } return {removed:false}; }
     catch(e){ return {err:String(e.message||e)}; } },
@@ -42226,6 +42322,12 @@ window.__hc={
       try{ sm('sky',skyMat); }catch(e){}
       try{ sm('ocean',oceanMat); }catch(e){}
       return { onModel:out.filter(o=>o.callsAmbient).map(o=>o.path), rows:out }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // WHAT THE SKY CAN SEE OF A POINT, and what the fill therefore becomes. No arguments reads the player's own eye.
+  // sky 0 is walled in, 1 is open; can is leaf layers overhead; fill is the multiplier a bound object's draw applies.
+  objSky(x,y,z){ try{ if(x==null){ x=player.pos.x; y=player.pos.y+EYE; z=player.pos.z; }
+      const r=objSkyFill(+x,+y,+z);
+      return { sky:r.sky, can:r.can, fill:+r.fill.toFixed(4), samples:_objSkyN, cacheHits:_objSkyHit, cached:_objSky.size }; }
     catch(e){ return {err:String(e.message||e)}; } },
   baseAmb(v){ try{ if(v!=null) _hcAux[0]=+v; return _hcAux[0]; }catch(e){ return String(e.message||e); } },
   // THE ALBEDO-INDEPENDENT SHEEN: k is how much of the delivered light a black texel returns, knee is the albedo it
