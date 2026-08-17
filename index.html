@@ -5392,6 +5392,7 @@ function generateChunk(c){
   if(i < CK*CK){ c._genI=i; _gc(1); _gc(2); _gc(3); _gc(4); _gc(5); _gc(6); return; }   // resume next frame
   c._genI=0;
   c.generated=true;                        // mark before decorate (uses getBlock)
+  _worldRev++;                             // the occupancy volume was built from a world that did not include this chunk yet — see buildOccVolume
   _gc(1);
   if(!brRegion(c.cx*CK)){ oreVeins(c); _gc(2); decorate(c); _gc(3); beachLog(c); _gc(4); enrichTerrain(c); } else { _gc(2); _gc(3); _gc(4); }   // THE BACKROOMS region is a hand-built voxel maze → skip ALL terrain decoration/ores/trees (Ben 07-24)
   _gc(5);
@@ -5689,6 +5690,12 @@ const _emptyLight3D = (()=>{ const t=new THREE.Data3DTexture(new Uint8Array(1), 
 const OCC_N = 64, OCC_HALF = OCC_N>>1;
 const _occData = new Uint8Array(OCC_N*OCC_N*OCC_N);
 let _occOx=1e9, _occOy=0, _occOz=1e9, _occValid=false, _occBuilds=0, _occMs=0, _occWant=true;
+// THE VOLUME GOES STALE AND MOVING IS NOT THE ONLY WAY. Measured: standing still in a forest the volume read 2081 of
+// 6000 cells WRONG, because it was filled at an origin whose chunks had not streamed in yet and nothing told it they
+// had arrived. So the world carries a revision — bumped where a chunk finishes generating and where any block is
+// edited — and the volume rebuilds when the revision it was built at is stale. Throttled, because during streaming
+// the revision changes many times a second and a full fill is ~8.5 ms.
+let _worldRev=0, _occRev=-1, _occNextT=0;
 const _occTex = (()=>{ const t=new THREE.Data3DTexture(_occData, OCC_N, OCC_N, OCC_N);
   t.format=THREE.RedFormat; t.type=THREE.UnsignedByteType;
   t.minFilter=THREE.NearestFilter; t.magFilter=THREE.NearestFilter;   // point sampling: a marcher asks "is this cell solid", not "what is the average around here"
@@ -5700,7 +5707,15 @@ function buildOccVolume(force){
   const px=Math.floor(player.pos.x), py=Math.floor(player.pos.y), pz=Math.floor(player.pos.z);
   const ox=(Math.floor((px-OCC_HALF)/8)*8), oz=(Math.floor((pz-OCC_HALF)/8)*8);
   let oy=Math.floor((py-OCC_HALF)/8)*8; if(oy<0) oy=0; if(oy+OCC_N>WH) oy=Math.max(0, WH-OCC_N);
-  if(!force && _occValid && ox===_occOx && oy===_occOy && oz===_occOz) return false;
+  const moved = !(ox===_occOx && oy===_occOy && oz===_occOz);
+  const stale = _occRev!==_worldRev;
+  const now = performance.now();
+  if(!force){
+    if(!_occValid) { /* first build always runs */ }
+    else if(moved) { /* a move always rebuilds: the data under the player is simply not there */ }
+    else if(stale && now>=_occNextT) { /* a stale volume rebuilds, but no more often than the throttle */ }
+    else return false;
+  }
   const t0=performance.now();
   _occData.fill(0);
   let ck=null, ckx=1e9, ckz=1e9;
@@ -5714,8 +5729,10 @@ function buildOccVolume(force){
         const b=ck.blocks[idx(lx,wy,lz)];
         if(b!==AIR && isOpaque[b]) _occData[base + y*OCC_N] = 255; } } }
   _occOx=ox; _occOy=oy; _occOz=oz; _occValid=true; _occBuilds++;
+  _occRev=_worldRev;
   _occTex.needsUpdate=true;
   _occMs=performance.now()-t0;
+  _occNextT=performance.now()+250;   // at most four full fills a second while chunks stream
   return true;
 }
 
@@ -10924,6 +10941,7 @@ function _bulkRun(fn){ beginBulk(); try{ fn(); } finally { endBulk(); } }   // b
 function setBlockWorld(wx,wy,wz,b,record){
   if (wy<1||wy>=WH) return;
   const c=getChunk(wx>>4,wz>>4); if(!c||!c.generated) return;
+  _worldRev++;   // every edit ages the occupancy volume — see buildOccVolume
   const lx=wx&15, lz=wz&15;
   // COVERING GRASS TURNS IT TO DIRT, wherever the cover comes from (Ben: "grass blocks cannot spawn under other grass
   // blocks, they should be dirt"). The generator's own sweep catches the columns it builds, and it is not enough: the
