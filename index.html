@@ -13454,7 +13454,10 @@ const _sunDir=new THREE.Vector3(), _keyDir=new THREE.Vector3(), _tmp=new THREE.V
 // floor = the key light's minimum height above the player as a fraction of its distance, i.e. how low it may rake (0.45
 // was the shipped value and it is why every shadow in the game was steep); nb = the noon normalBias, unchanged from what
 // the light was built with; nbMax = how far that bias may be multiplied as the light grazes. sinE is a readout.
-const _sunArc={ floor:0.16, nb:0.45, nbMax:3.0, sinE:1 };
+// snap = the texel-snap mode, and it is a dial because it is the A/B for shadow crawl: 1 is the light-space snap, 0 is
+// off. See the snap itself in updateSky for why the world-axis version it replaces could not work.
+const _sunArc={ floor:0.16, nb:0.45, nbMax:3.0, sinE:1, snap:1 };
+const _snapR=new THREE.Vector3(), _snapU=new THREE.Vector3(), _snapD=new THREE.Vector3(), _snapCtr=new THREE.Vector3();
 // THE CELESTIAL MODEL'S ONE PARAMETER. See the arc in updateSky for why a latitude replaces the old constant tilt.
 const _SUN={ lat:51.5 };
 const _fogGrey=new THREE.Color();   // scratch tint for the fog-weather event (weather.fog is driven in the existing updateWeather)
@@ -13549,9 +13552,37 @@ function updateSky(dt){
   // texel snap to kill shimmer
   const sc=sunLight.shadow.camera, R=46;   // tight radius → shadows focus near the player (sharper, more visible) and the shadow pass covers far less canopy (big forest-FPS win)
   sc.left=-R; sc.right=R; sc.top=R; sc.bottom=-R; sc.near=1; sc.far=kd*2.2;
+  // ---- THE SNAP IS IN THE LIGHT'S OWN SPACE, NOT IN WORLD X/Z ----
+  // What was here rounded the light's world x and z to a texel. That is only the right grid when the light happens to
+  // look down a world axis. The shadow map's texels are laid out on the shadow camera's OWN right/up axes, so as the
+  // sun swings through the day, rounding world x/z lands the projection on a grid that is rotated away from the texel
+  // grid by the light's azimuth — the ortho box then slides by a fraction of a texel every frame and the shadow edges
+  // crawl, which is the fault the snap exists to prevent. It went unnoticed because the old sun barely moved in
+  // azimuth: it was a fixed tilted circle. The real arc now sweeps 90 to 270 degrees across a day, so the error is
+  // live at almost every hour.
+  // WHAT IS SNAPPED IS THE BOX CENTRE, and both the light and its target move by the same delta so the DIRECTION is
+  // untouched — snapping the light's position alone would rotate the light slightly, which is a second bug in the
+  // same line. The centre is the target (the player), projected onto the light's right and up axes, rounded to whole
+  // texels there, and the difference carried back into world space.
+  // The up reference flips to +Z when the light is near-vertical, or the basis degenerates as dir approaches (0,-1,0)
+  // — which is exactly where a high summer sun sits at noon.
   const texel=(R*2)/sunLight.shadow.mapSize.width;
-  sunLight.position.x=Math.round(sunLight.position.x/texel)*texel;
-  sunLight.position.z=Math.round(sunLight.position.z/texel)*texel;
+  if(_sunArc.snap){
+    _snapD.copy(sunLight.target.position).sub(sunLight.position).normalize();          // the light's view direction
+    _snapU.set(0,1,0); if(Math.abs(_snapD.y)>0.999) _snapU.set(0,0,1);
+    _snapR.crossVectors(_snapD,_snapU).normalize();                                    // shadow-map +x in world space
+    _snapU.crossVectors(_snapR,_snapD).normalize();                                    // shadow-map +y in world space
+    _snapCtr.copy(sunLight.target.position);
+    const a=_snapCtr.dot(_snapR), b=_snapCtr.dot(_snapU);
+    const da=Math.round(a/texel)*texel-a, db=Math.round(b/texel)*texel-b;
+    _snapCtr.set(0,0,0).addScaledVector(_snapR,da).addScaledVector(_snapU,db);            // the world-space nudge onto the texel grid
+    // A DEGENERATE BASIS WOULD POISON THE LIGHT WITH NaN AND NEVER RECOVER, because position and target are carried
+    // frame to frame: one NaN in either is permanent. cross() of two parallel vectors is the zero vector and
+    // normalize() of that is NaN, so the guard is on the RESULT rather than on the inputs it could come from.
+    if(isFinite(_snapCtr.x) && isFinite(_snapCtr.y) && isFinite(_snapCtr.z)){
+      sunLight.position.add(_snapCtr);
+      sunLight.target.position.add(_snapCtr); sunLight.target.updateMatrixWorld(); }
+  }
   sc.updateProjectionMatrix();
   // SMOOTH sun↔moon blend across the ENTIRE twilight band — no hard boolean snap (that instant warm→blue cut was the harsh transition)
   { const gz=smooth(0.0,0.25,Math.abs(elev));                                       // grazing (dawn/dusk orange) → high (white)
@@ -24201,8 +24232,22 @@ function icon3DURL(id){ if(_icon3D[id])return _icon3D[id];
 // the same trap MUZZLE_IMG fell into (see the preload); an icon baked during module evaluation would take the
 // exception instead of an answer.
 const _hasPackModel=id=>{ try{ return !!GLB_ITEMS[id]; }catch(e){ return false; } };
-function slotIconURL(id){ const it=ITEMS[id]; const modelBlock = it&&it.block!=null && B[it.block] && B[it.block].cat==='model';   // fence/bars/chair/gate/door/pot/etc. → render their real 3D model, not a flat grass tile
-  return (_hasPackModel(id)||(it&&(it.gun||it.tool||it.ghost||it.nvg||it.atlas||it.block===BID.torch||it.block===BID.torch_unlit||it.block===BID.lantern||it.block===BID.candle||modelBlock||id==='handcuffs')))?icon3DURL(id):iconURL(id); }   // 3D icon for modelled items (Ghost, NVG, Atlas, …), else 2D
+// ONE ANSWER TO "DOES THIS ITEM HAVE A MODEL", read by the square icon and the grid icon both. It was written twice,
+// and the two copies had already drifted: the grid list carried spear, armor and shield and the square list carried
+// handcuffs, so a spear was a photographed model in the grid and a hand-drawn glyph in the hotbar, and the same item
+// answered the same question two ways. That is the "hand-written list of flags" the note above this says Ben's rule
+// replaces, surviving as two hand-written lists.
+// THE LIST IS THE UNION AND IT INCLUDES it.att, WHICH IS ITEM 2 (Ben: "attachment items are not showing their 3d
+// models in game… in the hand or inventory"). itemModel has built a real object for an unfitted attachment for some
+// time — the DROP has always been right, because spawnDrop calls itemModel — and neither icon gate nor the viewmodel
+// list ever heard about it, which is the four-dispatch trap in its purest form: three of the four were wrong and the
+// one that was right is the one nobody looks at.
+const _hasItemModel=id=>{ const it=ITEMS[id]; if(!it) return false;
+  if(_hasPackModel(id)) return true;
+  if(it.block!=null && B[it.block] && B[it.block].cat==='model') return true;   // fence/bars/chair/gate/door/pot/… → the real 3D model, not a flat grass tile
+  return !!(it.gun||it.tool||it.spear||it.att||it.ghost||it.nvg||it.atlas||it.armor||it.shield||it.syringe||it.flashlight
+            ||it.block===BID.torch||it.block===BID.torch_unlit||it.block===BID.lantern||it.block===BID.candle||id==='handcuffs'); };
+function slotIconURL(id){ return _hasItemModel(id)?icon3DURL(id):iconURL(id); }   // 3D icon for modelled items (Ghost, NVG, Atlas, an unfitted optic, …), else 2D
 // ---- SIDE-ON ICONS, FOR THE GRID -------------------------------------------------------------------------------
 // Ben 08-11: "ALL items need to display their side faces, so 2d, top down from the side. they all need to face the
 // same direction too. back to bottom, top to front of the item." and "all items should scale up to their exact size".
@@ -24280,11 +24325,7 @@ function iconSideURL(id){ if(_iconSide[id]) return _iconSide[id];
   return _iconSide[id]; }
 // A modelled item bakes side-on; a plain sprite item (a block, a berry) has no model to turn, so it keeps its flat
 // icon and simply fills its 1x1 cell.
-function gridIconURL(id){ const it=ITEMS[id];
-  const modelBlock = it&&it.block!=null && B[it.block] && B[it.block].cat==='model';
-  if(_hasPackModel(id)||(it&&(it.gun||it.tool||it.spear||it.ghost||it.nvg||it.atlas||it.armor||it.shield||modelBlock
-          ||it.block===BID.torch||it.block===BID.torch_unlit||it.block===BID.lantern||it.block===BID.candle
-          ||id==='handcuffs'))){ const u=iconSideURL(id); if(u) return u; }
+function gridIconURL(id){ if(_hasItemModel(id)){ const u=iconSideURL(id); if(u) return u; }
   return iconURL(id); }
 const _dropGeo=new THREE.BoxGeometry(0.26,0.26,0.26);
 function spawnDrop(id,n,x,y,z,delay,did,st){ if(!ITEMS[id])return; n=n||1;
@@ -27851,6 +27892,25 @@ function setViewItem(id){ if(view.id===id)return; view.id=id;
   // above warns about: itemModel already returns a real mesh for these, and without an entry here the right hand
   // would still show the extruded pixel sprite while the left hand held the apple.
   else if(GLB_ITEMS[id] && glbHas(GLB_ITEMS[id].id)){ const mm=itemModel(id); mm.rotation.y=0.4; view.mesh=mm; }   // already centred and sized by buildGlbItem — the same treatment the Ghost, the NVGs and the Atlas get
+  // AN UNFITTED ATTACHMENT IS AN OBJECT YOU ARE CARRYING (Ben: "attachment items are not showing their 3d models in
+  // game… in the hand or inventory"). itemModel has centred and scaled these to a hand-sized 0.30 for the drop and the
+  // icon since they were given models; this list is the dispatch that never heard, so a suppressor in your own hand was
+  // the extruded placeholder glyph while the identical suppressor lying on the ground was the model.
+  // 1.9 AND NOT THE TOOLS' SCALE. itemModel normalises an attachment's longest axis to 0.30 because a red dot measured
+  // against a GUN is a speck in a 100 px icon tile; 0.30 in the viewmodel's own units is a speck in the hand too. 1.9
+  // brings it to 0.57, between the shell's 0.16 and a pickaxe's fill, which is what a fist-sized object reads as.
+  // The pose is the extruded sprite's own, so a suppressor sits in the hand at the same angle as everything else that
+  // is carried rather than wielded — the difference between the two forms should be the object, not the grip.
+  // SIZED AND PLACED LIKE THE SHOTGUN SHELL, which is the one other thing in this list that is a small object you are
+  // carrying rather than a tool you are wielding — same 0.16-ish final extent, same (0.16, 0.10, 0.05) in the
+  // viewmodel's own units. itemModel normalises an attachment's longest axis to 0.30 because a red dot measured
+  // against a GUN would be a speck in a 100 px icon tile, and 0.30 THIS CLOSE TO THE EYE is a drainpipe: the first
+  // pass shipped 1.9 off the sprite's own numbers and the suppressor filled a third of the frame.
+  // The offsets are divided back out by the scale for the same reason — writing another branch's positions beside a
+  // different scale is how a held item ends up half a metre out of shot.
+  else if(it.att && ATT_DEFS[it.att]){ const grp=new THREE.Group(); const mm=itemModel(id), K=0.62;
+    mm.position.set(0.16/K, 0.10/K, 0.05/K); grp.add(mm); grp.scale.setScalar(K);
+    grp.rotation.set(0.1,0.18+Math.PI/2,0.15); view.mesh=grp; }
   else { const grp=new THREE.Group(); const em=extrudeIcon(id); em.position.set(0.34,0.44,0); grp.add(em); grp.scale.setScalar(0.5);
     grp.rotation.set(0.1,0.18+Math.PI/2,0.15); view.mesh=grp; }   // food / materials → extruded pixel model
   view.group.add(view.mesh); applyViewFog(view.mesh); }
@@ -46203,8 +46263,10 @@ window.__hc={
       return { vib:+u.uDuskVib.value.toFixed(3), red:+u.uDuskRed.value.toFixed(3),
                sunElevDeg:+(Math.asin(Math.max(-1,Math.min(1,globalU.uSunDir.value.y)))*57.29578).toFixed(2) }; }
     catch(e){ return {err:String(e.message||e)}; } },
-  sunArc(o){ try{ if(o){ if(o.floor!=null) _sunArc.floor=+o.floor; if(o.nb!=null) _sunArc.nb=+o.nb; if(o.nbMax!=null) _sunArc.nbMax=+o.nbMax; }
+  sunArc(o){ try{ if(o){ if(o.floor!=null) _sunArc.floor=+o.floor; if(o.nb!=null) _sunArc.nb=+o.nb; if(o.nbMax!=null) _sunArc.nbMax=+o.nbMax;
+        if(o.snap!=null) _sunArc.snap=o.snap?1:0; }
       return { floor:+_sunArc.floor.toFixed(3), nb:+_sunArc.nb.toFixed(3), nbMax:+_sunArc.nbMax.toFixed(2),
+               snap:_sunArc.snap, texel:+((46*2)/sunLight.shadow.mapSize.width).toFixed(4),
                elevDeg:+(Math.asin(Math.max(-1,Math.min(1,_sunArc.sinE)))*57.29578).toFixed(2),
                normalBias:+sunLight.shadow.normalBias.toFixed(3),
                sunElevDeg:+(Math.asin(Math.max(-1,Math.min(1,globalU.uSunDir.value.y)))*57.29578).toFixed(2) };
