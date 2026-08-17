@@ -17606,7 +17606,11 @@ function netMsg(m){
     else { herobrine.haunting=false; herobrine.owner=null; NET.hbnet=null; if(typeof despawnHerobrine==='function')despawnHerobrine(); } } }
   // A PEER'S SHOT IS A SOUND, NOT A STRIPE (Ben 2026-08-12: "bullets should not have trails"). This drew the same spark
   // line down the peer's ray that the local trace used to; both are gone, or one player would see trails and the other not.
-  else if(m.t==='shot'){ const ox=m.x,oy=m.y,oz=m.z; if(typeof playSample==='function')playSample(m.g==='r'?'gun_rifle':'gun_ar',{x:ox,y:oy,z:oz},1.0); }   // a peer fired → the report
+  else if(m.t==='shot'){ const ox=m.x,oy=m.y,oz=m.z;
+    // A FLARE IS NOT A GUNSHOT on this side either. 'f' is the flare gun's letter and it gets the same synthesised
+    // hollow thump the shooter hears, at the listener's own distance and pan — one function, so the two cannot drift.
+    if(m.g==='f'){ if(typeof flareThump==='function') flareThump(ox,oy,oz); }
+    else if(typeof playSample==='function')playSample(m.g==='r'?'gun_rifle':'gun_ar',{x:ox,y:oy,z:oz},1.0); }   // a peer fired → the report
   else if(m.t==='hw'){ if(wretchOwner()===NET.id && typeof hurtWretch==='function'){                                   // a peer's shot (hw = firearm hits) — I own the Wretch/boss, so I apply the damage
       const _t=m.h?wretchExtra.find(w=>w._hid===m.h && w.active):null, _prev=wretch;                                   // the guest resolved WHICH creature its own ray struck and sent that creature's _hid; without it every guest bullet landed on the host's primary
       if(_t) wretch=_t;
@@ -17726,7 +17730,7 @@ function netUpdate(dt){ if(!NET.on)return;
                ea:(typeof EAT!=='undefined'&&EAT.active)?+Math.min(1,EAT.t/Math.max(0.001,EAT.dur)).toFixed(2):0,
                // `sw` = the swim phase, 0 when not swimming. The PHASE and not a pose, and not a stroke rate either:
                // the receiver re-solves the limbs from it, so the wire cost of a swimming peer is one number.
-               sw:player.swimming?+((player.swimPh||0)%1).toFixed(3):0}); } }   // po: posture (0 stand / 1 crouch / 2 prone) — a crawling peer must not read as standing
+               sw:player.swimming?+((player.swimPh||0)%1).toFixed(3):0}); NET._lastP={po,ln,ea:0,held,at}; } }   // po: posture (0 stand / 1 crouch / 2 prone) — a crawling peer must not read as standing
   if(NET.host){ NET.tAcc=(NET.tAcc||0)+dt; if(NET.tAcc>1){ NET.tAcc=0; netSend({t:'time',tm:worldTime,rt:+((typeof weather!=='undefined'&&weather.rainTgt)||0).toFixed(2),ft:+((typeof weather!=='undefined'&&weather.fogTgt)||0).toFixed(2)}); } }   // day/night + weather targets → guests lerp
   for(const id in NET.avatars){ const a=NET.avatars[id], k=Math.min(1,dt*12);
     a.g.position.x+=(a.tx-a.g.position.x)*k; a.g.position.y+=(a.ty-a.g.position.y)*k; a.g.position.z+=(a.tz-a.g.position.z)*k; a.g.rotation.y=a.tyaw+Math.PI; a.g.visible=!a.dead;   // +π: the model's front (held-arm side) was pointing opposite the look direction → it rendered backward
@@ -23744,7 +23748,22 @@ function updateStuckSpears(dt){ for(let i=stuckSpears.length-1;i>=0;i--){ const 
 //
 // GRAVITY IS 9.5, NOT THE SPEAR'S 20. A flare is a slow lazy arc you can watch and walk under; a spear is a thrown
 // weapon and its trajectory is meant to be flat. Same reason the launch speed is 26 rather than 28-and-power.
-const flares=[]; const _FLARE_GRAV=9.5, _FLARE_BURN=34, _FLARE_FADE=4.0;
+// ---- IT IS A SIGNAL FLARE, SO IT HANGS AND IT IS BRIGHT (Ben: "should be like 10x brighter, and it should move much
+// slower in the sky, and actually kind of stay up there for a second, it should be realistic/usable") ----
+// The first pass borrowed the thrown spear's ballistics, and a spear is a weapon: 26 m/s on 9.5 gravity is a fast flat
+// arc that is over in two seconds. A real signal flare is fired slowly, burns at the top of its climb and comes down
+// under a parachute at little more than walking pace — which is what makes it usable, because the thing that lights
+// the ground is the time it spends above it.
+//   So: a slow launch, gentle gravity on the way up, and a DESCENT CLAMP on the way down. The clamp is the parachute,
+// and it is one line rather than a canopy simulation: past the apex the fall is limited to 1.3 m/s whatever gravity has
+// accumulated, so the flare drifts rather than drops. The horizontal drag bleeds off the launch speed over the same
+// stretch, so it does not sail away downrange while it hangs.
+const flares=[]; const _FLARE_GRAV=4.5, _FLARE_BURN=34, _FLARE_FADE=4.0;
+const _FLARE_SPD=13, _FLARE_SINK=1.3, _FLARE_DRAG=0.55;
+// TEN TIMES THE LIGHT, and the reach with it: 26 at 24 blocks lit its own patch of ground and nothing else, which is a
+// road flare, not a signal. 260 over 55 blocks is a flare that marks a position — and it costs nothing extra, because it
+// is one already-resident pool light either way.
+const _FLARE_LIGHT=260, _FLARE_REACH=55;
 let _flareLightSlot=-1;
 const _flareCol=new THREE.Color(0xff3c14);
 function flareLive(){ for(let i=0;i<flares.length;i++) if(!flares[i].dead) return true; return false; }
@@ -23755,13 +23774,27 @@ function buildFlareMesh(){ const g=new THREE.Group();
   const halo=new THREE.Mesh(new THREE.SphereGeometry(0.20,10,8),
     new THREE.MeshBasicMaterial({color:0xff4a1c, transparent:true, opacity:0.42, depthWrite:false, blending:THREE.AdditiveBlending}));
   halo.renderOrder=7; g.add(core); g.add(halo); g.userData.core=core; g.userData.halo=halo; return g; }
+// ---- WHAT A FLARE GUN SOUNDS LIKE (Ben: "the flare should make a sound when fired") ----
+// A hollow thump, not a report: a flare gun is a low-pressure smoothbore launching a slow projectile, so it is a
+// cardboard-tube "whump" with almost no crack in it. Three bursts around 150 Hz with a long tail, and the highest of
+// them only reaches 380 — a gunshot's energy is above that, which is exactly what this must not have.
+// ONE FUNCTION, TWO CALLERS, because it has to be heard by peers as well: fireGun calls it and so does the netUpdate
+// branch for an incoming flare shot. Synthesised rather than sampled, so there is no asset to ship and the peer hears
+// the same sound at their own distance and pan through the same panner the local shot uses.
+function flareThump(x,y,z){ if(!AC) return; const p=panAt(x,y,z);
+  burst(p,0.85,0.30,150,0.7,-90);      // the body of it: low, hollow, slow to die
+  burst(p,0.40,0.10,380,0.5,-260);     // the launch itself, dull
+  burst(p,0.22,0.55, 90,0.4, -40); }   // and the tube ringing after
 function launchFlare(o, d){
-  const spd=26;
+  const spd=_FLARE_SPD;
   const f={ mesh:buildFlareMesh(), x:o.x+d.x*0.35, y:o.y+d.y*0.35, z:o.z+d.z*0.35,
             vx:d.x*spd, vy:d.y*spd+2.0, vz:d.z*spd, age:0, landed:false, dead:false, seed:Math.random() };
   scene.add(f.mesh); f.mesh.position.set(f.x,f.y,f.z); flares.push(f);
   if(typeof emitNoise==='function') emitNoise(f.x,f.y,f.z,0.7);                 // a flare gun is loud, and the Wretch hears it
-  if(AC){ const p=panAt(f.x,f.y,f.z); burst(p,0.7,0.06,900,0.8,-620); burst(p,0.45,0.22,320,0.5,-160); }
+  flareThump(f.x,f.y,f.z);
+  // AND THE PEERS HEAR IT. The bullet path broadcasts {t:'shot'} from _traceBullet, which a flare never reaches — so it
+  // was the one shot in the game that was silent on every other screen. Same message, its own weapon letter.
+  if(NET.on && typeof netSend==='function') netSend({t:'shot',x:+f.x.toFixed(2),y:+f.y.toFixed(2),z:+f.z.toFixed(2),g:'f'});
   return f; }
 function killFlare(f,i){ if(f.mesh){ if(f.mesh.parent)f.mesh.parent.remove(f.mesh); _disposeView(f.mesh); f.mesh=null; }
   f.dead=true; flares.splice(i,1); }
@@ -23770,6 +23803,12 @@ function updateFlares(dt){
     if(f.age>_FLARE_BURN){ killFlare(f,i); continue; }
     if(!f.landed){
       f.vy-=_FLARE_GRAV*dt;
+      // THE PARACHUTE, AS ONE LINE. Past the apex the fall is limited whatever gravity has accumulated, so the flare
+      // drifts down at little more than walking pace instead of dropping — which is the whole of "stay up there" and the
+      // reason it is usable: what lights the ground is the time it spends above it. The drag bleeds the launch speed off
+      // over the same stretch so it hangs where it was fired rather than sailing away downrange.
+      if(f.vy < -_FLARE_SINK) f.vy = -_FLARE_SINK;
+      if(f.vy <= 0){ const k=Math.max(0, 1-_FLARE_DRAG*dt); f.vx*=k; f.vz*=k; }
       const vl=Math.hypot(f.vx,f.vy,f.vz)||1;
       const steps=Math.max(1,Math.ceil(vl*dt/0.3)), sdt=dt/steps;             // the spear's own sub-step rule: no tunnelling a one-block wall
       for(let k=0;k<steps;k++){ f.x+=f.vx*sdt; f.y+=f.vy*sdt; f.z+=f.vz*sdt;
@@ -23810,7 +23849,7 @@ function updateFlares(dt){
       const dx=f.x-camera.position.x, dy=f.y-camera.position.y, dz=f.z-camera.position.z, d2=dx*dx+dy*dy+dz*dz;
       if(d2<bd){ bd=d2; best=f; } }
     if(best){ pl.position.set(best.x,best.y+0.12,best.z); pl.color.copy(_flareCol);
-      pl.intensity=26*(best._lit!=null?best._lit:1); pl.distance=24; pl.decay=EL_DECAY; }
+      pl.intensity=_FLARE_LIGHT*(best._lit!=null?best._lit:1); pl.distance=_FLARE_REACH; pl.decay=EL_DECAY; }
     else if(pl.intensity>0){ pl.intensity=0; pl.position.set(0,-999,0); } } }
 // ---- PARTICLES (block-break puffs, blood, etc.) ----
 const fxGroup=new THREE.Group(); scene.add(fxGroup);
@@ -41496,6 +41535,14 @@ window.__hc={
   // a wall: a tile can be missing from the stamp list, missing from disk, or stamped and simply not look different.
   // These three are different faults and this tells them apart — `want` is what the list asked for, `got` is what
   // decoded and landed, and `missing` is the difference.
+  // THE LAST THING WE TOLD PEERS ABOUT OURSELVES. Recorded at the send rather than rebuilt here, so it cannot be a
+  // second copy of the packet expression that drifts from the one on the wire -- which is how a field gets added,
+  // tested against its own duplicate, and never actually sent.
+  netSelf(){ try{ return NET._lastP||null; }catch(e){ return {err:String(e.message||e)}; } },
+  // Force a lean without a key, so the send path can be watched. It writes _leanShown, which is the field the packet
+  // reads and the wall-limited value -- not _lean, the one the key asks for.
+  leanSet(v){ try{ player._lean=+v||0; player._leanShown=+v||0;
+      return { lean:player._lean, shown:player._leanShown }; }catch(e){ return {err:String(e.message||e)}; } },
   stamped(){ try{ const got=_stampedTiles.slice().sort();
       return { got:got.length, list:got,
                missing:_stampWant.filter(n=>got.indexOf(n)<0), want:_stampWant.length }; }
