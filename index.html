@@ -1108,7 +1108,10 @@ const _scotK = new Float32Array([0.45, 0, 0, 0]);
 // here the hard way: a scalar version of this dial swept 0 to 0.08 and read completely inert, texSD 4.085 / 4.223 /
 // 4.121 / 4.125 against a baseline of 4.13.
 // x = the base lighting level. y, z and w are spare, so the next dial costs no new uniform.
-const _hcAux = new Float32Array([0.10, 0, 0, 0]);
+// x = the base lighting level (albedo*k). y = the held/placed A-B gate. z = the ALBEDO-INDEPENDENT sheen, the term
+// that keeps a lit black texel visible; w = the albedo it fades out by. z starts at 0: it is a look change and
+// only Ben can set its size, so __hc.sheen({k,knee}) is the dial and the frames come to him.
+const _hcAux = new Float32Array([0.10, 0, 0, 0.15]);
 // _scotK[3], the rendered-luminance floor, IS THE LEVER ON BLACK TEXELS and it is blunt. Swept at the night lantern
 // (bench/tmp-lightpool-speckle.mjs), baseline row repeated last so the reading is not thermal drift:
 //   0.008 shipped  isoBlack 2.31%  crop median 16.6      0.04   isoBlack 0.38%  median 50.6
@@ -1487,7 +1490,11 @@ const HC_LIGHT_GLSL = [
     // WHY THIS IS NOT FOL_UNLIT_FLOOR COMING BACK: that was max(colour, albedo*0.20), an ADD in disguise, which made a
     // pure-black land pixel arithmetically impossible at any hour. This one is dark-texel-only and light-respecting.
     '  float _albL = dot(diffuseColor.rgb, '+L+');\n'+
-    '  if(uScotK.z > 0.0 && _albL > 1e-5 && _albL < uScotK.z) gl_FragColor.rgb *= (uScotK.z/_albL);\n'+
+    // THE DIVIDE IS GONE. It was `if(uScotK.z > 0 && _albL < uScotK.z) rgb *= uScotK.z/_albL` - a hard threshold on
+    // albedo that scaled the RESULT back up, which is why it lifted unlit caves (it never asked whether any light
+    // had arrived) and why it speckled at distance (mipmaps average texels across its boundary). It has been dialled
+    // to 0 since the base level replaced it, so removing it moves nothing; it goes so it cannot be turned back on by
+    // the next person who sees a black texel. _albL stays: the term above reads it, softly.
     // ---- AND THE SAME RULE IN THE UNIT THE EYE ACTUALLY READS (Ben 08-11, second report, with the frame:
     // Desktop/Screenshot 2026-08-11 134750.png) ----
     // "there are still faces with light projecting on them, they are considered lit, yet they still have black texels
@@ -1517,6 +1524,25 @@ const HC_LIGHT_GLSL = [
     // Gated by _lk, the same delivered-light ramp the descent and the floor use, so an unlit sealed room takes
     // exactly zero of it and Ben's black night is untouched.
     '  if(uHcAux.x > 0.0) gl_FragColor.rgb += diffuseColor.rgb * (uHcAux.x * _lk);\n'+
+    // ---- AND THE TERM THAT DOES NOT VANISH WITH THE ALBEDO (Ben 08-16: "real, pure daytime darkness should be
+    // built without the black textel regression. Black texteks are seen wben holding light at day or night in a
+    // darker area") ----
+    // Diffuse is light TIMES albedo, so a texel at albedo ~0 returns ~0 however bright the lantern is. Every term
+    // above is albedo-proportional - the base level is albedo*k, and both floors below normalise to a constant and
+    // erase the grain - so none of them can answer the one case he keeps reporting: a lit face with black texels on
+    // it. This one is the DELIVERED LIGHT ITSELF, with its own colour, so a lantern shows a sheen on dark stone and
+    // a black texel under it is no longer black.
+    // TWO PROPERTIES IT MUST HAVE AND HAS:
+    //   - it cannot light an unlit fragment: the gate is _lk, the same delivered-light ramp the descent and the
+    //     floors use, so a sealed room, an unlit cave and open ground under only the moon all take exactly zero.
+    //     Ben's black night is preserved by the gate rather than by the arithmetic.
+    //   - it has NO HARD THRESHOLD on albedo. The rescue this replaces did (`_albL < uScotK.z`), and a hard
+    //     threshold is what turns into speckle at distance: mipmapping averages neighbouring texels, so fragments
+    //     start crossing a boundary far away that they did not cross up close. smoothstep has no boundary to cross.
+    '  if(uHcAux.z > 0.0){\n'+
+    '    float _sh = uHcAux.z * _lk * (1.0 - smoothstep(0.0, max(uHcAux.w,1e-3), _albL));\n'+
+    '    gl_FragColor.rgb += (reflectedLight.directDiffuse + reflectedLight.indirectDiffuse) * _sh;\n'+
+    '  }\n'+
     '  float _fmin = uScotK.w * _lk;\n'+
     '  float _fl = dot(gl_FragColor.rgb, '+L+');\n'+
     '  if(_fmin > 0.0 && _fl > 1e-7 && _fl < _fmin) gl_FragColor.rgb *= (_fmin/_fl);\n'+
@@ -42001,6 +42027,10 @@ window.__hc={
   // texture whose spread is too wide; disp fixes one the terms downstream have pushed under the 8-bit floor entirely.
   // Sweep it with bench/tmp-lightpool-speckle.mjs, which is the lantern-in-a-night-wood frame it was reported at.
   baseAmb(v){ try{ if(v!=null) _hcAux[0]=+v; return _hcAux[0]; }catch(e){ return String(e.message||e); } },
+  // THE ALBEDO-INDEPENDENT SHEEN: k is how much of the delivered light a black texel returns, knee is the albedo it
+  // has faded out by. Both live in the spare halves of the same vec4, so the dial costs no new uniform.
+  sheen(o){ try{ if(o&&o.k!=null) _hcAux[2]=+o.k; if(o&&o.knee!=null) _hcAux[3]=+o.knee;
+      return { k:+_hcAux[2].toFixed(4), knee:+_hcAux[3].toFixed(4) }; }catch(e){ return {err:String(e.message||e)}; } },
   texFloor(o){ try{ if(o&&o.k!=null) _scotK[2]=+o.k; if(o&&o.disp!=null) _scotK[3]=+o.disp;
       return { k:+_scotK[2].toFixed(5), disp:+_scotK[3].toFixed(5), litKnee:+_scotH[3].toFixed(4) }; }catch(e){ return {err:String(e.message||e)}; } },
   freezeT(v){ try{ if(v===null) _pinT=null; else if(v!==undefined) _pinT=+v;
