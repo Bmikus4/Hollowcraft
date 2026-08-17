@@ -4676,6 +4676,42 @@ function _coastFringe(wx, wz){
   }
   return touches;
 }
+// THE APRON: A COLUMN AT EXACTLY SEA LEVEL IS DRY LAND, and there are hundreds of them in a bay (Ben 08-17: "the
+// shoreline needs receded by 14 blocksish, it should contact the shore and have no gaps in its corners").
+// Water is written at y<=SEA only ABOVE the ground, so a column whose top block IS SEA carries no water at all: its top
+// face sits level with the water surface and it reads as a flat sand pan lying between the sea and the shore. Measured
+// on a bay at spawn: 417 of 17,161 sampled columns at exactly SEA, and one traverse crossed 20 unbroken blocks of it
+// before the ground rose. That pan is the gap. The waterline is not where the beach is; it is 14-odd blocks out from it.
+// SO THE PAN IS FLOODED, one block, to SEA-1, which is the only way a heightfield generator can move a waterline: water
+// fills what is below it. It is NOT ec6cf76's `if (h===SEA+1) h=SEA` -- that lowered land by a height test and flattened
+// every inland flat that happened to sit at SEA+1. This asks three questions first and every one of them is about
+// whether this column is ocean coast:
+//   · RINGS, NOT SIDES, and this is Ben's corner gap. _coastFringe reads four orthogonal neighbours, so where a shoreline
+//     turns, the column on the inside of the corner has land on both sides it tests and water only on the diagonal --
+//     the test declines and leaves a dry notch in the bend. A Chebyshev ring includes the diagonals by construction.
+//   · NOT A RIVER. Same |_riverField|<0.075 channel test _inlandBed uses, so a river bed and this cannot disagree about
+//     where the river is. Without it a 14-block reach widens every inland channel it can see into a lake.
+//   · NOT DEEP INLAND. _isleAt>0.995 is the interior, where sea-level water is a pond rather than the coast, and the
+//     same gate keeps this off it. Recursion is why both tests are raw-only: _ringedByLand (which _inlandBed uses to
+//     decide the same question properly) calls surfaceH, and surfaceH is where this runs.
+// THE REACH IS 14 BECAUSE BEN SAID 14, and it is a reach and not a width: the water comes in as far as there is pan to
+// flood, and stops at the first column that stands above the sea. On the traverse above that lands the water against a
+// beach one block proud of it, which is what "contact the shore" means.
+const COAST_REACH=14;
+function _coastApron(wx, wz){
+  if(!_FRINGE) return false;                                  // one switch for the whole coast rule: __hc.coast(false)
+  if(Math.abs(_riverField(wx,wz))<0.075) return false;
+  if(_isleAt(wx,wz)>0.995) return false;
+  for(let r=1;r<=COAST_REACH;r++){                            // nearest ring first: a real apron column answers at r=1..3 and never pays for the rest
+    for(let dx=-r;dx<=r;dx++){
+      if(_rawSurfaceH(wx+dx,wz-r)<CFG.SEA) return true;
+      if(_rawSurfaceH(wx+dx,wz+r)<CFG.SEA) return true; }
+    for(let dz=1-r;dz<=r-1;dz++){
+      if(_rawSurfaceH(wx-r,wz+dz)<CFG.SEA) return true;
+      if(_rawSurfaceH(wx+r,wz+dz)<CFG.SEA) return true; }
+  }
+  return false;
+}
 // The ground everything else in the file reads — the twenty structures that site off it, groundYAt, the mud rules, the
 // tree gates and every distance-to-water test — so the coast moves for all of them at once. ec6cf76's other half was
 // lowering the column only where the blocks are written, which left 351 columns reporting SEA+1 over flooded terrain.
@@ -4683,7 +4719,11 @@ function surfaceH(wx, wz){
   const kk = wx+','+wz; let h=_hmCache.get(kk); if (h!==undefined) return h;
   h = _rawSurfaceH(wx, wz);
   if (h===CFG.SEA+1 && _coastFringe(wx, wz)) h = CFG.SEA;
-  if (_hmCache.size>60000) _hmCache.clear(); _rawCache.clear();
+  if (h===CFG.SEA && _coastApron(wx, wz)) h = CFG.SEA-1;   // the two compose: the fringe brings the edge one block in, this floods the pan behind it
+  // THE RAW CACHE IS KEPT, and it was being cleared on every miss. _coastApron reads up to 841 raw columns and the
+  // ring scans of neighbouring columns overlap almost entirely, so a per-call clear made each one re-derive the same
+  // fbm. Raw heights are pure noise and can never go stale; _rawSurfaceH bounds the map at 60k on its own.
+  if (_hmCache.size>60000) _hmCache.clear();
   _hmCache.set(kk,h); return h;
 }
 function caveCarved(wx, wy, wz, h, ent){
@@ -40409,6 +40449,35 @@ function kindInst(kind, anyState){
   return null;
 }
 window.__hc={
+  // QA: does a cached tileTex still match the atlas cell it was cut from? tileTex snapshots a tile into its own
+  // canvas ONCE and caches it forever, while stampTile/stampInto rewrite that same atlas cell asynchronously as the
+  // pack images decode. Nothing connected the two, so a material built before its tile's stamp landed kept the
+  // painter's pixels while the world showed the pack's. This reports the divergence per cached key rather than per
+  // door, because it is one seam and not four object bugs.
+  tileTexAudit(){ try{
+    const cv=document.createElement('canvas'); cv.width=cv.height=TILE; const cx=cv.getContext('2d'); cx.imageSmoothingEnabled=false;
+    const rows=[];
+    for(const k in _tileTexCache){ const name=k.split('|')[0], i=TILEIDX[name]; if(i==null) continue;
+      cx.clearRect(0,0,TILE,TILE);
+      cx.drawImage(atlasCanvas,(i%ATLAS_TILES)*TILE,((i/ATLAS_TILES)|0)*TILE,TILE,TILE,0,0,TILE,TILE);
+      const now=cx.getImageData(0,0,TILE,TILE).data;
+      const t=_tileTexCache[k], hc=t.image.getContext('2d'), had=hc.getImageData(0,0,TILE,TILE).data;
+      const count=(a,b)=>{ let n=0,s=0; for(let p=0;p<a.length;p+=4){ const d=Math.abs(a[p]-b[p])+Math.abs(a[p+1]-b[p+1])+Math.abs(a[p+2]-b[p+2]);
+        if(d>3){ n++; s+=d/3; } } return [n,s]; };
+      const [diff,sum]=count(now,had);
+      // THE CONTROL, and it travels with the measurement rather than in a harness: the same comparator run against the
+      // NEXT atlas cell, which is a different tile and must therefore be non-zero. A stale count of 0 beside a ctl of 0
+      // means the comparator is blind, not that the cache is fresh — that is the exact failure mode that let seven
+      // instruments acquit things they could not see.
+      const j=(i+1)%ATLAS_COUNT;
+      cx.clearRect(0,0,TILE,TILE);
+      cx.drawImage(atlasCanvas,(j%ATLAS_TILES)*TILE,((j/ATLAS_TILES)|0)*TILE,TILE,TILE,0,0,TILE,TILE);
+      const ctl=count(cx.getImageData(0,0,TILE,TILE).data, had)[0];
+      rows.push({ key:k, stale:diff, pct:+(100*diff/(TILE*TILE)).toFixed(1), meanDiff:diff?+(sum/diff).toFixed(1):0,
+                  ctl, stamped:_stampedTiles.indexOf(name)>=0 }); }
+    return { cached:rows.length, stale:rows.filter(r=>r.stale>0).length, blind:rows.filter(r=>r.ctl===0).length,
+             stampsLanded:_stampedTiles.length, rows };
+  }catch(e){ return {err:String(e&&e.message||e)}; } },
   // QA: the MODEL PACK's contract, measured off built models rather than looked at. A replaced gun has to keep
   // handing the rest of the file the same five things (grip, sight line, flash, forend, pull), and the one thing
   // a screenshot can never tell you is whether what you are looking at is the pack's model or the procedural
@@ -43481,16 +43550,27 @@ window.__hc={
   coast(v){ try{ if(v!=null){ _FRINGE=!!v; _hmCache.clear(); _rawCache.clear(); } return { fringe:_FRINGE }; }catch(e){ return {err:String(e.message||e)}; } },
   coastCensus(r,step){ const R=r||220, ST=step||1, P={x:Math.round(player.pos.x), z:Math.round(player.pos.z)};
     let cols=0, atFringeH=0, moved=0, inlandFlats=0, steps2=0, sea=0;
+    // THE PAN AND ITS CORNERS (Ben 08-17: "it should contact the shore and have no gaps in its corners"). A column at
+    // EXACTLY sea level carries no water — water is only written above the ground — so it is dry land whose top face is
+    // level with the sea, and a run of them is the gap between the water and the beach. `dryTouchingWater` is the
+    // straight edge of that gap; `cornerNotches` is the same column with water on a DIAGONAL and land on all four
+    // sides, which is what an orthogonal-only fringe test leaves behind wherever the shoreline turns.
+    let dry=0, dryWet=0, notch=0;
     for(let dx=-R;dx<=R;dx+=ST)for(let dz=-R;dz<=R;dz+=ST){ const x=P.x+dx, z=P.z+dz;
       const raw=_rawSurfaceH(x,z), got=surfaceH(x,z); cols++;
       if(got<=CFG.SEA) sea++;
+      if(got===CFG.SEA){ dry++;
+        const side=surfaceH(x+1,z)<CFG.SEA||surfaceH(x-1,z)<CFG.SEA||surfaceH(x,z+1)<CFG.SEA||surfaceH(x,z-1)<CFG.SEA;
+        const diag=surfaceH(x+1,z+1)<CFG.SEA||surfaceH(x+1,z-1)<CFG.SEA||surfaceH(x-1,z+1)<CFG.SEA||surfaceH(x-1,z-1)<CFG.SEA;
+        if(side) dryWet++; else if(diag) notch++; }
       if(raw===CFG.SEA+1){ atFringeH++;
         if(got<raw) moved++; else if(!_coastFringe(x,z)){
           // did it stay because nothing beside it is water, or because a step would have opened?
           let wet=false; for(let i=0;i<4;i++){ const n=_rawSurfaceH(x+(i===0?1:i===1?-1:0), z+(i===2?1:i===3?-1:0)); if(n<=CFG.SEA) wet=true; }
           if(!wet) inlandFlats++; } }
       if(dx<R){ const b1=surfaceH(x,z), b2=surfaceH(x+ST,z); if(Math.abs(b1-b2)>=2) steps2++; } }
-    return { cols, atSeaPlus1:atFringeH, moved, inlandFlatsLeftAlone:inlandFlats, adjacentStepsOf2Plus:steps2, submerged:sea }; },
+    return { cols, sea:CFG.SEA, reach:COAST_REACH, atSeaPlus1:atFringeH, moved, inlandFlatsLeftAlone:inlandFlats,
+             adjacentStepsOf2Plus:steps2, submerged:sea, drySeaLevel:dry, dryTouchingWater:dryWet, cornerNotches:notch }; },
   // THE BED, which mudCensus cannot see: it skips every column at or under the sea line, so the one thing Ben
   // photographed — mud on the SEA FLOOR — is invisible to it by construction. This walks the submerged columns and
   // asks the generator's own _inlandBed, then splits them by how far out they are: a bed cell beyond the coast is
