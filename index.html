@@ -3684,6 +3684,12 @@ function getBlockC(c,wx,wy,wz){ // fast path when chunk known & in-range
 //  TERRAIN GENERATION  (domain-warped fBm + ridged highlands + rivers + caves)
 // =====================================================================
 const _hmCache = new Map();     // "wx,wz" -> height (column cache, bounded)
+// THE RAW HEIGHTFIELD, before the coast fringe is applied. Two caches because there are two questions: _rawSurfaceH
+// answers "what does the noise say" and surfaceH answers "what is the ground", and the fringe rule needs the first
+// one about its NEIGHBOURS while it is deciding the second one about itself. Asking surfaceH there would recurse
+// through the same rule and read a cache holding already-adjusted values, which is exactly why ec6cf76's note says
+// the neighbour test cannot live inside surfaceH. Anything that clears one must clear the other.
+const _rawCache = new Map();
 // SELF-CONTAINED ISLAND: land only within a finite disc (~960 across → inside a 1000×1000 box). Beyond the ring, it fades to open ocean.
 const ISLE_X=500, ISLE_Z=0, ISLE_R=470, ISLE_EDGE=130, ISLE_CORE=340;
 // ---- NUCLEAR CRATERS ARE TERRAIN, NOT BLOCK EDITS ------------------------------------------------------------------------
@@ -3869,8 +3875,8 @@ function hcSkyBind(obj){ if(!obj || obj.userData._hcBound) return obj; obj.userD
   const prevA=obj.onAfterRender;
   obj.onAfterRender=function(r,sc,cam,geo,mat,grp){ _hcObj[0]=1; if(prevA) prevA.call(this,r,sc,cam,geo,mat,grp); };
   return obj; }
-function surfaceH(wx, wz){
-  const kk = wx+','+wz; let h=_hmCache.get(kk); if (h!==undefined) return h;
+function _rawSurfaceH(wx, wz){
+  const kk = wx+','+wz; let h=_rawCache.get(kk); if (h!==undefined) return h;
   // domain warp
   const wxo = wx + 34*fbm2(wx*0.0041, wz*0.0041, 701, 4);
   const wzo = wz + 34*fbm2(wx*0.0041+11.3, wz*0.0041+7.7, 733, 4);
@@ -4029,7 +4035,38 @@ function surfaceH(wx, wz){
   // The right shape is to move the WATER EDGE and leave the terrain alone. That needs the fringe identified — a column at
   // SEA+1 that actually touches water — and the neighbour test cannot live in this function, because surfaceH asking
   // surfaceH about its neighbours recurses through the same rule and the cache holds adjusted values.
-  if (_hmCache.size>60000) _hmCache.clear();
+  if (_rawCache.size>60000) _rawCache.clear();
+  _rawCache.set(kk,h); return h;
+}
+// THE COAST FRINGE: a column standing exactly one block proud of the sea that actually TOUCHES it. Ben asked for the
+// water/inland cutoff to come one block inward; ec6cf76 did it as `if (h===SEA+1) h=SEA` and was reverted because that
+// is a statement about a height rather than about a coast — it flattened every inland flat that happened to sit at
+// SEA+1 (his enormous plain) and it opened two-block steps wherever the next column in stood at SEA+2 (his cliff under
+// the grass). Both faults are neighbour questions, so both are answered here.
+//   · touches water — at least one of the four sides is at or under the sea line. An inland flat touches none.
+//   · opens no step — no side stands at SEA+2 or higher, so the worst drop beside a flooded column stays one block,
+//     exactly what it was before the coast moved. This is the guard that keeps the cliff from coming back, and it is
+//     why the rule is deliberately conservative: a fringe column wedged against rising ground simply stays land.
+// Neighbours are read RAW. That is the whole reason this is a separate function.
+let _FRINGE=true;   // the coast fringe on/off, for the A/B and for Ben's eye: __hc.coast(false) restores the old waterline
+function _coastFringe(wx, wz){
+  if(!_FRINGE) return false;
+  let touches=false;
+  for(let i=0;i<4;i++){
+    const n=_rawSurfaceH(wx+(i===0?1:i===1?-1:0), wz+(i===2?1:i===3?-1:0));
+    if(n>=CFG.SEA+2) return false;
+    if(n<=CFG.SEA) touches=true;
+  }
+  return touches;
+}
+// The ground everything else in the file reads — the twenty structures that site off it, groundYAt, the mud rules, the
+// tree gates and every distance-to-water test — so the coast moves for all of them at once. ec6cf76's other half was
+// lowering the column only where the blocks are written, which left 351 columns reporting SEA+1 over flooded terrain.
+function surfaceH(wx, wz){
+  const kk = wx+','+wz; let h=_hmCache.get(kk); if (h!==undefined) return h;
+  h = _rawSurfaceH(wx, wz);
+  if (h===CFG.SEA+1 && _coastFringe(wx, wz)) h = CFG.SEA;
+  if (_hmCache.size>60000) _hmCache.clear(); _rawCache.clear();
   _hmCache.set(kk,h); return h;
 }
 function caveCarved(wx, wy, wz, h, ent){
@@ -13945,7 +13982,7 @@ function applySave(s){
   // CRATERS: one record each, however wide. Restored BEFORE the world streams, and _hmCache is dropped, or columns cached from
   // the pre-blast heightfield would come back un-cratered and the bowl would appear only where you had not already walked.
   if(typeof _vaultOpenSync==='function') _vaultOpenSync();   // a door loaded OPEN needs its leaf's hitbox back with it
-  if(Array.isArray(s.craters)){ craters.length=0; for(const c of s.craters) craters.push({x:+c.x,z:+c.z,r:+c.r,d:+c.d}); _hmCache.clear(); }
+  if(Array.isArray(s.craters)){ craters.length=0; for(const c of s.craters) craters.push({x:+c.x,z:+c.z,r:+c.r,d:+c.d}); _hmCache.clear(); _rawCache.clear(); }
   setTimeout(()=>{ try{ scrRebuildAll(); }catch(e){} }, 1200);   // …and rebuild their screen quads once the chunks holding them exist; a monitor restored by applySave was never placed, so it never built one
   if(s.horror){ HORROR.nightsSurvived=s.horror.nightsSurvived|0; HORROR.tier=s.horror.tier||1; HORROR.menace=s.horror.menace||0; HORROR.monkWrath=s.horror.monkWrath|0; HORROR.hwPending=s.horror.hwPending|0; }   // the monk count MUST come back: it is a gate, and a gate that forgets is not one — and nor is an owed conversion (hwPending, see hwOnSacrifice)
   const P=s.player;
@@ -27744,7 +27781,7 @@ function icbmDetonate(x,z,r,depth){
   const R=(r!=null?+r:NUKE_R), D=(depth!=null?+depth:NUKE_DEPTH);
   const gy=(typeof surfaceH==='function')?surfaceH(Math.round(x),Math.round(z)):CFG.SEA;
   craters.push({ x:Math.round(x), z:Math.round(z), r:R, d:D });
-  _hmCache.clear();                                                          // the heightfield changed; every cached column inside the bowl is now a lie
+  _hmCache.clear(); _rawCache.clear();                                                          // the heightfield changed; every cached column inside the bowl is now a lie
   // EVICT, DO NOT CARVE. Any chunk whose columns can be touched (the bowl plus its ejecta lip) is dropped, and the streamer
   // regenerates it from the new heightfield on its own schedule. That is the whole delivery mechanism.
   const reach=Math.ceil(R*1.18)+2, c0x=(Math.round(x)-reach)>>4, c1x=(Math.round(x)+reach)>>4, c0z=(Math.round(z)-reach)>>4, c1z=(Math.round(z)+reach)>>4;
@@ -38842,11 +38879,11 @@ window.__hc={
   // The minimap markers, by type — so "the target appears while a warhead is up, and only then" is testable without reading pixels
   // out of a 198px canvas.
   mmMarks(){ try{ return mmLandmarks().map(l=>({t:l.t, x:Math.round(l.x), z:Math.round(l.z)})); }catch(e){ return {err:String(e.message||e)}; } },
-  icbmClear(){ try{ craters.length=0; _hmCache.clear(); RADS.level=0; return true; }catch(e){ return {err:String(e.message||e)}; } },
+  icbmClear(){ try{ craters.length=0; _hmCache.clear(); _rawCache.clear(); RADS.level=0; return true; }catch(e){ return {err:String(e.message||e)}; } },
   icbmSaveRoundTrip(){ try{ const before=craters.map(c=>({x:c.x,z:c.z,r:c.r,d:c.d})), dose=RADS.level;
       const snap={ seed:CFG.SEED, edits:{}, worldTime, player:{x:player.pos.x,y:player.pos.y,z:player.pos.z,yaw:player.yaw,pitch:player.pitch,rads:dose},
                    inv:inv.slice(), armor:armor.slice(), craters:before };
-      craters.length=0; RADS.level=0; _hmCache.clear();
+      craters.length=0; RADS.level=0; _hmCache.clear(); _rawCache.clear();
       const cleared=craters.length;
       applySave(snap);
       const same=craters.length===before.length && before.every((c,i)=>craters[i].x===c.x&&craters[i].z===c.z&&craters[i].r===c.r&&craters[i].d===c.d);
@@ -40547,7 +40584,7 @@ window.__hc={
   // the SHALLOW band (water no deeper than `deep`), which is the "water on the shore" Ben is asking to widen.
   // Set the shelf and drop the height cache, so the next shoreProfile reads the new terrain. K=1 is the identity map — the
   // proven-failing control for the shallow-band numbers, and the way to show the coast is unmoved by measuring both.
-  shelf(k,w){ try{ if(k!=null) SHELF_K=+k; if(w!=null) SHELF_W=+w; _hmCache.clear();
+  shelf(k,w){ try{ if(k!=null) SHELF_K=+k; if(w!=null) SHELF_W=+w; _hmCache.clear(); _rawCache.clear();
       return { k:SHELF_K, w:SHELF_W }; }catch(e){ return {err:String(e.message||e)}; } },
   // #69: the plains dial, live. Clearing the heightmap cache is the whole point — without it surfaceH keeps answering
   // from the setting you just changed away from, and an A/B of the coastline compares a number with itself.
@@ -40576,7 +40613,7 @@ window.__hc={
              highest:hMax, highestPl:+hMaxPl.toFixed(3),
              raw:{ p05:pc(raws,0.05), p50:pc(raws,0.5), p75:pc(raws,0.75), p90:pc(raws,0.9), p99:pc(raws,0.99) },
              mtnRaw:{ p50:pc(mtns,0.5), p90:pc(mtns,0.9), p99:pc(mtns,0.99) } }; },
-  plains(k,d){ try{ if(k!=null) PLAINS_K=+k; if(d!=null) PLAINS_DAMP=+d; _hmCache.clear();
+  plains(k,d){ try{ if(k!=null) PLAINS_K=+k; if(d!=null) PLAINS_DAMP=+d; _hmCache.clear(); _rawCache.clear();
       return { k:PLAINS_K, damp:PLAINS_DAMP }; }catch(e){ return {err:String(e.message||e)}; } },
   // How flat is the ground, and is it flat because it is a plain? Mean absolute height difference between neighbours over
   // a patch, with the mask's own strength at the centre, so "plains are flatter than the rest" becomes two numbers.
@@ -40765,6 +40802,27 @@ window.__hc={
       if(wet && (h<=CFG.SEA+3 || bank)){ mud++; if(bank && h>CFG.SEA+3) river++; if(h<minH)minH=h; if(h>maxH)maxH=h; } }
     return { dry, sand, nearWater, mud, mudOnStreamBanks:river, mudFrac:dry?+(mud/dry).toFixed(4):0,
              mudH:mud?[minH,maxH]:null, sea:CFG.SEA, spots:_mudSpots(P.x,P.z,R) }; },
+  // THE COAST FRINGE, and the two faults that reverted the last attempt at it, as numbers. `moved` is how many
+  // columns the water took; `inlandFlats` is how many columns sit at SEA+1 touching no water at all — the enormous
+  // plain ec6cf76 flattened, which must stay at zero moved; and `steps2` counts adjacent pairs differing by two or
+  // more blocks anywhere in the census, which is the cliff under the grass. Run it against a build with the fringe
+  // disabled and the step count must not have risen.
+  // The fringe on or off, with both height caches dropped so the next question is answered by the new rule rather than
+  // by what the old one cached. Terrain already baked into a save does not change — same caveat the reverted attempt
+  // carried — so an A/B has to be read from a census, not from a walk around an existing world.
+  coast(v){ try{ if(v!=null){ _FRINGE=!!v; _hmCache.clear(); _rawCache.clear(); } return { fringe:_FRINGE }; }catch(e){ return {err:String(e.message||e)}; } },
+  coastCensus(r,step){ const R=r||220, ST=step||1, P={x:Math.round(player.pos.x), z:Math.round(player.pos.z)};
+    let cols=0, atFringeH=0, moved=0, inlandFlats=0, steps2=0, sea=0;
+    for(let dx=-R;dx<=R;dx+=ST)for(let dz=-R;dz<=R;dz+=ST){ const x=P.x+dx, z=P.z+dz;
+      const raw=_rawSurfaceH(x,z), got=surfaceH(x,z); cols++;
+      if(got<=CFG.SEA) sea++;
+      if(raw===CFG.SEA+1){ atFringeH++;
+        if(got<raw) moved++; else if(!_coastFringe(x,z)){
+          // did it stay because nothing beside it is water, or because a step would have opened?
+          let wet=false; for(let i=0;i<4;i++){ const n=_rawSurfaceH(x+(i===0?1:i===1?-1:0), z+(i===2?1:i===3?-1:0)); if(n<=CFG.SEA) wet=true; }
+          if(!wet) inlandFlats++; } }
+      if(dx<R){ const b1=surfaceH(x,z), b2=surfaceH(x+ST,z); if(Math.abs(b1-b2)>=2) steps2++; } }
+    return { cols, atSeaPlus1:atFringeH, moved, inlandFlatsLeftAlone:inlandFlats, adjacentStepsOf2Plus:steps2, submerged:sea }; },
   // THE BED, which mudCensus cannot see: it skips every column at or under the sea line, so the one thing Ben
   // photographed — mud on the SEA FLOOR — is invisible to it by construction. This walks the submerged columns and
   // asks the generator's own _inlandBed, then splits them by how far out they are: a bed cell beyond the coast is
@@ -40790,7 +40848,7 @@ window.__hc={
   // has aimed at a river cell and put the camera in the channel or under the bank — the bank is what you want to stand
   // on, and it is the column BESIDE the water, two or three blocks above it.
   mudSpots(r){ return _mudSpots(Math.round(player.pos.x), Math.round(player.pos.z), r||140); },
-  riverWidth(v){ if(v!=null){ RIVER_W=+v; _hmCache.clear(); } return { riverW:RIVER_W }; },   // the dial, and the cache clear is the whole point: surfaceH would keep answering from the old setting
+  riverWidth(v){ if(v!=null){ RIVER_W=+v; _hmCache.clear(); _rawCache.clear(); } return { riverW:RIVER_W }; },   // the dial, and the cache clear is the whole point: surfaceH would keep answering from the old setting
   // HOW WIDE IS A STREAM, actually. "Three blocks wider" is a number, so it gets measured rather than argued: find
   // river cells, walk PERPENDICULAR to the channel (across the field's gradient) and count the unbroken run of water.
   // Reported as a distribution because a river is not one width — the point of the change is that it varies.
