@@ -13341,7 +13341,35 @@ let openUI=null, cursor=null, craftSize=2; const craftGrid=new Array(9).fill(nul
 const localChests=new Set();   // structure LOOT chests — deterministic from the seed, so each player loots their OWN copy (never synced); only player-placed storage chests sync
 const boot=document.getElementById('boot'), pause=document.getElementById('pause');
   try{ if(!CINE){ menuBgTry(0); menuFxStart(); } }catch(e){}   // the still is in the markup; this lights it, rains on it and gives it a soundscape
-function requestLock(){ const pr=canvas.requestPointerLock({unadjustedMovement:true}); if(pr&&pr.catch)pr.catch(()=>{ const p2=canvas.requestPointerLock(); if(p2&&p2.catch)p2.catch(()=>{}); }); }
+// THE POINTER LOCK, AND A LEDGER OF EVERY TIME IT MOVED (Ben 08-16: "FIX THe games pointer for gods sake. when i put
+// my mouse in the window it makes its way out all the time" — and: "its actually nothing to do with today, its been
+// going on forever"). A lock that leaks cannot be found by reading, because the browser drops it for its own reasons
+// — a refused request, a focus change, a full-screen transition — and every one of those looks the same from inside
+// the game: locked went false and nobody knows who did it. So every acquire, every release and every refusal is
+// written down with what asked for it, readable in play with __hc.lockLog(). It is 40 entries of strings; it costs
+// nothing and it is the only thing that can tell a deliberate exit from a leak.
+const LOCKLOG=[]; let _lockWanted=false, _lockBy='';
+function lockNote(what,why){ LOCKLOG.push({t:Math.round(performance.now()), what, why:why||'',
+    el:document.pointerLockElement?(document.pointerLockElement.id||document.pointerLockElement.tagName):null,
+    focus:document.activeElement?(document.activeElement.id||document.activeElement.tagName):null,
+    vis:document.visibilityState, ui:openUI||null });
+  if(LOCKLOG.length>40) LOCKLOG.shift();
+  if(_lockDbg) console.log('[lock] '+what+(why?' — '+why:''));
+}
+const _lockDbg=(typeof Q!=='undefined'&&Q.get)?!!Q.get('dbglock'):false;
+// WANTED IS THE GAME'S OWN INTENT, kept separate from the browser's state. Only a deliberate release clears it, so
+// pointerlockchange can tell "the player opened their bag" from "the lock went away on its own".
+function requestLock(why){ _lockWanted=true; _lockBy=why||'';
+  lockNote('request',why);
+  const fail=(e)=>{ lockNote('REFUSED',(why||'')+' :: '+String(e&&e.name||e)); };
+  let pr=null; try{ pr=canvas.requestPointerLock({unadjustedMovement:true}); }catch(e){ fail(e); return; }
+  if(pr&&pr.catch)pr.catch(()=>{ let p2=null; try{ p2=canvas.requestPointerLock(); }catch(e){ fail(e); return; }
+    if(p2&&p2.catch)p2.catch(fail); }); }
+// EVERY DELIBERATE EXIT GOES THROUGH HERE. Scattered document.exitPointerLock() calls are indistinguishable from a
+// leak in the ledger, and worse, the re-acquire below cannot know not to fight them.
+function releaseLock(why){ _lockWanted=false; _lockBy=why||''; lockNote('release',why);
+  try{ document.exitPointerLock&&document.exitPointerLock(); }catch(e){} }
+document.addEventListener('pointerlockerror',()=>{ lockNote('ERROR','browser refused the lock for '+(_lockBy||'?')); });
 // =====================================================================
 //  LOCAL SAVE / LOAD — the host's world persists in this browser.
 //  The terrain is deterministic from CFG.SEED, so a save is just the
@@ -13957,7 +13985,24 @@ document.addEventListener('pointerlockchange',()=>{ locked=document.pointerLockE
   // browser hands Escape to us only as a lost pointer lock, so this is where that gesture arrives; the pause menu must not eat
   // it, and the second Escape — the one that leaves — is handled by the ID box's own key handler.
   else if(MON.on){ MON.look=false; monSync(); }
-  else if(started && !player.dead && !openUI && !player.grabbed && performance.now()>=_noPauseUntil){ buildPauseSettings(); pauseFace(false); pause.style.display='flex'; for(const k in keys)delete keys[k]; lmbHeld=false; rmbHeld=false; } });   // no pause overlay mid-capture either — the jumpscare/haul owns the screen; settings rebuild so the achievements ledger stays current
+  else if(started && !player.dead && !openUI && !player.grabbed && performance.now()>=_noPauseUntil){
+    lockNote('lost', _lockWanted?('nobody released it — last taken for '+(_lockBy||'?')):('deliberate: '+(_lockBy||'?')));
+    // A LOCK NOBODY RELEASED IS A LEAK, AND A LEAK IS NOT A PAUSE. This branch treated every exit as the player
+    // stepping back from the screen, so a lock the browser dropped on its own — a refused request, a focus change,
+    // an element outside the canvas taking focus — left them looking at a free cursor with the pause card up, and
+    // the only way back was to notice and click. _lockWanted is the game's own intent and only releaseLock clears
+    // it, so an exit with it still set is asked for again immediately. Escape still pauses: the browser refuses a
+    // re-lock for about a second after a USER-initiated exit, and that refusal is what raises the card below.
+    if(_lockWanted){ let pr=null; try{ pr=canvas.requestPointerLock(); }catch(e){ pr=null; }
+      if(pr&&pr.then){ pr.then(()=>lockNote('retaken','after an unasked-for exit')).catch(e=>{ lockNote('retake REFUSED',String(e&&e.name||e)); showPause(); }); return; }
+      if(pr===null) { showPause(); return; }
+      return; }
+    showPause(); } });   // no pause overlay mid-capture either — the jumpscare/haul owns the screen; settings rebuild so the achievements ledger stays current
+function showPause(){ buildPauseSettings(); pauseFace(false); pause.style.display='flex'; for(const k in keys)delete keys[k]; lmbHeld=false; rmbHeld=false; }
+// THE WINDOW COMING BACK IS A RETURN TO THE GAME. Alt-tab away and the browser drops the lock; alt-tab back and
+// nothing asked for it again, so the player was in the world with a free cursor until they thought to click.
+window.addEventListener('focus',()=>{ if(started && !player.dead && !openUI && !player.grabbed && _lockWanted &&
+    document.pointerLockElement!==canvas && pause && pause.style.display==='none') requestLock('window focus'); });
 let _lookDX=0,_lookDY=0;   // raw mouse deltas accumulate here; applyLook() eases them out over a few frames → SMOOTHED looking
 let _lookFresh=false;      // did the mouse actually move since the last frame? (see the coast-stop in applyLook)
 document.addEventListener('mousemove',e=>{ if(!locked)return;
@@ -41390,6 +41435,47 @@ window.__hc={
   // QA: the actual bone angles on a fork, this frame. A gait is a claim about motion over time and cannot be read from one
   // frame or from a screenshot of a 120 px creature — the bench samples this and measures peak-to-peak swing and how many
   // strides a second, which is the only way to tell a scurry from a gallop or a still creature from a frozen one.
+  // QA: THE WHOLE LIMB CHAIN, PRINTED. Ben has now said "arms are still inverted" after a fix, and the way to stop guessing
+  // is a table: every joint from shoulder to hand and hip to foot, with its local position, its local rotation, the SIGN of
+  // every scale component, and the sign of its world matrix determinant — a negative determinant means the frame is mirrored,
+  // and because a joint matrix is the product of its ancestors, one negative factor flips everything below it.
+  //
+  // `cross` IS THE ANSWER TO THE ACTUAL QUESTION and no per-joint number is. An arm is inverted when the hand ends up on the
+  // wrong side of the body, so the hand's world position is taken back into the creature's OWN space and compared with the
+  // shoulder's: same sign is an arm hanging where it belongs, opposite sign is an arm crossing the chest. That reading is
+  // immune to which way the creature is facing, which is what defeats reading it off a screenshot.
+  limbTable(kind){ try{
+      const inst=kindInst(kind);
+      if(!inst || !inst.P || !inst.group) return {err:'none alive'};
+      const P=inst.P, g=inst.group; g.updateMatrixWorld(true);
+      const inv=new THREE.Matrix4().copy(g.matrixWorld).invert();
+      const loc=o=>{ const v=new THREE.Vector3(); o.getWorldPosition(v); return v.applyMatrix4(inv); };
+      const f=n=>+n.toFixed(3);
+      const joint=(o,name)=>{ if(!o) return null;
+        const m=o.matrixWorld.elements;
+        const ax=new THREE.Vector3(m[0],m[1],m[2]), ay=new THREE.Vector3(m[4],m[5],m[6]), az=new THREE.Vector3(m[8],m[9],m[10]);
+        return { name, pos:[f(o.position.x),f(o.position.y),f(o.position.z)],
+                 rot:[f(o.rotation.x),f(o.rotation.y),f(o.rotation.z)],
+                 scl:[f(o.scale.x),f(o.scale.y),f(o.scale.z)],
+                 det:ax.dot(ay.clone().cross(az))<0?-1:1 }; };
+      const out={ kind, arms:[], legs:[] };
+      (P.arms||[]).forEach((c,ai)=>{
+        const chain=c.map((o,i)=>joint(o,(i===0?'shoulder':i===c.length-1?'hand':'j'+i)));
+        const sh=loc(c[0]), hd=loc(c[c.length-1]);
+        out.arms.push({ side:ai, shoulderX:f(sh.x), handX:f(hd.x),
+                        // Sitting on the midline (|x| under a tenth of a block) is neither crossed nor correct, and calling it
+                        // crossed on a rounding error would send the next reader hunting a bug that is not there.
+                        cross:(Math.abs(hd.x)<0.10||Math.abs(sh.x)<0.10)?'midline':(Math.sign(hd.x)===Math.sign(sh.x)?'ok':'CROSSED'),
+                        mirrored:chain.filter(j=>j&&j.det<0).length, chain }); });
+      (P.legs||[]).forEach((L,li)=>{
+        const c=[L.hip,L.thigh,L.shin,L.foot];
+        const chain=c.map((o,i)=>joint(o,['hip','thigh','shin','foot'][i]));
+        const hp=L.hip?loc(L.hip):null, ft=L.foot?loc(L.foot):null;
+        out.legs.push({ side:li, hipX:hp?f(hp.x):null, footX:ft?f(ft.x):null,
+                        cross:(!hp||!ft)?'?':(Math.abs(ft.x)<0.10||Math.abs(hp.x)<0.10)?'midline':(Math.sign(ft.x)===Math.sign(hp.x)?'ok':'CROSSED'),
+                        mirrored:chain.filter(j=>j&&j.det<0).length, chain }); });
+      return out; }
+    catch(e){ return {err:String(e.message||e)}; } },
   rigSample(kind){ try{
       const inst = kindInst(kind);
       if(!inst) return {err:'none alive'};
