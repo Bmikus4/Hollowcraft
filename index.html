@@ -5303,7 +5303,7 @@ function packFace(id,tile,sky,back){ return 1 + (back?1:0) + (tile<<1) + (sky<<1
 // JS arrays and reconverting them every chunk. That per-chunk allocate-and-discard was the main GC-churn source
 // behind the random streaming micro-stutters. Grows on demand for a pathological chunk; otherwise never allocates.
 let _mCap=1<<17;                       // vertex capacity (131072) — plenty for a dense chunk
-let _mP=new Float32Array(_mCap*3), _mN=new Float32Array(_mCap*3), _mU=new Float32Array(_mCap*2), _mT=new Float32Array(_mCap), _mK=new Float32Array(_mCap), _mC=new Float32Array(_mCap);
+let _mP=new Float32Array(_mCap*3), _mN=new Float32Array(_mCap*3), _mU=new Float32Array(_mCap*2), _mT=new Float32Array(_mCap), _mK=new Float32Array(_mCap), _mC=new Float32Array(_mCap), _mW=new Float32Array(_mCap);
 function _growMesh(){ _mCap*=2;
   const P=new Float32Array(_mCap*3); P.set(_mP); _mP=P;
   const N=new Float32Array(_mCap*3); N.set(_mN); _mN=N;
@@ -5311,6 +5311,7 @@ function _growMesh(){ _mCap*=2;
   const T=new Float32Array(_mCap);   T.set(_mT); _mT=T;
   const K=new Float32Array(_mCap);   K.set(_mK); _mK=K;
   const C=new Float32Array(_mCap);   C.set(_mC); _mC=C;
+  const Wd=new Float32Array(_mCap);  Wd.set(_mW); _mW=Wd;
 }
 
 // PADDED CHUNK SNAPSHOT — one linear copy per rebuild, then every mesher pass reads flat typed arrays.
@@ -5489,6 +5490,12 @@ let _LEAF_UV_MIRROR = true;   // __hc.leafUV(false) + a world remesh is the A/B 
 function greedyMesh(c, pass){
   // pass: 'opaque' | 'cutout'
   const _leafUV = _LEAF_UV_MIRROR && pass==='leaf';
+  // A FOREST THAT DOES NOT MOVE READS DEAD, and until now only the cross blocks swayed: leafMat never carried the wind
+  // flag, so grass and ferns moved while every tree in the world stood perfectly still. The canopy gets the same one
+  // attribute the mesher already writes for foliage, at about half strength — the shader's phase comes from world
+  // position, so neighbouring leaf cubes move together as a mass and no gaps open between them, and 0.55 of a 0.10
+  // amplitude is five centimetres, which is a breath rather than a wobble.
+  const _windQ = (pass==='leaf') ? 0.55 : 0;
   let _vn=0;                           // vertices written into the shared scratch this call
   const g=_sg;                         // padded-snapshot reads (snapshotChunk(c) ran in buildChunkMeshes) — NOT world getBlock
   const isSrc = pass==='opaque'
@@ -5584,7 +5591,7 @@ function greedyMesh(c, pass){
             const p3=_vn*3, u2=_vn*2;
             _mP[p3]=vv[0]; _mP[p3+1]=vv[1]; _mP[p3+2]=vv[2];
             _mN[p3]=nrm[0]; _mN[p3+1]=nrm[1]; _mN[p3+2]=nrm[2];
-            _mU[u2]=uu0; _mU[u2+1]=uu1; _mT[_vn]=tile; _mK[_vn]=skq[vi]; _mC[_vn]=_CANOPY_BAKE?_canAt(vv[0],vv[1],vv[2]):0; _vn++;
+            _mU[u2]=uu0; _mU[u2+1]=uu1; _mT[_vn]=tile; _mK[_vn]=skq[vi]; _mC[_vn]=_CANOPY_BAKE?_canAt(vv[0],vv[1],vv[2]):0; _mW[_vn]=_windQ; _vn++;
           }
           for (let l=0;l<h;l++) for (let k=0;k<w;k++) mask[n+k+l*dU]=0;
           i+=w; n+=w;
@@ -5600,6 +5607,7 @@ function greedyMesh(c, pass){
   geo.setAttribute('aTile', new THREE.BufferAttribute(_mT.slice(0,_vn),1));
   geo.setAttribute('aSky', new THREE.BufferAttribute(_mK.slice(0,_vn),1));
   geo.setAttribute('aCan', new THREE.BufferAttribute(_mC.slice(0,_vn),1));
+  geo.setAttribute('aWind', new THREE.BufferAttribute(_mW.slice(0,_vn),1));
   return geo;
 }
 
@@ -6700,7 +6708,7 @@ const cutoutMat = injectAtlas(new THREE.MeshPhongMaterial({ side:THREE.DoubleSid
 // property I had set was decorative. The hole count in the tile, the alphaTest value and the atlas's alpha channel were
 // all correct and all measurable — and every one of them measured green while the thing on screen was opaque. This flag
 // is what makes any of them mean anything. (leafTrans is the other session's and is left exactly as found.)
-const leafMat   = injectAtlas(new THREE.MeshPhongMaterial({ side:THREE.DoubleSide, shininess:0, specular:0x000000, alphaTest:0.5 }), {nightFoliage:true, leafTrans:true, cutout:true});   // DoubleSide, not FrontSide (Ben 08-05: "we can also see both sides of them"). FrontSide was deliberate while every leaf face was seen from its normal side and it halved canopy fragment work; a canopy you can now see into is a canopy whose far layers are seen from behind.
+const leafMat   = injectAtlas(new THREE.MeshPhongMaterial({ side:THREE.DoubleSide, shininess:0, specular:0x000000, alphaTest:0.5 }), {nightFoliage:true, leafTrans:true, cutout:true, wind:true});   // DoubleSide, not FrontSide (Ben 08-05: "we can also see both sides of them"). FrontSide was deliberate while every leaf face was seen from its normal side and it halved canopy fragment work; a canopy you can now see into is a canopy whose far layers are seen from behind.
 // DoubleSide. The note that used to be here said FrontSide was safe because "the mesher emits both crossed
 // quads, so one always faces you", and that is true as far as it goes: two quads at right angles each front
 // a half-space, and the two half-spaces do cover every direction, so a plant never disappears outright.
@@ -9617,7 +9625,7 @@ const GradeShader={
   // grey wall over the black Ben has signed off four times; a quarter of it stops the crush without lighting anything.
   uniforms:{ tDiffuse:{value:null}, uTime:{value:0}, uSat:{value:0.96}, uGrain:{value:0.06}, uDark:{value:0}, uResolution:{value:new THREE.Vector2(innerWidth,innerHeight)}, uFXAA:{value:CFG.quality==='Low'?0:1}, uWhiteVoid:{value:0},
     uCurve:{value:0.26}, uVib:{value:0.14}, uWarm:{value:1.6}, uTemp:{value:-0.35},
-    uVig:{value:0.50}, uVigR:{value:new THREE.Vector2(0.88,0.24)}, uLift:{value:0.030}, uLiftNight:{value:0.25}, uGain:{value:0.97},
+    uVig:{value:0.50}, uVigR:{value:new THREE.Vector2(0.88,0.24)}, uLift:{value:0.030}, uLiftNight:{value:0.0}, uGain:{value:0.97},
     // THE DAYTIME TOE (Ben 08-12: "absolute dark shadows during day time ... and THEN ALSO realistic daytime
     // darkness too"). uDayToe is the depth, uDayKnee the luminance it reaches up to. Day-gated by uDark so a
     // night he has signed off four times cannot move by a digit.
