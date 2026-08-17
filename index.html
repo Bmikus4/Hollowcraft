@@ -12266,6 +12266,64 @@ const LEAN_X=0.55, LEAN_ROLL=0.19, LEAN_DIP=0.13;
 // flat, and a swimmer stretched out along the surface is exactly that shape. 0.72 rather than prone's 0.62 because
 // a swimmer's stroke lifts the shoulders and the head clears the water — it is a swim, not a corpse.
 function bodyH(){ return player.swimming?0.72:(player.prone?0.62:(player.sneak?1.45:PH)); }
+// =====================================================================
+//  WALK PACE — the wheel sets it, stamina pays for the fast end (Ben)
+// =====================================================================
+// "scroll wheel should slow/speed up the players walk speed which should variably affect stamina."
+// A LEVEL 0..1, NOT A MULTIPLIER, so the two ends can be real speeds rather than ratios of a number that may itself be
+// retuned. 0.5 returns exactly 4.6 — the speed the game has always walked at — so the default build is unchanged and the
+// dial is a departure from it in both directions rather than a new baseline.
+// THE THREE ANCHORS: 1.7 is a deliberate creep, slower than the 1.9 sneak because a sneak is a posture and this is a
+// pace; 4.6 is the walk; 6.3 is as fast as you can move without running, which has to stay under the 7.2 sprint or the
+// two gaits cross and sprinting becomes pointless. Lerped through the midpoint in two halves so 0.5 lands on 4.6 exactly
+// instead of near it.
+const WALK_SLOW=1.7, WALK_MID=4.6, WALK_FAST=6.3;
+// WHAT THE FAST END COSTS. "slow walk costs almost nothing, fast walk drains steadily" — so the cost is zero at and
+// below the midpoint and rises to this at the top. 2.6/s against the sprint's 7.3 makes a flat-out walk sustainable for
+// about forty seconds from full and a sprint for fourteen, which is the ordering that makes the dial worth having: it is
+// the pace you use to cover ground, not a cheaper sprint.
+const WALK_STAM=2.6;
+function walkSpeed(){ const l=Math.max(0,Math.min(1,player.walkLvl!=null?player.walkLvl:0.5));
+  return l<=0.5 ? WALK_SLOW+(WALK_MID-WALK_SLOW)*(l/0.5) : WALK_MID+(WALK_FAST-WALK_MID)*((l-0.5)/0.5); }
+// The stamina share of the current level: 0 at or below the midpoint, 1 at the top. One function so the drain and the
+// readout cannot disagree about what the dial is costing.
+function walkEffort(){ const l=Math.max(0,Math.min(1,player.walkLvl!=null?player.walkLvl:0.5));
+  return Math.max(0,(l-0.5)/0.5); }
+// ---- AND HE HAS TO BE ABLE TO SEE IT (Ben: "Show the current level in the HUD") ----
+// Built in JS and anchored above the hotbar rather than added to the vitals stack: that corner belongs to the other
+// terminal this week, and a pace readout is not a vital anyway — it is a control's position, so it sits with the controls.
+// Seven pips, because a 0.1 step over 0..1 is eleven positions and eleven pips is a bar; seven reads as a setting.
+// It FADES OUT when the pace is neutral and nothing is being asked of it, so the default build gains no permanent HUD
+// furniture — turn the wheel and it appears, leave it at the middle and it goes away.
+let _walkPips=null, _walkHideT=0;
+function walkLvlSet(v){
+  player.walkLvl=Math.max(0,Math.min(1,Math.round(v*10)/10));
+  _walkHideT=2.2;
+  if(typeof flashName==='function'){
+    const l=player.walkLvl;
+    flashName(l<0.2?'creeping':l<0.45?'slow walk':l<0.55?'walking':l<0.8?'brisk':'fast walk');
+  }
+  walkPipsDraw();
+  return player.walkLvl; }
+function walkPipsDraw(){
+  if(!_walkPips){
+    const d=document.createElement('div'); d.id='walkpips';
+    d.style.cssText='position:fixed;left:50%;transform:translateX(-50%);bottom:86px;display:flex;gap:4px;'+
+      'pointer-events:none;z-index:6;opacity:0;transition:opacity .25s;';
+    for(let i=0;i<7;i++){ const s=document.createElement('div');
+      s.style.cssText='width:12px;height:5px;border-radius:2px;background:rgba(255,255,255,0.16);'+
+        'box-shadow:inset 0 0 0 1px rgba(0,0,0,0.5);';
+      d.appendChild(s); }
+    document.body.appendChild(d); _walkPips=d; }
+  const l=player.walkLvl!=null?player.walkLvl:0.5, on=Math.round(l*6);
+  for(let i=0;i<7;i++){
+    // The fast half warms as it goes, because that is the half that costs stamina — the colour IS the cost.
+    const lit=i<=on, hot=i>3;
+    _walkPips.children[i].style.background = lit ? (hot?'rgba(255,'+(190-40*(i-3))+',120,0.92)':'rgba(220,232,238,0.85)')
+                                                : 'rgba(255,255,255,0.16)'; }
+  _walkPips.style.opacity='1'; }
+function walkPipsTick(dt){ if(!_walkPips) return;
+  if(_walkHideT>0){ _walkHideT-=dt; if(_walkHideT<=0 && Math.abs((player.walkLvl!=null?player.walkLvl:0.5)-0.5)<0.001) _walkPips.style.opacity='0'; } }
 const player={ pos:new THREE.Vector3(), vel:new THREE.Vector3(), yaw:0, pitch:0,
   onGround:false, fly:false, sneak:false, sprint:false, inWater:false,
   health:20, hunger:20, water:20, sat:5, creative:false, bob:0, fov:74, dead:false,
@@ -12426,7 +12484,11 @@ function physics(dt){
   if(p.prone && K.Space && p.onGround){ p.prone=false; if(typeof flashName==='function')flashName('up'); }
   const _spdBuf = (!p.fly && (p.speedT||0)>0) ? (p.speedMul||1.4) : 1;   // stim/adrenaline SPEED buff (Ben 07-21): quickens walk+sprint on foot while the window holds
   if(p.prone) p.sprint=false;                                    // nobody sprints on their belly
-  const base = (p.fly?(cineMode?cineSpeed:18) : (p.prone?1.15:p.sprint?7.2:(p.sneak?1.9:4.6)) * (p.inWater?(p.sprint?0.26:0.18):(p.wading?0.55:1))) * _spdBuf;   // water DRASTICALLY slows you (Ben 07-20): swim crawls at 0.18× (0.26× sprint), even wading halves you — the sea is not a shortcut; cinematic flight uses the scroll-set speed
+  // THE WALK IS A CONTINUOUS PACE, not one number (Ben, with the wheel bound to it). walkSpeed() returns the metres a
+  // second the current level asks for, and it replaces ONLY the plain 4.6 walk: sneak, prone, sprint and the water
+  // multipliers are all untouched, because a pace dial is about walking and those are other gaits. 4.6 is what level
+  // 0.5 returns, so the default build moves at exactly the speed it always did.
+  const base = (p.fly?(cineMode?cineSpeed:18) : (p.prone?1.15:p.sprint?7.2:(p.sneak?1.9:walkSpeed())) * (p.inWater?(p.sprint?0.26:0.18):(p.wading?0.55:1))) * _spdBuf;   // water DRASTICALLY slows you (Ben 07-20): swim crawls at 0.18× (0.26× sprint), even wading halves you — the sea is not a shortcut; cinematic flight uses the scroll-set speed
   let mvx=0,mvz=0;
   if(mag>0){ const nx=fwd/mag, ns=str/mag; mvx=(-sy*nx + cy*ns); mvz=(-cy*nx - sy*ns); }
   if(p.fly && cineMode){ const k=Math.min(1,dt*2.4);   // CINEMATIC FLIGHT — inertial easing on all three axes → glassy, floaty camera glide; look pitch drives forward too (fly where you look)
@@ -12617,6 +12679,11 @@ function physics(dt){
     let drain=0;
     if(p.sprint && mag>0) drain+=7.3;                                 // 1.5x slower than the first pass (Ben): ~14 s of flat-out sprinting from full
     if(p.inWater && mag>0) drain+=3.3;
+    // THE PACE DIAL COSTS WIND AT ITS FAST END (Ben: "which should variably affect stamina"). walkEffort is 0 at and
+    // below the neutral pace and 1 at the top, so a creep and an ordinary walk are free exactly as they have always been
+    // and only the half above 4.6 is paid for. Not while sprinting — that is its own gait with its own 7.3 — and not in
+    // water, which already has its own drain and its own multipliers on the speed.
+    if(!p.sprint && !p.inWater && !p.prone && mag>0) drain += WALK_STAM*walkEffort();
     // The rush burns wind at a fifth of the rate, which turns fourteen seconds of sprint into seventy — most of the stim's own
     // minute. A multiplier and not an exemption, because a stim that made stamina irrelevant would delete the bar for a minute
     // rather than make it feel like something.
@@ -15142,6 +15209,14 @@ addEventListener('wheel',e=>{ if(!locked)return;
         view.scopeFov=clamp((view.scopeFov||7)*(e.deltaY>0?1.14:1/1.14), _lo, _hi); }
       try{localStorage.setItem('hollowcraft_zoom',view.scopeFov);}catch(_){}
       flashName((Math.round(700/view.scopeFov)/10)+'x zoom'); return; } }   // scroll while aimed = adjust + save scope magnification (magnified SCOPE only — the holosight is fixed 1x)
+  // ---- THE WHEEL SETS HOW FAST YOU WALK (Ben: "scroll wheel should slow/speed up the players walk speed") ----
+  // IT WAS ALREADY BOUND, to hotbar selection, and both cannot have it. The wheel is where every game that has a
+  // continuous walk pace puts it, and the hotbar has nine number keys of its own and a labelled row showing them — so
+  // the wheel goes to the pace and the hotbar keeps ALT+wheel, which was unbound. Nothing is lost and the binding
+  // Ben asked for is the plain one.
+  // The cinematic-flight and scope-zoom branches above are untouched: those are modes, and inside a mode the wheel
+  // belongs to it.
+  if(!e.altKey){ walkLvlSet((player.walkLvl!=null?player.walkLvl:0.5) + (e.deltaY>0?-0.1:0.1)); return; }
   selSlot=((selSlot+(e.deltaY>0?1:-1))%HOT_N+HOT_N)%HOT_N; refreshHotbar(); hotWake(hotGroup(selSlot)); const s=inv[selSlot]; flashName(s?ITEMS[s.id].name:''); });
 addEventListener('keydown',e=>{ if(e.code==='Space')e.preventDefault();
   // THE COMMAND CONSOLE owns the keyboard while it is open. Its input handler deals with Enter, Escape and history; every
@@ -18188,7 +18263,7 @@ function loop(){ try{
   T.end(TID.input);
   T.begin(TID.fx); applyWaterFog(); T.end(TID.fx);
   T.begin(TID.entities); T.begin(TID.props);
-  updateDrops(dt); updateDropPick(); updateEat(dt); updateSpears(dt); updateStuckSpears(dt); updateFlares(dt); updateParticles(dt); updateBubbles(dt); updateEmbers(dt); updateShells(dt); updateView(dt); attTick(); if(typeof updateWings==='function')updateWings(dt); updateWatchers(dt); checkNotes(dt); updateSkyBirds(dt); updateFireflies(dt); updateLampHalos(dt); updateContactShadows(dt); updateLeaves(dt); if(typeof updateDungeonBugs==='function')updateDungeonBugs(dt);  // floating items, thrown/stuck spears, particles, ejected shell casings, held viewmodel, angel wings, watching-eyes, notes, sky birds, dungeon arachnids
+  updateDrops(dt); updateDropPick(); updateEat(dt); updateSpears(dt); updateStuckSpears(dt); updateFlares(dt); walkPipsTick(dt); updateParticles(dt); updateBubbles(dt); updateEmbers(dt); updateShells(dt); updateView(dt); attTick(); if(typeof updateWings==='function')updateWings(dt); updateWatchers(dt); checkNotes(dt); updateSkyBirds(dt); updateFireflies(dt); updateLampHalos(dt); updateContactShadows(dt); updateLeaves(dt); if(typeof updateDungeonBugs==='function')updateDungeonBugs(dt);  // floating items, thrown/stuck spears, particles, ejected shell casings, held viewmodel, angel wings, watching-eyes, notes, sky birds, dungeon arachnids
   netUpdate(dt);                                                             // co-op: send my transform, interpolate peers, host broadcasts the Wretch/time
   T.end(TID.props); T.end(TID.entities);
   T.begin(TID.audio); updateAudio(dt); T.end(TID.audio);
