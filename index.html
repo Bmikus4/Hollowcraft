@@ -7543,12 +7543,15 @@ const _mtU={ uMask:{value:_mtTex}, uPine:_uCoastPine, uRock:_uMtnRock, uSnow:_uM
   // only 0.017-0.05 of luminance, which is a tint on the sky rather than land on the horizon. This is the contrast lever,
   // not the size lever — the height is capped separately by uMtnMax.
   uFogMul:{value:0.10}, uGain:{value:1.1}, uPixAng:_cpU.uPixAng, uMaskOff:_cpU.uMaskOff, uDbg:{value:0}, uScotG:{value:_scotG}, uScotH:{value:_scotH},
+  // THE SNOW LINE IN WORLD HEIGHT, low sun and high sun. Inside the peak spread __hc.mtnMask() reports (92-110 tall,
+  // 57-70 mean, foot at sea+18) so that only the upper part of the taller ridges carries a cap.
+  uSnowY:{value:new THREE.Vector2(CFG.SEA+42, CFG.SEA+52)},
   uMtnMax:{value:0.349} };  // 20 degrees of range above its own foot — Ben's number, set by eye after 13.7 read as too little
 const mountainMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, side:THREE.BackSide, fog:false,
   uniforms:_mtU, vertexShader:_horizVert, fragmentShader:[
   'precision highp float; varying vec3 vPos;',
   'uniform sampler2D uMask; uniform vec3 uPine, uRock, uSnow, uAir, uFogCol, uSunCol; uniform vec2 uSunXZ;',
-  'uniform float uFogD, uWall, uCamY, uWx, uDay, uSunUp, uFogMul, uGain, uPixAng, uDbg, uMtnMax; uniform vec2 uMaskOff; uniform vec4 uScotG, uScotH;',
+  'uniform float uFogD, uWall, uCamY, uWx, uDay, uSunUp, uFogMul, uGain, uPixAng, uDbg, uMtnMax; uniform vec2 uMaskOff, uSnowY; uniform vec4 uScotG, uScotH;',
   'float hash(float n){ return fract(sin(n)*43758.5453); }',
   'float nz(float x){ float i=floor(x), f=fract(x); return mix(hash(i),hash(i+1.0),f*f*(3.0-2.0*f)); }',
   'void main(){',
@@ -7611,32 +7614,33 @@ const mountainMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false,
   // horizon at dawn and dusk when it would be the brightest thing in the frame.
   // SNOW IS AN ALTITUDE, NOT A FRACTION OF A PEAK. It was a fraction of each ridge's own height, so doubling the range
   // carried every snow line up with its own summit and no cap ever appeared. A snow line is a height above sea in the
-  // world, the same way the generator paints the interior peaks the player can walk to - so it is computed back through
-  // the projection: the fragment's own world height is the eye height plus its elevation times the range's distance,
-  // compared against a line that still RISES with the sun the way a real one does across a day.
-  '    float wy=uCamY+elev*dist;',
-  // AND THE LINE IS SET FROM WHAT THE RANGE ACTUALLY REACHES, not from what its envelope allows. ridged()^1.35 rarely
-  // comes near its own ceiling, so a profile that CAN reach 334 above sea mostly delivers about 150 - and a snow line
-  // at 190 put the cap above every peak in the frame, which is why doubling the height still produced no snow.
-  // AND THE LINE IS WHERE THE DEBUG VIEW SAID THE PEAKS ARE. uDbg 2 paints (wy - snowY) as green and the ranges came
-  // back BLACK - every fragment at least thirty blocks under the line, at every setting I had reasoned my way to. The
-  // ridges in frame stand at about 110 to 135 in world height, not the 190 the envelope allows and not the 150 I
-  // estimated off the projection, so the line sits just under their tops and the caps are on the top fifth.
-  // THE RAMP RUNS THE OTHER WAY, and dusk is why. It read as a real snow line - lower when it is cold - and what that
-  // produces is the most snow at exactly the hours the light is weakest, so at dusk the caps covered most of the range
-  // and the whole thing went to a flat pale band, which is the cloud-shaped fault this horizon keeps growing. The line
-  // RISES as the sun drops: full caps at noon when there is light to model them, a rim at dusk, and the snow's own
-  // brightness rides the sun's elevation too, so an unlit cap sinks into the rock instead of floating over it.
-  // AND THE WHOLE RAMP LIVES UNDER THE PEAKS. sea+101 at midday is 141 in world terms and the ridges reach about 135,
-  // so at noon there was no snow at all - the frame I read as caps was strip luminance, which the rock and the crags move
-  // just as well. 72 to 88 puts the line at 112 to 128 against peaks of 110 to 135: a rim at midday, more of a cap when
-  // the sun is low, and the coverage gate keeps that from becoming a band.
-  // BACK THE OTHER WAY, and this is the bracket rather than the theory. Inverting the ramp fixed dusk and cost noon:
-  // with the line at sea+84 at midday the caps covered everything above the treeline and the range read as cloud. The
-  // line is a real snow line again - lower when it is cold - and dusk is handled by the COVERAGE gate instead, which
-  // is the honest lever: it is not that a low sun should melt snow, it is that an unlit cap must not out-read the rock.
-  '    float snowY=mix(' + (CFG.SEA+72).toFixed(1) + ', ' + (CFG.SEA+88).toFixed(1) + ', uDay);',
-  '    float snowT=smoothstep(snowY-22.0, snowY+16.0, wy);',
+  // world, the same way the generator paints the interior peaks the player can walk to.
+  // THE HEIGHT IS READ OFF THE RIDGE, NOT OFF THE SCREEN. `uCamY+elev*dist` inverts the projection, and that inversion
+  // is only valid while `top` IS peak/dist — which it stops being the moment uMtnMax caps it, and 20 degrees caps every
+  // near-band bearing there is. Capped, the drawn band is a squashed picture of the ridge, so elevation no longer
+  // carries height: at the near band's 320 blocks, half a degree of screen bought 2.8 blocks of "altitude" and the whole
+  // range came out above any line that left snow on the peaks. That is the solid white sheet — measured 08-17, snowT
+  // was 1.0 across every visible fragment (__hc.mtnDbg(1) paints it red; bench/results/look-snowT-0.png).
+  // t already IS the honest fraction up the ridge, 0 at the foot and 1 at the summit, and both of those heights are
+  // known in world terms — so interpolate between them and the cap cannot lie about altitude any more.
+  '    float wyPeak=uCamY+peak*(1.0+crest);',
+  '    float wy=mix(' + (CFG.SEA+18).toFixed(1) + ', wyPeak, t);',
+  // THE LINE IS SET AGAINST WHAT THE MASK DELIVERS, and every earlier number in this file was set against the broken
+  // projection above, so none of them survive. __hc.mtnMask() reads the peaks the generator actually put around the
+  // player: the near band tops out at 92-110 in world height with a MEAN of 57-70, over a foot at sea+18 = 58. A line
+  // has to sit inside that spread to mean anything — above 110 no bearing has snow, below 70 most of them do, and
+  // "most of them do" is the white sheet with extra steps.
+  // THE RAMP RUNS DOWNWARD WITH THE SUN, which is the real thing: a snow line is lower when it is cold. What made that
+  // wrong before was that the whole range was snow at every hour, so dusk simply had more of it. With the line inside
+  // the peak spread, dusk lowers it 10 blocks and takes the caps a little further down the tall ridges; the coverage
+  // gate on the mix below is what stops an unlit cap out-reading the rock.
+  // IT IS A DIAL because how much snow a horizon should carry is Ben's eye, not a derived number: __hc.mtn({snow:[lo,
+  // hi]}) sets the low-sun and high-sun ends in world height and reports them.
+  '    float snowY=mix(uSnowY.x, uSnowY.y, uDay);',
+  // AND THE RAMP IS 24 BLOCKS, NOT 38. The old ramp was wider than the gap between the foot and the tallest peak, so
+  // every fragment sat somewhere inside the transition and no ridge had a rock/snow EDGE anywhere on it. A snow line
+  // you can see is a line.
+  '    float snowT=smoothstep(snowY-12.0, snowY+12.0, wy);',
   // IT IS WOODED FOR MOST OF ITS HEIGHT (Ben: it is grey and desaturated against the deep green of the real forest).
   // Rock took over at 0.34 to 0.52 of the way up, so on a band this tall almost everything visible was bare slate. A real
   // range is treeline for two thirds of what you can see of it; rock and snow are the top.
@@ -24497,7 +24501,14 @@ function _glbOneOf(modelId,cut,style){
 //   mm is the real object, in millimetres. axis is 0/1/2 = x/y/z of the model as exported.
 const GAME_MM=890/0.79;   // the game's own scale, measured off a gun rather than assumed: the AR-15 is 0.79 units for a real 890 mm carbine
 const ATT_SIZE={
-  red_dot:      {mm: 68, axis:2},   // an Aimpoint T-1 body
+  // A BIGGER SIGHT, BY CHANGING WHAT IT IS A SIGHT OF (Ben 08-16: "the dot sight is wayy to tiny") ----
+  // 68 mm is an Aimpoint T-1 micro and it was right to life: 68 of the 890 mm the AR-15 measures is 7.6% of the
+  // rifle, which is what a micro red dot really is. He is not wrong either — at that size it reads as a bump on
+  // the rail rather than as a sight you aim through, and the fix is not to fudge the number but to change which
+  // optic this is. A CompM4 is 120 mm, a full-size Aimpoint, and it is the sight a rifle like this usually wears.
+  // Same move the suppressor line below records, and the same reason to write it as one number: the scale rule
+  // stays honest and the object it describes is the thing that changed.
+  red_dot:      {mm:120, axis:2},   // an Aimpoint CompM4 body (was 68, a T-1 micro — see above)
   holo_sight:   {mm:140, axis:2},   // an EOTech 512 with its battery housing
   optic_scope:  {mm:300, axis:2},   // a mid-length rifle scope
   suppressor:   {mm:240, axis:2},   // 200 is the real can; Ben asked for more presence on the muzzle and this is that call, in one number
@@ -43708,8 +43719,12 @@ window.__hc={
       // range above its own foot; the band measured 37-43 degrees when he called it a wall.
       if(o && o.deg!=null) _mtU.uMtnMax.value=Math.max(0.02, (+o.deg)*Math.PI/180);
       if(o){ if(o.gain!=null) _mtU.uGain.value=+o.gain; if(o.fogMul!=null) _mtU.uFogMul.value=+o.fogMul;
+             // The snow line, low sun and high sun, in world height — against peaks that mtnMask() reports in the same
+             // units, so the two readings can be compared without converting anything.
+             if(o.snow!=null) _mtU.uSnowY.value.set(+o.snow[0], +o.snow[1]);
              if(o.force){ _cpLastX=1e9; _cpLastZ=1e9; } }
       return { on:_mtWant, gain:_mtU.uGain.value, fogMul:_mtU.uFogMul.value,
+               snow:[_mtU.uSnowY.value.x, _mtU.uSnowY.value.y],
                deg:+(_mtU.uMtnMax.value*180/Math.PI).toFixed(2) }; }
     catch(e){ return String(e.message||e); } },
   // QA/bench: isolate one distance band (0 near, 1 mid, 2 far); -1 restores all three.
