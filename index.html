@@ -7615,8 +7615,15 @@ const mountainMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false,
   // at full height while it disappears, which is a curtain being drawn back, not land: a range ends by sinking to the
   // horizon. Presence therefore drives the HEIGHT as well, and the two together mean the last few degrees of the run
   // are a low ridge going under the waterline rather than a sheet with a straight edge cut in it.
+  // ...AND IT FADES THE RIDGE'S HEIGHT ABOVE ITS OWN FOOT, not its height above the eye. Scaling (summit - camera)
+  // reads as "sink to the horizon", which is right only while the horizon and the range's base are the same line —
+  // true from the beach, false from 300 blocks up, where the base sits 21 degrees BELOW the horizon and a fading
+  // range rose to meet the horizon instead of flattening into the land. Fading (summit - foot) is the same picture
+  // from the beach and the correct one from anywhere else.
+  '    float footY=' + (CFG.SEA+18).toFixed(1) + '-uCamY;',        // the range stands on the island's own high ground
+  '    float foot=footY/dist;',
   '    float _run=smoothstep(0.08, 0.62, m.r);',
-  '    float peak=(SEA_H+m.g*MTN_SPAN-uCamY)*_run;',
+  '    float peak=footY+(SEA_H+m.g*MTN_SPAN-(SEA_H+18.0))*_run;',
   // The ridge line, with a fine crest riding it. The crest is bandlimited the same way the pine crowns are: a feature
   // narrower than a pixel is not a feature, it is noise, and at these distances a 40-block crag is close to that.
   '    float cpx=(40.0/dist)/max(uPixAng,1e-6);',
@@ -7637,8 +7644,6 @@ const mountainMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false,
   // foot+uMtnMax)` referenced an undeclared identifier and the whole mountain program failed to link: no inland range
   // was drawn at any bearing, at any hour, on any dial. Every reading taken off this layer between that reordering and
   // 08-17 was of an empty framebuffer — including "the clamp does nothing", which is true of a shader that never runs.
-  '    float footY=' + (CFG.SEA+18).toFixed(1) + '-uCamY;',        // the range stands on the island's own high ground
-  '    float foot=footY/dist;',
   // THE LOOM ANGLE IS NOT A CLAMP ANY MORE — it sets the range's DISTANCE, on the CPU, once per mask build (see
   // updateInlandMountains). A clamp on `top` was the wrong shape for the call it was implementing: every near-band
   // bearing hit 20 degrees, so a 281-block peak and a 190-block one drew to exactly the same height and the range was
@@ -7781,13 +7786,18 @@ function updateInlandMountains(){
   // when anyone touches the slider.
   // THE DISTANCE IS DERIVED FROM THE LOOM ANGLE, not stated. 320 was a stated distance with a 20-degree clamp on top
   // of it, and the clamp was doing all the work: the tallest bearing here stands 281 in world height, which over 320
-  // blocks subtends 36 degrees, so every bearing above about 155 was being cut to the same 20 and the range drew flat.
-  // Standing the tallest peak at rise/tan(loom) is the same picture Ben asked for — apparent size is what looms — with
-  // the ridge line intact underneath it. The floor on `rise` keeps the range from flying off to infinity when the
-  // player climbs above the peaks (from a mountain top it should sit low and far, not vanish), and the clamp on the
-  // result keeps parallax and the crest's pixel scale inside the range those terms were written for.
-  { const rise=Math.max(24, _mtPeakW[0]-camera.position.y);
-    _mtU.uWall.value=Math.max(240, Math.min(3000, rise/Math.tan(Math.max(0.03, _mtU.uMtnMax.value)))); }
+  // blocks subtends 36 degrees, so every bearing above about 155 was being cut to the same 20 and the range drew flat
+  // — one height for every ridge, which is the slab. Standing the range at its own height over tan(loom) gives the
+  // picture Ben asked for (apparent size is what "looms" means; distance only moves haze and parallax, and both
+  // follow) with the ridge line intact underneath it.
+  // MEASURED FROM THE RANGE'S FOOT, NOT FROM THE CAMERA, and that is not a detail. Against the camera the distance
+  // collapses as the player climbs — at y 300, above the peaks, rise went to nothing, the range came to its minimum
+  // distance and filled the frame with a wall (bench/results/loom-high-0.png, before this line). The old cap had been
+  // quietly covering that case. A range's height is a fact about the range: 281 at the tallest bearing over a foot at
+  // sea+18 is 223 blocks, so it stands at 223/tan(loom) whatever the player does, and from altitude it simply drops
+  // below the horizon the way real land does.
+  _mtU.uWall.value=Math.max(200, Math.min(4000,
+    (_mtPeakW[0]-(CFG.SEA+18))/Math.tan(Math.max(0.03, _mtU.uMtnMax.value))));
   _mtU.uCamY.value=camera.position.y;
   _mtU.uFogD.value=scene.fog?scene.fog.density:0.01;
   _mtU.uWx.value=(typeof weather!=='undefined'?(weather.fog||0):0);
@@ -33108,7 +33118,28 @@ function updateLeaves(dt){ if(!_leafIM.instanceColor)return;
     // DARK IN THE DARK (Ben 07-22): dim each falling leaf by its OWN sky exposure — a leaf under a canopy, roof or
     // underground goes dark, in open sky it stays lit. (skyExposure is read-only; it does not touch the light bake.)
     { const _ex=(typeof skyExposure==='function')?skyExposure(Math.floor(_leafPos[b]),Math.floor(_leafPos[b+1]),Math.floor(_leafPos[b+2])):1; const _eb=0.1+0.9*_ex;
-      _leafTmpCol.setRGB(_leafCol[b]*_eb,_leafCol[b+1]*_eb,_leafCol[b+2]*_eb); _leafIM.setColorAt(i,_leafTmpCol); }
+      let _r=_leafCol[b]*_eb, _g=_leafCol[b+1]*_eb, _bl=_leafCol[b+2]*_eb;
+      // ---- AND A WARM LEAF STOPS BEING AN ORANGE SPARK AT RANGE (Ben 08-17, the orange speckles) ----
+      // Convicted in d835d35: with the leaves hidden, zero pixels in a noon sky pass an orange test; with them shown,
+      // twenty-four do. Three of the seven palette entries are autumn — 0xb98b2e, 0xc8702a, 0x9a5a24 — and a
+      // 0.42x0.34 plane thirty blocks off is a few pixels wide, so at distance the leaf is gone and only its colour is
+      // left. Against sky that is a spark.
+      // THE FOG CANNOT DO THIS, which is why it is done here. The material already carries fog:true; the density at
+      // noon is lerp(1.70, 0.155, sqrt(day)) over the whole render distance, deliberately thin so daylight reaches the
+      // wall, and thirty-four blocks of that is almost nothing. Four separate rulings hold the fog where it is.
+      // ONLY THE WARM ONES, and gated on the COLOUR rather than on a palette index so an eighth entry inherits the
+      // rule: r > g > b is the same test that convicted them. A green leaf against green wood was never the complaint
+      // and is left alone entirely.
+      // IT DESATURATES, IT DOES NOT DIM. Fading toward luminance keeps the leaf visible as a leaf — a dimming ramp
+      // would make distant leaves vanish and the canopy shed nothing, which is the feature Ben likes in the same frame
+      // he reported this. Near leaves are untouched: the ramp is zero inside twelve blocks and full at LEAF_R.
+      if(_r>_g && _g>_bl){
+        const _dx=_leafPos[b]-eye.x, _dy=_leafPos[b+1]-eye.y, _dz=_leafPos[b+2]-eye.z;
+        const _d=Math.sqrt(_dx*_dx+_dy*_dy+_dz*_dz);
+        const _f=Math.min(1,Math.max(0,(_d-12)/(LEAF_R-12)));
+        if(_f>0){ const _l=0.2126*_r+0.7152*_g+0.0722*_bl;
+          _r+=(_l-_r)*_f; _g+=(_l-_g)*_f; _bl+=(_l-_bl)*_f; } }
+      _leafTmpCol.setRGB(_r,_g,_bl); _leafIM.setColorAt(i,_leafTmpCol); }
     if(_leafLand[i]>0){                                                        // LANDED — rest flat on the surface, then vanish forever (a fresh leaf spawns up top)
       _leafLand[i]-=dt; if(_leafLand[i]<=0){ _leafRespawn(i, eye.y+LEAF_TOP); }
       else { _leafDummy.position.set(_leafPos[b],_leafPos[b+1],_leafPos[b+2]); _leafDummy.rotation.set(-1.5708, _leafRot[b+1], 0); _leafDummy.scale.setScalar(_leafSz[i]); _leafDummy.updateMatrix(); _leafIM.setMatrixAt(i,_leafDummy.matrix); }
