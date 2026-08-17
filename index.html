@@ -9627,6 +9627,9 @@ function setBlockWorld(wx,wy,wz,b,record){
   }
   const _old=c.blocks[idx(lx,wy,lz)];
   c.blocks[idx(lx,wy,lz)]=b;
+  // WAKE THE FLUID, and only where an edit could have changed it. This is the seam that makes the simulation cost nothing
+  // in a still world: no scan, no timer over the sea, just the six cells around whatever was placed or broken.
+  if(typeof waterTouch==='function' && (b===WATER || _old===WATER || b===AIR || _old===AIR)) waterTouch(wx,wy,wz);
   if(blockLight[_old]||blockLight[b]){                 // a light block changed → invalidate the baked emitter caches; neighbours get a cheap RELIGHT (texture re-flood), not a geometry rebuild
     for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++){ const nc=getChunk(c.cx+dx,c.cz+dz); if(nc){ nc._emit=null; if(dx||dz) markRelight(nc.cx,nc.cz); } }
   }                                                    // the edited chunk itself still gets the full markRemesh below — its geometry really changed (the torch/lantern model)
@@ -17204,7 +17207,7 @@ function loop(){ try{
     else if(rmbHeld && performance.now()>=nextAct){ doPlace(); nextAct=performance.now()+240; } }   // right-hold = repeat place
   T.end(TID.sim);
   T.begin(TID.entities);
-  if(started && !player.dead && !intro.active && !(typeof BR!=='undefined'&&BR.inside)){ wretch=wretchPrime; T.begin(TID.brain); if(!NET.on||NET.host)updateBrain(dt); T.end(TID.brain); T.begin(TID.wretch); updateWretch(dt); if(wretchExtra.length){ updateWretchExtras(dt); hwBindGrabber(); } T.end(TID.wretch); if(typeof heartbeatProximity==='function')heartbeatProximity(dt); T.begin(TID.animals); if(NET.on&&!NET.host)netAnimalsTick(); else updateAnimals(dt); T.end(TID.animals); if(typeof updateGiantess==='function')updateGiantess(dt); if(typeof updateHerobrine==='function'){ if(NET.on && herobrine.haunting && herobrine.owner!=null && herobrine.owner!==NET.id) hbMirrorTick(dt); else updateHerobrine(dt); } }   // co-op: director + animals run on the host; the HAUNT runs on its interactor, others mirror. THE BACKROOMS suspends ALL overworld-entity sim — the Wretch can never follow you in or grab you there (Ben 07-27)
+  if(started && !player.dead && !intro.active && !(typeof BR!=='undefined'&&BR.inside)){ wretch=wretchPrime; T.begin(TID.brain); if(!NET.on||NET.host)updateBrain(dt); T.end(TID.brain); T.begin(TID.wretch); updateWretch(dt); if(wretchExtra.length){ updateWretchExtras(dt); hwBindGrabber(); } T.end(TID.wretch); if(typeof heartbeatProximity==='function')heartbeatProximity(dt); T.begin(TID.animals); if(NET.on&&!NET.host)netAnimalsTick(); else updateAnimals(dt); T.end(TID.animals); if(typeof updateWater==='function')updateWater(dt); if(typeof updateGiantess==='function')updateGiantess(dt); if(typeof updateHerobrine==='function'){ if(NET.on && herobrine.haunting && herobrine.owner!=null && herobrine.owner!==NET.id) hbMirrorTick(dt); else updateHerobrine(dt); } }   // co-op: director + animals run on the host; the HAUNT runs on its interactor, others mirror. THE BACKROOMS suspends ALL overworld-entity sim — the Wretch can never follow you in or grab you there (Ben 07-27)
   if(started && !player.dead && !intro.active) updateGhost(dt);            // hover vehicle — must run BEFORE the camera so a rider's slaved position is current this frame
   if(started) updateNVG(dt);                                               // night-vision overlay (green phosphor + heavy grain) while the goggles are worn+on
   T.end(TID.entities);
@@ -22575,6 +22578,107 @@ function updateDropPick(){
   const e=_dropEdges(now); if(e) e.visible=true;
 }
 function removeDropById(did){ for(let i=drops.length-1;i>=0;i--){ if(drops[i].did===did){ const o=drops[i]; dropGroup.remove(o.mesh); _disposeView(o.mesh); drops.splice(i,1); } } }
+
+// =====================================================================
+//  WATER THAT FLOWS DOWNWARD AND OUTWARD (Ben 2026-08-16)
+// =====================================================================
+// Dig a channel out of a lake and the water runs down it. The decisions, stated because each is expensive to change later
+// and none of them falls out of the code by itself:
+//
+//  1. FLOWING WATER IS THE SAME BLOCK AS STILL WATER. No new block id, no save-format change, and nothing else in this file
+//     has to learn a second kind of water — the mesher, the swim physics, the drag, the light and the fog all key off
+//     `b===WATER` in about forty places and every one of them keeps working untouched. The LEVEL exists only inside this
+//     simulation, in `_wLev`, which is why it does not need to persist: on load the sim re-derives it from the sources.
+//     The alternative, seven block ids for seven levels, is six ids of permanent debt for a thing that rebuilds itself in
+//     a second, and block ids are positional so the debt is forever.
+//  2. A SOURCE IS INFINITE, and a source is any water at or below sea level plus any water a player places. Without that
+//     the first channel dug out of the sea drains the sea.
+//  3. SEVEN BLOCKS OF SPREAD from a source before it runs dry. Water that FALLS lands at full strength, so a waterfall
+//     spreads seven again from its base — which is what makes a drop off a ledge read as a river rather than a dribble.
+//  4. WHEN TWO FLOWS MEET, the higher level wins and equal levels do nothing. No stone is made where they touch; that is
+//     a different feature and inventing it here would surprise someone.
+//  5. ONLY CELLS THAT CAN CHANGE ARE EVALUATED. There is no world scan, ever. The queue is seeded by block edits and by
+//     the sim's own writes, and it is capped per tick — a fluid that re-evaluates a lake every tick costs more than
+//     everything else built today put together.
+//
+// THE COST IS BOUNDED BY CONSTRUCTION, not by hoping the water settles: WATER_CAP cells per tick at WATER_HZ ticks a
+// second is the ceiling whatever the player does, and a queue that cannot drain in time simply takes longer to settle.
+const WATER_MAX=7;        // spread distance from a source, in blocks
+const WATER_CAP=192;      // cells evaluated per tick — the hard ceiling on what this can ever cost
+const WATER_HZ=8;         // ticks a second. Fast enough that a channel fills while you watch it, slow enough to see it move
+const _wLev=new Map();    // 'x,y,z' -> 1..7 for FLOW cells. Sources are not in here; they are level 8 by definition
+let _wQ=new Map(), _wT=0, _wRan=0, _wMoved=0;
+const _wKey=(x,y,z)=>x+','+y+','+z;
+// A source is the world's own water: the sea, a lake, anything the generator laid at or below sea level, and anything a
+// player has placed. `_wLev` holding no entry for a water cell IS the definition of a source, which is why placing water
+// needs no extra bookkeeping.
+function _wIsSource(x,y,z,b){ return b===WATER && !_wLev.has(_wKey(x,y,z)); }
+function _wLevelAt(x,y,z){
+  const b=getBlock(x,y,z);
+  if(b!==WATER) return 0;
+  const L=_wLev.get(_wKey(x,y,z));
+  return L===undefined ? 8 : L;
+}
+// Enqueue a cell and the six around it. Called from the block chokepoint, so any edit anywhere near water wakes exactly
+// the cells that edit could have changed and nothing else.
+function waterTouch(x,y,z){
+  if(!_wOn) return;
+  _wQ.set(_wKey(x,y,z),1);
+  _wQ.set(_wKey(x+1,y,z),1); _wQ.set(_wKey(x-1,y,z),1);
+  _wQ.set(_wKey(x,y,z+1),1); _wQ.set(_wKey(x,y,z-1),1);
+  _wQ.set(_wKey(x,y+1,z),1); _wQ.set(_wKey(x,y-1,z),1);
+}
+let _wOn=true;
+function updateWater(dt){
+  if(!_wOn || !_wQ.size) return;
+  _wT+=dt; if(_wT < 1/WATER_HZ) return; _wT=0;
+  let n=0;
+  const next=new Map();
+  for(const k of _wQ.keys()){
+    if(n++>=WATER_CAP){ next.set(k,1); continue; }
+    const p=k.split(','), x=+p[0], y=+p[1], z=+p[2];
+    if(y<1||y>=WH) continue;
+    const b=getBlock(x,y,z);
+    if(b!==AIR && b!==WATER) continue;                       // solid: nothing to do, and it is not a hole to fill
+    if(_wIsSource(x,y,z,b)) continue;                        // the sea is not the sim's to move
+
+    // WHAT SHOULD BE HERE. Water above at any level fills this cell completely — that is the falling case, and it is why a
+    // waterfall stays a full column instead of thinning as it drops. Otherwise it is one less than the wettest neighbour.
+    let want=0;
+    if(_wLevelAt(x,y+1,z)>0) want=8;
+    else {
+      let m=0;
+      const a=_wLevelAt(x+1,y,z), bq=_wLevelAt(x-1,y,z), c2=_wLevelAt(x,y,z+1), d2=_wLevelAt(x,y,z-1);
+      m=Math.max(a,bq,c2,d2);
+      want=m>1 ? Math.min(WATER_MAX, m-1) : 0;
+    }
+    // WATER PREFERS DOWN. If the cell below can take it, this cell does not spread sideways at all — which is the whole
+    // difference between water running down a channel and water sheeting across a floor.
+    const below=getBlock(x,y-1,z);
+    if(want>0 && (below===AIR || (below===WATER && _wLevelAt(x,y-1,z)<8 && !_wIsSource(x,y-1,z,below)))) {
+      _wQ.set(_wKey(x,y-1,z),1);
+    }
+
+    const have=(b===WATER)?_wLevelAt(x,y,z):0;
+    if(want===have) continue;
+    if(want>0){
+      _wLev.set(k,Math.min(8,want));
+      if(b!==WATER){ setBlockWorld(x,y,z,WATER,true); _wMoved++; }
+      waterTouch(x,y,z);
+    } else {
+      _wLev.delete(k);
+      if(b===WATER){ setBlockWorld(x,y,z,AIR,true); _wMoved++; }
+      waterTouch(x,y,z);
+    }
+  }
+  // A MAP IS THE QUEUE because a cell touched six times in one pass must be evaluated once, not six times, and that dedupe
+  // is most of what keeps the cost flat. Keys added by waterTouch DURING this loop are visited by it — that is Map
+  // iteration semantics and it is deliberate, because it lets one tick carry a flow several cells rather than one; the cap
+  // is what bounds it, and everything past the cap spills into `next` for the tick after.
+  _wQ=next;
+  _wRan++;
+}
+
 function updateDrops(dt){ for(let i=drops.length-1;i>=0;i--){ const d=drops[i]; d.age+=dt;
     if(!d.rest) _dropStep(d,dt);
     // DROPS OF THE SAME THING MERGE (Ben's backlog item 30: "dropped stackable items merge when close together"). Mining a seam or
@@ -41054,6 +41158,24 @@ window.__hc={
         else if(h===CFG.SEA+2) out.s2++;
         else if(h===CFG.SEA+3) out.s3++; }
       out.sea=+out.sea; return out; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // QA: the fluid as numbers. `queue` is what is still to settle, `cells` how many flow cells exist, `moved` how many
+  // block writes the sim has made in its life — the last one is the difference between a simulation that is running and
+  // one that is merely enqueued, which no screenshot separates.
+  water(on){ try{ if(on!=null){ _wOn=!!on; if(!_wOn){ _wQ.clear(); } }
+      return { on:_wOn, queue:_wQ.size, cells:_wLev.size, ticks:_wRan, moved:_wMoved, cap:WATER_CAP, hz:WATER_HZ, max:WATER_MAX }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // QA: cut a channel from a point, in a straight line, one block wide and one deep — the thing Ben described doing by
+  // hand. Returns what was dug so a bench can watch those exact cells fill rather than hunting for water.
+  waterChannel(len, dir){ try{
+      const L=+len||8, d=(dir==null?0:+dir);
+      const dx=(d===0?1:d===2?-1:0), dz=(d===1?1:d===3?-1:0);
+      const x0=Math.floor(player.pos.x), z0=Math.floor(player.pos.z);
+      const dug=[];
+      for(let i=0;i<L;i++){
+        const x=x0+dx*i, z=z0+dz*i, gy=surfaceH(x,z);
+        setBlockWorld(x,gy,z,AIR,true); dug.push([x,gy,z]); }
+      return { dug:dug.length, from:[x0,z0], first:dug[0]||null, last:dug[dug.length-1]||null, queue:_wQ.size }; }
     catch(e){ return {err:String(e.message||e)}; } },
   humanGone(){ try{ if(_humanOne){ scene.remove(_humanOne); _humanOne=null; return {removed:true}; } return {removed:false}; }
     catch(e){ return {err:String(e.message||e)}; } },
