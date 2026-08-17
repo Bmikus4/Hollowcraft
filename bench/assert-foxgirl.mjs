@@ -46,7 +46,10 @@ const ok=(n,c,d)=>{ if(c){pass++; console.log('  ok   '+n);} else {fail++; conso
     const before=await ev("__hc.foxgirl ? __hc.foxgirl() : {err:'no probe'}");
     console.log('  state '+JSON.stringify(before));
     ok('she is alive in the world', !before.err && before.alive===true, JSON.stringify(before));
-    ok('she is human height', !before.err && Math.abs(before.height-1.8)<0.25, JSON.stringify(before));
+    // FOUR TIMES HUMAN (Ben: "make the fox girl 4x bigger"). Read from the engine rather than written here twice, so the
+    // day the constant moves this does not quietly keep asserting the old size.
+    const H=await ev("(()=>{ try{ return FOXGIRL_H; }catch(e){ return null; } })()") || 7.2;
+    ok('she is four times human height', !before.err && Math.abs(before.height-H)<0.4, JSON.stringify(before)+' want '+H);
     ok('she is the real model, not the fallback box', !before.err && before.meshes>4, JSON.stringify(before));
 
     // DAMAGE THROUGH hurtAnimal, the chokepoint every weapon in the game routes through.
