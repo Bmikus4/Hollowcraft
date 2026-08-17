@@ -29,6 +29,10 @@ const plainIn = o => Object.keys(o).filter(k=>!GRASS(k));
     if(A.err) throw new Error(A.err);
     ok(grassIn(A.under).length===0,    'no grass on any underside (under: '+JSON.stringify(A.under)+')');
     ok(plainIn(A.sideOpen).length===0, 'every sky-exposed edge is grass ('+sum(A.sideOpen)+' faces, tiles '+Object.keys(A.sideOpen)+')');
+    // AND IT IS PLAIN GRASS, NEVER LITTER (Ben: "constrain those fallen leaves to only upward facing sides, and all
+    // other exposed-to-air sides should be grass"). Leaves that fell onto the ground are ON the ground; the side of that
+    // block is the soil under them.
+    ok(Object.keys(A.sideOpen).every(k=>k==='grass_top'), 'an open edge is grass_top, not a litter tile ('+Object.keys(A.sideOpen)+')');
     // AND WHAT A SHUT EDGE WEARS IS DIRT, in Ben's words: "a face is grass ONLY if it is exposed to the sky; every
     // other face is dirt". It was grass_side -- dirt with a green lip -- which is the ordinary block's own side and is
     // not what he asked for.
