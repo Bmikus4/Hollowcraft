@@ -35455,7 +35455,10 @@ function bloodPlane(size,op){ const m=new THREE.Mesh(new THREE.PlaneGeometry(siz
 function spawnBloodSplat(x,z,scale){ const sc=scale||1, gy=groundYAt(x,z); const g=new THREE.Group(); g.position.set(x,gy+0.03,z); carcassGroup.add(g);
   g.add(bloodPlane((1.1+Math.random()*0.5)*sc));
   for(let k=0;k<2+((Math.random()*2)|0);k++){ const sp=bloodPlane((0.4+Math.random()*0.5)*sc); sp.position.set((Math.random()-0.5)*1.5*sc,0.002+k*0.002,(Math.random()-0.5)*1.5*sc); g.add(sp); }   // satellite spatter around it
-  carcasses.push({g,life:SPLAT_LIFE,fade:SPLAT_FADE,mats:g.children.map(o=>o.material)}); if(carcasses.length>SPLAT_CAP){ const old=carcasses.shift(); carcassGroup.remove(old.g); } }
+  // The block it is lying ON, one below the surface height, so mining the floor takes the pool with it (see _decalSweep).
+  const sbx=Math.floor(x), sby=Math.floor(gy)-1, sbz=Math.floor(z);
+  carcasses.push({g,life:SPLAT_LIFE,fade:SPLAT_FADE,mats:g.children.map(o=>o.material),bx:sbx,by:sby,bz:sbz,bid:getBlock(sbx,sby,sbz)});
+  if(carcasses.length>SPLAT_CAP){ const old=carcasses.shift(); carcassGroup.remove(old.g); } }
 // carcasses left behind by the Wretch's feeding — a split ribcage + blood pool that lingers then fades
 // HOW LONG A KILL SITE LASTS (Ben 08-04: carcasses "decompose wayy too fast"). It was 70 SECONDS for a carcass and 80 for
 // a blood splat, fading over the last 8 — so a body you left behind was gone before you had walked a chunk and come back,
@@ -35474,7 +35477,9 @@ function spawnCarcass(x,y,z){ const g=new THREE.Group(); g.position.set(x,y+0.02
   for(let r=-2;r<=2;r++){ const rib=new THREE.Mesh(new THREE.TorusGeometry(0.22,0.025,5,8,Math.PI),bone); rib.position.set(0,0.14,r*0.14); rib.rotation.y=0; rib.rotation.z=(Math.random()-0.5)*0.5; g.add(rib); }   // split-open ribcage — ribs arc UP across the body (spaced along the spine), rotated 90° from before
   const spine=new THREE.Mesh(new THREE.BoxGeometry(0.06,0.06,0.7),bone); spine.position.y=0.08; g.add(spine);
   for(let i=0;i<5;i++){ const b=new THREE.Mesh(new THREE.BoxGeometry(0.05,0.05,0.24),bone); b.position.set((Math.random()-0.5)*0.9,0.05,(Math.random()-0.5)*0.9); b.rotation.y=Math.random()*6.283; g.add(b); }   // scattered bones
-  carcasses.push({g,life:CARCASS_LIFE,fade:CARCASS_FADE,mats:[pool.material]}); if(carcasses.length>CARCASS_CAP){ const old=carcasses.shift(); carcassGroup.remove(old.g); } }
+  { const cbx=Math.floor(x), cby=Math.floor(y)-1, cbz=Math.floor(z);
+    carcasses.push({g,life:CARCASS_LIFE,fade:CARCASS_FADE,mats:[pool.material],bx:cbx,by:cby,bz:cbz,bid:getBlock(cbx,cby,cbz)}); }
+  if(carcasses.length>CARCASS_CAP){ const old=carcasses.shift(); carcassGroup.remove(old.g); } }
 // ---- THE DREAD RAMP: one signal for "the Wretch is closing" ----------------------------------------------------------
 // Ben 08-04: "all game music should stop when the ambient sound also cuts out, so when before the wretch attacks all game
 // music should stop." E2 of the plan wants the birds and the insects to thin out on the same approach, so this is ONE
@@ -37128,11 +37133,44 @@ const _bholes=[]; let _bholeGeo=null, _bholeMat=null;
 function addBulletHole(px,py,pz,nx,ny,nz){ try{
   if(!_bholeGeo){ _bholeGeo=new THREE.CircleGeometry(0.065,8); _bholeMat=new THREE.MeshBasicMaterial({color:0x0d0a08,transparent:true,opacity:0.9,depthWrite:false,side:THREE.DoubleSide,polygonOffset:true,polygonOffsetFactor:-4,polygonOffsetUnits:-4}); }   // double-sided + a bigger depth pull so the decal stays visible point-blank and through the scope (never loses the z-fight to its own wall)
   const m=new THREE.Mesh(_bholeGeo,_bholeMat); m.position.set(px+nx*0.03,py+ny*0.03,pz+nz*0.03); m.lookAt(px+nx,py+ny,pz+nz); m.renderOrder=4; m.frustumCulled=false; scene.add(m);   // seat it 3cm proud of the face so it can't z-fight up close
-  _bholes.push({m,t:clock.elapsedTime}); if(_bholes.length>100){ const o=_bholes.shift(); scene.remove(o.m); } }catch(e){} }   // HARD CAP: at most 100 bullet holes in the world at once — oldest gives way (Ben 07-21)
+  // THE HOLE REMEMBERS THE BLOCK IT IS IN (Ben: "bullet holes must die with their block"). Step half a block back along
+  // the face normal from the hit point and you are in the cell the bullet struck — the hit point itself sits exactly on
+  // the boundary, so flooring it lands in the cell in FRONT half the time and the hole would then be watching the air.
+  const bx=Math.floor(px-nx*0.5), by=Math.floor(py-ny*0.5), bz=Math.floor(pz-nz*0.5);
+  _bholes.push({m,t:clock.elapsedTime,bx,by,bz,bid:getBlock(bx,by,bz)});
+  if(_bholes.length>100){ const o=_bholes.shift(); scene.remove(o.m); } }catch(e){} }   // HARD CAP: at most 100 bullet holes in the world at once — oldest gives way (Ben 07-21)
 // MOB bullet holes were REMOVED (Ben 07-21) — creatures take blood-burst particles on hit but never a lingering wound decal.
+// EVERY SURFACE DECAL SHARES ONE FAULT BY CONSTRUCTION: it is a plane at a world position and the world underneath it
+// can be taken away. A bullet hole is the one Ben names, but a blood pool and a carcass sit on the ground the same way,
+// and mining the block out from under any of them leaves it floating.
+//   THE TEST IS THE BLOCK ID, NOT "IS IT AIR". Replacing stone with planks under a splat is still a different surface,
+// and a pool that survives the swap reads as paint on the new floor. Anything that changes the cell kills the decal.
+let _dsI=0;
+function _decalSweepList(list, per, kill){
+  if(!list.length) return;
+  const n=Math.min(per, list.length);
+  for(let k=0;k<n;k++){ const i=(_dsI+k)%list.length, d=list[i];
+    if(!d || d.bx==null) continue;
+    // AN UNLOADED CHUNK IS NOT A MINED BLOCK, and getBlock cannot tell you apart: it returns AIR for a chunk that has
+    // not generated yet. Without this the sweep deletes every decal the moment you walk out of streaming range, and a
+    // carcass with a ten-minute life would never survive a walk to the treeline and back.
+    const c=world.get(key(d.bx>>4, d.bz>>4)); if(!c || !c.generated) continue;
+    if(getBlock(d.bx,d.by,d.bz)!==d.bid){ kill(d); list.splice(i,1); return; } }   // one removal a frame keeps the index walk honest
+}
+function _decalSweep(dt){
+  _dsI+=8;
+  _decalSweepList(_bholes, 8, o=>{ scene.remove(o.m); });
+  _decalSweepList(carcasses, 3, o=>{ carcassGroup.remove(o.g); });
+}
 function updateBlockFx(dt){
   updateBloodFx(dt);   // before the chest-lid early return below, or blood would only age while a chest was opening
   { const now=clock.elapsedTime; while(_bholes.length && now-_bholes[0].t>120){ const o=_bholes.shift(); scene.remove(o.m); } }   // surface (terrain) holes age out at 120s — mob wound decals removed (Ben 07-21)
+  // A HOLE WHOSE BLOCK IS GONE IS A DISC HANGING IN THE AIR. Blocks change through mining, explosions, the peel, the
+  // ICBM and worldgen streaming, and hooking every one of those is how this stays broken: a hole would outlive the
+  // one path somebody forgot. So the decals ASK, round-robin — a fixed slice per frame, never the whole list, so the
+  // cost is constant no matter how many are live. At 8 a frame a hundred holes are all re-checked inside a fifth of a
+  // second, which is faster than a player can look back at the wall they just broke.
+  _decalSweep(dt);
   if(!chestLid||!chestLidAnim.active)return; chestLidAnim.t+=dt*3.4*chestLidAnim.dir; const t=clamp(chestLidAnim.t,0,1); const e=t*t*(3-2*t); chestLid.rotation.x=-1.35*e;
   if(chestLidAnim.dir<0&&t<=0){ chestLid.visible=false; chestLidAnim.active=false; _lidRestore(); } if(chestLidAnim.dir>0&&t>=1) chestLidAnim.active=false; }
 let sfxCreak=null;
@@ -39804,6 +39842,24 @@ window.__hc={
       for(let i=0;i<20;i++) updateDrops(1/30);
       const back=inv.find(q=>q&&q.id===id) || (GRID.items||[]).find(q=>q&&q.id===id);
       return { before, after:back?(back.att||null):null, picked:!!back }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // WHAT SURFACE DECALS ARE LIVE AND WHAT BLOCK EACH ONE IS WATCHING. The whole "die with their block" behaviour is
+  // invisible on screen until it fires, so the counts and the first few cells are the only way to see it working.
+  decals(){ try{ return { holes:_bholes.length, carcasses:carcasses.length,
+      cells:_bholes.slice(-4).map(h=>[h.bx,h.by,h.bz,h.bid,getBlock(h.bx,h.by,h.bz)]) }; }catch(e){ return {err:String(e.message||e)}; } },
+  // THE WHOLE TRIP INSIDE THE MODULE, because nothing this needs — player, setBlockWorld, addBulletHole — is on window.
+  // Reads the count with the hole seated AND with the block still there first: a run that never seats one would
+  // otherwise report the same zero as a hole that died correctly.
+  decalTrip(){ try{ const p=player.pos, bx=Math.floor(p.x)+3, by=Math.floor(p.y), bz=Math.floor(p.z);
+      setBlockWorld(bx,by,bz,BID.stone,true);
+      addBulletHole(bx+1, by+0.5, bz+0.5, 1,0,0);
+      const seated=_bholes.length, cell=_bholes[_bholes.length-1];
+      for(let i=0;i<40;i++) updateBlockFx(1/60);
+      const survives=_bholes.length;                        // the block is still there: the sweep must NOT take it
+      setBlockWorld(bx,by,bz,0,true);
+      for(let i=0;i<40;i++) updateBlockFx(1/60);
+      return { seated, survives, after:_bholes.length, watching:cell?[cell.bx,cell.by,cell.bz,cell.bid]:null,
+               placedAt:[bx,by,bz] }; }
     catch(e){ return {err:String(e.message||e)}; } },
   attFit(slot,id){ try{ const s=heldSlot(); if(!s) return {err:'nothing held'};
       // AN UNKNOWN SLOT IS REFUSED. It used to be written straight through to the instance, so a harness that passed
