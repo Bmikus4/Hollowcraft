@@ -241,6 +241,12 @@ export function humanBuild(url, heightBlocks){
   group.position.y = -t.box.min.y * s;
   group.userData.bones = bones;
   group.userData.skeleton = skeleton;
+  // THE REST POSE, CAPTURED ONCE. Every pose below is written as rest * delta and never as an increment on whatever the
+  // bone already held — an accumulating rotation drifts, and a sway that drifts turns a standing body into a corkscrew
+  // over a minute. This is the same discipline the Wretch's animator uses and for the same reason.
+  const rest = new Map();
+  if (skeleton) for (const b of skeleton.bones) rest.set(b, b.quaternion.clone());
+  group.userData.rest = rest;
   return group;
 }
 
@@ -259,4 +265,63 @@ export function humanProbe(url){
            materials: t.mats.map(m => ({ name: m.name, map: !!m.mat.map, alphaTest: m.mat.alphaTest || 0 })),
            size: [ +t.size.x.toFixed(3), +t.size.y.toFixed(3), +t.size.z.toFixed(3) ],
            minY: +t.box.min.y.toFixed(3) };
+}
+
+// ---- IDLE SWAY -----------------------------------------------------------------------------------------------------
+// Ben: "add an idle sway". She stands still — no wandering, no turning, no locomotion — and this is the only animation she
+// has, so it carries the entire impression of her being alive. What that means in practice:
+//
+//   SLOW AND SMALL. A few centimetres of weight shift, a breath in the chest and shoulders, the head drifting a degree or
+//   two. A large idle reads as a dance; a fast one reads as a twitch. The amplitudes below are in radians and the biggest
+//   of them is under two degrees.
+//   NON-REPEATING TO THE EYE. Three cycles at deliberately unrelated periods — 0.23, 0.37 and 0.61 Hz, whose ratios are
+//   not simple fractions — so the combination does not close for many minutes. A single clean sine is the tell that says
+//   "this is an animation" rather than "this is a person", which is the same reasoning as the weapon sway.
+//   THE FEET STAY PLANTED. The motion comes from the ankles, hips and spine; the weight moves BETWEEN the feet rather
+//   than the whole body sliding, because a body that translates without its feet responding looks like a floating model.
+//   AMPLITUDE DOES NOT SCALE WITH SIZE. She is 7.2 blocks, four times a person, and a linear scale would sway her a metre
+//   and read as a swaying tower. A bigger body moves slower and proportionally less, so `size` slows the clock and shrinks
+//   the angles rather than growing them.
+const _iq = new THREE.Quaternion(), _ie = new THREE.Euler();
+export function humanIdle(group, t, size){
+  const rest = group && group.userData && group.userData.rest;
+  const B = group && group.userData && group.userData.bones;
+  if (!rest || !B) return false;
+  // A body four times human moves at about half the rate and two thirds the angle. Both are gentle curves rather than
+  // divisions, so a human-sized character is unchanged and a giant is calmed rather than frozen.
+  const S = Math.max(1, (size || 1.8) / 1.8);
+  const k = 1 / Math.sqrt(S), amp = 1 / Math.pow(S, 0.55);
+  const a = t * 0.23 * 6.2831853 * k;      // the slow weight shift, left foot to right
+  const b = t * 0.37 * 6.2831853 * k;      // the breath
+  const c = t * 0.61 * 6.2831853 * k;      // the small head drift, fastest of the three and still under a hertz
+  const set = (name, x, y, z) => {
+    const bone = B[name]; if (!bone) return;
+    const r = rest.get(bone); if (!r) return;
+    _ie.set(x, y, z, 'XYZ'); _iq.setFromEuler(_ie);
+    bone.quaternion.copy(r).multiply(_iq);
+  };
+  const sa = Math.sin(a), sb = Math.sin(b), sc = Math.sin(c);
+  // THE WEIGHT SHIFT IS THE WHOLE THING. The pelvis rolls a degree toward the loaded foot and the spine counter-rolls
+  // most of it back, which is what a person standing does and what keeps the shoulders level while the hips move.
+  set('pelvis', 0.004 * sb * amp,  0.006 * sa * amp,  0.017 * sa * amp);
+  set('spine',  0.005 * sb * amp,  0.003 * sc * amp, -0.011 * sa * amp);
+  // The breath lives in the chest, and it is the one cycle a viewer can name if it is wrong: too big and she is panting.
+  set('chest',  0.010 * sb * amp, -0.002 * sa * amp, -0.005 * sa * amp);
+  set('neck',  -0.006 * sb * amp,  0.004 * sc * amp,  0.004 * sa * amp);
+  set('head',   0.008 * sc * amp,  0.012 * sa * 0.5 * amp, 0.009 * sc * amp);
+  // ANKLES TAKE THE ROLL BACK OUT so the feet stay flat on the ground rather than rocking onto their edges with the hips.
+  set('footL',  0, 0, -0.010 * sa * amp);
+  set('footR',  0, 0, -0.010 * sa * amp);
+  // The arms hang and lag the body slightly, which is what stops them reading as welded to the ribs.
+  set('armL',   0.010 * sb * amp, 0,  0.008 * sa * amp);
+  set('armR',   0.010 * sb * amp, 0, -0.008 * sa * amp);
+  return true;
+}
+// Put every bone back to the pose the file shipped in. Called when she dies, so the ragdoll takes a still body rather
+// than one that goes on breathing while it falls.
+export function humanRest(group){
+  const rest = group && group.userData && group.userData.rest;
+  if (!rest) return false;
+  for (const [bone, q] of rest) bone.quaternion.copy(q);
+  return true;
 }
