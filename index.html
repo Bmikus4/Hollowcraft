@@ -1158,7 +1158,10 @@ const _hcLamp = new Float32Array([1.0, 0.35, 18.7, 0.85]);
 // lift every shaded block face in the world with it, and the daylight frame has been signed off four times.
 // Gated on uScotG.w (the day factor) so it is gone at night, which is what Ben asked for in the same breath: extremely
 // black nights, with the light in them coming from lamps.
-const _propFill = new Float32Array([0.237, 0.267, 0.30, 0]);
+// [r, g, b, BLACK-TEXEL SIZE]. The fourth was unused; it is now how much albedo-independent delivered light a texel at
+// zero albedo keeps on the non-atlas path, which is where the doors, the fences, the scarecrow and every other cat:'model'
+// block live. 0.55 of the fill, faded in over the darkest 5% of the albedo range — see the term in lights_fragment_end.
+const _propFill = new Float32Array([0.237, 0.267, 0.30, 0.55]);
 // =====================================================================================================
 //  ONE LIGHTING MODEL — the terms, defined once (Ben 08-11: "One standard way of doing lighting, across
 //  the entire game. Then over this, comes weather/fog, the postfx pass.")
@@ -1401,7 +1404,22 @@ const HC_LIGHT_GLSL = [
     '  { float _pfd=clamp(dot(reflectedLight.directDiffuse,'+L+'),0.0,1.0);\n'+
     // AND IT IS OCCLUDED LIKE EVERYTHING ELSE. uHcObj.x is the object's own sky-and-canopy term, written per draw
     // (hcSkyBind) and 1 for anything that has not been bound - so an unbound object behaves exactly as it did.
-    '    reflectedLight.indirectDiffuse += diffuseColor.rgb * uPropFill.rgb * uScotG.w * uHcObj.x * (1.0-_pfd); }\n#endif\n';
+    // ---- AND A BLACK TEXEL IS A HOLE, NOT A SHADE (Ben: "objects like doors, and the scarecrow are covered in black
+    // texels" / "same with fences in light. and there are black texels again") ----
+    // Every one of those is NON-CUBE geometry, which means cat:'model' — and a model block is a Lambert material, so it
+    // comes down this path and not the atlas one. This fill is diffuseColor-weighted, deliberately ("a dark prop stays
+    // dark and a pale one lifts"), and that is exactly right for a shade and exactly wrong for a texel at albedo zero:
+    // light times zero is zero however much of it arrives, so those texels have no value from any term in the frame and
+    // read as punched holes. The atlas path has an albedo-independent term for this; this path never got one.
+    // FADED IN BY A SMOOTHSTEP ON THE TEXEL'S OWN LUMINANCE, never a threshold. A hard cutoff is what becomes speckle at
+    // distance, because the mip chain averages texels across it and the average lands on either side from frame to frame
+    // — which would trade a hole for a shimmer.
+    // IT IS THE DELIVERED LIGHT, so it carries the fill's own occlusion and its (1-_pfd) gate: a black texel in a cave
+    // stays black, and one on a sunlit door is left alone because the fill itself is. uPropFill.w is the size of it and 0
+    // is the build before this.
+    '    vec3 _pf = uPropFill.rgb * uScotG.w * uHcObj.x * (1.0-_pfd);\n'+
+    '    float _palb = dot(diffuseColor.rgb, '+L+');\n'+
+    '    reflectedLight.indirectDiffuse += _pf * (diffuseColor.rgb + vec3(uPropFill.w) * (1.0 - smoothstep(0.0, 0.055, _palb))); }\n#endif\n';
   // reflectedLight and totalEmissiveRadiance are both still in scope at dithering_fragment (same main(), later line), so the
   // gate is computed here only to mark the shader as lit. A #define inside main() is legal: the preprocessor is line-ordered
   // and lights_fragment_end always precedes dithering_fragment in all four shaders.
@@ -3062,9 +3080,12 @@ const _grassBaseMark=(x,y,r)=>{ const c=_grassBase(x,y,r); c[3]=254; return c; }
 paintTile('grass_leaf1', _leafGround(0, 0.0, _grassBaseMark));   // fresh fall, still green
 paintTile('grass_leaf2', _leafGround(1, 1.0, _grassBaseMark));   // dried out, gone over to brown
 paintTile('grass_leaf3', _leafGround(2, 2.0, _grassBaseMark));   // dead litter, grey-brown, nearly soil again
-paintTile('sand_leaf1',  _leafGround(0, 0.5, _sandBase));
-paintTile('sand_leaf2',  _leafGround(1, 1.5, _sandBase));
-paintTile('sand_leaf3',  _leafGround(2, 2.5, _sandBase));
+// And the same for sand (Ben 08-17: "leaves on sand need retextured"), by the same mark and for the same reason: the
+// sand tile is the pack's and these three were still laying litter over the painted one.
+const _sandBaseMark=(x,y,r)=>{ const c=_sandBase(x,y,r); c[3]=254; return c; };
+paintTile('sand_leaf1',  _leafGround(0, 0.5, _sandBaseMark));
+paintTile('sand_leaf2',  _leafGround(1, 1.5, _sandBaseMark));
+paintTile('sand_leaf3',  _leafGround(2, 2.5, _sandBaseMark));
 paintTile('gold',      (x,y,r)=>{ const v=jit(r,0,24), sh=((x+y)%5===0)?26:0; return [214+v+sh,178+v,66+v*0.5]; });                          // shrine gold block
 paintTile('netherite', (x,y,r)=>{ const v=jit(r,0,14), sp=r()<0.16; return [ (sp?66:44)+v, (sp?52:40)+v, (sp?62:48)+v ]; });               // dark netherite, faint purple speckle
 paintTile('netherrack',(x,y,r)=>{ const v=jit(r,0,22), b=r()<0.35; return b?[70+v,20+v*0.4,22+v*0.4]:[106+v,34+v*0.5,32+v*0.5]; });         // maroon netherrack
@@ -3694,8 +3715,8 @@ const _stampInto={};
 const _stampWant=['barrel_side','barrel_top','bedrock','birch_side','birch_top','bookshelf','coal_ore','cobble','diamond_ore','dirt','furnace_front','furnace_top','glass','gold_block','grass_side','grass_top','gravel','hay','hay_top','ice','ind_concrete','ind_grate','ind_metal','ind_panel','ind_rust','iron_ore','ladder','lantern','log_side','log_top','mossy','mud','netherite','netherrack','oak_side','oak_top','planks','planks_white','sand','snow','stone','thatch','torch','wool'];
 _stampWant.forEach(n=>stampTile(n, 'assets/blocks/'+n+'.png'));
 // The leaf variants take the SAME grass_top image, under their own litter.
-const _stampIntoWant=['grass_leaf1','grass_leaf2','grass_leaf3'];
-_stampIntoWant.forEach(n=>stampInto(n, 'assets/blocks/grass_top.png'));
+const _stampIntoWant=['grass_leaf1','grass_leaf2','grass_leaf3','sand_leaf1','sand_leaf2','sand_leaf3'];
+_stampIntoWant.forEach(n=>stampInto(n, n[0]==='s' ? 'assets/blocks/sand.png' : 'assets/blocks/grass_top.png'));
 
 // =====================================================================
 //  BLOCK REGISTRY
