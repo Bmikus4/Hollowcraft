@@ -9932,11 +9932,16 @@ let composer, bloomPass;
 const DofShader={
   uniforms:{ tDiffuse:{value:null}, tDepth:{value:null}, uResolution:{value:new THREE.Vector2(1,1)},
              uNear:{value:0.1}, uFar:{value:1000}, uAmt:{value:1.0},
-             uMaxCoC:{value:4.0},        // the widest blur radius in PIXELS at the frame's own resolution
+             // THESE NUMBERS WERE MEASURED AND THEN PULLED BACK. The first set (maxCoC 4, farDead 9, farFall 90) cut
+             // high-frequency detail in a distant crop by 41% -- 1.397 to 0.825 mean gradient -- and the frame read as
+             // a photograph of the game rather than the game. That is the cinematic far blur the research warned
+             // against: in first person you look at the horizon BECAUSE you are trying to see it, so the far side has
+             // to stay legible and the depth cue has to come from the near side.
+             uMaxCoC:{value:3.0},        // the widest blur radius in PIXELS at the frame's own resolution
              uNearDead:{value:0.8},      // metres nearer than focus that stay sharp
-             uNearFall:{value:3.0},      // metres over which the near side reaches full blur
-             uFarDead:{value:9.0},       // metres further than focus that stay sharp
-             uFarFall:{value:90.0},      // long, so distant terrain is only softened
+             uNearFall:{value:2.5},      // metres over which the near side reaches full blur -- the strong side
+             uFarDead:{value:25.0},      // metres further than focus that stay sharp -- generous on purpose
+             uFarFall:{value:140.0},     // long, so distant terrain is softened rather than defocused
              uNearCut:{value:0.35} },    // anything nearer than this is the viewmodel: never blurred, never a tap
   vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
   fragmentShader:`varying vec2 vUv; uniform sampler2D tDiffuse, tDepth; uniform vec2 uResolution;
@@ -10520,6 +10525,7 @@ const MotionBlurShader={
 };
 let gradePass, ssaoPass=null, godrayPass=null, motionPass=null, _sceneRT=null, _mbMode=false;
 let smaaPass=null;   // see the import, and the add in buildComposer for why it is LAST
+let dofPass=null;    // depth of field — see DofShader for why it sits before bloom and before the tone map
 // THE DEPTH PATH IS NOT THE MOTION BLUR, and conflating the two is why Ben's god rays vanished (08-05: "god rays are gone from
 // the sun"). The scene's DEPTH exists only as a texture on _sceneRT, and _sceneRT was only built when the motion-blur SETTING was
 // on — so turning motion blur off in Settings silently deleted the god rays and the SSAO with it. Ben had every reason to turn it
@@ -16518,6 +16524,12 @@ function useFlintSteel(h,slot){ let did=false, fx=player.pos.x, fy=player.pos.y+
     slot.dur=(slot.dur||ITEMS.flint_and_steel.firestarter.dur)-1; if(slot.dur<=0){ inv[selSlot]=null; flashName('your flint & steel wears out'); } refreshHotbar(); }
   else flashName('nothing here to light'); }
 function doPlace(){ if(player.grabbed)return;   // no right-click interactions while it has you (no chests, no eating, no placing)
+  // NOR MID-SWAP (Ben: "no firing or use until it completes"). fireGun and _doSwing were gated when the two-second
+  // swap was written and USE was not, so a two-second draw could be spent placing blocks, eating, opening a chest or
+  // working a door with a weapon halfway to the hand. One gate here rather than at the mouse buttons, for the reason
+  // fireGun's carries: right-click arrives from a press, from the repeat-place hold and from the QA hooks, and this is
+  // the one function all three reach.
+  if(typeof swapping==='function' && swapping()) return;
   if(player.riding) return;                     // already aboard the Ghost → right-click does nothing (Ctrl dismounts)
   { const hs0=heldSlot(); const holdingGhost=hs0&&ITEMS[hs0.id]&&ITEMS[hs0.id].ghost;
     if(ghostNear() && !holdingGhost){ if(keys.ShiftLeft||keys.ShiftRight){ pickupGhost(); } else { mountGhost(); } return; }   // near the parked Ghost: sneak+click = pick it up, plain click = ride
@@ -19305,6 +19317,13 @@ function loop(){ try{
   // THE OCCLUSION RADIUS IS A WORLD SIZE, so its pixel size has to be re-derived whenever the projection changes.
   // Per frame rather than on a resize event: camera.fov is animated by aiming down sights, so a resize hook would
   // still leave the crease swelling every time the player raised a scope.
+  // DOF's near/far have to be written per frame for the same reason SSAO's are: camera.far tracks the render-distance
+  // slider, so a linearisation using a stale far plane reports the wrong metres and the focus lands in the wrong place.
+  if(dofPass && dofPass.enabled){
+    dofPass.uniforms.uResolution.value.set(innerWidth, innerHeight);
+    dofPass.uniforms.uNear.value = camera.near; dofPass.uniforms.uFar.value = camera.far;
+    dofPass.uniforms.tDepth.value = _sceneRT ? _sceneRT.depthTexture : null;
+  }
   if(ssaoPass && ssaoPass.enabled){
     ssaoPass.uniforms.uResolution.value.set(innerWidth, innerHeight);
     ssaoPass.uniforms.uFocal.value = (innerHeight*0.5)/Math.tan(camera.fov*Math.PI/360);
@@ -21266,7 +21285,7 @@ function placeWretch(dt,moving){
   // about three frames and is under the eye's threshold.
   // CAPPED, so a creature that cannot get out does not walk backwards for ever -- in a tunnel or a doorway the chest can
   // be inside stone with nowhere better to be, and the anti-wedge rule above owns that case.
-  if(wretch.active && wretch.P && wretch.P.spine && wretch.P.spine.length && !wretch.dragging && !player.grabbed
+  if(_BODY_PUSH && wretch.active && wretch.P && wretch.P.spine && wretch.P.spine.length && !wretch.dragging && !player.grabbed
      && !wretch._scooping && !wretch._vigAct && !wretch._park && !wretch.boss){
     // EVERY SPINE JOINT, not the last one. Which end of P.spine is the chest is a fact about how the rig was built, and
     // guessing it wrong tests the pelvis -- which is over the feet and therefore almost never buried, so the push would
@@ -22314,26 +22333,33 @@ const WDFX=[ {amp:1.00,ph: 0.00,rest: 0.00,duty:0.00},
 // puts it on the surface. Retracting a leg the way this retracts an arm would break the walk. It wants foot IK and it
 // is written down rather than half-done.
 const _clV=new THREE.Vector3();
-let _ARM_CLAMP=true;   // __hc.armClamp(false) is the A/B, and it is how the 155-to-2 number below was taken
+// THE SAME TEST THE HIDER USES, on the same meshes. The first version of this asked whether the HAND JOINT's origin was
+// inside a block, and a joint origin is a point on a limb whose meshes are 20cm thick: with the whole forearm in a stone
+// wall the origin sat in open air on the far side of the face, the clamp declined, and it moved the count by 3%.
+// _meshBuried walks a mesh's own bounding box, which is what updateCreatureClip hides on, so the two can never disagree
+// about what "inside" means.
+function _chainBuried(root){ let hit=false;
+  root.traverse(o=>{ if(hit || !o.isMesh) return; if(_meshBuried(o)) hit=true; });
+  return hit; }
+let _ARM_CLAMP=true;   // __hc.armClamp(false) is the A/B for the arms
+let _BODY_PUSH=true;   // __hc.bodyPush(false) is the A/B for the chest correction in placeWretch
 function _clampArmsToWorld(P){
   if(!_ARM_CLAMP) return;
   if(!P || !P.arms || !wretch.active || wretch.dragging || player.grabbed) return;
   const dx=wretch.pos.x-player.pos.x, dz=wretch.pos.z-player.pos.z;
   if(dx*dx+dz*dz > 48*48) return;                       // too far to read: not worth the matrices
   for(let ai=0;ai<P.arms.length;ai++){
-    const c=P.arms[ai], sh=c[1], el=c[2], hand=c[c.length-1];
-    if(!sh || !hand) continue;
+    const c=P.arms[ai], sh=c[1], el=c[2];
+    if(!sh) continue;
     sh.updateWorldMatrix(true,true);
-    hand.getWorldPosition(_clV);
-    if(!_clipBuried(_clV)) continue;
+    if(!_chainBuried(sh)) continue;
     const s=ai?1:-1, restX=-0.12, restZ=s*0.13, restEl=-0.5;
     for(let k=0;k<6;k++){
       sh.rotation.x += (restX-sh.rotation.x)*0.35;
       sh.rotation.z += (restZ-sh.rotation.z)*0.35;
       if(el) el.rotation.x += (restEl-el.rotation.x)*0.35;
       sh.updateWorldMatrix(false,true);
-      hand.getWorldPosition(_clV);
-      if(!_clipBuried(_clV)) break;
+      if(!_chainBuried(sh)) break;
     }
   }
 }
@@ -42512,6 +42538,20 @@ window.__hc={
         out.lateral=run('KeyD'); out.forwardCtl=run('KeyW'); }
       return out;
     }catch(e){ return {err:String(e&&e.message||e)}; } },
+  // QA: THE TWO-SECOND SWAP, which had no instrument at all and is why 610e8c4 could only record it as unexercised.
+  // _swapT, _swapTo and swapping() are module scope, and __hc.hold — the only way a harness had to change what is in
+  // the hand — deliberately CANCELS a swap, so every previous attempt to watch one destroyed it first. This reads the
+  // state without touching it, so the way to drive a swap is what a player does: press a hotbar key.
+  //   {tryFire:true} calls fireGun and reports what it returned, and that is the whole of "the player cannot fire until
+  // it completes" — but it costs a round, so it is opt-in and the harness has to ask twice: once mid-swap, expecting
+  // false, and once after, expecting true. A single reading of false proves nothing, because fireGun returns false for
+  // an empty magazine too.
+  swap(o){ try{ const out={ dur:SWAP_DUR, active:swapping(), t:+(_swapT||0).toFixed(3),
+      secs:+((_swapT||0)*SWAP_DUR).toFixed(3), to:(_swapTo===undefined?null:_swapTo), mid:!!_swapMid,
+      held:view.id, dip:+swapDip().toFixed(4), sel:selSlot };
+    if(o&&o.tryFire) out.fired=(typeof fireGun==='function')?fireGun():null;
+    return out;
+  }catch(e){ return {err:String(e&&e.message||e)}; } },
   bipod(o){ try{ if(o&&o.steady!=null) _bipod.steady=Math.max(0,Math.min(1,+o.steady));
       if(o&&o.deployS!=null) _bipod.deployS=Math.max(0.5,+o.deployS);
       // THE FOLD ANGLE, in degrees because that is the unit the shape is argued in. A gun already built keeps the rest
@@ -45326,6 +45366,7 @@ window.__hc={
   // them, because "an arm" and "a foot" are different bugs -- a foot in the floor is a creature standing on the ground.
   wpos(){ try{ return [+wretch.pos.x.toFixed(3), +wretch.pos.y.toFixed(3), +wretch.pos.z.toFixed(3)]; }catch(e){ return null; } },   // QA: where the creature actually is, for a harness that must not teleport it back on top of a correction it is measuring
   armClamp(on){ try{ if(on!=null) _ARM_CLAMP=!!on; return { on:_ARM_CLAMP }; }catch(e){ return {err:String(e.message||e)}; } },
+  bodyPush(on){ try{ if(on!=null) _BODY_PUSH=!!on; return { on:_BODY_PUSH, pushed:+(wretch._chestPush||0).toFixed(3) }; }catch(e){ return {err:String(e.message||e)}; } },
   rigBuried(){ try{ const g=wretch.group; if(!g||!wretch.active) return {err:'not active'};
       g.updateMatrixWorld(true);
       // BY LIMB, NOT BY MESH NAME. Every mesh in this rig is unnamed, so a count alone cannot tell an arm through a
@@ -45929,7 +45970,20 @@ window.__hc={
                near:r('uNear'), far:r('uFar'), tanHalf:r('uTanHalf'), aspect:r('uAspect'),
                camY:+U.uCamPos.value.y.toFixed(2) };
     }catch(e){ return {err:String(e.message||e)}; } },
-  pass(name, on){ try{ const P={ ssao:ssaoPass, godray:godrayPass, bloom:bloomPass, grade:gradePass, motion:motionPass, heightfog:heightFogPass, smaa:smaaPass };
+  // DEPTH OF FIELD, as dials and a readout. amt 0 is the A/B off; maxCoC is the widest blur in PIXELS; the four range
+  // numbers are metres either side of the focus. focusM reports where the autofocus actually landed this frame, which
+  // is the one thing a screenshot of a blurred frame cannot tell you.
+  dof(o){ try{ if(!dofPass) return {err:'no dof pass: needs the depth path (motion blur on, quality above Low)'};
+      const U=dofPass.uniforms, f=(k,u)=>{ if(o&&o[k]!=null) U[u].value=+o[k]; };
+      f('amt','uAmt'); f('maxCoC','uMaxCoC'); f('nearDead','uNearDead'); f('nearFall','uNearFall');
+      f('farDead','uFarDead'); f('farFall','uFarFall'); f('nearCut','uNearCut');
+      if(o&&o.on!=null) dofPass.enabled=!!o.on;
+      const r=k=>+U[k].value.toFixed(3);
+      return { on:dofPass.enabled, amt:r('uAmt'), maxCoC:r('uMaxCoC'),
+               nearDead:r('uNearDead'), nearFall:r('uNearFall'), farDead:r('uFarDead'), farFall:r('uFarFall'),
+               nearCut:r('uNearCut'), near:r('uNear'), far:r('uFar') }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  pass(name, on){ try{ const P={ ssao:ssaoPass, godray:godrayPass, bloom:bloomPass, grade:gradePass, motion:motionPass, heightfog:heightFogPass, smaa:smaaPass, dof:dofPass };
       const p=P[name]; if(!p) return {err:'no such pass: '+name+' (have '+Object.keys(P).filter(k=>P[k]).join(',')+')'};
       if(on!=null) p.enabled=!!on;
       const st={}; for(const k of Object.keys(P)) st[k]=P[k]?!!P[k].enabled:null;
@@ -46751,7 +46805,8 @@ window.__hc={
       const known=(p===(typeof ssaoPass!=='undefined'?ssaoPass:null))?'ssao':(p===(typeof godrayPass!=='undefined'?godrayPass:null))?'godray'
         :(p===(typeof volPass!=='undefined'?volPass:null))?'volumetric':(p===(typeof heightFogPass!=='undefined'?heightFogPass:null))?'heightFog'
         :(p===(typeof gradePass!=='undefined'?gradePass:null))?'grade':(p===(typeof motionPass!=='undefined'?motionPass:null))?'motionBlur'
-        :(p===(typeof bloomPass!=='undefined'?bloomPass:null))?'bloom':nm;
+        :(p===(typeof bloomPass!=='undefined'?bloomPass:null))?'bloom'
+        :(p===(typeof dofPass!=='undefined'?dofPass:null))?'dof':nm;
       return { i, pass:known, cls:nm, enabled:p.enabled!==false, additive:!!ADD[nm]||/bloom|godray|volumetric/.test(known) }; });
     const outIdx = passes.findIndex(p=>p.cls==='OutputPass');
     passes.forEach(p=>{ p.afterToneMap = outIdx>=0 ? p.i>outIdx : true; });
