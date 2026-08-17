@@ -12070,6 +12070,10 @@ const HW=0.3, PH=1.8, EYE=1.62, STEP=0.6;
 // PRONE EYE HEIGHT. 0.32 is a head lying on its side on the ground: low enough that grass is at eye level and a doorway
 // gap you can see under is a real one, high enough that the near plane does not sit inside the block below you.
 const PRONE_EYE=0.32;
+// LEAN. 0.55 of a block is about a shoulder's width — far enough to clear a doorframe and see down a corridor, short
+// enough that the body it belongs to is still behind the corner. The roll is 11 degrees: past about fifteen the world
+// tips enough to read as damage rather than as a head moving.
+const LEAN_X=0.55, LEAN_ROLL=0.19, LEAN_DIP=0.13;
 // HOW TALL THE PLAYER ACTUALLY IS RIGHT NOW (Ben 2026-08-12: "make the hitbox"). PH is the standing constant and stays —
 // it is a build-time number used by peers, mobs and worldgen — but the LOCAL body's collision height and the capsule a
 // bullet is tested against are postures, not constants. Prone is 0.62: low enough to crawl under a one-block gap, which
@@ -14983,7 +14987,11 @@ addEventListener('keydown',e=>{ if(e.code==='Space')e.preventDefault();
   if(openUI && (e.code==='Escape'||e.code==='KeyE'||e.code==='KeyB')){ if(openUI==='creative')toggleCreative(); else closeUI(); return; }   // B closes the backpack the same way it opened it. (The launch board is not here: it never takes openUI, because it is a screen in the world rather than a menu.)
   if(!locked)return; keys[e.code]=true;
   if(e.code==='Space' && !e.repeat && (player.grabbed||player.tied||player.bound)) wretch._mash=(wretch._mash||0)+1;   // struggle: count only REAL taps (ignore OS key-repeat) so holding Space can't cheese it — grabs, ropes, AND heaven's chains
-  if(e.code==='KeyE'){ if(!player.grabbed)openInventory(2); return; }   // no menus while it has you — mash Space, that's all there is
+  // E IS LEAN NOW, NOT THE INVENTORY (Ben: "Q and E are lean"). The inventory it used to open moves to TAB, which is
+  // where the other half of the world puts it; B still opens the backpack and E still CLOSES an open screen, above,
+  // so nobody's fingers lose a way in or out. The lean itself is read off `keys` in updateCamera — nothing to do here
+  // beyond not stealing the key.
+  if(e.code==='Tab'){ e.preventDefault(); if(!player.grabbed)openInventory(2); return; }   // no menus while it has you — mash Space, that's all there is
   if(e.code==='KeyB'){ openBackpack(); return; }                        // fix-list #1: your own 27 slots, if you are carrying the pack
   // The wake is explicit here and on the wheel, not left to hotSense: pressing the number of the slot you already hold
   // changes no signature, and a key press that shows nothing reads as a dead key.
@@ -15006,8 +15014,9 @@ addEventListener('keydown',e=>{ if(e.code==='Space')e.preventDefault();
     else if(player.creative){ applyCine(true); }                                   // applyCine flashes the CINEMATIC banner
     else { player.creative=true; flashName('creative'); }
     return; }
-  if(e.code==='KeyQ'){ const s=heldSlot(); if(s){ tossOne(s.id, s.uid, s);                                  // drop ONE of the held item, tossed forward, with a 1.8s no-pickup window
-    s.n--; if(s.n<=0)inv[selSlot]=null; refreshHotbar(); } }
+  // Q-TO-DROP IS CANCELLED (Ben), because Q is lean. Dropping is dragging a stack out of the inventory onto empty
+  // space, which is one deliberate action rather than a key you can knock with your ring finger mid-fight; Q over a
+  // slot in an OPEN screen still drops one, and that line is above, where it belongs.
   // R = RELOAD; respawn only when neither hand holds a mag-fed gun. MAIN HAND FIRST, then the offhand on a second press
   // (Ben 08-03: "if both a main hand AND offhand gun, reload main hand gun first, when and if its loaded, then load the off
   // hand gun with a consecutive R"). The order falls out of asking which gun is short of a full magazine, so it needs no
@@ -16901,7 +16910,27 @@ function updateCamera(dt){
   // falling-through-the-floor bug; ~0.2s of drop reads as lying down.
   p._proneT=(p._proneT||0)+((p.prone?1:0)-(p._proneT||0))*Math.min(1,dt*7);
   const proneDrop=(EYE-PRONE_EYE)*p._proneT;
-  camera.position.set(p.pos.x+right.x*bobX, p.pos.y+EYE-proneDrop+bobY, p.pos.z+right.z*bobX);
+  // ---- LEAN, ON Q AND E (Ben: "Q and E are lean", and Q-to-drop is cancelled with it) ----
+  // The eye slides sideways and the head tilts with it. Both are needed: the roll alone is a camera effect and reads
+  // as a stumble, and the offset alone reads as strafing. The dip is what keeps it from looking like a sidestep — a
+  // person leaning past a corner drops their head as they go.
+  //   IT STOPS AT WALLS, and that is the whole point of the move. Leaning out from cover has to be refused by the
+  // cover: the offset is tried whole, then at half, then abandoned, so an eye can never end up inside stone looking
+  // out the far side of it. Three getBlock calls a frame.
+  //   NOT WHILE PRONE OR HELD. Prone already owns the body's roll and the grab owns everything.
+  let wantLean=(keys.KeyQ?-1:0)+(keys.KeyE?1:0);
+  if(p.prone||player.grabbed||player.tied||player.dead) wantLean=0;
+  p._lean=(p._lean||0)+(wantLean-(p._lean||0))*Math.min(1,dt*9);
+  if(Math.abs(p._lean)<0.002) p._lean=0;
+  let leanF=0;
+  if(p._lean){ const ey=p.pos.y+EYE-proneDrop+bobY;
+    for(const f of [1,0.5]){ const d=LEAN_X*p._lean*f;
+      const b=getBlock(p.pos.x+right.x*d, ey, p.pos.z+right.z*d);
+      if(!b || !isSolid[b] || blockCat[b]==='cross'){ leanF=f; break; } } }
+  const leanX=LEAN_X*p._lean*leanF, leanDip=LEAN_DIP*Math.abs(p._lean)*leanF;
+  p._leanShown=p._lean*leanF;                                    // what the player actually got, for the body pose and any probe
+  if(leanF) camera.rotateZ(-LEAN_ROLL*p._lean*leanF);            // the tilt follows the offset the wall ALLOWED, not the one the key asked for
+  camera.position.set(p.pos.x+right.x*(bobX+leanX), p.pos.y+EYE-proneDrop+bobY-leanDip, p.pos.z+right.z*(bobX+leanX));
   // ---- F4 THIRD PERSON (Ben 07-27) — deliberately ROUGH tracking: the boom lags the eye instead of being welded to it,
   //      so the camera swings and settles behind you rather than snapping. Pulled in if a wall is in the way.
   _tpsAct = _tpsOn && !_tpsUpdateIndoors(dt);   // the player's preference, minus the indoor override
@@ -21291,15 +21320,20 @@ function slotEl(src,idx){ const d=document.createElement('div'); d.className='is
   return d; }
 // One item, tossed forward with a no-pickup window. Factored out of the KeyQ gameplay branch so the UI drop is the SAME
 // toss and cannot drift from it.
-function tossOne(id,uid,st){ const d=lookDir();
+// ONE DROP FUNCTION, CALLED FROM EVERYWHERE (Ben). Every way a thing leaves your hands — the old Q, a slot's Q, a
+// stack dragged out of the inventory onto empty space — ends here, so the thing that lands always carries full
+// instance state. A second copy of this is how a dropped rifle loses its scope down exactly one of the paths.
+function tossFrom(id,n,uid,st){ const d=lookDir();
   // The state goes IN to spawnDrop rather than being stamped on afterwards: that is the call that broadcasts, so
   // anything added after it reaches this client's drop and none of the others.
-  spawnDrop(id,1, player.pos.x+d.x*0.6, player.pos.y+1.2, player.pos.z+d.z*0.6, 1.8, null, st?{uid:uid,att:st.att,mag:st.mag}:(uid!=null?{uid:uid}:null));
+  spawnDrop(id,n, player.pos.x+d.x*0.6, player.pos.y+1.2, player.pos.z+d.z*0.6, 1.8, null, st?{uid:uid,att:st.att,mag:st.mag}:(uid!=null?{uid:uid}:null));
   const dr=drops[drops.length-1]; if(dr){ dr.vx=d.x*4.5; dr.vz=d.z*4.5; dr.vy=2.2; if(uid!=null)dr.uid=uid;
     // WHAT THE STACK CARRIED GOES WITH IT. A gun's attachments and its loaded magazine live on the stack, and a
     // pickup builds a NEW stack — so dropping a fitted rifle and picking it up again quietly stripped it. The uid
     // was already carried here for the same reason; att and mag are the rest of that state.
-    if(st){ if(st.att) dr.att=Object.assign({},st.att); if(st.mag!=null) dr.mag=st.mag; } } }
+    if(st){ if(st.att) dr.att=Object.assign({},st.att); if(st.mag!=null) dr.mag=st.mag; } }
+  return dr||null; }
+function tossOne(id,uid,st){ return tossFrom(id,1,uid,st); }
 // The stack that a pickup produced, stamped with what the dropped one was carrying. invAdd builds the stack itself
 // (bar first, then bag) and hands back only the remainder, so the way to find it is to look for the one stack of
 // that id that has no state on it yet — a gun is max:1, so it is always a fresh slot rather than a merge.
@@ -21607,6 +21641,20 @@ function renderCursor(){ if(!cursor){ cursorEl.style.display='none'; return; }
   const s=cursorEl.querySelector('span'); if(s)s.textContent=cursor.n>1?cursor.n:''; }
 document.addEventListener('mousemove',ev=>{ if(cursor){
   cursorEl.style.left=(ev.clientX-cursorEl.offsetWidth/2)+'px'; cursorEl.style.top=(ev.clientY-cursorEl.offsetHeight/2)+'px'; } });
+// DRAGGING A STACK OUT ONTO EMPTY SPACE DROPS IT (Ben), and this is now the only way to drop from an open screen
+// besides Q over a slot — Q in play is lean. The test is where the release lands, not what it started on: a panel is
+// anything a stack could legitimately be put down on, so a release anywhere else is a release over the world.
+//   MOUSEUP, NOT MOUSEDOWN. The gesture is a drag, so it ends where the button comes up; on mousedown the player is
+// still holding the stack and has not chosen anything yet, and a slip on the way to a slot would throw a rifle on the
+// floor. The whole stack goes, with its uid, attachments and magazine, through the one drop function.
+const _DROP_PANELS='#invui,#chestui,#creative,#cursor,#attui,#cmdline,#pause,#griditems,.gitem,.gslot,#hotbar';
+document.addEventListener('mouseup',ev=>{
+  if(!cursor || !openUI) return;
+  if(ev.button!==0) return;
+  const t=ev.target; if(t && t.closest && t.closest(_DROP_PANELS)) return;
+  tossFrom(cursor.id, cursor.n, cursor.uid, cursor);
+  flashName((cursor.n>1?cursor.n+' ':'')+((ITEMS[cursor.id]&&ITEMS[cursor.id].name)||cursor.id)+' dropped');
+  cursor=null; renderCursor(); refreshHotbar(); });
 function showTip(ev,src,idx){ const st=getSlot(src,idx); if(!st){ tipEl.style.display='none'; return; } const it=ITEMS[st.id];
   tipEl.innerHTML='<b>'+(it?it.name:st.id)+'</b>'+(it&&it.tool?'<br><i>'+cap(it.tool.tier)+' '+cap(it.tool.kind)+'</i>':(it&&it.armor?'<br><i>Armor +'+it.armor.def+'</i>':(it&&it.food?'<br><i>food</i>':''))); tipEl.style.display='block'; tipEl.style.left=(ev.clientX+14)+'px'; tipEl.style.top=(ev.clientY+8)+'px'; }
 // ---- inventory player viewport — a live 3D player showing equipped armor ----
@@ -44757,12 +44805,34 @@ window.__hc={
           if(p) out.wornPack={id:p[0], ...box(p[1])};
           if(sh) out.shell={id:sh[0], rot:[+sh[1].rotation.x.toFixed(3),+sh[1].rotation.y.toFixed(3),+sh[1].rotation.z.toFixed(3)], ...box(sh[1])};
           return out; })() }; }catch(e){ return {err:String(e.message||e)}; } },
+  // LEAN, IN THE ONLY THREE NUMBERS THAT SAY WHETHER IT HAPPENED: how far the eye went sideways off the body, how far
+  // the head rolled, and what the wall let through (`shown` differs from `lean` exactly when cover refused it).
+  lean(){ try{ const p=player, r=[Math.cos(p.yaw),0,-Math.sin(p.yaw)];
+      const dx=camera.position.x-p.pos.x, dz=camera.position.z-p.pos.z;
+      return { keys:{q:!!keys.KeyQ,e:!!keys.KeyE}, lean:+(p._lean||0).toFixed(4), shown:+(p._leanShown||0).toFixed(4),
+               side:+(dx*r[0]+dz*r[2]).toFixed(4), roll:+camera.rotation.z.toFixed(4),
+               eyeY:+(camera.position.y-p.pos.y).toFixed(4) }; }catch(e){ return {err:String(e.message||e)}; } },
+  // Wall off the cell a lean of `sign` would put the eye in, so the refusal branch can be shown to fire. Without it
+  // that branch has no positive: a lean that comes back short and a lean that never happened read the same.
+  leanWall(sign){ try{ const p=player, s=(sign<0?-1:1), r=[Math.cos(p.yaw),0,-Math.sin(p.yaw)];
+      const bx=Math.floor(p.pos.x+r[0]*LEAN_X*s), by=Math.floor(p.pos.y+EYE), bz=Math.floor(p.pos.z+r[2]*LEAN_X*s);
+      setBlockWorld(bx,by,bz,BID.stone,true); return [bx,by,bz,getBlock(bx,by,bz)]; }catch(e){ return {err:String(e.message||e)}; } },
+  // Place a block at a world cell. Nothing on window can write to the world, so every harness that needs one built a
+  // trip of its own; this is that one line.
+  setBlk(x,y,z,id){ try{ setBlockWorld(x|0,y|0,z|0, id==null?BID.stone:(typeof id==='string'?BID[id]:id|0), true);
+      return getBlock(x|0,y|0,z|0); }catch(e){ return {err:String(e.message||e)}; } },
   eqClearInv(){ try{ for(let i=0;i<INV_N;i++) inv[i]=null; refreshHotbar(); return inv.filter(Boolean).length; }catch(e){ return {err:e.message}; } },
   // QA/bench: Q-drop. hover() sets the same _hoverSlot the mouseenter handler sets; the harness then dispatches a REAL
   // KeyQ on window, so what is under test is the key handler and its openUI/kill-switch guards, not dropHovered directly.
   qState(){ try{ return { hover:_hoverSlot, ui:openUI, drops:drops.length, noQDrop:_NO_Q_DROP,
       inv:inv.filter(Boolean).length, held:(heldSlot()||{}).n||0 }; }catch(e){ return {err:String(e.message||e)}; } },
   qHover(src,idx){ try{ _hoverSlot = src? {src, idx:idx|0} : null; return _hoverSlot; }catch(e){ return {err:e.message}; } },
+  // Put a stack in the drag cursor. The drop-on-empty-space gesture has to end in a REAL mouseup on the document to
+  // test the handler at all, so the harness can only set this half up from in here.
+  qCursor(id,n){ try{ cursor = id? {id, n:n|0||1} : null; renderCursor();
+      return cursor?{id:cursor.id,n:cursor.n}:null; }catch(e){ return {err:String(e.message||e)}; } },
+  qDrops(){ try{ const d=drops[drops.length-1]; return { n:drops.length, carrying:!!cursor,
+      last:d?{id:d.id,n:d.n}:null }; }catch(e){ return {err:String(e.message||e)}; } },
   qSet(src,idx,id,n){ try{ setSlot(src,idx|0, id?{id,n:n|0||1}:null); renderInvUI(); return getSlot(src,idx|0); }catch(e){ return {err:String(e.message||e)}; } },
   qGet(src,idx){ try{ const s=getSlot(src,idx|0); return s?s.id+':'+s.n:null; }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: shields. hurt() drives the REAL damage() choke point rather than doing the arithmetic here, so what is under
