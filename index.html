@@ -899,6 +899,14 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+// SMAA, vendored from three r160 to match vendor/three.module.js exactly (REVISION '160'). It is the antialiasing
+// choice for this renderer and the reason is structural rather than taste: the frame is composited through
+// EffectComposer render targets, and MSAA cannot work on a composited pipeline at all, so AA has to be an image-space
+// pass. Of those, FXAA blends across the whole image and softens HUD text and fine texture along with the jaggies,
+// while SMAA does edge detection AND morphological shape analysis before blending, so geometry edges stay sharp for
+// about the same cost. TAA is the modern default and is deliberately not taken: it needs a motion-vector buffer this
+// game does not have, and Ben already has an open complaint about smearing from the motion-blur pass.
+import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { Water } from 'three/addons/objects/Water.js';
 import { seraphOn, seraphOff, seraphAnimate, seraphShowBeam, seraphHideBeam, seraphBeamGold, seraphMiniBeam, seraphHideMiniBeam, seraphHideMiniBeams, seraphBloom, seraphEyeSpheres, seraphWingSpheres, seraphFold, seraphWoundEye, seraphHealEyes, seraphFreshEyes, seraphEyeClose, seraphEyesReset, seraphBodyBox, buildSeraphStoneProto, seraphCorpseMode, prewarm as seraphPrewarm } from './src/boss/seraphim/adapter.js';
@@ -10436,6 +10444,7 @@ const MotionBlurShader={
     }`
 };
 let gradePass, ssaoPass=null, godrayPass=null, motionPass=null, _sceneRT=null, _mbMode=false;
+let smaaPass=null;   // see the import, and the add in buildComposer for why it is LAST
 // THE DEPTH PATH IS NOT THE MOTION BLUR, and conflating the two is why Ben's god rays vanished (08-05: "god rays are gone from
 // the sun"). The scene's DEPTH exists only as a texture on _sceneRT, and _sceneRT was only built when the motion-blur SETTING was
 // on — so turning motion blur off in Settings silently deleted the god rays and the SSAO with it. Ben had every reason to turn it
@@ -10554,6 +10563,15 @@ function buildComposer(){
   if (CFG.quality==='Low') gradePass.uniforms.uGrain.value=0.036;   // grain +20% (Ben 07-21)
   try{ const _g=+localStorage.getItem('hollowcraft_grain'); if(_g>=0 && !isNaN(_g) && localStorage.getItem('hollowcraft_grain')!=null) gradePass.uniforms.uGrain.value=_g; }catch(e){}   // restore the POSTFX grain setting (survives composer rebuilds)
   composer.addPass(gradePass);
+  // ---- SMAA IS LAST, AND THAT IS THE ONE THING THAT LEGITIMATELY RUNS AFTER THE TONE MAP ----
+  // Everything else in this chain is a lighting term and belongs in linear light before OutputPass. Antialiasing is
+  // not a lighting term: it is an image-space edge operation on the pixels the eye actually receives, so it wants the
+  // final, graded, display-referred frame. Putting it before the tone map would have it smooth values the tone map
+  // then redistributes, which is how an AA pass ends up either invisible or blurry.
+  // AFTER THE GRADE, therefore also after its grain. That is deliberate: grain added and then partially averaged is
+  // the normal film order, and running SMAA before the grade would let the grade re-sharpen the edges SMAA just fixed.
+  // Skipped on Low, matching the bloom line above -- it is the same class of decision and the same 3-8% of frame.
+  if (CFG.quality!=='Low'){ smaaPass = new SMAAPass(innerWidth, innerHeight); composer.addPass(smaaPass); }
 }
 buildComposer();
 // ---- RESOLUTION MANAGEMENT — one place sets renderer + composer + FXAA resolution.
@@ -27770,7 +27788,12 @@ function updateMainArm(){
 // degrees, which lays them along the barrel's underside pointing at the muzzle — reaching model x 3.14 against a
 // barrel tip at 3.98, so they fold under the tube and not past it.
 // It folds FORWARD. +rotation.x about a hinge takes a point hanging at -y toward -z, and -z is the muzzle.
-const BIPOD_FOLD=1.45;
+// A DIAL, because "fold in tighter" is an angle nobody can name from reading the model (Ben: "folded, it must fold in
+// tighter and clip cleanly against the forend"). 83 degrees leaves the legs 7 degrees off the tube, and over a 0.199
+// leg that is 2.4 cm of daylight between the legs and the forend they are supposed to be stowed against — which is
+// what reads as a bipod that is not attached to anything. __hc.bipod({foldDeg}) sweeps it; a build takes the value at
+// the moment the gun is built, and the held gun and every avatar are driven from it every frame.
+let BIPOD_FOLD=1.62;
 // THE HEIGHT THE SHARED CHEEK-WELD POSE EXPECTS A SCOPE'S GLASS AT. Not a new number: GLB_GUNS records it as the axis
 // that pose was settled against ("the procedural rifle's scope axis at y=0.10"), and every gun with a MODELLED scope is
 // anchored by its opticY so its glass lands exactly here. It is written down so a FITTED scope can be corrected by the
@@ -28662,7 +28685,16 @@ function updateView(dt){ updateRecoil(dt);                                      
     // rifle is driven by avatarBipod and needs no lift, because it is held by a hand that is already on the ground.
     { const UD=(!_tpsAct && view.mesh && view.mesh.userData) || null;
       if(UD && UD.bipod && (view.bipodT||0)>0.001){
-        const gnd=(typeof groundYAt==='function'?groundYAt(player.pos.x,player.pos.z):player.pos.y)-camera.position.y;
+        // THE GROUND UNDER THE FEET, NOT UNDER THE NAVEL. The feet are out ahead of the player — a metre of rifle
+        // forward of the chest — and this sampled the column the player stands in, so on any slope the legs were
+        // solved against ground that is not the ground they are on. Prone on a rise with the muzzle downhill sank
+        // them; prone facing uphill floated them. The HIGHER of the two columns is the answer that can never bury a
+        // leg: a foot resting on the near lip of a step is correct, a foot inside the step is not, and a bipod stood
+        // 5 cm proud of a slope reads as a bipod on uneven ground, which is what it is.
+        const _fx=player.pos.x-Math.sin(player.yaw)*0.9, _fz=player.pos.z-Math.cos(player.yaw)*0.9;
+        const _g0=(typeof groundYAt==='function')?groundYAt(player.pos.x,player.pos.z):player.pos.y;
+        const _g1=(typeof groundYAt==='function')?groundYAt(_fx,_fz):_g0;
+        const gnd=Math.max(_g0,_g1)-camera.position.y;
         // A TARGET, NOT A CORRECTION (Ben). This used to read view.group.position.y and correct it, which made the
         // lift depend on whatever had already moved the group -- so the moment it was reordered into the pose stack
         // its own contribution flipped from +0.0619 to -0.0745. A layer whose INPUT is the pose cannot be a layer.
@@ -28677,7 +28709,20 @@ function updateView(dt){ updateRecoil(dt);                                      
         const baseY=POSE._marked ? POSE._m.p[1] : view.group.position.y;
         const targetY=gnd-legDrop;
         const feet=baseY + legDrop;
-        const raw=targetY-baseY, put=clamp(raw, -0.10, 0.32)*view.bipodT;   // == gnd-feet, written as a target so it does not read the pose
+        // ---- AND IT LETS GO OF THE GUN AT FULL ADS, BECAUSE THE SIGHT LINE WINS (Ben: "prone with a sniper: the
+        // reticle's angle to the eye is off. Standing ADS aligns the camera to the optic's declared axis; prone does
+        // not. Apply the same alignment in prone.") ----
+        // Measured with the pose ledger: standing at full ADS the group sits at y -0.097 and the scope's picture is
+        // dead centre; prone at full ADS it sits at -0.134, and the whole of that 0.037 is this layer. Over the 0.3 m
+        // from eye to glass that is 7 degrees, and it put the sight picture ninety pixels low in a 520-pixel frame.
+        // The two instructions cannot both hold on a rigid gun: the feet on the dirt fixes the gun's height, and the
+        // optic on the axis fixes it too, and in prone those two heights differ by 3.4 cm. The legs cannot take up the
+        // difference either — they are already at full extension at the modelled angle, so there is no splay left to
+        // reach with. So the AIM owns the height and the CARRY owns the contact: faded out by the same ADS ease the
+        // pose blends on, the carried prone rifle rests on its legs (the 6.9 cm that was burying them) and the aimed
+        // one is on the sight line with its feet up to 3.4 cm proud of the dirt — a gap at the bottom of a frame the
+        // legs are barely in, against a sight that pointed somewhere other than the crosshair.
+        const raw=targetY-baseY, put=clamp(raw, -0.10, 0.32)*view.bipodT*(1-e);   // == gnd-feet, written as a target so it does not read the pose
         void feet;
         // NOW A REAL LAYER: the stack applies it, because the value above no longer reads the pose.
         POSE.add('bipod', 0,put,0);
@@ -42229,6 +42274,10 @@ window.__hc={
     }catch(e){ return {err:String(e.message||e)}; } },
   bipod(o){ try{ if(o&&o.steady!=null) _bipod.steady=Math.max(0,Math.min(1,+o.steady));
       if(o&&o.deployS!=null) _bipod.deployS=Math.max(0.5,+o.deployS);
+      // THE FOLD ANGLE, in degrees because that is the unit the shape is argued in. A gun already built keeps the rest
+      // pose it was built with, so a sweep re-drops or re-holds the weapon; the held gun and the avatars are driven
+      // from this every frame and move immediately.
+      if(o&&o.foldDeg!=null) BIPOD_FOLD=(+o.foldDeg)/57.2958;
       const UD=(view.mesh&&view.mesh.userData)||{}, p=UD.bipod||null;
       const t=view.bipodT||0, k=1-_bipod.steady*t;
       return { has:!!p, id:view.id, t:+t.toFixed(3), deg:p?+(p.rotation.x*57.2958).toFixed(2):null,
@@ -45030,6 +45079,18 @@ window.__hc={
                dy:+((inst._deadY!=null?inst.pos.y-inst._deadY:0)).toFixed(3),
                visible:!!(inst.group&&inst.group.visible) }; }
     catch(e){ return {err:String(e.message||e)}; } },
+  // HOW MUCH OF THE CREATURE IS INSIDE THE WORLD RIGHT NOW (Ben 08-17: "make it so that the wretch cant clip his body
+  // through blocks"). updateCreatureClip already HIDES a buried part, which is why the fault is easy to under-rate from
+  // a screenshot: what you see is a limb that ends at a wall, and what is actually happening is a limb inside it. This
+  // counts them with the same _meshBuried the hider uses, so the number and the hiding can never disagree, and it names
+  // them, because "an arm" and "a foot" are different bugs -- a foot in the floor is a creature standing on the ground.
+  rigBuried(){ try{ const g=wretch.group; if(!g||!wretch.active) return {err:'not active'};
+      g.updateMatrixWorld(true);
+      let parts=0, buried=0; const names=[];
+      g.traverse(o=>{ if(!o.isMesh) return; parts++;
+        if(_meshBuried(o)){ buried++; if(names.length<12) names.push(o.name||'(unnamed)'); } });
+      return { parts, buried, names, pos:[+wretch.pos.x.toFixed(2),+wretch.pos.y.toFixed(2),+wretch.pos.z.toFixed(2)], state:wretch.state }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   // QA: record a fork's bones AT FRAME RATE, with the animation clock, so a tempo can be measured rather than estimated.
   // Pass a kind to start, null to stop and drain. Rows are [phase, thigh0, arm0, groupY].
   rigTrace(kind){ try{
@@ -45592,7 +45653,7 @@ window.__hc={
                near:r('uNear'), far:r('uFar'), tanHalf:r('uTanHalf'), aspect:r('uAspect'),
                camY:+U.uCamPos.value.y.toFixed(2) };
     }catch(e){ return {err:String(e.message||e)}; } },
-  pass(name, on){ try{ const P={ ssao:ssaoPass, godray:godrayPass, bloom:bloomPass, grade:gradePass, motion:motionPass, heightfog:heightFogPass };
+  pass(name, on){ try{ const P={ ssao:ssaoPass, godray:godrayPass, bloom:bloomPass, grade:gradePass, motion:motionPass, heightfog:heightFogPass, smaa:smaaPass };
       const p=P[name]; if(!p) return {err:'no such pass: '+name+' (have '+Object.keys(P).filter(k=>P[k]).join(',')+')'};
       if(on!=null) p.enabled=!!on;
       const st={}; for(const k of Object.keys(P)) st[k]=P[k]?!!P[k].enabled:null;
