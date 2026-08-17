@@ -13,12 +13,13 @@ const GUID='258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_CLIENTS = Number(process.env.MP_MAX)||12;   // reject beyond this
 const MAX_MSG     = 64*1024;                           // drop any frame claiming to be bigger (memory-blow guard)
 const RATE_MSGS   = 240;                               // per-client messages per second before we start dropping
-const ALLOWED = new Set(['p','b','bb','tree','drop','drops','dpick','an','w','own','grab','rescue','sync','time','chest','dmg','bossdead','hb','shot','hw','han','seraphSay','bosscine','wretchdead','mine','cmd','g','gdead','gh','gst','drst','va']);   // 'drst' = where a dropped rigid body came to rest, sent once by the client that threw it
+const ALLOWED = new Set(['p','b','bb','tree','drop','drops','dpick','an','w','own','grab','rescue','sync','time','chest','dmg','bossdead','hb','shot','hw','han','seraphSay','bosscine','wretchdead','mine','cmd','g','gdead','gh','gst','drst','va','flare','eyeSeal','storm']);   // 'drst' = where a dropped rigid body came to rest, sent once by the client that threw it
 // 'va' = a voice frame. UNLIKE EVERYTHING ELSE ON THIS LIST IT IS CONTINUOUS: 25 messages a second per speaking
 // client, ~640 bytes of 16 kHz mono PCM each, and it is added here BEFORE anything sends one because this list has
 // silently eaten three message types in a day with both ends reporting success.   // relay only known message types ('bb'/'drops' = per-frame batches; dmg/bossdead/hb/shot/hw/han = boss+Herobrine+gun sync; seraphSay/bosscine = the seraph's voice + arrival cutscene; 'mine' = a landmine's blast for the show; 'cmd' = a console command aimed at one player, e.g. /give — it carries `to` and the relay already routes those to that client alone)
 const HIFREQ  = new Set(['p','w','an','time','g']);   // 'g' is the giantess's 20 Hz transform stream: shed it under backpressure like any other, the next tick carries fresher state        // shed-able under backpressure: next tick resends fresher state anyway. Event messages (edits/drops/sync) are NEVER shed.
 const MAX_BEHIND = 256*1024;                           // a client buffered further behind than this stops receiving high-frequency traffic until it drains
+const _unknown=new Set();   // types already reported as dropped, so one mistake is one line and not a flood
 let nextId=1, hostId=null; const clients=new Map();   // id -> {sock, alive, msgs, win}
 // ---- LAN GAME BROWSER state (UDP beacons; carried over Hamachi/real LAN) ----
 const SELF=crypto.randomBytes(4).toString('hex');     // unique id so we ignore our own beacon
@@ -70,7 +71,13 @@ server.on('upgrade',(req,sock)=>{
         const now=Date.now(); if(now-c.win>=1000){ c.win=now; c.msgs=0; }
         if(++c.msgs > RATE_MSGS) continue;                                                // over budget → drop this frame
         let msg; try{ msg=JSON.parse(payload.toString()); }catch(e){ continue; }
-        if(!msg || !ALLOWED.has(msg.t)) continue;                                         // only relay known message types
+        // AND AN UNKNOWN TYPE IS PRINTED, ONCE PER TYPE. This list has now eaten six message types across two
+        // sessions with BOTH ENDS REPORTING SUCCESS: the sender's netSend returns, the receiver's branch exists and
+        // is correct, and nothing in either log says the message was thrown away here. The three found by sweeping
+        // every netSend in index.html against this line were 'flare', 'eyeSeal' and 'storm' -- every one of them a
+        // finished feature with a working receive branch that no peer had ever seen. A name on stdout costs nothing
+        // and turns the next one into a bug report instead of an afternoon.
+        if(!msg || !ALLOWED.has(msg.t)){ if(msg && msg.t && !_unknown.has(msg.t)){ _unknown.add(msg.t); console.log('relay: DROPPED unknown message type '+JSON.stringify(msg.t)+' -- add it to ALLOWED in mp-server.js'); } continue; }   // only relay known message types
         if(msg.to!=null){ const tgt=clients.get(msg.to); if(tgt){ msg.id=id; send(tgt.sock,msg); } continue; }   // directed (e.g. late-join 'sync') → one recipient, not a broadcast
         msg.id=id; broadcast(msg,id);                                                     // relay to everyone else, stamped with sender id
       }
