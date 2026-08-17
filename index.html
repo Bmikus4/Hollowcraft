@@ -3866,6 +3866,17 @@ function surfaceH(wx, wz){
       const d=(0.05-Math.abs(braid))/0.05; elev = lerp(elev, CFG.SEA-2, d*d*0.85); }
   }
   h = Math.max(3, Math.min(WH-26, Math.round(elev)));
+  // THE WATERLINE COMES ONE BLOCK INLAND (Ben: "the water/inland cutoff needs extended by one single block inward"). A
+  // column standing exactly one block proud of the sea becomes sea level, so the generator's water fill covers it — a
+  // shoreline moved inward by one block everywhere, for one comparison per column and no extra noise call.
+  // IT BELONGS HERE AND NOT IN genColumn, which is where it was first put. About twenty structures site off surfaceH, and
+  // so do the mud placement, the tree gates, groundYAt, animal spawning and every distance-to-water test in the file —
+  // lowering the column only where the blocks are written left all of those reading SEA+1 for ground the sea was now over.
+  // Measured before the move: 351 columns of a 17,161-column census still reported SEA+1 while the terrain under them had
+  // already been flooded.
+  // ALREADY-GENERATED CHUNKS KEEP THEIR OLD COAST. Terrain is baked into the save when a chunk is first visited, so an
+  // existing world does not change and a new one does. That is expected rather than a failure.
+  if (h===CFG.SEA+1) h=CFG.SEA;
   if (_hmCache.size>60000) _hmCache.clear();
   _hmCache.set(kk,h); return h;
 }
@@ -3888,15 +3899,7 @@ function caveCarved(wx, wy, wz, h, ent){
 function genColumn(c, lx, lz){
   const wx=c.cx*CK+lx, wz=c.cz*CK+lz;
   if(brRegion(wx)){ brGenColumn(c,lx,lz,wx,wz); return; }   // THE BACKROOMS (Ben 07-24): the far +X region is a voxel maze, not terrain
-  // THE WATERLINE COMES ONE BLOCK INLAND (Ben: "the water/inland cutoff needs extended by one single block inward").
-  // A column standing exactly one block proud of the sea becomes sea level, so the water fill below covers it — which is a
-  // shoreline that has moved inward by one block everywhere, in the GENERATOR, rather than a patch on the visible edge.
-  // It costs nothing: no neighbour sampling, no second noise call, one comparison per column.
-  // ALREADY-GENERATED CHUNKS KEEP THEIR OLD BOUNDARY. Terrain is baked into the save when a chunk is first visited, so an
-  // existing world's coast does not move and a new one's does. That is expected, not a failure, and it is the reason this
-  // belongs in the generator: patching the shoreline at draw time would disagree with the blocks underneath it.
-  let h=surfaceH(wx,wz);
-  if(h===CFG.SEA+1) h=CFG.SEA;
+  const h=surfaceH(wx,wz);
   const onTrail = trailDist(wx,wz) < 1.6 || nearOpening(wx,wz);   // dirt path corridor + trailhead clearings
   const beach = h<=CFG.SEA+1;
   const entCol = fbm2(wx*0.018, wz*0.018, 811, 3) > 0.62;         // cave-mouth test, once per COLUMN (see caveCarved)
@@ -6020,6 +6023,13 @@ function injectAtlas(mat, opts={}){
     // where it is not. This is the frame to look at when a cave reads too bright or a shaded hillside reads too dark: it shows
     // whether the descent fired on the pixels it was meant for, which no luminance statistic can tell you.
     if(Q.get('dbg')==='cave') sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\n{ float _d=dot(reflectedLight.directDiffuse,vec3(0.2126,0.7152,0.0722))*uScotH.x; float _s=max(max(_bl,vSky*uScotG.w),_d); float _ww=1.0-smoothstep(uScotG.y,uScotG.z,_s); gl_FragColor=vec4(vec3(_ww*(1.0-clamp(vSky,0.0,1.0))),1.0); }');
+    // IS THIS SHADER ACTUALLY ON THE SHARED MODEL? Recorded from the source three is about to compile, not asserted.
+    // Three times tonight lighting code was found that existed and never ran - a library appended to no shader, a
+    // function with no callers, a typo that could not fail because nothing compiled it. So the answer is taken from
+    // the text itself, at the one moment it is guaranteed to be the real text, and __hc.lightPaths() reads it back.
+    mat.userData.hcLight = { declares: sh.fragmentShader.indexOf('vec3 hcAmbient(')>=0,
+                             callsAmbient: sh.fragmentShader.indexOf('irradiance = hcAmbient(')>=0,
+                             callsFolNight: sh.fragmentShader.indexOf('hcFolNight(')>=0 };
   };
   mat.userData.atlas = true;   // marks this as a voxel-atlas material → chunks bind their per-chunk light volume to it
   return mat;
@@ -41015,6 +41025,20 @@ window.__hc={
       hurtAnimal(a, +dmg||1);
       return { hp:a.hp, dead:!!a.dead }; }
     catch(e){ return {err:String(e.message||e)}; } },
+  // QA: the shoreline as a census of column heights, because "the waterline moved one block inland" is a claim about the
+  // GENERATOR and a screenshot of one beach cannot separate it from a beach that always looked like that. If the change
+  // took, no column anywhere reports a surface height of exactly SEA+1: that block is now sea level.
+  shoreCensus(step, span){
+    try{ const d=+span||260, st=+step||4, out={sea:0, s1:0, s2:0, s3:0, below:0, n:0};
+      for(let x=-d;x<=d;x+=st) for(let z=-d;z<=d;z+=st){
+        const h=surfaceH(x,z); out.n++;
+        if(h<CFG.SEA) out.below++;
+        else if(h===CFG.SEA) out.sea++;
+        else if(h===CFG.SEA+1) out.s1++;
+        else if(h===CFG.SEA+2) out.s2++;
+        else if(h===CFG.SEA+3) out.s3++; }
+      out.sea=+out.sea; return out; }
+    catch(e){ return {err:String(e.message||e)}; } },
   humanGone(){ try{ if(_humanOne){ scene.remove(_humanOne); _humanOne=null; return {removed:true}; } return {removed:false}; }
     catch(e){ return {err:String(e.message||e)}; } },
   wretchCommit(){ try{ wretch.committed=true; wretch.commitT=0;
@@ -42034,6 +42058,21 @@ window.__hc={
   // whatever light arrives), disp is a minimum RENDERED luminance for a fragment a light actually reaches. k fixes a
   // texture whose spread is too wide; disp fixes one the terms downstream have pushed under the 8-bit floor entirely.
   // Sweep it with bench/tmp-lightpool-speckle.mjs, which is the lantern-in-a-night-wood frame it was reported at.
+  // WHICH SURFACES ARE ON THE ONE LIGHTING MODEL, answered by the build rather than believed. The atlas materials
+  // report what their compiled source actually contained (mat.userData.hcLight, stamped in injectAtlas); a
+  // ShaderMaterial carries its own fragmentShader as a string, so it can be asked directly. `declares` without
+  // `calls` is the state the whole of Tier 1 exists to end: the library present and nothing using it.
+  lightPaths(){ try{ const out=[];
+      const atlas=(n,m)=>{ const u=m&&m.userData&&m.userData.hcLight;
+        out.push({ path:n, kind:'atlas', compiled:!!u, declares:u?u.declares:null, callsAmbient:u?u.callsAmbient:null, callsFolNight:u?u.callsFolNight:null }); };
+      atlas('opaque',opaqueMat); atlas('cutout',cutoutMat); atlas('leaf',leafMat); atlas('foliage',foliageMat); atlas('pane',paneMat);
+      const sm=(n,m)=>{ const f=m&&m.fragmentShader||'';
+        out.push({ path:n, kind:'shader', compiled:!!f, declares:f.indexOf('vec3 hcAmbient(')>=0, callsAmbient:f.indexOf('hcAmbient(')>=0, callsFolNight:f.indexOf('hcFolNight(')>=0 }); };
+      try{ sm('water',waterMat); }catch(e){}
+      try{ sm('sky',skyMat); }catch(e){}
+      try{ sm('ocean',oceanMat); }catch(e){}
+      return { onModel:out.filter(o=>o.callsAmbient).map(o=>o.path), rows:out }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   baseAmb(v){ try{ if(v!=null) _hcAux[0]=+v; return _hcAux[0]; }catch(e){ return String(e.message||e); } },
   // THE ALBEDO-INDEPENDENT SHEEN: k is how much of the delivered light a black texel returns, knee is the albedo it
   // has faded out by. Both live in the spare halves of the same vec4, so the dial costs no new uniform.
