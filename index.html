@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>HOLLOWCRAFT</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
@@ -10994,8 +10994,32 @@ buildComposer();
 const _basePR = Math.min(devicePixelRatio, CFG.quality==='Ultra'?2:1.25);
 let _pixelScale = 1.0;
 const _dbv = new THREE.Vector2();
+// ---- A RESOLUTION SETTING (Ben: "A RESOLUTION SETTING in settings, defaulting to the detected display resolution,
+// with low graphics capped at 1080p") ----
+// It is a CAP ON THE DRAWING BUFFER'S HEIGHT in device pixels, not a canvas size. The canvas keeps filling the window,
+// so the HUD, the inventory and the drag-out drop are untouched by it — all three are DOM, and none of them knows or
+// cares how many pixels the scene was rendered at. Choosing 1080p on a 4K screen renders 1920x1080 and scales it up,
+// which is what a resolution setting means everywhere else and is the whole point of having one.
+//   THE DEFAULT IS THE DETECTED DISPLAY, expressed as 0 rather than as a number: screen.height*devicePixelRatio is what
+// the display is, and storing it as a literal would pin the game to whichever monitor it first booted on.
+//   LOW IS CAPPED AT 1080p, and the cap is applied at read time rather than written into the setting, so switching
+// quality away from Low restores whatever the player actually chose instead of leaving them at 1080 for good.
+const RES_STEPS=[0,720,900,1080,1440,2160];   // 0 = native
+let _resCap=(()=>{ try{ const v=+localStorage.getItem('hollowcraft_res'); return RES_STEPS.indexOf(v)>=0?v:0; }catch(e){ return 0; } })();
+function nativeResH(){ try{ return Math.round((screen.height||innerHeight)*(devicePixelRatio||1)); }catch(e){ return innerHeight; } }
+function resCapEff(){ const q=(CFG.quality==='Low')?1080:0;              // Low never renders above 1080p
+  const a=_resCap||0, b=q||0;
+  if(!a) return b||0; if(!b) return a; return Math.min(a,b); }
+function setResCap(v){ _resCap=(RES_STEPS.indexOf(+v)>=0)?+v:0;
+  try{ localStorage.setItem('hollowcraft_res',String(_resCap)); }catch(e){}
+  applyResolution(); return _resCap; }
 function applyResolution(){
-  const pr = _basePR*_pixelScale;
+  // THE CAP IS A CEILING ON pr, not a replacement for it: the adaptive lever (_pixelScale) and the quality ceiling
+  // (_basePR) still apply, so a machine that is struggling still drops below the chosen resolution rather than being
+  // pinned to it. min() of the two is the only combination that respects both.
+  const cap=resCapEff();
+  let pr = _basePR*_pixelScale;
+  if(cap>0 && innerHeight>0) pr = Math.min(pr, cap/innerHeight);
   renderer.setPixelRatio(pr);
   if(composer.setPixelRatio) composer.setPixelRatio(pr);
   composer.setSize(innerWidth, innerHeight);
@@ -14072,6 +14096,22 @@ function updateSky(dt){
   const R=Math.max(_sunArc.rMin, Math.min(_sunArc.rMax, _sunArc.rMin*(_cosE/_sinE)*0.55));
   _sunArc.R=R;
   sc.left=-R; sc.right=R; sc.top=R; sc.bottom=-R; sc.near=1; sc.far=kd*2.2;
+  // ---- AND IT IS KEPT ON ARGUMENT, NOT ON MEASUREMENT, WHICH IS ONLY DEFENSIBLE BECAUSE IT IS FREE ----
+  // Re-measured on the best instrument available — camera at absolute coordinates read back every shot, eye
+  // adaptation off so exposure holds, foliage frozen, and a beach vantage whose crop provably contains sharp shadow
+  // edges — crawl is still not measurable. Stepping the camera 0.03 of a block at a time (a third of the 0.0898
+  // texel), median frame-to-frame difference in the shadow crop:
+  //     CONTROL, camera not moving at all   1.35
+  //     snap ON                             1.64 and 1.22
+  //     snap OFF                            1.45 and 1.11
+  // The control is the finding. With nothing moving the frame still differs by 1.35, so this whole family of
+  // frame-difference instruments has a floor around 1.4 — which is also why the SMAA A/B (signal 1.69 against a 2.14
+  // control) and both shadow-box tests read null. A frame diff cannot resolve anything smaller than that here, and
+  // the next person should stop trying rather than repeat the four attempts this took.
+  // THE DIFFERENCE FROM THE SHADOW BOX, which was reverted on the same kind of null: that change cost real resolution
+  // and real fill, so an unproven benefit could not justify it. This one is a handful of vector operations a frame
+  // with no resolution loss and nothing extra rendered, against a predecessor that was provably computing the wrong
+  // grid. Zero cost plus a correctness argument survives a null result; a measurable cost does not.
   // ---- THE SNAP IS IN THE LIGHT'S OWN SPACE, NOT IN WORLD X/Z ----
   // What was here rounded the light's world x and z to a texel. That is only the right grid when the light happens to
   // look down a world axis. The shadow map's texels are laid out on the shadow camera's OWN right/up axes, so as the
@@ -16158,6 +16198,17 @@ function buildSettingsRows(el, where){
     sel.style.cssText='background:rgba(6,8,6,.8);color:#e0cfa0;border:1px solid rgba(140,128,96,.34);border-radius:6px;padding:4px 8px;font:13px Georgia;';
     ['Low','Medium','High','Ultra'].forEach(q=>{ const o=document.createElement('option'); o.value=q; o.textContent=q; if(q===CFG.quality)o.selected=true; sel.appendChild(o); });
     sel.onchange=()=>{ applyQuality(sel.value); }; d.appendChild(sel); }
+  // RESOLUTION, beside Quality because it is the same kind of choice. The native option is labelled with the display it
+  // detected, so the default is a statement rather than a blank — and the row shows what is actually being rendered when
+  // Low has capped it, or a player on Low would pick 1440 and see no change with nothing telling them why.
+  { const d=row('Resolution'); const sel=document.createElement('select');
+    sel.style.cssText='background:rgba(6,8,6,.8);color:#e0cfa0;border:1px solid rgba(140,128,96,.34);border-radius:6px;padding:4px 8px;font:13px Georgia;';
+    for(const v of RES_STEPS){ const o=document.createElement('option'); o.value=String(v);
+      o.textContent = v? (v+'p') : ('Native ('+nativeResH()+'p)');
+      if(v===_resCap)o.selected=true; sel.appendChild(o); }
+    sel.onchange=()=>{ setResCap(sel.value); buildSettingsRows(el,where); }; d.appendChild(sel);
+    if(CFG.quality==='Low'){ const n=document.createElement('span'); n.textContent=' capped to 1080p on Low';
+      n.style.cssText='opacity:.6;font-size:11px;margin-left:6px'; d.appendChild(n); } }
   slider('Render distance',3,CFG.RD_MAX,1,CFG.RENDER_DIST,x=>x+' ch',x=>{ CFG.RENDER_DIST=x; try{localStorage.setItem('hollowcraft_rd',x);}catch(e){} });
   check('FPS counter',_fpsOn,v=>{ _fpsOn=v; applyFps(); try{localStorage.setItem('hollowcraft_fps',_fpsOn?'1':'0');}catch(e){} });
   check('Hide HUD',!_hudOn,v=>{ _hudOn=!v; applyHud(); try{localStorage.setItem('hollowcraft_hud',_hudOn?'1':'0');}catch(e){} });
@@ -43306,6 +43357,16 @@ window.__hc={
   // CO-OP, FROM A HARNESS. Replication cannot be tested from one page: the thing under test is what crosses the
   // wire. These two let a bench open two real clients against the local relay and ask one of them what it built for
   // the other — mpConnect joins the same websocket the menu would, mpPeers reports each avatar as it was RECEIVED.
+  // QA/dial: THE RESOLUTION SETTING, and the only number that says whether it did anything is the DRAWING BUFFER's
+  // size. The canvas's CSS size never changes — that is the point of a resolution cap — so a screenshot cannot tell
+  // 1080p from native on a 1080p window, and only the buffer can.
+  resolution(v,q){ try{ if(v!==undefined) setResCap(v);
+    if(q) applyQuality(q);   // the Low cap is the other half of the setting and cannot be tested without it
+    const b=new THREE.Vector2(); renderer.getDrawingBufferSize(b);
+    return { set:_resCap, cap:resCapEff(), native:nativeResH(), quality:CFG.quality,
+             buffer:[b.x,b.y], pr:+renderer.getPixelRatio().toFixed(3), basePR:+_basePR.toFixed(3),
+             pixelScale:+_pixelScale.toFixed(3), css:[innerWidth,innerHeight], steps:RES_STEPS };
+  }catch(e){ return {err:String(e&&e.message||e)}; } },
   mpConnect(url){ try{ netConnect(url||('ws://'+location.host)); return {url:NET._url}; }catch(e){ return {err:String(e.message||e)}; } },
   // QA: THE VOICE WIRE, separately from the speaker. sent/captured are this client's microphone path; rx is frames
   // that ARRIVED from a peer. A headless client can never play one back (an AudioContext needs a gesture), so rx is
