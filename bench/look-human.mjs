@@ -38,8 +38,11 @@ function pixels(f){ const r=spawnSync('ffmpeg',['-loglevel','error','-i',f,'-f',
     await ev('__hc.qaLocked(true)'); await ev('__hc.setTime(0.30)'); await ev('__hc.cam({pitch:0})');
 
     // She loads in the background, so the first ask can legitimately be too early — that is a wait, not a failure.
+    // AT HER REAL SIZE. Ben: "make the fox girl 4x bigger" — photographing her at 1.8 would be a picture of a character
+    // that is not in the game. The height comes from the engine's own constant so this frame cannot drift from her.
+    const HGT=await ev("(()=>{ try{ return FOXGIRL_H; }catch(e){ return 7.2; } })()") || 7.2;
     let info=null;
-    for(let i=0;i<40;i++){ info=await ev('__hc.human(3.2, 1.8)'); if(!info.err) break; await sleep(500); }
+    for(let i=0;i<40;i++){ info=await ev('__hc.human('+(HGT*2.2).toFixed(1)+', '+HGT+')'); if(!info.err) break; await sleep(500); }
     console.log('  ' + JSON.stringify(info));
     if(info.err){ console.log('  she never loaded'); return; }
 
@@ -54,7 +57,7 @@ function pixels(f){ const r=spawnSync('ffmpeg',['-loglevel','error','-i',f,'-f',
       // over her head and photographed the sea; the player's own eye offset has to come off the number. It is read from the
       // engine rather than assumed, because a constant here is a frame nobody can trust.
       const eye = await ev('__hc.probe().eye') || 1.62;
-      await ev(`__hc.tpExact(${x.toFixed(3)}, ${z.toFixed(3)}, ${(at[1]+0.9-eye).toFixed(3)})`);
+      await ev(`__hc.tpExact(${x.toFixed(3)}, ${z.toFixed(3)}, ${(at[1]+(info.worldSize?info.worldSize[1]:1.8)*0.5-eye).toFixed(3)})`);
       await ev(`__hc.cam({yaw:${Math.atan2(-(at[0]-x), -(at[2]-z)).toFixed(4)}, pitch:0})`);
       await sleep(700);
       const f=path.join(OUT, tag+'.png'); await pg.screenshot({path:f});
@@ -67,8 +70,8 @@ function pixels(f){ const r=spawnSync('ffmpeg',['-loglevel','error','-i',f,'-f',
         if(!(B>R+12 && B>G+6) && !(G>R+14 && G>B+14)) body++; }
       console.log('  '+tag.padEnd(7)+(100*body/tot).toFixed(1)+'% non-sky non-grass in the middle third   '+f);
     };
-    for(const [tag,ang] of [['front',0],['left',Math.PI/2],['back',Math.PI],['right',-Math.PI/2]]) await shot(tag, ang, 3.6);
-    await shot('close', 0.6, 1.6);
+    for(const [tag,ang] of [['front',0],['left',Math.PI/2],['back',Math.PI],['right',-Math.PI/2]]) await shot(tag, ang, (info.worldSize?info.worldSize[1]:1.8)*2.0);
+    await shot('close', 0.6, (info.worldSize?info.worldSize[1]:1.8)*0.9);
     console.log('  frames in '+OUT);
   } finally { try{ if(b) await b.close(); }catch(e){} try{ srv.kill(); }catch(e){} }
 })();

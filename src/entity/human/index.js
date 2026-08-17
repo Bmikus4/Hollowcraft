@@ -190,23 +190,41 @@ export function humanBuild(url, heightBlocks){
   };
   for (const r of t.roots){ const o = mk(r); if (o) group.add(o); }
 
+  // THE SCALE IS BAKED INTO THE SKIN, NOT SET ON THE GROUP, and this is the one structural decision in this function.
+  // Skinning is bindMatrixInverse * (bone.matrixWorld * inverseBind) * bindMatrix * vertex, and bone.matrixWorld is a WORLD
+  // matrix — so a scale on any ancestor of the bones is inside it, and the mesh's own matrixWorld then applies the same
+  // scale again. There is no bind matrix that fixes that: measured both ways, asking for 7.2 blocks produced a body 24.41
+  // tall (7.2 x 3.39) and asking for 1.8 produced 1.53 (1.8 / 3.39 x 2.88), which is s squared over s either way.
+  // Baking is exact for a uniform scale and costs one pass over the vertices at build time, which happens once per body:
+  // geometry positions x s, bone rest translations x s, and each inverse-bind matrix conjugated by the same scale, which
+  // for a uniform scale is just its translation x s.
+  const S = (heightBlocks || 1.8) / Math.max(1e-6, t.size.y);
   let skeleton = null;
   if (t.skin){
     const bl = t.skin.joints.map(j => objs.get(j)).filter(Boolean);
     if (bl.length === t.skin.joints.length){
+      for (const bone of bl) bone.position.multiplyScalar(S);
       const inv = [];
-      for (let i = 0; i < t.skin.joints.length; i++) inv.push(new THREE.Matrix4().fromArray(t.skin.ibm, i * 16));
+      for (let i = 0; i < t.skin.joints.length; i++){
+        const m = new THREE.Matrix4().fromArray(t.skin.ibm, i * 16);
+        m.elements[12] *= S; m.elements[13] *= S; m.elements[14] *= S;
+        inv.push(m);
+      }
       skeleton = new THREE.Skeleton(bl, inv);
     }
   }
-  const bones = {};
+  // Anything above the joints in the hierarchy carries the scale too, or the bones start in the wrong place.
+  for (const [ni, o] of objs) if (!jointSet.has(ni)) o.position.multiplyScalar(S);
+  const bones = {}, skinned = [];
   if (skeleton) for (const b of skeleton.bones) bones[b.name] = b;
 
   for (const P of t.parts){
     const geo = new THREE.BufferGeometry();
     // GEOMETRY BUFFERS ARE COPIED. Everything in this game that drops a mesh disposes its geometry, so handing out the
     // template's own arrays means the second character built is an empty body.
-    geo.setAttribute('position', new THREE.BufferAttribute(P.pos.slice(), 3));
+    const _p = P.pos.slice();
+    for (let i = 0; i < _p.length; i++) _p[i] *= S;
+    geo.setAttribute('position', new THREE.BufferAttribute(_p, 3));
     if (P.nor) geo.setAttribute('normal', new THREE.BufferAttribute(P.nor.slice(), 3));
     if (P.uv)  geo.setAttribute('uv', new THREE.BufferAttribute(P.uv.slice(), 2));
     if (P.idx) geo.setIndex(new THREE.BufferAttribute(P.idx.slice(), 1));
@@ -218,10 +236,7 @@ export function humanBuild(url, heightBlocks){
       if (!P.nor) geo.computeVertexNormals();
       m = new THREE.SkinnedMesh(geo, mat);
       group.add(m);
-      // BIND MATRIX IDENTITY, EXPLICITLY. glTF skinning is defined in skin space; bind()'s default is the mesh's
-      // matrixWorld, which is whatever the parent chain happened to be at the moment it was added - so the scale set on
-      // the group below would be applied to her a second time.
-      m.bind(skeleton, new THREE.Matrix4());
+      skinned.push(m);          // bound AFTER the scale is set - see the note at the bottom of this function
       m.frustumCulled = false;
     } else {
       if (P.wm) geo.applyMatrix4(P.wm);
@@ -234,11 +249,12 @@ export function humanBuild(url, heightBlocks){
   }
 
   // HEIGHT IS THE INPUT, NOT SCALE. An asset's units are whoever exported it's business, so the caller says how many blocks
-  // tall the character should be and the scale is derived.
-  const s = (heightBlocks || 1.8) / Math.max(1e-6, t.size.y);
-  group.scale.setScalar(s);
+  // tall the character should be and the scale is derived — and then baked in above, so the group itself stays at 1.
   // FEET ON THE GROUND. The bind-pose box minimum times the scale is how far the body sits below its own origin.
-  group.position.y = -t.box.min.y * s;
+  group.position.y = -t.box.min.y * S;
+  group.updateMatrixWorld(true);
+  // With the scale baked, every mesh's world matrix is a pure translation and the bind is the ordinary one.
+  for (const m of skinned) m.bind(skeleton, m.matrixWorld.clone());
   group.userData.bones = bones;
   group.userData.skeleton = skeleton;
   // THE REST POSE, CAPTURED ONCE. Every pose below is written as rest * delta and never as an increment on whatever the
