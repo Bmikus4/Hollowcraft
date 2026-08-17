@@ -56,8 +56,9 @@ const fb=()=>['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Progra
       const w=Math.min(W-x,Math.round(L.box.w*W)+80), h=Math.min(H-y,Math.round(L.box.h*H)+80);
       spawnSync('ffmpeg',['-y','-loglevel','error','-i',f,'-vf','crop='+w+':'+h+':'+x+':'+y+',scale=iw*3:ih*3:flags=neighbor',path.join(OUT,'sil-'+k+'-zoom.png')]);
       const S=await ev(`__hc.kindShape('${k}')`);
-      const D=await ev(`__hc.kindDrawn('${k}')`);
-      console.log(k.padEnd(9)+'dist '+L.dist+' behind '+L.behind+'  box '+JSON.stringify(L.box)+'\n         shape '+JSON.stringify(S)+'\n         drawn '+JSON.stringify(D));
+      const D=await ev(`__hc.kindDrawn('${k}')`), K=await ev(`__hc.rigSkew('${k}')`);
+      console.log(k.padEnd(9)+'dist '+L.dist+' behind '+L.behind+'  box '+JSON.stringify(L.box)
+        +'\n         shape '+JSON.stringify(S)+'\n         drawn '+JSON.stringify(D)+'\n         rig   '+JSON.stringify(K));
     };
 
     for(const k of ['wretch','meek','burrower']) await shoot(k,10);
