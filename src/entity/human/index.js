@@ -111,28 +111,48 @@ export async function humanLoad(url, skin, base){
         return { mat, name };
       });
 
+      // SKINNED PRIMITIVES ARE KEPT RAW. A skinned mesh's node transform must be IGNORED per the glTF spec - its vertices
+      // live in skin space and the joints carry the transform - and more to the point its vertices are only in the right
+      // place once a skeleton has posed them. Baking those flat put the body a metre and a half below her own eyes.
+      // Unskinned primitives are still baked, because with no skeleton there is nothing to pose and the node matrix is the
+      // only transform they have.
       const parts = [];
-      const box = new THREE.Box3();
       for (let ni = 0; ni < g.nodes.length; ni++){
         const n = g.nodes[ni];
         if (n.mesh == null) continue;
-        const wm = W.get(ni) || new THREE.Matrix4();
+        const skinned = n.skin != null;
         for (const pr of g.meshes[n.mesh].primitives || []){
           if ((pr.mode != null && pr.mode !== 4) || pr.attributes.POSITION == null) continue;
-          const geo = new THREE.BufferGeometry();
-          geo.setAttribute('position', new THREE.BufferAttribute(acc(g, buf, bin, pr.attributes.POSITION), 3));
-          if (pr.attributes.NORMAL != null) geo.setAttribute('normal', new THREE.BufferAttribute(acc(g, buf, bin, pr.attributes.NORMAL), 3));
-          if (pr.attributes.TEXCOORD_0 != null) geo.setAttribute('uv', new THREE.BufferAttribute(acc(g, buf, bin, pr.attributes.TEXCOORD_0), 2));
-          if (pr.indices != null) geo.setIndex(new THREE.BufferAttribute(acc(g, buf, bin, pr.indices), 1));
-          if (!geo.getAttribute('normal')) geo.computeVertexNormals();
-          geo.applyMatrix4(wm);            // baked: no skin means no reason to keep the hierarchy
-          geo.computeBoundingBox();
-          box.union(geo.boundingBox);
-          parts.push({ geo, matIdx: pr.material == null ? -1 : pr.material, node: n.name || 'node' });
+          parts.push({
+            node: n.name || ('node' + ni), ni, skinned,
+            matIdx: pr.material == null ? -1 : pr.material,
+            pos: acc(g, buf, bin, pr.attributes.POSITION),
+            nor: pr.attributes.NORMAL != null ? acc(g, buf, bin, pr.attributes.NORMAL) : null,
+            uv:  pr.attributes.TEXCOORD_0 != null ? acc(g, buf, bin, pr.attributes.TEXCOORD_0) : null,
+            idx: pr.indices != null ? acc(g, buf, bin, pr.indices) : null,
+            si:  skinned && pr.attributes.JOINTS_0  != null ? acc(g, buf, bin, pr.attributes.JOINTS_0)  : null,
+            sw:  skinned && pr.attributes.WEIGHTS_0 != null ? acc(g, buf, bin, pr.attributes.WEIGHTS_0) : null,
+            wm:  skinned ? null : (W.get(ni) || new THREE.Matrix4()),
+          });
+        }
+      }
+      const _skin = (g.skins && g.skins[0]) || null;
+      const skinInfo = _skin ? { joints: _skin.joints.slice(), ibm: acc(g, buf, bin, _skin.inverseBindMatrices) } : null;
+      const box = new THREE.Box3();
+      // THE BOX IS MEASURED IN BIND POSE, from the raw positions, because that is the pose the file ships in and the pose a
+      // character starts from. Measuring it after an animation had run would make her height depend on which frame it was.
+      for (const P of parts){
+        const v = new THREE.Vector3();
+        for (let i = 0; i < P.pos.length; i += 3){
+          v.set(P.pos[i], P.pos[i+1], P.pos[i+2]);
+          if (P.wm) v.applyMatrix4(P.wm);
+          box.expandByPoint(v);
         }
       }
       const size = new THREE.Vector3(); box.getSize(size);
-      TPL.set(url, { parts, mats, box, size, tris: parts.reduce((a,p)=>a + (p.geo.index ? p.geo.index.count : p.geo.getAttribute('position').count)/3, 0) });
+      TPL.set(url, { g, parts, mats, box, size, skin: skinInfo,
+                     roots: g.scenes[g.scene || 0].nodes.slice(),
+                     tris: parts.reduce((a,p)=>a + (p.idx ? p.idx.length : p.pos.length/3)/3, 0) });
       return true;
     } catch (e){ console.warn('[human] ' + url + ': ' + (e && e.message || e)); return false; }
     finally { LOADING.delete(url); }
@@ -146,19 +166,81 @@ export async function humanLoad(url, skin, base){
 // Ben asked for "human size", and a human in this world is the player's own 1.8.
 export function humanBuild(url, heightBlocks){
   const t = TPL.get(url); if (!t) return null;
-  const group = new THREE.Group();
-  // GEOMETRY IS CLONED. The viewmodel and drop paths dispose geometry and material of every mesh they drop, so handing out
-  // the template's own buffers means the second character built is an empty body.
-  for (const p of t.parts){
-    const m = new THREE.Mesh(p.geo.clone(), p.matIdx >= 0 && t.mats[p.matIdx] ? t.mats[p.matIdx].mat : new THREE.MeshLambertMaterial({ color: 0xffffff }));
-    m.name = p.node; m.castShadow = false; m.receiveShadow = false;
-    group.add(m);
+  const g = t.g, group = new THREE.Group();
+
+  // The node hierarchy, rebuilt so the joints are real Bones. A skinned mesh's own node is skipped here and its geometry is
+  // added to the group below, for the reason in the loader.
+  const objs = new Map(), jointSet = new Set(t.skin ? t.skin.joints : []);
+  const mk = (ni) => {
+    const n = g.nodes[ni];
+    let o = null;
+    if (!(n.mesh != null && n.skin != null)){
+      o = jointSet.has(ni) ? new THREE.Bone() : new THREE.Object3D();
+      o.name = n.name || ('node' + ni);
+      if (n.matrix){ o.matrix.fromArray(n.matrix); o.matrix.decompose(o.position, o.quaternion, o.scale); }
+      else {
+        if (n.translation) o.position.fromArray(n.translation);
+        if (n.rotation) o.quaternion.fromArray(n.rotation);
+        if (n.scale) o.scale.fromArray(n.scale);
+      }
+      objs.set(ni, o);
+    }
+    for (const c of n.children || []){ const co = mk(c); if (co && o) o.add(co); }
+    return o;
+  };
+  for (const r of t.roots){ const o = mk(r); if (o) group.add(o); }
+
+  let skeleton = null;
+  if (t.skin){
+    const bl = t.skin.joints.map(j => objs.get(j)).filter(Boolean);
+    if (bl.length === t.skin.joints.length){
+      const inv = [];
+      for (let i = 0; i < t.skin.joints.length; i++) inv.push(new THREE.Matrix4().fromArray(t.skin.ibm, i * 16));
+      skeleton = new THREE.Skeleton(bl, inv);
+    }
   }
+  const bones = {};
+  if (skeleton) for (const b of skeleton.bones) bones[b.name] = b;
+
+  for (const P of t.parts){
+    const geo = new THREE.BufferGeometry();
+    // GEOMETRY BUFFERS ARE COPIED. Everything in this game that drops a mesh disposes its geometry, so handing out the
+    // template's own arrays means the second character built is an empty body.
+    geo.setAttribute('position', new THREE.BufferAttribute(P.pos.slice(), 3));
+    if (P.nor) geo.setAttribute('normal', new THREE.BufferAttribute(P.nor.slice(), 3));
+    if (P.uv)  geo.setAttribute('uv', new THREE.BufferAttribute(P.uv.slice(), 2));
+    if (P.idx) geo.setIndex(new THREE.BufferAttribute(P.idx.slice(), 1));
+    const mat = P.matIdx >= 0 && t.mats[P.matIdx] ? t.mats[P.matIdx].mat : new THREE.MeshLambertMaterial({ color: 0xffffff });
+    let m;
+    if (P.skinned && skeleton && P.si && P.sw){
+      geo.setAttribute('skinIndex',  new THREE.BufferAttribute(P.si.slice(), 4));
+      geo.setAttribute('skinWeight', new THREE.BufferAttribute(P.sw.slice(), 4));
+      if (!P.nor) geo.computeVertexNormals();
+      m = new THREE.SkinnedMesh(geo, mat);
+      group.add(m);
+      // BIND MATRIX IDENTITY, EXPLICITLY. glTF skinning is defined in skin space; bind()'s default is the mesh's
+      // matrixWorld, which is whatever the parent chain happened to be at the moment it was added - so the scale set on
+      // the group below would be applied to her a second time.
+      m.bind(skeleton, new THREE.Matrix4());
+      m.frustumCulled = false;
+    } else {
+      if (P.wm) geo.applyMatrix4(P.wm);
+      if (!P.nor) geo.computeVertexNormals();
+      m = new THREE.Mesh(geo, mat);
+      group.add(m);
+    }
+    m.name = P.node;
+    m.castShadow = false; m.receiveShadow = false;
+  }
+
+  // HEIGHT IS THE INPUT, NOT SCALE. An asset's units are whoever exported it's business, so the caller says how many blocks
+  // tall the character should be and the scale is derived.
   const s = (heightBlocks || 1.8) / Math.max(1e-6, t.size.y);
   group.scale.setScalar(s);
-  // FEET ON THE GROUND. The template's box is in its own space, so its minimum y times the scale is how far the model sits
-  // below its own origin; without this she stands buried or hovering, depending on how the asset was authored.
+  // FEET ON THE GROUND. The bind-pose box minimum times the scale is how far the body sits below its own origin.
   group.position.y = -t.box.min.y * s;
+  group.userData.bones = bones;
+  group.userData.skeleton = skeleton;
   return group;
 }
 
@@ -169,11 +251,11 @@ export function humanProbe(url){
   // object standing in the world — and from a distance a white object is indistinguishable from a cloud, which is exactly
   // how the first frames read. The per-part box says WHERE each one landed, which is what catches a mesh whose transform
   // did not come with it.
-  const box = new THREE.Box3(), v = new THREE.Vector3();
   return { loaded: true, parts: t.parts.length, tris: Math.round(t.tris),
-           partList: t.parts.map(p => { p.geo.computeBoundingBox(); const b = p.geo.boundingBox; b.getCenter(v);
-             return { node: p.node, mat: p.matIdx, tris: Math.round((p.geo.index ? p.geo.index.count : p.geo.getAttribute('position').count)/3),
-                      at: [+v.x.toFixed(2), +v.y.toFixed(2), +v.z.toFixed(2)] }; }),
+           skinned: t.parts.filter(p => p.skinned).length,
+           bones: t.skin ? t.skin.joints.length : 0,
+           partList: t.parts.map(p => ({ node: p.node, mat: p.matIdx, skinned: !!p.skinned,
+                      tris: Math.round((p.idx ? p.idx.length : p.pos.length/3)/3) })),
            materials: t.mats.map(m => ({ name: m.name, map: !!m.mat.map, alphaTest: m.mat.alphaTest || 0 })),
            size: [ +t.size.x.toFixed(3), +t.size.y.toFixed(3), +t.size.z.toFixed(3) ],
            minY: +t.box.min.y.toFixed(3) };
