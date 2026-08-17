@@ -1188,6 +1188,10 @@ const _hcLamp = new Float32Array([1.0, 0.35, 18.7, 0.85]);
 // zero albedo keeps on the non-atlas path, which is where the doors, the fences, the scarecrow and every other cat:'model'
 // block live. 0.55 of the fill, faded in over the darkest 5% of the albedo range — see the term in lights_fragment_end.
 const _propFill = new Float32Array([0.237, 0.267, 0.30, 0.55]);
+// THE REBUILD'S SET-ASIDE SWITCH lives here rather than beside __hc.oldLight because these are the arrays it moves,
+// and the snapshot has to be taken from their SHIPPED values — captured on first use, so a dial swept before the
+// switch is thrown still restores to what the sweep chose rather than to a literal written twice.
+let _oldLightOn = true, _oldLightSnap = null;
 // =====================================================================================================
 //  ONE LIGHTING MODEL — the terms, defined once (Ben 08-11: "One standard way of doing lighting, across
 //  the entire game. Then over this, comes weather/fog, the postfx pass.")
@@ -4709,12 +4713,17 @@ function _coastFringe(wx, wz){
 // finds it. THE DIAGONALS ARE FOUR OF THE EIGHT, which is Ben's corner.
 const COAST_REACH=14;
 const _APRON_RAY=[[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
+// _ringedByLand's rule -- 8 of 12 bearings at 22 blocks standing above the sea -- read RAW, because the caller runs
+// inside surfaceH and the original asks surfaceH. Same 8/12 and same 22: two answers to "is this water inland" that
+// could disagree would be worse than the duplication.
+function _ringedByLandRaw(wx,wz){ let land=0;
+  for(let k=0;k<12;k++){ const th=k*0.5236;
+    if(_rawSurfaceH(wx+Math.round(Math.cos(th)*22), wz+Math.round(Math.sin(th)*22))>CFG.SEA && ++land>=8) return true; }
+  return false; }
 function _coastApron(wx, wz){
   if(!_FRINGE) return false;                                  // one switch for the whole coast rule: __hc.coast(false)
   if(Math.abs(_riverField(wx,wz))<0.075) return false;
-  let land=0;
-  for(let k=0;k<12;k++){ const th=k*0.5236;
-    if(_rawSurfaceH(wx+Math.round(Math.cos(th)*22), wz+Math.round(Math.sin(th)*22))>CFG.SEA){ if(++land>=8) return false; } }
+  if(_ringedByLandRaw(wx,wz)) return false;
   for(let i=0;i<8;i++){ const dx=_APRON_RAY[i][0], dz=_APRON_RAY[i][1];
     for(let r=1;r<=COAST_REACH;r++){ const n=_rawSurfaceH(wx+dx*r, wz+dz*r);
       if(n<CFG.SEA) return true;                              // open water, reached over ground no higher than the sea
@@ -11791,9 +11800,9 @@ function buildModelBlocks(c,g){
       im.geometry=geo.clone();
       im.geometry.setAttribute('aMSky', new THREE.InstancedBufferAttribute(sky,1));
       for(let i=0;i<arr.length;i++){ const a=arr[i]; m4.makeTranslation(a[0]+0.5,a[1]+yo,a[2]+0.5); im.setMatrixAt(i,m4); }
-      im.instanceMatrix.needsUpdate=true; im.userData.modelMat=mat; if(extra)extra(im); g.add(im); return im; };
-    let arr;
-    for(const idk in byId){ const id=+idk, bd=B[id], m=bd.model; arr=byId[idk];
+      im.instanceMatrix.needsUpdate=true; im.userData.modelMat=mat; im.userData.mbName=_mbName; if(extra)extra(im); g.add(im); return im; };
+    let arr, _mbName=null;
+    for(const idk in byId){ const id=+idk, bd=B[id], m=bd.model; arr=byId[idk]; _mbName=bd.name;
       if(m==='torch'){ const wd=torchWoodMat();                                                                                              // faceted 2-segment box shaft (not a cylinder), longer
         // A TORCH CASTS NO SHADOW (Ben 08-05: "there is this weird square shadow around the torchs base"). These parts were
         // shadow casters — a 9 cm stick is far thinner than a shadow-map texel at any sane resolution, and a caster smaller than
@@ -40515,6 +40524,22 @@ window.__hc={
   // QA: how big the thing in your hand actually is, in the camera's own space (view.group is a child of the camera,
   // so this IS camera space) — the question a screenshot of a viewmodel cannot answer, because a tool that fills the
   // frame and a tool that is inches from the eye look identical.
+  // QA: WHAT A PLACED MODEL BLOCK IS ACTUALLY WEARING, read off the live scene graph rather than off the factory.
+  // modelBlockMat is module scope and a screenshot cannot tell a missing map from a pale one, so this walks chunkRoot
+  // and reports, per block name, the material type, whether it has a map, that map's name (tileTex stamps the tile
+  // key onto it) and the tint. The positive control is built in: a run with no rows at all, or every row reading
+  // map:null, is the shape of an instrument looking at the wrong tree — the log/planks rows must always carry a map.
+  modelWorldMats(){ try{ const by={};
+    chunkRoot.traverse(o=>{ if(!o.isMesh && !o.isInstancedMesh) return; const nm=o.userData&&o.userData.mbName; if(!nm) return;
+      const ms=Array.isArray(o.material)?o.material:[o.material];
+      for(const mt of ms){ if(!mt) continue;
+        const row={ block:nm, type:mt.type, map:mt.map?(mt.map.name||'(canvas)'):null,
+                    col:mt.color?'#'+mt.color.getHexString():null, uv:!!(o.geometry&&o.geometry.attributes&&o.geometry.attributes.uv) };
+        const k=nm+'|'+row.type+'|'+row.map+'|'+row.col+'|'+row.uv;
+        if(!by[k]) by[k]={...row, n:0}; by[k].n++; } });
+    const rows=Object.values(by).sort((a,b)=>a.block<b.block?-1:1);
+    return { rows, noMap:rows.filter(r=>!r.map).length, noUV:rows.filter(r=>!r.uv).length };
+  }catch(e){ return {err:String(e&&e.stack||e)}; } },
   heldBox(id){ try{ __hc.hold(id);
     const bb=new THREE.Box3().setFromObject(view.mesh), s=bb.getSize(new THREE.Vector3()), c=bb.getCenter(new THREE.Vector3());
     const g=new THREE.Box3().setFromObject(itemModel(id)), gs=g.getSize(new THREE.Vector3());
@@ -43585,22 +43610,31 @@ window.__hc={
     // level with the sea, and a run of them is the gap between the water and the beach. `dryTouchingWater` is the
     // straight edge of that gap; `cornerNotches` is the same column with water on a DIAGONAL and land on all four
     // sides, which is what an orthogonal-only fringe test leaves behind wherever the shoreline turns.
-    let dry=0, dryWet=0, notch=0;
+    let dry=0, dryWet=0, notch=0, notchRiver=0, notchRinged=0, notchShore=0, under=0, drySteps2=0;
     for(let dx=-R;dx<=R;dx+=ST)for(let dz=-R;dz<=R;dz+=ST){ const x=P.x+dx, z=P.z+dz;
       const raw=_rawSurfaceH(x,z), got=surfaceH(x,z); cols++;
       if(got<=CFG.SEA) sea++;
       if(got===CFG.SEA){ dry++;
         const side=surfaceH(x+1,z)<CFG.SEA||surfaceH(x-1,z)<CFG.SEA||surfaceH(x,z+1)<CFG.SEA||surfaceH(x,z-1)<CFG.SEA;
         const diag=surfaceH(x+1,z+1)<CFG.SEA||surfaceH(x+1,z-1)<CFG.SEA||surfaceH(x-1,z+1)<CFG.SEA||surfaceH(x-1,z-1)<CFG.SEA;
-        if(side) dryWet++; else if(diag) notch++; }
+        if(side) dryWet++; else if(diag){ notch++; if(Math.abs(_riverField(x,z))<0.075) notchRiver++; else if(_ringedByLandRaw(x,z)) notchRinged++;
+          // ON THE SHORELINE, which is the only notch Ben can see: at least one SIDE stands above the sea, so this
+          // column is in a bend where land meets water. A notch whose four sides are all at sea level too is the
+          // ragged inner limit of a pan wider than the 14-block reach -- flat sand beside flat sand, no visible gap.
+          else if(surfaceH(x+1,z)>CFG.SEA||surfaceH(x-1,z)>CFG.SEA||surfaceH(x,z+1)>CFG.SEA||surfaceH(x,z-1)>CFG.SEA) notchShore++; } }
       if(raw===CFG.SEA+1){ atFringeH++;
         if(got<raw) moved++; else if(!_coastFringe(x,z)){
           // did it stay because nothing beside it is water, or because a step would have opened?
           let wet=false; for(let i=0;i<4;i++){ const n=_rawSurfaceH(x+(i===0?1:i===1?-1:0), z+(i===2?1:i===3?-1:0)); if(n<=CFG.SEA) wet=true; }
           if(!wet) inlandFlats++; } }
-      if(dx<R){ const b1=surfaceH(x,z), b2=surfaceH(x+ST,z); if(Math.abs(b1-b2)>=2) steps2++; } }
+      if(got<CFG.SEA) under++;
+      // A STEP OF TWO ONLY COUNTS WHERE YOU CAN SEE IT. The guard this metric was written for is Ben's "cliff under the
+      // grass", which is two DRY columns; the seabed one block under the water beside a beach one block over it is the
+      // same arithmetic and is a bank, not a cliff, so it is reported separately rather than allowed to hide the real one.
+      if(dx<R){ const b1=surfaceH(x,z), b2=surfaceH(x+ST,z); if(Math.abs(b1-b2)>=2){ steps2++; if(b1>=CFG.SEA&&b2>=CFG.SEA) drySteps2++; } } }
     return { cols, sea:CFG.SEA, reach:COAST_REACH, atSeaPlus1:atFringeH, moved, inlandFlatsLeftAlone:inlandFlats,
-             adjacentStepsOf2Plus:steps2, submerged:sea, drySeaLevel:dry, dryTouchingWater:dryWet, cornerNotches:notch }; },
+             adjacentStepsOf2Plus:steps2, dryStepsOf2Plus:drySteps2, atOrUnderSea:sea, underWater:under,
+             drySeaLevel:dry, dryTouchingWater:dryWet, cornerNotches:notch, cornerNotchesOnRiver:notchRiver, cornerNotchesRingedByLand:notchRinged, cornerNotchesOnShore:notchShore }; },
   // THE BED, which mudCensus cannot see: it skips every column at or under the sea line, so the one thing Ben
   // photographed — mud on the SEA FLOOR — is invisible to it by construction. This walks the submerged columns and
   // asks the generator's own _inlandBed, then splits them by how far out they are: a bed cell beyond the coast is
@@ -45955,6 +45989,92 @@ window.__hc={
   // report what their compiled source actually contained (mat.userData.hcLight, stamped in injectAtlas); a
   // ShaderMaterial carries its own fragmentShader as a string, so it can be asked directly. `declares` without
   // `calls` is the state the whole of Tier 1 exists to end: the library present and nothing using it.
+  // ================= THE LIGHTING REBUILD, STAGE 1: INVENTORY AND SET ASIDE =================
+  // Ben, 08-17: rebuild the lighting as ONE system, and before that "assess what is broken, predict why, set it
+  // aside". lightPaths() below answers which MATERIALS are on the model. This answers the other half — every lighting
+  // TERM in the file with its live value, whether it is inert, and which stage of the rebuild owns it — and it is
+  // generated from the live objects rather than from a list, so it cannot go stale the way a written inventory does.
+  //
+  // WHY A TERM AT ZERO IS REPORTED RATHER THAN IGNORED: half of tonight's history is dials that were shipped at 0,
+  // read as "never built", and re-implemented by the next person. `inert` is that state, named.
+  lightInventory(){ try{
+    const f=(v)=>+(+v).toFixed(4);
+    const arr=(a,names)=>names.map((n,i)=>({ slot:n, v:f(a[i]), inert:a[i]===0 }));
+    const dials=[
+      { name:'_scotG', what:'the nighttime white wash: [amount, lo, hi, DAY FACTOR (driven per frame, not a dial)]',
+        stage:'7 — the wash is kept as a named term, Ben likes it', v:arr(_scotG,['amount','lo','hi','dayFactor']) },
+      { name:'_scotH', what:'[wash target, scot floor, NIGHT ADDITIVE (display-referred, see 1.1), lift]',
+        stage:'2 — the additive is one of the terms writing after the tone map', v:arr(_scotH,['target','floor','nightAdd','lift']) },
+      { name:'_scotK', what:'[day adaptation, renew knee, albedo floor, spare]',
+        stage:'7 — exposure and adaptation', v:arr(_scotK,['adapt','renew','albFloor','spare']) },
+      { name:'_hcAux', what:'[base lighting level, held/placed A-B, BLACK-TEXEL SHEEN k, its albedo knee]',
+        stage:'6 — the sheen is a one-material-interface parameter, not a rescue', v:arr(_hcAux,['baseLevel','heldAB','sheenK','sheenKnee']) },
+      { name:'_hcObj', what:'[per-draw sky&canopy (hcSkyBind writes it), non-atlas night follow, night grey, spare]',
+        stage:'6 — this is the per-draw seam the one material interface removes', v:arr(_hcObj,['objSky','nightFollow','nightGrey','spare']) },
+      { name:'_hcLamp', what:'[torch directional amount, back-face floor, reach blocks, radial smooth]',
+        stage:'5 — superseded by per-fragment point lights with a DDA occlusion march', v:arr(_hcLamp,['dirAmt','backFloor','reach','smooth']) },
+      { name:'_propFill', what:'[r, g, b, black-texel size] — the daylight fill props take instead of baked sky',
+        stage:'6 — a whole second lighting path, deleted by the material interface', v:arr(_propFill,['r','g','b','texelSize']) },
+    ];
+    const gu=[]; for(const k in globalU){ const v=globalU[k]&&globalU[k].value;
+      if(typeof v==='number') gu.push({ u:k, v:f(v), inert:v===0 });
+      else if(v&&v.isColor) gu.push({ u:k, v:[f(v.r),f(v.g),f(v.b)] });
+      else if(v&&v.isVector2) gu.push({ u:k, v:[f(v.x),f(v.y)] });
+      else if(v&&v.isVector3) gu.push({ u:k, v:[f(v.x),f(v.y),f(v.z)] });
+      else if(v&&v.isVector4) gu.push({ u:k, v:[f(v.x),f(v.y),f(v.z),f(v.w)], inert:v.w===0 });
+      else gu.push({ u:k, v:v&&v.isTexture?'texture':String(v&&v.constructor&&v.constructor.name||typeof v) }); }
+    const L=(n,l)=>l?{ light:n, intensity:f(l.intensity), col:'#'+l.color.getHexString(), inert:l.intensity===0 }:{light:n,missing:true};
+    const lights=[ L('sun',typeof sunLight!=='undefined'?sunLight:null), L('hemi',typeof hemi!=='undefined'?hemi:null),
+                   L('ambient',typeof ambient!=='undefined'?ambient:null), L('nightVision',typeof nvLight!=='undefined'?nvLight:null) ];
+    // THE PASS CHAIN IN ORDER, AND WHERE THE TONE MAP ACTUALLY FALLS IN IT — computed from the live chain, because
+    // asserting it is how the plan got this wrong. three applies renderer.toneMapping inside the material shaders
+    // ONLY when the render target is the canvas (WebGLRenderer: `toneMapping = NoToneMapping` unless
+    // `_currentRenderTarget === null`, vendor/three.module.js ~30147). EffectComposer always renders to a target, so
+    // the materials write LINEAR into a HalfFloat buffer and the tone map is whatever OutputPass does at the end.
+    // So `afterToneMap` is the index test against OutputPass, not a constant — and a pass that is additive AND after
+    // it is the §1.1 fault, while an additive pass BEFORE it is already correct and must not be "fixed".
+    const ADD={ UnrealBloomPass:1, ShaderPass:0 };
+    const passes=(typeof composer!=='undefined'&&composer&&composer.passes||[]).map((p,i)=>{
+      const nm=p&&p.constructor&&p.constructor.name||'?';
+      const known=(p===(typeof ssaoPass!=='undefined'?ssaoPass:null))?'ssao':(p===(typeof godrayPass!=='undefined'?godrayPass:null))?'godray'
+        :(p===(typeof volPass!=='undefined'?volPass:null))?'volumetric':(p===(typeof heightFogPass!=='undefined'?heightFogPass:null))?'heightFog'
+        :(p===(typeof gradePass!=='undefined'?gradePass:null))?'grade':(p===(typeof motionPass!=='undefined'?motionPass:null))?'motionBlur'
+        :(p===(typeof bloomPass!=='undefined'?bloomPass:null))?'bloom':nm;
+      return { i, pass:known, cls:nm, enabled:p.enabled!==false, additive:!!ADD[nm]||/bloom|godray|volumetric/.test(known) }; });
+    const outIdx = passes.findIndex(p=>p.cls==='OutputPass');
+    passes.forEach(p=>{ p.afterToneMap = outIdx>=0 ? p.i>outIdx : true; });
+    const wrong = passes.filter(p=>p.enabled&&p.additive&&p.afterToneMap).map(p=>p.pass);
+    return {
+      renderer:{ toneMapping:['None','Linear','Reinhard','Cineon','ACESFilmic','Custom','AgX'][renderer.toneMapping]||('#'+renderer.toneMapping),
+                 exposure:f(renderer.toneMappingExposure), outputColorSpace:renderer.outputColorSpace,
+                 shadows:renderer.shadowMap.enabled, shadowType:renderer.shadowMap.type },
+      toneMapAppliedIn: outIdx>=0 ? ('OutputPass at index '+outIdx+' — passes 0..'+(outIdx-1)+' are LINEAR')
+                                  : 'no OutputPass in the chain: the material shaders tone-mapped on the way in',
+      additiveAfterToneMap: wrong,
+      oldChain:_oldLightOn, lights, passes, dials, globalU:gu,
+      inert:{ dials:dials.flatMap(d=>d.v.filter(s=>s.inert).map(s=>d.name+'.'+s.slot)), uniforms:gu.filter(g=>g.inert).map(g=>g.u) } };
+  }catch(e){ return {err:String(e&&e.message||e)}; } },
+  // THE ONE SWITCH the rebuild is compared against. Nothing is deleted: the old chain is a state you can leave and
+  // return to inside one page, because the alternative is deleting terms blind and having no frame to argue with.
+  // It sets aside the AMOUNTS, never the driven state — _scotG.w is the day factor written every frame from the sun,
+  // so zeroing it would not disable a term, it would tell the whole shader it is midnight.
+  oldLight(on){ try{
+    if(!_oldLightSnap){ _oldLightSnap={ scotG:_scotG[0], scotH2:_scotH[2], hcAux0:_hcAux[0], hcAux2:_hcAux[2],
+      hcObj1:_hcObj[1], hcObj2:_hcObj[2], lamp0:_hcLamp[0], prop:[_propFill[0],_propFill[1],_propFill[2],_propFill[3]],
+      skyDir:globalU.uSkyDirAmt.value }; }
+    const S=_oldLightSnap, want=(on===undefined)?!_oldLightOn:!!on;
+    _scotG[0]=want?S.scotG:0; _scotH[2]=want?S.scotH2:0;
+    _hcAux[0]=want?S.hcAux0:0; _hcAux[2]=want?S.hcAux2:0;
+    _hcObj[1]=want?S.hcObj1:0; _hcObj[2]=want?S.hcObj2:0; _hcLamp[0]=want?S.lamp0:0;
+    for(let i=0;i<4;i++) _propFill[i]=want?S.prop[i]:0;
+    globalU.uSkyDirAmt.value=want?S.skyDir:0;
+    const P=(p)=>{ if(p) p.enabled=want?(p.userData&&p.userData._hcWas!==undefined?p.userData._hcWas:true):false; };
+    for(const p of [typeof ssaoPass!=='undefined'?ssaoPass:null, typeof godrayPass!=='undefined'?godrayPass:null,
+                    typeof volPass!=='undefined'?volPass:null, typeof heightFogPass!=='undefined'?heightFogPass:null]){
+      if(!p) continue; if(!p.userData) p.userData={}; if(want===false&&p.userData._hcWas===undefined) p.userData._hcWas=p.enabled!==false; P(p); }
+    _oldLightOn=want;
+    return { oldChain:_oldLightOn, note:want?'shipped chain restored':'old chain set aside — terms zeroed, additive passes off' };
+  }catch(e){ return {err:String(e&&e.message||e)}; } },
   lightPaths(){ try{ const out=[];
       const atlas=(n,m)=>{ const u=m&&m.userData&&m.userData.hcLight;
         out.push({ path:n, kind:'atlas', compiled:!!u, declares:u?u.declares:null, callsAmbient:u?u.callsAmbient:null, callsFolNight:u?u.callsFolNight:null }); };
