@@ -30,7 +30,7 @@ const fb=()=>['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Progra
         if(T.err){ console.log('  '+k+': '+T.err); return; }
         const a=T.arms.map(x=>`arm${x.side} sh${x.shoulderX} hand${x.handX} ${x.cross} mir${x.mirrored}`).join('  |  ');
         const l=T.legs.map(x=>`leg${x.side} hip${x.hipX} foot${x.footX} ${x.cross} mir${x.mirrored}`).join('  |  ');
-        console.log('  '+(k+' #'+s).padEnd(14)+a);
+        console.log('  '+(k+' #'+s).padEnd(14)+'torsoHalfX '+T.torsoHalfX+'  '+a);
         console.log('  '+''.padEnd(14)+l);
         if(s===2){ const c=T.arms[0].chain;
           console.log('  '+''.padEnd(14)+'arm0 chain: '+c.map(j=>j&&(j.name+' scl['+j.scl.join(',')+'] det'+j.det+' rot['+j.rot.join(',')+']')).join('   ')); }
