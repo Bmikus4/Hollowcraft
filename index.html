@@ -10494,6 +10494,11 @@ try{
 if(!_rtPath && _sceneRT){ try{ _sceneRT.dispose(); }catch(e){} _sceneRT=null; }
 let heightFogPass=null, _HFOG_ON=false;   // see HeightFogShader: shipped off, and not in the chain at all until it is on
 function buildComposer(){
+  // buildComposer runs again on every quality change and on each motion-blur toggle, so a pass that owns GPU memory
+  // has to be released or the rebuild leaks it. SMAA owns two render targets plus its two lookup textures, which is
+  // the largest allocation any pass here makes, and it is the only one with a dispose() to call.
+  if(smaaPass && smaaPass.dispose){ try{ smaaPass.dispose(); }catch(e){} }
+  smaaPass = null;
   composer = new EffectComposer(renderer);
   // _rtPath, NOT _mbMode: this pass is also the scene→composer BRIDGE, and with uEnabled 0 it is a single texture read that
   // passes the scene through untouched. Keeping it in the chain with the blur off is what keeps the depth texture — and therefore
@@ -13110,6 +13115,10 @@ const SWIM_FLOAT = 1.30;
 // the two thrusts rather than being written down as speeds. Raising this makes water thicker and SLOWER to enter
 // as well as slower to cross, which is the coupling that makes it feel like water rather than like a speed cap.
 const WATER_DRAG = 1.10;
+// THE STRAFE RAMP, in units of "target-approach per second" like every other rate in physics(). 4.6 is 2.303/0.5, the
+// exponential that reaches 90% of full lateral speed in half a second, and `stop` matches it so the ease-out is the
+// ramp run backwards. __hc.strafe({rate,stop}) sweeps both, and 19/9.5 restores the single-rate build exactly.
+const _strafe={ rate:4.6, stop:4.6 };
 function physics(dt){
   if(_resumeHold){ const c=getChunk(Math.floor(player.pos.x)>>4,Math.floor(player.pos.z)>>4);   // resumed game — hold still until the ground under you exists
     if(!c||!c.generated||!c.meshed){ player.vel.set(0,0,0); return; } _resumeHold=false; }
@@ -13238,7 +13247,32 @@ function physics(dt){
     else if(air){ if(mag>0){ const k=Math.min(1,dt*0.85); p.vel.x+=(tx-p.vel.x)*k; p.vel.z+=(tz-p.vel.z)*k;
         const sp=Math.hypot(p.vel.x,p.vel.z), cap=Math.max(p._airSpd||0, 0.6);
         if(sp>cap){ const f=cap/sp; p.vel.x*=f; p.vel.z*=f; } } }
-    else { const k=Math.min(1, dt*(mag>0?19:9.5)); p.vel.x+=(tx-p.vel.x)*k; p.vel.z+=(tz-p.vel.z)*k;
+    // ---- A STRAFE HAS ITS OWN RAMP (Ben: "strafing needs an acceleration ramp of roughly half a second, with a
+    // matching ease-out. It should read as weight, not a slide") ----
+    // The ground lerp was ONE rate for the whole velocity vector, so sidestepping reached 90% of full speed in 0.12 s
+    // like a walk forward does — and a body cannot do that sideways. It has to break its own stance first, which is
+    // exactly the half second Ben is describing, and the reason a fast lateral ramp reads as sliding rather than as
+    // stepping: nothing has to be overcome, so no weight is implied.
+    // SO THE VELOCITY IS SPLIT ALONG THE BODY, not along the world. Decomposed onto the facing's forward and right
+    // vectors, eased at two different rates, recomposed. Forward keeps 19 up / 9.5 down, which is signed off and is
+    // what makes a sprint feel direct. Lateral gets 4.6, which is 2.303/0.5 — the rate whose exponential reaches 90%
+    // in half a second, so the number in the code is the number in the instruction. Ease-out MATCHES it at 4.6 rather
+    // than being slower, because "a matching ease-out" is what was asked for; the walk's asymmetry is a walk's.
+    // Turning on the spot cannot fake either of them: the basis turns with you, so a strafe is a strafe whichever way
+    // you face — the same reason the viewmodel's lean is measured this way.
+    // AND IT LETS GO WHILE AIMING (Ben: "check it does not make ADS strafing sluggish"). At the shoulder a sidestep is
+    // a small deliberate correction and a half-second ramp on it is exactly the sluggishness he is warning about, so
+    // the lateral rate is blended back to the forward rate by view.adsT — the same 0..1 raise the cheek weld eases on.
+    // At full ADS this arithmetic is bit-identical to the build before it.
+    else { const _aT=clamp((typeof view!=='undefined'&&view.adsT)||0,0,1);
+      const kF=Math.min(1, dt*(mag>0?19:9.5));
+      const _lr=(mag>0?_strafe.rate:_strafe.stop), kL=Math.min(1, dt*(_lr+((mag>0?19:9.5)-_lr)*_aT));
+      const fX=-sy, fZ=-cy, rX=cy, rZ=-sy;                                   // the same basis mvx/mvz were built from
+      const curF=p.vel.x*fX+p.vel.z*fZ, curR=p.vel.x*rX+p.vel.z*rZ;
+      const tgF=tx*fX+tz*fZ,            tgR=tx*rX+tz*rZ;
+      const nF=curF+(tgF-curF)*kF,      nR=curR+(tgR-curR)*kL;
+      p.vel.x=nF*fX+nR*rX; p.vel.z=nF*fZ+nR*rZ;
+      p._strafeV=+nR.toFixed(4); p._fwdV=+nF.toFixed(4);                     // what the ramp actually produced, for __hc.strafe
       p._airSpd=Math.hypot(p.vel.x,p.vel.z);   // the speed you had on the ground is the ceiling you take into the air
       if(Math.abs(p.vel.x)<0.02) p.vel.x=0; if(Math.abs(p.vel.z)<0.02) p.vel.z=0; } }   // an exponential never reaches zero; a standing player must actually stand still
   if(p.fly){}                                                                          // flying → skip the swim/ladder/gravity chain below (its y is already set above)
@@ -22135,6 +22169,49 @@ const WDFX=[ {amp:1.00,ph: 0.00,rest: 0.00,duty:0.00},
 //  _smooth/WDFX) to be defined above this function in file scope.
 //  MUST be called AFTER placeWretch sets g.position (it is: line 3075→3076).
 // ============================================================================
+// ---- ARMS STOP AT SURFACES (Ben 08-17: it "likes to wave his arms through trees") ----
+// The complaint and "make it so that the wretch cant clip his body through blocks" are one mechanism. Measured over a
+// 140-sample stalk through the forest before this existed: 89% of samples had some part of the rig inside the world,
+// and the arms accounted for 155 of them -- an arm swinging through a trunk on almost every other frame.
+// WHY IT IS A POST-PASS AND NOT A FIX AT THE POSE SITES. The arms are FK: forty-odd places set these rotations -- the
+// gait, the gestures, the reach, the window press, the vignettes, the intimidation poses -- and a rule written into any
+// one of them is a rule the other thirty-nine do not have. This runs after all of them, so a pose cannot opt out.
+// RETRACTED, NOT STOPPED DEAD. The shoulder and elbow are eased back toward the tucked rest a step at a time and the
+// hand is re-tested after each; the first step that clears the world wins, so an arm that is barely inside a trunk
+// barely moves and one that is halfway through it comes most of the way home. Six steps is enough to reach the tuck
+// from any pose in the library, and the whole thing costs at most six matrix updates of a four-joint chain, twice.
+// IT DOES NOT ACCUMULATE: every frame starts from the pose the animation just wrote, so this can never drift the arms
+// out of a pose that is legal -- the moment the trunk is gone the arm is wherever the animation put it.
+// THE HAND IS THE TEST POINT because it is the end of the chain: an elbow inside a wall with the hand outside it is a
+// geometry no rotation of this chain can produce.
+// NOT THE LEGS. The same census says the feet and shins are inside the ground on most samples, which is a different
+// fault with a different fix -- the legs are pure FK with no world target, so a foot is placed by the gait and nothing
+// puts it on the surface. Retracting a leg the way this retracts an arm would break the walk. It wants foot IK and it
+// is written down rather than half-done.
+const _clV=new THREE.Vector3();
+let _ARM_CLAMP=true;   // __hc.armClamp(false) is the A/B, and it is how the 155-to-2 number below was taken
+function _clampArmsToWorld(P){
+  if(!_ARM_CLAMP) return;
+  if(!P || !P.arms || !wretch.active || wretch.dragging || player.grabbed) return;
+  const dx=wretch.pos.x-player.pos.x, dz=wretch.pos.z-player.pos.z;
+  if(dx*dx+dz*dz > 48*48) return;                       // too far to read: not worth the matrices
+  for(let ai=0;ai<P.arms.length;ai++){
+    const c=P.arms[ai], sh=c[1], el=c[2], hand=c[c.length-1];
+    if(!sh || !hand) continue;
+    sh.updateWorldMatrix(true,true);
+    hand.getWorldPosition(_clV);
+    if(!_clipBuried(_clV)) continue;
+    const s=ai?1:-1, restX=-0.12, restZ=s*0.13, restEl=-0.5;
+    for(let k=0;k<6;k++){
+      sh.rotation.x += (restX-sh.rotation.x)*0.35;
+      sh.rotation.z += (restZ-sh.rotation.z)*0.35;
+      if(el) el.rotation.x += (restEl-el.rotation.x)*0.35;
+      sh.updateWorldMatrix(false,true);
+      hand.getWorldPosition(_clV);
+      if(!_clipBuried(_clV)) break;
+    }
+  }
+}
 // hoisted constant spring tables — these are read-only tuning arrays; keeping them at module scope avoids re-allocating ~7 small arrays every animation frame (GC pressure while the Wretch is on-screen)
 const _wSag=[0.10,0.16,0.13,0.05,0.03], _wHump=[0.62,0.40,0.18,0,0], _wLeanW=[0.42,0.36,0.30,0,0], _wLegOm=[26,20,16], _wLegZe=[0.7,0.55,0.45], _wArmOm=[32,24,18,14,10], _wArmZe=[0.75,0.6,0.5,0.4,0.28];
 function animateWretch(dt, moving){
@@ -22429,6 +22506,7 @@ function animateWretch(dt, moving){
   if(isFinite(yb)) g.position.y += yb;
 
   animateExtra(dt);                                                                   // demon extra-arm flail (unchanged)
+  _clampArmsToWorld(P);                                                               // arms stop at surfaces instead of sweeping through them
   // THE GAIT RECORDER'S COLLECTOR. It used to live in kindPose and went out with the forks, which would have left
   // __hc.rigTrace returning an empty buffer for ever — a probe that answers "no movement" whatever the rig is doing, and
   // this file has been bitten four times in one day by exactly that. It records the Wretch's own bones now.
@@ -42272,6 +42350,39 @@ window.__hc={
   proneSet(on){ try{ if(on){ player.fly=false; player.prone=true; player.sneak=false; } else player.prone=false;
       return { prone:!!player.prone, fly:!!player.fly, onGround:!!player.onGround, bodyH:+bodyH().toFixed(3) };
     }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/dial: THE STRAFE RAMP, MEASURED BY RUNNING IT. {rate,stop} sweep it; {measure:true} holds a sidestep through
+  // physics() a frame at a time and reports how long the lateral speed takes to reach 90% of where it settles, then
+  // does the same for the release. THE POSITIVE CONTROL TRAVELS WITH IT: the same measurement is taken along FORWARD,
+  // which is untouched at 19/9.5 and must come back at about 0.12 s. A lateral figure of 0.5 beside a forward figure
+  // of 0.5 would mean the harness is timing the frame loop rather than the ramp.
+  strafe(o){ try{ if(o&&o.rate!=null) _strafe.rate=Math.max(0.2,+o.rate);
+      if(o&&o.stop!=null) _strafe.stop=Math.max(0.2,+o.stop);
+      const out={ rate:_strafe.rate, stop:_strafe.stop, adsT:+((view&&view.adsT)||0).toFixed(3) };
+      if(o&&o.measure){
+        // ON THE GROUND OR NOT AT ALL. The ramp lives in the ground branch, and in the air a different one runs and
+        // never writes these fields — so a measurement taken mid-fall reports the last ground frame forever. The first
+        // run of this read a lateral top of 0.353 and a time-to-90% of one frame, which is exactly that: 4.6 * 4.6/60,
+        // the single frame before the player left the floor.
+        if(!player.onGround || player.fly || player.inWater)
+          return { err:'not standing on the ground', onGround:!!player.onGround, fly:!!player.fly, inWater:!!player.inWater };
+        const run=(key)=>{ const p=player, was={x:p.vel.x,z:p.vel.z};
+          p.vel.x=p.vel.z=0; keys[key]=true; const v=[]; const DT=1/60;
+          for(let i=0;i<180;i++){ physics(DT); v.push(key==='KeyD'?(p._strafeV||0):(p._fwdV||0)); }
+          const top=Math.abs(v[v.length-1])||1e-9;
+          // BLOCKED IS REPORTED, NEVER SILENTLY TIMED. The move resolver zeroes the velocity it could not spend, so a
+          // player standing against terrain restarts the ramp from zero every frame: the history then reads the SAME
+          // first-frame value 180 times, which a naive time-to-90% scores as "instant". That is how this hook first
+          // reported a half-second ramp as one frame. If nothing accumulated, the ramp was never run.
+          const blocked = Math.abs(v[Math.min(9,v.length-1)]) <= Math.abs(v[0])*1.05;
+          let up=180; for(let i=0;i<v.length;i++) if(Math.abs(v[i])>=0.9*top){ up=i+1; break; }
+          keys[key]=false; const w=[];
+          for(let i=0;i<180;i++){ physics(DT); w.push(key==='KeyD'?(p._strafeV||0):(p._fwdV||0)); }
+          let dn=180; for(let i=0;i<w.length;i++) if(Math.abs(w[i])<=0.1*top){ dn=i+1; break; }
+          p.vel.x=was.x; p.vel.z=was.z;
+          return { top:+top.toFixed(3), to90s:+(up*DT).toFixed(3), to10s:+(dn*DT).toFixed(3) }; };
+        out.lateral=run('KeyD'); out.forwardCtl=run('KeyW'); }
+      return out;
+    }catch(e){ return {err:String(e&&e.message||e)}; } },
   bipod(o){ try{ if(o&&o.steady!=null) _bipod.steady=Math.max(0,Math.min(1,+o.steady));
       if(o&&o.deployS!=null) _bipod.deployS=Math.max(0.5,+o.deployS);
       // THE FOLD ANGLE, in degrees because that is the unit the shape is argued in. A gun already built keeps the rest
@@ -45084,12 +45195,22 @@ window.__hc={
   // a screenshot: what you see is a limb that ends at a wall, and what is actually happening is a limb inside it. This
   // counts them with the same _meshBuried the hider uses, so the number and the hiding can never disagree, and it names
   // them, because "an arm" and "a foot" are different bugs -- a foot in the floor is a creature standing on the ground.
+  armClamp(on){ try{ if(on!=null) _ARM_CLAMP=!!on; return { on:_ARM_CLAMP }; }catch(e){ return {err:String(e.message||e)}; } },
   rigBuried(){ try{ const g=wretch.group; if(!g||!wretch.active) return {err:'not active'};
       g.updateMatrixWorld(true);
-      let parts=0, buried=0; const names=[];
+      // BY LIMB, NOT BY MESH NAME. Every mesh in this rig is unnamed, so a count alone cannot tell an arm through a
+      // trunk from a foot in the floor -- and those are a bug and a creature standing up respectively. The rig's own
+      // structure has the answer: label the joints from P and walk a buried mesh up to its nearest labelled ancestor.
+      const P=wretch.P, tag=new Map();
+      if(P){ if(P.arms) P.arms.forEach((c,ai)=>c.forEach(j=>j&&tag.set(j, ai?'armR':'armL')));
+        if(P.legs) P.legs.forEach((L,li)=>{ for(const k of ['hip','thigh','shin','foot']) if(L&&L[k]) tag.set(L[k], 'leg'+li+':'+k); });
+        if(P.spine) P.spine.forEach((j,i)=>j&&tag.set(j,'spine'+i));
+        if(P.neck) tag.set(P.neck,'neck'); if(P.head) tag.set(P.head,'head'); }
+      const label=o=>{ let n=o; for(let i=0;i<12 && n;i++){ const t=tag.get(n); if(t) return t; n=n.parent; } return 'other'; };
+      let parts=0, buried=0; const by={};
       g.traverse(o=>{ if(!o.isMesh) return; parts++;
-        if(_meshBuried(o)){ buried++; if(names.length<12) names.push(o.name||'(unnamed)'); } });
-      return { parts, buried, names, pos:[+wretch.pos.x.toFixed(2),+wretch.pos.y.toFixed(2),+wretch.pos.z.toFixed(2)], state:wretch.state }; }
+        if(_meshBuried(o)){ buried++; const k=label(o); by[k]=(by[k]|0)+1; } });
+      return { parts, buried, by, pos:[+wretch.pos.x.toFixed(2),+wretch.pos.y.toFixed(2),+wretch.pos.z.toFixed(2)], state:wretch.state }; }
     catch(e){ return {err:String(e.message||e)}; } },
   // QA: record a fork's bones AT FRAME RATE, with the animation clock, so a tempo can be measured rather than estimated.
   // Pass a kind to start, null to stop and drain. Rows are [phase, thigh0, arm0, groupY].
