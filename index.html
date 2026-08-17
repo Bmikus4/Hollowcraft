@@ -10112,7 +10112,21 @@ const VoxelAOShader={
       vec2 px = 1.0/uResolution;
       vec3 Px = wpos(vUv+vec2(px.x,0.0), texture2D(tDepth, vUv+vec2(px.x,0.0)).x);
       vec3 Py = wpos(vUv+vec2(0.0,px.y), texture2D(tDepth, vUv+vec2(0.0,px.y)).x);
-      vec3 N = normalize(cross(Px-P, Py-P));
+      // A DEGENERATE NORMAL IS THE FAILURE MODE OF THIS RECONSTRUCTION, and it has to be rejected rather than
+      // normalized. Two neighbouring pixels at nearly the same depth — a flat surface seen at a grazing angle, or
+      // anything far enough away that depth precision flattens it — give a cross product of almost zero, and
+      // normalize() of that is noise or NaN. Marched, that lights rays in arbitrary directions and the result is a
+      // frame-wide dimming rather than a crease: measured at 64.81% of an open frame moved and its mean luminance
+      // down from 52.08 to 46.54, which is the same "dims most of the frame instead of darkening creases" fault this
+      // pass exists to replace. The other rejection is the SILHOUETTE: if either neighbour is a long way off in
+      // depth, the two deltas span an edge and describe no surface at all.
+      vec3 dX = Px-P, dY = Py-P;
+      float zx = lin(texture2D(tDepth, vUv+vec2(px.x,0.0)).x), zy = lin(texture2D(tDepth, vUv+vec2(0.0,px.y)).x);
+      if(abs(zx-z) > 0.25*z || abs(zy-z) > 0.25*z){ gl_FragColor = col; return; }
+      vec3 nc = cross(dX, dY);
+      float nl = length(nc);
+      if(nl < 1e-5 || nl < 1e-4*length(dX)*length(dY)){ gl_FragColor = col; return; }
+      vec3 N = nc/nl;
       if(dot(N, uCamPos-P) < 0.0) N = -N;                                  // the cross order flips with the winding of the two deltas
       float jit = h21(gl_FragCoord.xy);
       float occ = 0.0, wsum = 0.0;
@@ -10776,7 +10790,17 @@ function buildComposer(){
     vaoPass.uniforms.uResolution.value.set(innerWidth, innerHeight);
     vaoPass.uniforms.uOcc.value=_occTex;
     composer.addPass(vaoPass);
-    ssaoPass.enabled=false;
+    // IT SHIPS OFF AND SSAO KEEPS THE FRAME. The intent was for this to replace SSAO outright, and the argument for
+    // that still stands — a screen-space pass cannot see an occluder that was never rasterised. But measured, three
+    // rays with no denoiser do not darken creases, they dim the picture: an open frame moved 64.8% of its pixels and
+    // its mean luminance fell 49.7 to 44.6, which is the same fault the plan records against the SSAO it was meant to
+    // retire. Rejecting degenerate normals at grazing angles and silhouettes was tried and changed nothing (64.81% ->
+    // 64.82%), so the reconstruction is not the problem: the sample count is. Teardown gets away with two AO rays
+    // because it spends a spatiotemporal filter on them -- 12 Poisson taps with bilateral weights plus a reprojected,
+    // clamped history -- and this game has neither motion vectors nor a history buffer to build one from.
+    // So the next step is not another dial on this pass. It is the denoiser, or the motion vectors that make one
+    // possible, which is the same buffer TAA would want.
+    vaoPass.enabled=false;
   } else { ssaoPass=null; vaoPass=null; }
   // HEIGHT FOG after AO and before the god rays, so a shaft is drawn through the mist rather than under it, and before
   // bloom so a lit bank glows. Same depth gate as the two passes around it: no depth attachment, no fog. Absent from the
