@@ -1140,7 +1140,7 @@ const _hcAux = new Float32Array([0.10, 0, 0.012, 0.14]);
 // dropped item and the viewmodel are not chunk geometry and carried nothing, so they all took the same FLAT sky fill
 // whether they stood in open ground or a sealed cave. This is the value they were missing, written per draw by
 // hcSkyBind and read by the non-atlas fill in lights_fragment_end.
-const _hcObj = new Float32Array([1, 0.85, 0.06, 0]);   // [per-draw sky&canopy (hcSkyBind writes this one), how much the NON-ATLAS path follows the day factor at night, the mid-grey luminance the night celestial term flattens toward, spare]
+const _hcObj = new Float32Array([1, 0.85, 0, 0]);   // [per-draw sky&canopy (hcSkyBind writes this one), how much the NON-ATLAS path follows the day factor at night, the mid-grey luminance the night celestial term flattens toward, spare]
 // x = how much of the torch's directional shaping to apply (0 restores the flat level exactly, for the A/B).
 // y = what a face pointing away from the flame keeps.
 // [directional amount, back-face floor, REACH in blocks, smooth-radial blend]. The last two are the smooth falloff that
@@ -5988,6 +5988,16 @@ function waterMesh(c){
   geo.setAttribute('aDepth',new THREE.Float32BufferAttribute(DEP,1));
   geo.setAttribute('aColD',new THREE.Float32BufferAttribute(COLD,1));
   geo.setAttribute('aFlow',new THREE.Float32BufferAttribute(FLOW,2));   // #74: blocks a second, in world XZ
+  // aFar IS DECLARED AND MUST BE SUPPLIED, and leaving it out is what made a well look empty (Ben: "i cant see water
+  // in wells"). The fragment stage carries `if(vFar>0.5 && length(vW.xz-uCamPos.xz) < uMeshR) discard;` so the painted
+  // far-sea disc is thrown away where real water already exists — and the disc sets aFar=1 while chunk water set it
+  // nowhere at all. An attribute a shader declares but a geometry omits does not read zero; it reads whatever was last
+  // bound to that slot, which after the disc has drawn is 1.0. Every chunk water surface inside uMeshR was then
+  // discarding itself — near water, which is the only water you are ever close enough to look into.
+  // THIS IS THE aFlow BUG WITH THE ROLES REVERSED. The note on the disc's own aFlow says it in as many words: "an
+  // attribute the shader declares but the geometry omits reads whatever was last bound to that slot". That was fixed
+  // by giving the DISC a zeroed aFlow; this is the same fix owed in the other direction.
+  geo.setAttribute('aFar', new THREE.Float32BufferAttribute(new Float32Array(P.length/3), 1));   // all zero: this is real water, never the painted disc
   return geo;
 }
 
@@ -42223,6 +42233,33 @@ window.__hc={
     catch(e){ return {err:String(e.message||e)}; } },
   // WHERE THE WELL'S WATER QUAD LANDS ON SCREEN, in pixels. A frame diff over a guessed rectangle cannot tell a water
   // surface from film grain; projecting the surface's own world corners through the live camera can.
+  // TURN FRUSTUM CULLING OFF FOR THE WELL'S WATER MESH ALONE. One line, one frame, and it either appears or it does
+  // not -- which is the difference between "the cull is wrong" and "something else eats it", and no amount of reading
+  // the bounding sphere settles that.
+  wellCull(on){ try{ const wx=spawnX+14, wz=spawnZ+34, c=getChunk(wx>>4,wz>>4);
+      const wm=c&&c.group&&c.group.userData&&c.group.userData.water; if(!wm) return {err:'no water mesh'};
+      if(on!=null) wm.frustumCulled=!!on;
+      // What three would test: the geometry's sphere pushed through the mesh's world matrix.
+      wm.updateMatrixWorld(true);
+      const g=wm.geometry; if(!g.boundingSphere) g.computeBoundingSphere();
+      const sp=g.boundingSphere.clone().applyMatrix4(wm.matrixWorld);
+      return { frustumCulled:wm.frustumCulled,
+               localSphere:{c:[+g.boundingSphere.center.x.toFixed(2),+g.boundingSphere.center.y.toFixed(2),+g.boundingSphere.center.z.toFixed(2)], r:+g.boundingSphere.radius.toFixed(2)},
+               worldSphere:{c:[+sp.center.x.toFixed(2),+sp.center.y.toFixed(2),+sp.center.z.toFixed(2)], r:+sp.radius.toFixed(2)},
+               cam:[+camera.position.x.toFixed(1),+camera.position.y.toFixed(1),+camera.position.z.toFixed(1)],
+               distToSphere:+(camera.position.distanceTo(sp.center)-sp.radius).toFixed(2) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // SWAP THE WELL'S WATER MESH ONTO A PLAIN MATERIAL. This is the test the magenta debug could not do: uNanDbg paints
+  // in the FRAGMENT stage, so if the VERTEX stage puts these vertices somewhere that generates no fragments, magenta
+  // never appears and the shader still looks innocent. A MeshBasicMaterial has no vertex stage of its own -- if the
+  // quad shows up in flat magenta, the geometry and the draw path are sound and waterMat is doing it.
+  wellBasic(on){ try{ const wx=spawnX+14, wz=spawnZ+34, c=getChunk(wx>>4,wz>>4);
+      const wm=c&&c.group&&c.group.userData&&c.group.userData.water; if(!wm) return {err:'no water mesh'};
+      if(on){ if(!wm.userData._realMat) wm.userData._realMat=wm.material;
+              wm.material=new THREE.MeshBasicMaterial({color:0xff00ff, side:THREE.DoubleSide, depthTest:true}); }
+      else if(wm.userData._realMat){ wm.material=wm.userData._realMat; wm.userData._realMat=null; }
+      return { basic:wm.material.type, verts:wm.geometry.attributes.position.count }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   wellRect(){ try{ const wx=spawnX+14, wz=spawnZ+34, gy=surfaceH(wx,wz), y=gy+1-WATER_SURF_DROP;
       const V=new THREE.Vector3(); let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9, behind=0;
       for(const [ax,az] of [[wx-1.5,wz-1.5],[wx+1.5,wz-1.5],[wx+1.5,wz+1.5],[wx-1.5,wz+1.5]]){
