@@ -51,7 +51,11 @@ function ok(label, cond, got){ checks++; if(!cond)fails++; console.log('  '+(con
     await page.waitForFunction('(()=>{try{return window.__hc && __hc.st().started===true;}catch(e){return false;}})()',null, {timeout:90000});
     await page.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null, {timeout:90000});
     await sleep(6000);
-    await page.evaluate('__hc.setTime(0.42)');
+    // dayLock, NOT setTime. setTime sets the clock and the clock then RUNS: this file spent 0.42 (late afternoon)
+    // and then waited through a teleport, a chunk fill and two aims, by which point the world was past sunset and
+    // the frame was BLACK — 0.0% wood-toned pixels and a "the cabin is not DRAWN" failure with the cabin standing
+    // there in 19 block kinds. dayLock pins worldTime so the hour cannot walk out from under the measurement.
+    await page.evaluate('__hc.dayLock(0.42)');
 
     // The cabin is at a fixed seeded offset from spawn: buildCabin uses cx=spawnX+22, cz=spawnZ-14.
     const S = await page.evaluate('(()=>{const p=__hc.probe(); return {sx:p.spawnX, sz:p.spawnZ, x:p.x, z:p.z};})()');
