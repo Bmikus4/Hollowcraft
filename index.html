@@ -4702,16 +4702,20 @@ function _coastFringe(wx, wz){
 // not transfer: the bay at spawn sits at idist 237, well inside ISLE_CORE 340, so _isleAt reads exactly 1 over it and
 // the gate declined every column of the shoreline Ben is looking at. The file already says this at the elevation rule --
 // "no single radius separates inland from shore, height does" -- and this is the second time it has been paid for.
-// THE REACH IS 14 BECAUSE BEN SAID 14, and it is a reach and not a width: the water comes in as far as there is pan to
-// flood, and stops at the first column that stands above the sea. On the traverse above that lands the water against a
-// beach one block proud of it, which is what "contact the shore" means.
+// THE REACH IS A CEILING, NOT THE RECESSION. The water comes in as far as there is pan to flood and stops at the first
+// column standing above the sea, so on Ben's traverse it moved 16 blocks -- his "14 blocksish" -- without the number
+// being set to 14. It is 24 because that is where flooding SATURATES: swept over 58,081 columns at spawn, dry sea-level
+// columns fall 4933 -> 1291 -> 829 at reaches 0, 14 and 24 and then do not move again at 40, 64 or 120, and the census
+// costs the same 210ms at every one of them. 14 was tried first and it is the wrong number for the second half of Ben's
+// sentence: a bay CORNER is where the pan is widest, so a 14-block ceiling left 34 dry columns with water on the
+// diagonal only -- his gaps in the corners, one step further in. At 24 that count is 0.
 // REACHED ALONG THE PAN, not merely near it: eight rays, and a ray is spent the moment it crosses a column standing
 // above the sea. Nearness alone floods a sea-level flat that happens to lie 14 blocks behind a ridge from the water,
 // which is a pond in a field; a ray that has to stay at or under sea level the whole way can only arrive over ground the
 // water could actually cover. Eight rays instead of a true 8-connected flood is the cheap half of the same idea and it
 // is a deliberate trade: a flood is up to 841 visited columns PER COLUMN inside surfaceH, and the pan is wide, so a ray
 // finds it. THE DIAGONALS ARE FOUR OF THE EIGHT, which is Ben's corner.
-const COAST_REACH=14;
+let COAST_REACH=24;   // __hc.coast(true, n) re-aims it and drops the height caches, which is how the number was chosen
 const _APRON_RAY=[[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
 // _ringedByLand's rule -- 8 of 12 bearings at 22 blocks standing above the sea -- read RAW, because the caller runs
 // inside surfaceH and the original asks surfaceH. Same 8/12 and same 22: two answers to "is this water inland" that
@@ -6499,6 +6503,15 @@ let _pinT = null;
 // OPEN the eye in the dark, never close it below the sunlit baseline: 1.05 is where the game lives and 1.30 is what
 // a cave at noon earns.
 const ADAPT={ on:true, cur:1.05, want:1.05, lo:1.05, hi:1.30, inT:2.2, outT:0.45 };
+// EXPOSURE HAS ONE OWNER, and it did not before: the adaptation block wrote renderer.toneMappingExposure when it was
+// on and not flashing, and the weather block wrote it unconditionally every frame from the lightning term — while its
+// own comment claimed to be "the only place play sets it". They did not fight to a visible wrong look, because the
+// adaptation write happens later in the frame and won whenever it was enabled. What they did break is every
+// measurement: __hc.exposure(4) read back 1.05 fifty milliseconds later, so the dial could not hold for a single
+// frame and any exposure sweep taken through it was a sweep of nothing. Measured before the fix, a 16x sweep
+// (0.2625 -> 4.0) moved a noon ground crop by 0.2 of 255 and a midnight crop not at all.
+// null means "adaptation owns it". A number is an explicit override that survives, which is what makes it a dial.
+let _expoOverride = null;
 // ---- THE TIME-OF-DAY GRADE (the other half of Ben's "eye adaptation plus a time-of-day grade") ----
 // Adaptation moves the EXPOSURE; this moves the LOOK. Three graded anchors instead of one curve stretched across all
 // twenty-four hours, which is what the build had: uDark scaled the lift, the grain and the vignette and nothing else,
@@ -18928,8 +18941,15 @@ function loop(){ try{
     const want=clamp(ADAPT.lo + (ADAPT.hi-ADAPT.lo)*dark, ADAPT.lo, ADAPT.hi);
     const k=1-Math.exp(-dt/((want>ADAPT.cur)?ADAPT.inT:ADAPT.outT));
     ADAPT.cur += (want-ADAPT.cur)*k; ADAPT.want=want;
-    if(!weather.flash) renderer.toneMappingExposure=+ADAPT.cur.toFixed(4);
   }
+  // THE SINGLE WRITE. Base is the override if one is set, else adaptation's current value, else the shipped 1.05 when
+  // adaptation is off — so turning adaptation off no longer silently hands the global to the lightning term. The
+  // flash is an ADDITION on top of that base rather than a replacement of it, which is what it always meant to be:
+  // lightning brightens whatever the eye is currently adapted to. The clamp is unchanged and stays where the value is
+  // written, because nothing downstream can tell a blown frame from a bright one.
+  { const _eb = (_expoOverride!=null) ? _expoOverride
+              : ((typeof ADAPT!=='undefined' && ADAPT.on) ? ADAPT.cur : 1.05);
+    renderer.toneMappingExposure = Math.min(2.75, Math.max(0.2, _eb + (weather.flash||0)*1.7)) || 1.05; }
   // ---- THE TIME-OF-DAY GRADE (see TOD, above) ----
   // Three weights that sum to one by construction: `d` rises as the sun clears the horizon, `n` rises as it sinks
   // below, and golden is whatever neither of them claims — which puts the golden anchor at full strength exactly in
@@ -39011,10 +39031,11 @@ function updateWeather(dt){
   // a third brighter night to remove not even half the artefact. Ben has asked four separate times for night to be genuinely
   // black, so the lever that lifts everything is the wrong one; the floor below is aimed only where a lamp is actually lighting
   // a surface. Left flat deliberately: do not "finish" this item.
-  // AND THE EXPOSURE IS CLAMPED WHERE IT IS WRITTEN. It is one global that whitens EVERY surface at once, this is the
-  // only place play sets it, and nothing downstream can tell a blown frame from a bright one. 1.05 to 2.75 is the
-  // entire range this expression was ever meant to produce, since flash runs 0 to 1.
-  renderer.toneMappingExposure = Math.min(2.75, Math.max(0.2, 1.05 + weather.flash*1.7)) || 1.05;                                          // lightning briefly blows out exposure
+  // THE EXPOSURE WRITE THAT WAS HERE IS GONE, and this note is what stops it coming back. It set the global every
+  // frame from `1.05 + weather.flash*1.7`, which meant lightning did not brighten what the eye was adapted to — it
+  // REPLACED it — and, with flash at 0 (almost always), it overwrote any other value within one frame. weather.flash
+  // is still the lightning term and is still read; it is now an addition on top of the adapted base, applied at the
+  // single write beside ADAPT. See the note at _expoOverride.
   // FOG WEATHER EVENT — a cold bank gathers slowly, hangs, then lifts (drives weather.fog, read by updateSky)
   if(!NET.on||NET.host){ if(weather.fogHold>0){ weather.fogHold-=dt; if(weather.fogHold<=0){ weather.fogTgt=0; if(typeof reasonEvent==='function')reasonEvent('fog_lifts'); } }
   else { weather.fogNext-=dt; if(weather.fogNext<=0){ weather.fogNext=750+Math.random()*900; weather.fogTgt=0.72+Math.random()*0.28; weather.fogHold=180+Math.random()*90; flashName('a cold fog rolls in over the wood'); if(typeof reasonEvent==='function')reasonEvent('fog_rolls_in'); } } }   // host-only ROLL; guests receive fogTgt + lerp
@@ -41847,9 +41868,11 @@ window.__hc={
     catch(e){ return {err:String(e.message||e)}; } },
   // EYE ADAPTATION, as a dial and a readout. `want` is where the eye is heading, `cur` where it is — the two differ
   // for exactly as long as the adaptation takes, which is the thing to look at when it feels wrong.
-  adapt(o){ try{ if(o){ for(const k of ['on','lo','hi','inT','outT']) if(o[k]!=null) ADAPT[k]=(k==='on')?!!o[k]:+o[k];
-        if(o.on===false) renderer.toneMappingExposure=1.05; }
+  // It no longer writes the exposure global when switched off: the single owner beside ADAPT falls back to 1.05 on
+  // its own next frame, and a second writer here is exactly what made the dial unable to hold.
+  adapt(o){ try{ if(o){ for(const k of ['on','lo','hi','inT','outT']) if(o[k]!=null) ADAPT[k]=(k==='on')?!!o[k]:+o[k]; }
       return { on:ADAPT.on, cur:+ADAPT.cur.toFixed(3), want:+ADAPT.want.toFixed(3), lo:ADAPT.lo, hi:ADAPT.hi,
+               override:_expoOverride,
                inT:ADAPT.inT, outT:ADAPT.outT, exposure:+renderer.toneMappingExposure.toFixed(3),
                enclosed:(typeof fogEnclosure==='function')?+fogEnclosure().toFixed(2):null,
                day:+globalU.uDay.value.toFixed(2) }; }
@@ -41857,10 +41880,15 @@ window.__hc={
   // THE FRAME'S EXPOSURE, as a dial. The daylight black guard has to run at BOTH ends of whatever range eye
   // adaptation will move this through, not only at the shipped 1.05: adaptation can manufacture exactly the crushed
   // pixels Ben's precondition forbids, and a ceiling measured at one exposure says nothing about the other end.
-  // Returns to 1.05 with no argument, which is also what the weather's lightning flash restores it to.
-  exposure(n){ try{ if(n!=null) renderer.toneMappingExposure=Math.max(0.05,Math.min(4,+n));
-      else renderer.toneMappingExposure=1.05;
-      return +renderer.toneMappingExposure.toFixed(3); }catch(e){ return {err:String(e.message||e)}; } },
+  // IT SETS AN OVERRIDE, NOT THE GLOBAL, and that is the difference between a dial and a value that is gone by the
+  // next frame. Writing renderer.toneMappingExposure directly could not hold: adaptation and the weather term both
+  // rewrote it every frame, so a set of 4.0 read back 1.05 fifty milliseconds later and every sweep taken through
+  // this hook measured nothing. No argument hands the frame back to adaptation.
+  exposure(n){ try{ _expoOverride = (n!=null) ? Math.max(0.05,Math.min(4,+n)) : null;
+      if(_expoOverride!=null) renderer.toneMappingExposure=_expoOverride;   // take effect this frame, not next
+      return { exposure:+renderer.toneMappingExposure.toFixed(3), override:_expoOverride,
+               owner:_expoOverride!=null?'override':(ADAPT.on?'adaptation':'base 1.05') }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   // QA: the giantess's side of the wire. Who owns her, whether this client is sending or receiving her, and how
   // many of her packets have arrived — the three things that separate "not replicated" from "replicated into a
   // client that is ignoring it".
@@ -43602,7 +43630,7 @@ window.__hc={
   // The fringe on or off, with both height caches dropped so the next question is answered by the new rule rather than
   // by what the old one cached. Terrain already baked into a save does not change — same caveat the reverted attempt
   // carried — so an A/B has to be read from a census, not from a walk around an existing world.
-  coast(v){ try{ if(v!=null){ _FRINGE=!!v; _hmCache.clear(); _rawCache.clear(); } return { fringe:_FRINGE }; }catch(e){ return {err:String(e.message||e)}; } },
+  coast(v,reach){ try{ if(reach!=null) COAST_REACH=Math.max(1,reach|0); if(v!=null||reach!=null){ if(v!=null)_FRINGE=!!v; _hmCache.clear(); _rawCache.clear(); } return { fringe:_FRINGE, reach:COAST_REACH }; }catch(e){ return {err:String(e.message||e)}; } },
   coastCensus(r,step){ const R=r||220, ST=step||1, P={x:Math.round(player.pos.x), z:Math.round(player.pos.z)};
     let cols=0, atFringeH=0, moved=0, inlandFlats=0, steps2=0, sea=0;
     // THE PAN AND ITS CORNERS (Ben 08-17: "it should contact the shore and have no gaps in its corners"). A column at
