@@ -12569,6 +12569,9 @@ function drainUnloads(){ let n=0;
 //  PLAYER + PHYSICS
 // =====================================================================
 const HW=0.3, PH=1.8, EYE=1.62, STEP=0.6;
+// CROUCHED EYE HEIGHT. The crouched BODY is 1.45 (see bodyH), and the eye has to stay inside it with room for the
+// spring's overshoot -- at 1.28 the eye sits 17cm under its own ceiling, which the 6% overshoot cannot cross.
+const CROUCH_EYE=1.28;
 // PRONE EYE HEIGHT. 0.32 is a head lying on its side on the ground: low enough that grass is at eye level and a doorway
 // gap you can see under is a real one, high enough that the near plane does not sit inside the block below you.
 const PRONE_EYE=0.32;
@@ -12584,7 +12587,12 @@ const LEAN_X=0.55, LEAN_ROLL=0.19, LEAN_DIP=0.13;
 // the same one: a horizontal body that keeps a standing hitbox is a body you can shoot in the head while it lies
 // flat, and a swimmer stretched out along the surface is exactly that shape. 0.72 rather than prone's 0.62 because
 // a swimmer's stroke lifts the shoulders and the head clears the water — it is a swim, not a corpse.
-function bodyH(){ return player.swimming?0.72:(player.prone?0.62:(player.sneak?1.45:PH)); }
+// THE HITBOX FOLLOWS THE POSTURE, which is the second half of the ask. It used to SNAP from 1.80 to 1.45 on the
+// keypress while the body took a quarter second to get there, so for that quarter second the collision box and the
+// thing on screen disagreed -- you could already be under a gap you had not ducked into yet. It rides the same sprung
+// value the eye does, clamped at 0 so an overshoot on the way up cannot make the box taller than standing.
+function bodyH(){ if(player.swimming) return 0.72; if(player.prone) return 0.62;
+  return PH - (PH-1.45)*clamp(player._crouchT||0, 0, 1); }
 // =====================================================================
 //  WALK PACE — the wheel sets it, stamina pays for the fast end (Ben)
 // =====================================================================
@@ -17581,6 +17589,20 @@ function updateCamera(dt){
   // falling-through-the-floor bug; ~0.2s of drop reads as lying down.
   p._proneT=(p._proneT||0)+((p.prone?1:0)-(p._proneT||0))*Math.min(1,dt*7);
   const proneDrop=(EYE-PRONE_EYE)*p._proneT;
+  // ---- CROUCH HAS KNEES (Ben: "crouch needs real sprung knees, with the hitbox following the posture") ----
+  // IT DID NOT MOVE THE EYE AT ALL. bodyH() dropped the collision box from 1.80 to 1.45 the instant Ctrl went down,
+  // and the camera stayed at EYE=1.62 the whole time -- so crouching shrank the hitbox to BELOW the eye and looked,
+  // from inside, like nothing had happened. That is the whole of the complaint.
+  //   A SPRING, NOT A LERP, and that is what "sprung" means. An exponential ease arrives and stops; knees compress
+  // past the mark and rebound, and the overshoot is the only part a player actually reads as weight. Stiffness 220
+  // with damping 22 settles in about a quarter second with roughly 6% of overshoot -- enough to feel, small enough
+  // that the eye never crosses the crouched body's own ceiling.
+  //   CLAMPED EITHER SIDE, because a spring can be driven: tapping Ctrl on alternate frames pumps it, and an
+  // unclamped overshoot would put the eye through the floor on the way down and above standing height on the way up.
+  { const tgt=(p.sneak&&!p.prone)?1:0, k=220, d0=22, h=Math.min(dt,0.033);
+    p._crouchV=(p._crouchV||0) + ((tgt-(p._crouchT||0))*k - (p._crouchV||0)*d0)*h;
+    p._crouchT=clamp((p._crouchT||0) + p._crouchV*h, -0.08, 1.08); }
+  const crouchDrop=(EYE-CROUCH_EYE)*p._crouchT;
   // ---- LEAN, ON Q AND E (Ben: "Q and E are lean", and Q-to-drop is cancelled with it) ----
   // The eye slides sideways and the head tilts with it. Both are needed: the roll alone is a camera effect and reads
   // as a stumble, and the offset alone reads as strafing. The dip is what keeps it from looking like a sidestep — a
@@ -17610,7 +17632,7 @@ function updateCamera(dt){
   // upright-looking player in the middle of it reads as the camera falling over. The BODY still leans (updateTpsBody);
   // `_tpsAct` is last frame's value here, which costs one frame on a view change nobody makes mid-peek.
   if(leanF && !_tpsAct) camera.rotateZ(-LEAN_ROLL*p._lean*leanF);   // the tilt follows the offset the wall ALLOWED, not the one the key asked for
-  camera.position.set(p.pos.x+right.x*(bobX+leanX), p.pos.y+EYE-proneDrop+bobY-leanDip, p.pos.z+right.z*(bobX+leanX));
+  camera.position.set(p.pos.x+right.x*(bobX+leanX), p.pos.y+EYE-proneDrop-crouchDrop+bobY-leanDip, p.pos.z+right.z*(bobX+leanX));
   // ---- F4 THIRD PERSON (Ben 07-27) — deliberately ROUGH tracking: the boom lags the eye instead of being welded to it,
   //      so the camera swings and settles behind you rather than snapping. Pulled in if a wall is in the way.
   _tpsAct = _tpsOn && !_tpsUpdateIndoors(dt);   // the player's preference, minus the indoor override
@@ -17819,7 +17841,10 @@ function updateTpsBody(dt){
   // standing player lowered into the floor on straight legs, which is what was wrong with it. A crouch is knees, then
   // height: the thighs fold, the arms come in, the head drops, and the sink is what is left over.
   // Both are eased: a posture that snaps between two rigs reads as a glitch, and the eye is already easing (see PRONE_EYE).
-  P.crouchT=(P.crouchT||0)+((player.sneak&&!player.prone?1:0)-(P.crouchT||0))*Math.min(1,dt*9);
+  // ONE SPRING FOR BOTH SCREENS. This ran its own dt*9 lerp off player.sneak, so the body's knees and the camera's
+  // arrived at different times and by different curves -- the eye sprang and the legs eased. Reading the player's own
+  // sprung value means the third-person knees compress and rebound exactly as the first-person eye does.
+  P.crouchT=clamp(player._crouchT||0, 0, 1);
   P.proneT=(P.proneT||0)+((player.prone?1:0)-(P.proneT||0))*Math.min(1,dt*7);
   const _cT=P.crouchT, _pT=P.proneT;
   P.group.position.y -= 0.15*_cT;
@@ -17890,7 +17915,10 @@ function updateTpsBody(dt){
     P.armL.rotation.x=P.armL.rotation.x*k - 1.15*_pT; P.armR.rotation.x=P.armR.rotation.x*k - 1.15*_pT; }
   // THE HELD ITEM IS IN THE HAND (Ben: "should render from the hand"), which is also where a gun has to be for the arm pose to
   // mean anything: holding a rifle raises the right arm to point it down the look direction instead of letting it swing.
-  const hs=inv[selSlot], hid=hs?hs.id:null;
+  // THE BODY FOLLOWS WHAT THE HANDS ARE SHOWING, not what the slot holds (Ben: the swap "must read on the
+  // third-person body and to a peer too"). view.id changes at the swap MIDPOINT, so the body puts the new item up at
+  // the same instant the viewmodel does instead of teleporting it in the moment a key is pressed.
+  const hs=inv[selSlot], hid=(typeof view!=='undefined' && view.id!==undefined) ? view.id : (hs?hs.id:null);
   // AND IT WEARS WHAT YOU BOLTED TO IT. Your own third-person body goes through the same builder a peer's does, so
   // it needs the same attachment string — without it, the one player guaranteed to know a scope is fitted is the
   // one whose body renders without it.
@@ -17903,6 +17931,11 @@ function updateTpsBody(dt){
   // avatarBipod is shared with the peer path (netUpdate's avatars carry `prone`), which is what keeps one gun looking
   // like one gun on both screens.
   avatarBipod(P, P.proneT||0);
+  // AND THE ARM DIPS WITH IT. The same sine the viewmodel uses, on the held arm, so a watcher sees the weapon go
+  // down and come back up rather than one model becoming another.
+  { const _sw=(typeof swapDip==='function')?swapDip():0;
+    if(_sw>0.001){ P.armR.rotation.x += 1.05*_sw; if(P.hand) P.hand.rotation.x = -0.5*_sw; }
+    else if(P.hand) P.hand.rotation.x = 0; }
   const oid=(armor[EQ_OFF]&&armor[EQ_OFF].id)||null;                            // BOTH HANDS (Ben 08-04): the offhand carries too
   if(P.offHeld!==oid){ P.offHeld=oid; try{ _tpsSetOff(P,oid); }catch(e){} }
   const it=hid?ITEMS[hid]:null, oit=oid?ITEMS[oid]:null;
@@ -18295,6 +18328,10 @@ function setAvatarHeld(a,id,at){ if(a.heldMesh){ a.hand.remove(a.heldMesh); _dis
   else if(it.shield){ _tpsShieldPose(m,w); }                                                                    // the same board as the offhand, same fit and same forward tilt — see _tpsShieldPose
   else { m.scale.setScalar(0.5); w.rotation.set(-0.4,0,0.25); w.position.set(0,0.04,-0.02); }                   // tools/materials: canted up out of the grip like the viewmodel
   a.hand.add(w); a.heldMesh=w;
+  // A PEER RAISES IT, over the second half of the swap. They only learn the new id at the midpoint — the owner's
+  // packet carries what its hands are SHOWING — so what a watcher sees is the old item, then the new one rising,
+  // which is the same gesture from the other side and needs no extra field on the wire.
+  a._swapT=0;
   // The hinge, found once per built mesh rather than traversed every frame: avatarBipod runs on your own body and on
   // every peer, each frame, and a traverse per body per frame to find a group that cannot move is pure waste.
   a._bipod=(m.userData&&m.userData.bipod)||null; }
@@ -18316,7 +18353,7 @@ function netUpdate(dt){ if(!NET.on)return;
   netFlushQueues();   // batched block-edit/drop bursts + late-join sync pages
   NET.sendAcc+=dt; if(NET.sendAcc>0.05){ NET.sendAcc=0; const s=inv[selSlot];
     // rounded (2cm / ~0.06deg — invisible) + send-on-change with a 0.5s heartbeat: idle players stop flooding the relay, packets ~40% smaller
-    const px=+player.pos.x.toFixed(2),py=+player.pos.y.toFixed(2),pz=+player.pos.z.toFixed(2),yaw=+player.yaw.toFixed(3),pit=+player.pitch.toFixed(3),held=s?s.id:null,tied=!!player.tied,dead=!!player.dead,po=(player.prone?2:player.sneak?1:0),pk=!!(armor[EQ_PACK]&&PACK_SLOTS[armor[EQ_PACK].id]!=null),ch=(armor[1]&&WORN_SHELL[armor[1].id])?armor[1].id:null,
+    const px=+player.pos.x.toFixed(2),py=+player.pos.y.toFixed(2),pz=+player.pos.z.toFixed(2),yaw=+player.yaw.toFixed(3),pit=+player.pitch.toFixed(3),held=(view&&view.id!==undefined)?view.id:(s?s.id:null),tied=!!player.tied,dead=!!player.dead,po=(player.prone?2:player.sneak?1:0),pk=!!(armor[EQ_PACK]&&PACK_SLOTS[armor[EQ_PACK].id]!=null),ch=(armor[1]&&WORN_SHELL[armor[1].id])?armor[1].id:null,
       // WHAT THE HELD GUN IS WEARING. A peer's gun is built from an item id alone, so a fitted optic or can was
       // invisible to everyone but its owner — a rifle with a scope on it looked bare in a teammate's hands. Sent
       // as a short string ('optic:red_dot|muzzle:suppressor') rather than an object because it also has to be
@@ -18349,7 +18386,9 @@ function netUpdate(dt){ if(!NET.on)return;
     // still means what it says). Eased at the same rates, because a peer's posture arrives in steps of one packet.
     a.crouchT=(a.crouchT||0)+(((a.po===1)?1:0)-(a.crouchT||0))*Math.min(1,dt*9);
     a.proneT=(a.proneT||0)+(((a.po===2)?1:0)-(a.proneT||0))*Math.min(1,dt*7);
-    avatarBipod(a, a.proneT);   // a peer's rifle unfolds its legs as they go down — same driver as your own body, so one gun looks like one gun on both screens
+    avatarBipod(a, a.proneT);
+    if(a._swapT!=null && a._swapT<1){ a._swapT=Math.min(1, a._swapT + dt/(SWAP_DUR*0.5));
+      const _r=Math.sin((1-a._swapT)*Math.PI*0.5); a.armR.rotation.x += 1.05*_r; }   // a peer's rifle unfolds its legs as they go down — same driver as your own body, so one gun looks like one gun on both screens
     // The same fold as your own body, same numbers — a peer crouching must look like you crouching, and the way these
     // two drift is by being tuned separately.
     if(a.crouchT>0.001){ a.g.position.y-=0.15*a.crouchT;
@@ -27325,6 +27364,40 @@ function warmPrimaries(){ if(typeof ITEMS==='undefined') return;
     _viewWarmed.add(s.id);
     const id=s.id;
     setTimeout(()=>{ try{ const m=buildGlbGun(id,it.dot,it.suppressed); if(m) _disposeView(m); }catch(e){} },0); } }
+// =====================================================================
+//  A SWAP TAKES TWO SECONDS (Ben: "swapping between guns or tools should always take 2s")
+// =====================================================================
+// "A weapon or tool swap takes a full 2 seconds, always - no instant switch. Animate it: the current item lowers out of
+// frame, the new one raises into the grip, and the player cannot fire or use until it completes."
+//
+// THIS IS NOT INSIDE setViewItem, and that distinction is the whole design. setViewItem is called from fourteen places,
+// and most of them are not a swap: fitting an optic rebuilds the held mesh, so does dropping a stack, so does every QA
+// hook. Putting a two-second animation in there would make bolting on a red dot take two seconds and would fight the
+// attach screen. The swap belongs at the ONE seam where the held item follows the selected slot — the per-frame line in
+// updateView — and everything else keeps switching instantly.
+//
+// THE MESH CHANGES AT THE MIDPOINT, which is what makes one timer serve both halves of the animation: the old model
+// lowers for a second, the swap happens while it is off the bottom of the frame, and the new one rises for the second
+// second. Nothing has to cross-fade and no two models are ever drawn at once.
+const SWAP_DUR=2.0;
+let _swapT=0, _swapTo=undefined, _swapMid=false;
+function wantViewItem(id){
+  if(_swapTo!==undefined){
+    // RETARGET WITHOUT RESTARTING. Rolling the wheel across four slots must not cost eight seconds, and it must not
+    // land on the item that happened to be under the cursor when the clock started either — so the destination is
+    // updated in place and the two seconds keep running from the first press.
+    if(id!==_swapTo) _swapTo=id;
+    return; }
+  if(id===view.id) return;
+  _swapTo=id; _swapT=0; _swapMid=false; }
+function updateSwap(dt){
+  if(_swapTo===undefined) return;
+  _swapT += dt/SWAP_DUR;
+  if(!_swapMid && _swapT>=0.5){ _swapMid=true; setViewItem(_swapTo); }
+  if(_swapT>=1){ if(!_swapMid) setViewItem(_swapTo); _swapTo=undefined; _swapT=0; _swapMid=false; } }
+// 0 at rest, 1 at the midpoint, 0 again at the end — so one number both lowers the old model and raises the new one.
+function swapDip(){ return _swapTo===undefined ? 0 : Math.sin(Math.max(0,Math.min(1,_swapT))*Math.PI); }
+function swapping(){ return _swapTo!==undefined; }
 function setViewItem(id){ if(view.id===id)return; view.id=id;
   if(view.mesh){ view.group.remove(view.mesh); _disposeView(view.mesh); view.mesh=null; }
   if(!id||!ITEMS[id]){ view.mesh=buildFist(); view.group.add(view.mesh); applyViewFog(view.mesh); return; }   // empty hand → a real fist you punch with
@@ -27760,7 +27833,10 @@ function updateView(dt){ updateRecoil(dt);                                      
   if(armor[EQ_OFF] && armor[EQ_OFF].n<=0){ armor[EQ_OFF]=null; offUse=false; if(typeof updateArmorView==='function')updateArmorView(); refreshHotbar(); }
   // The RIGHT hand shows what is in the right hand. heldSlot() answers "which slot is acting", and in offhand-use mode
   // that is the left one -- reading it here drew the offhand item in BOTH fists.
-  setViewItem(inv[selSlot]?inv[selSlot].id:null);
+  // THE ONE SEAM A SWAP LIVES AT (see wantViewItem): the held item follows the selected slot through a two-second
+  // animation instead of appearing. Every other setViewItem caller is unaffected and still instant.
+  updateSwap(dt);
+  wantViewItem(inv[selSlot]?inv[selSlot].id:null);
   // NO LEFT HAND AT ALL. setOffItem(null) tears down whatever was built and keeps it torn down, and the group stays
   // hidden — the offhand's model, arm and pose code is left in the file but unreachable, because it is 120 references
   // deep in the viewmodel and deleting it blind is how a working right hand gets broken. Nothing calls it now.
@@ -28085,6 +28161,16 @@ function updateView(dt){ updateRecoil(dt);                                      
       // children of the thing being folded. Published for the probe, which is how the bench tells a fold from a sweep.
       view.sprintFold=st; }
     else view.sprintFold=0;
+    // ---- THE SWAP ITSELF: the item goes DOWN out of frame and comes back up ----
+    // A post-pass on the finished pose, for the same reason the sprint fold and the inspect carry are: every pose branch
+    // above ASSIGNS position outright, so anything set before them is overwritten.
+    // 0.62 down and 0.85 of muzzle-down pitch takes a rifle fully off the bottom of the frame at the midpoint, which is
+    // what lets the mesh change unseen. The dip is a sine, so it leaves and returns with zero velocity — a linear ramp
+    // reads as the gun being yanked.
+    { const _sw=swapDip();
+      if(_sw>0.001){ view.group.position.y -= 0.62*_sw; view.group.rotation.x += 0.85*_sw;
+        view.group.position.z += 0.10*_sw; view.swapDip=_sw; }
+      else view.swapDip=0; }
     // THE INSPECT CARRY — the attach screen's own pose (Ben 08-12: "the current running animation for held guns,
     // brings them closer to the chest ... it is the perfect animation for that attatchment system"). These are that
     // animation's numbers, from eb5919d, given to the screen it was assigned to: brought across to the LEFT and
@@ -28767,7 +28853,11 @@ function _bladeProg(using){
 // path to keep in step with the first, and the thing Ben is asking for is a MOVE, not a second weapon.
 function _doStab(){ const h=heldSlot(); if(!h||!_isBlade(h.id)) return false;
   view.swing=0; meleeAttack(); return true; }
-function _doSwing(){ const h=heldSlot(); if(h&&ITEMS[h.id]&&ITEMS[h.id].gun){ if(fireGun())view.swing=1.4; return; } view.swing=1; meleeAttack(); }
+// AND NOTHING SWINGS MID-SWAP EITHER (Ben: "cannot fire or use until it completes"). fireGun has its own gate for
+// the several routes to a trigger; this is the other half — a pickaxe, an axe, a blade or a bare fist during the two
+// seconds. One test at the top, so every caller of doSwing is covered rather than each mouse path separately.
+function _doSwing(){ if(typeof swapping==='function' && swapping()) return;
+  const h=heldSlot(); if(h&&ITEMS[h.id]&&ITEMS[h.id].gun){ if(fireGun())view.swing=1.4; return; } view.swing=1; meleeAttack(); }
 // hitscan down the look ray → first block/entity/animal hit. Muzzle flash + crack + tracer + recoil. Returns true if a shot was actually fired.
 // A FITTED CAN IS A SUPPRESSED GUN. `suppressed` was an item flag and the items that set it were deleted with the
 // rest of the variants, so nothing in the game could be quiet. It is read off the INSTANCE now — the same place
@@ -28776,6 +28866,10 @@ function fireGun(slotArg){ const held=slotArg||heldSlot(), it=held?ITEMS[held.id
     sup = !!(it&&it.suppressed) || !!(held && typeof attOf==='function' && (attOf(held)||{}).muzzle==='suppressor');
   if(it&&it.gun)achUnlock('armed');   // sup = the suppressed rifle: 40% quieter (sound + heard-range + emitted-noise) and -20 damage; rev = the .357 revolver (handgun)
   if(view.reloadT>0) return false;                                                                // hands are busy with the reload
+  // NOR MID-SWAP (Ben: "the player cannot fire or use until it completes"). Gated here rather than at the mouse buttons
+  // for the reason the grab gate above carries: there are several ways to a trigger — left click, a held full-auto, the
+  // offhand, and the QA hooks — and one gate at the gun covers all of them.
+  if(typeof swapping==='function' && swapping()) return false;
   // NOT WHILE IT HAS HOLD OF YOU (Ben 08-04: "you should not be able to fire a gun or an offhand gun when the wretch is dragging
   // you"). Being hauled is meant to be a helpless sequence you break out of by struggling, and a rifle in a hand that is being
   // dragged through the dirt is both wrong to look at and an escape hatch out of the one scene the horror rests on. Guarded HERE
@@ -46700,6 +46794,16 @@ window.__hc={
   // FRAME INTERVALS, AS A DISTRIBUTION. A mean hides the thing that matters: the 144Hz cap once made every reading in
   // this project exactly 6.96ms, and a cost that shows up as occasional long frames does not move a mean at all.
   // Collected from raw rAF deltas, the only clock that measures what the player waits for.
+  // THE CROUCH, IN THE NUMBERS THAT SAY WHETHER IT HAS KNEES: the spring's value and velocity, where the eye actually
+  // is above the feet, and the collision box it is inside. An eye that never moves and a box that snaps are both
+  // invisible from a screenshot and obvious here.
+  // player.sneak is re-derived from the key state every physics tick, so setting it here lasts one frame. The probe
+  // holds the KEY instead, which is also the thing a player does.
+  crouch(on){ try{ if(on!=null){ if(on){ player.fly=false; keys.ControlLeft=true; } else delete keys.ControlLeft; player.sneak=!!on&&!player.fly; }
+      return { sneak:!!player.sneak, fly:!!player.fly, keyDown:!!keys.ControlLeft, t:+(player._crouchT||0).toFixed(4), v:+(player._crouchV||0).toFixed(3),
+               eyeAboveFeet:+(camera.position.y-player.pos.y).toFixed(4),
+               bodyH:+bodyH().toFixed(4), standEye:EYE, crouchEye:CROUCH_EYE }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   frameMs(n){ try{ n=Math.max(8, Math.min(600, n|0 || 120));
       return new Promise(res=>{ const d=[]; let last=performance.now();
         const step=()=>{ const t=performance.now(); d.push(t-last); last=t;
