@@ -73,7 +73,19 @@ async function carveRoom(P, CX, CZ){
     await P.evaluate(`__hc.freezeT(null)`);
     console.log(`  cave lantern ${fmt(caveLit)}`);
     check('a lantern still lights the same room', caveLit.lum > caveDay.lum*2.5, `${caveLit.lum} against ${caveDay.lum} unlit`);
-    check('...and the lit surface keeps its colour', caveLit.sat > 0.25, `sat ${caveLit.sat}`);
+    // THE DELTA THE LAMP ADDS, NOT THE WALL'S OWN SATURATION — the same fault as assert-cave-black's lamp-chroma
+    // check, found the same way. `caveLit.sat > 0.25` was written in 80cf400 on 08-06, which is before the albedo
+    // divide (22042c4), before midnight got its own grade (c9eab7e, 08-16) and before tonight's black level moved,
+    // so it asserts a magnitude belonging to a pipeline that no longer exists. And the crop is a sealed room's far
+    // wall: bare grey STONE, which has no chroma of its own, so the number was never about the lighting. The same
+    // measurement in a dirt-walled cave reads 0.359 against 0.208 on stone for no reason but the dirt
+    // (bench/tmp-washoff.mjs), and switching the entire scotopic wash off moves saturation by 0.026.
+    // caveDay is already the SAME crop unlit, so lit minus unlit isolates what the lantern contributes and holds on
+    // stone, dirt or anything else the room is carved through. 0.04 catches the failure worth catching — a lamp
+    // whose light arrives grey, which reads as 0.00 — with better than double the margin on the shipped 0.089.
+    console.log(`  the lantern adds sat ${(caveLit.sat-caveDay.sat).toFixed(3)}  (unlit ${caveDay.sat} -> lit ${caveLit.sat})`);
+    check('...and the lit surface keeps its colour', caveLit.sat - caveDay.sat > 0.04,
+          `lantern adds ${(caveLit.sat-caveDay.sat).toFixed(3)} (floor 0.04)`);
 
     // ---- THE REJECTED EXPERIMENTS ----
     // A shaded forest floor at noon. vSky is ~1 here, so the sky curve must be inert on it; what darkens it is
