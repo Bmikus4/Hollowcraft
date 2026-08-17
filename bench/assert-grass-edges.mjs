@@ -29,7 +29,12 @@ const plainIn = o => Object.keys(o).filter(k=>!GRASS(k));
     if(A.err) throw new Error(A.err);
     ok(grassIn(A.under).length===0,    'no grass on any underside (under: '+JSON.stringify(A.under)+')');
     ok(plainIn(A.sideOpen).length===0, 'every sky-exposed edge is grass ('+sum(A.sideOpen)+' faces, tiles '+Object.keys(A.sideOpen)+')');
+    // AND WHAT A SHUT EDGE WEARS IS DIRT, in Ben's words: "a face is grass ONLY if it is exposed to the sky; every
+    // other face is dirt". It was grass_side -- dirt with a green lip -- which is the ordinary block's own side and is
+    // not what he asked for.
     ok(grassIn(A.sideShut).length===0, 'no grass on an edge with no sky on it (sideShut: '+JSON.stringify(A.sideShut)+')');
+    ok(Object.keys(A.sideShut).every(k=>k==='dirt'), 'a shut edge is dirt (sideShut: '+JSON.stringify(A.sideShut)+')');
+    ok(sum(A.sideShut)>200, 'the rule actually bites: '+sum(A.sideShut)+' shut edges, against 34 when it asked the neighbourhood sky');
     ok(plainIn(A.top).length===0,      'every top face is grass ('+sum(A.top)+' faces)');
 
     // A GRASS SLOPE with no water in it, then a tunnel bored under its turf: the surface block stays as the roof.
