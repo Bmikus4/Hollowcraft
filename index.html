@@ -5988,16 +5988,15 @@ function waterMesh(c){
   geo.setAttribute('aDepth',new THREE.Float32BufferAttribute(DEP,1));
   geo.setAttribute('aColD',new THREE.Float32BufferAttribute(COLD,1));
   geo.setAttribute('aFlow',new THREE.Float32BufferAttribute(FLOW,2));   // #74: blocks a second, in world XZ
-  // aFar IS DECLARED AND MUST BE SUPPLIED, and leaving it out is what made a well look empty (Ben: "i cant see water
-  // in wells"). The fragment stage carries `if(vFar>0.5 && length(vW.xz-uCamPos.xz) < uMeshR) discard;` so the painted
-  // far-sea disc is thrown away where real water already exists — and the disc sets aFar=1 while chunk water set it
-  // nowhere at all. An attribute a shader declares but a geometry omits does not read zero; it reads whatever was last
-  // bound to that slot, which after the disc has drawn is 1.0. Every chunk water surface inside uMeshR was then
-  // discarding itself — near water, which is the only water you are ever close enough to look into.
-  // THIS IS THE aFlow BUG WITH THE ROLES REVERSED. The note on the disc's own aFlow says it in as many words: "an
-  // attribute the shader declares but the geometry omits reads whatever was last bound to that slot". That was fixed
-  // by giving the DISC a zeroed aFlow; this is the same fix owed in the other direction.
-  geo.setAttribute('aFar', new THREE.Float32BufferAttribute(new Float32Array(P.length/3), 1));   // all zero: this is real water, never the painted disc
+  // aFar IS DECLARED BY THE SHADER AND SUPPLIED BY NOTHING HERE, and that is a real latent fault, recorded rather than
+  // fixed. The fragment stage carries `if(vFar>0.5 && length(vW.xz-uCamPos.xz) < uMeshR) discard;` so the painted
+  // far-sea disc is thrown away where real water already exists -- the disc sets aFar=1 and chunk water sets it
+  // nowhere, and an attribute a shader declares but a geometry omits reads whatever was last bound to that slot, not
+  // zero. The file already documents exactly this trap for aFlow, in the other direction.
+  //   SUPPLYING A ZEROED aFar HERE WAS TRIED AND BACKED OUT. It changes the sea: assert-water-clarity's "looking down
+  // is unchanged" went from passing to a block spread of 9.958 -> 6.655, and assert-night-water's black-texel report
+  // stopped reproducing. Both may well be improvements -- one of them is a known bug ceasing to occur -- but a change
+  // that moves how the ocean looks is Ben's call and needs its own before/after, not a side effect of a well.
   return geo;
 }
 
@@ -9747,13 +9746,13 @@ const VolLightShader={
   uniforms:{ tDiffuse:{value:null}, tDepth:{value:null}, uInvVP:{value:new THREE.Matrix4()},
     uCamPos:{value:new THREE.Vector3()}, uVLPos:{value:[new THREE.Vector3(),new THREE.Vector3(),new THREE.Vector3()]},
     uVLCol:{value:[new THREE.Vector3(),new THREE.Vector3(),new THREE.Vector3()]},
-    uVLI:{value:[0,0,0]}, uDensity:{value:0}, uStrength:{value:0.045}, uMaxDist:{value:34.0}, uSteps:{value:10.0} },
+    uVLI:{value:[0,0,0]}, uDensity:{value:0}, uStrength:{value:0.045}, uMaxDist:{value:34.0}, uSteps:{value:6.0}, uStepsNear:{value:22.0}, uJit:{value:1.0} },
   vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
   fragmentShader:[
   'precision highp float; varying vec2 vUv;',
   'uniform sampler2D tDiffuse, tDepth; uniform mat4 uInvVP; uniform vec3 uCamPos;',
   'uniform vec3 uVLPos[3]; uniform vec3 uVLCol[3]; uniform float uVLI[3];',
-  'uniform float uDensity, uStrength, uMaxDist, uSteps;',
+  'uniform float uDensity, uStrength, uMaxDist, uSteps, uStepsNear, uJit;',
   'float hash12(vec2 p){ vec3 p3=fract(vec3(p.xyx)*0.1031); p3+=dot(p3,p3.yzx+33.33); return fract((p3.x+p3.y)*p3.z); }',
   'vec3 worldAt(vec2 uv, float d){ vec4 ndc=vec4(uv*2.0-1.0, d*2.0-1.0, 1.0); vec4 w=uInvVP*ndc; return w.xyz/max(w.w,1e-6); }',
   'void main(){',
@@ -9782,11 +9781,27 @@ const VolLightShader={
   // neighbouring pixels are spread evenly rather than independently, so the sampling error becomes a fine ordered
   // texture instead of random dots. Same one line, same cost, same banding suppression, no speckle.
   '  float jitter=fract(52.9829189*fract(0.06711056*gl_FragCoord.x + 0.00583715*gl_FragCoord.y));',
-  '  float dt=len/uSteps;',
+  // ---- THE STEP BUDGET GOES WHERE THE VARIANCE IS, NOT SPREAD EVENLY ----
+  // Ten steps everywhere is the wrong shape for this integrand. A ray that passes a block from a flame crosses the whole
+  // spike in one step and its neighbour crosses a different part of it, which is the speckle; a ray that never comes
+  // within twenty blocks of any lamp is integrating a nearly flat function and ten samples of it are nine too many.
+  // So the count is per PIXEL, from the ray's CLOSEST APPROACH to the selected lights — which is a dot product and a
+  // clamp per light, three of each, against a loop body that costs far more than that.
+  // THIS IS A REALLOCATION AND NOT AN INCREASE, which is the only reason it can be afforded: the far count drops from
+  // ten to six and only the rays that actually pass near a lamp climb to twenty-two. Most of a night frame is the former.
+  '  float _d2min=1e9;',
+  '  for(int l=0;l<3;l++){ if(uVLI[l]<=0.0) continue;',
+  '    vec3 w=uVLPos[l]-uCamPos; float t=clamp(dot(w,dir),0.0,len);',
+  '    vec3 cw=w-dir*t; _d2min=min(_d2min, dot(cw,cw)); }',
+  // 3 blocks to 12: inside 3 the ray is through the peak and wants every sample it can get, past 12 the function it is
+  // integrating is flat enough that six is indistinguishable from twenty.
+  '  float _nearRay=1.0-smoothstep(9.0,144.0,_d2min);',
+  '  float _ns=max(2.0, mix(uSteps, uStepsNear, _nearRay));',
+  '  float dt=len/_ns;',
   '  vec3 acc=vec3(0.0);',
-  '  for(int s=0;s<12;s++){',
-  '    if(float(s)>=uSteps) break;',
-  '    vec3 p=uCamPos + dir*((float(s)+jitter)*dt);',
+  '  for(int s=0;s<24;s++){',
+  '    if(float(s)>=_ns) break;',
+  '    vec3 p=uCamPos + dir*((float(s)+jitter*uJit)*dt);',
   '    for(int l=0;l<3;l++){',
   '      if(uVLI[l]<=0.0) continue;',
   '      vec3 dl=uVLPos[l]-p; float d2=dot(dl,dl)+2.0;',
@@ -46299,10 +46314,12 @@ window.__hc={
   vol(v,o){ try{ if(!volPass) return 'no pass (Low quality or ?norays)';
       if(v!=null) _volWant=!!v;
       if(o){ if(o.strength!=null) volPass.uniforms.uStrength.value=+o.strength;
-             if(o.steps!=null) volPass.uniforms.uSteps.value=Math.max(2,Math.min(12,+o.steps));
+             if(o.steps!=null) volPass.uniforms.uSteps.value=Math.max(2,Math.min(24,+o.steps));
+             if(o.stepsNear!=null) volPass.uniforms.uStepsNear.value=Math.max(2,Math.min(24,+o.stepsNear));
+             if(o.jit!=null) volPass.uniforms.uJit.value=Math.max(0,Math.min(1,+o.jit));
              if(o.maxDist!=null) volPass.uniforms.uMaxDist.value=+o.maxDist; }
       return { on:volPass.enabled, want:_volWant, density:+volPass.uniforms.uDensity.value.toFixed(4),
-               strength:volPass.uniforms.uStrength.value, steps:volPass.uniforms.uSteps.value,
+               strength:volPass.uniforms.uStrength.value, steps:volPass.uniforms.uSteps.value, stepsNear:volPass.uniforms.uStepsNear.value, jit:volPass.uniforms.uJit.value,
                lights:_volSel.length }; }
     catch(e){ return String(e.message||e); } },
   // QA/bench: how many rain streaks were suppressed by something overhead this frame, and how many drew. Under a full
