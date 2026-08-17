@@ -7881,7 +7881,11 @@ const coastPineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false
   '  if(uDbgAll>1.5){ gl_FragColor=vec4(1.0,0.0,1.0,1.0); return; }',   // 2 = paint where the band has SURVIVED every earlier gate
   '  float flank=smoothstep(0.06,0.22,m.a);',
   '  if(uDbgAll<0.5 && flank<0.02) discard;',
-  '  float a=smoothstep(0.10,0.30,m.r)*clamp(1.0-uWx*1.25,0.0,1.0)*flank;',
+  // ALPHA COMES FROM THE SMOOTHED PRESENCE, NOT THE RAW CELL. The mask hard-zeroes any cell under 0.35 ("a faint
+  // coast across the middle of the ocean is still a coast across the ocean"), so m.r is 0 or 0.35+ with nothing
+  // between, and a bearing between two runs reads 0 while the sixteen-degree envelope over it reads half. Keyed to
+  // m.r the treeline therefore vanished exactly where a coast recedes, which is the case it exists for.
+  '  float a=flank*clamp(1.0-uWx*1.25,0.0,1.0);',
   // DECLARED HERE, because this shader has no loop to hoist them out of. The mountain band below accumulates two
   // ranges into outc/outa across a `for(int b=1; b>=0; b--)` and so declares them before the loop; the treeline is
   // one band and was written by taking that block's tail — the scotopic wash and the gl_FragColor — without the
@@ -24827,9 +24831,14 @@ const ATT_SIZE={
   foregrip:     {mm:100, axis:1},   // TALL, not long — the axis that made this whole rule necessary
 };
 const ATT_DEFS={
-  red_dot:      {model:'attachments/red-dot',     slot:'optic',  len:0.10, flip:false, sit:'rail'},
-  holo_sight:   {model:'attachments/holographic', slot:'optic',  len:0.13, flip:true,  sit:'rail'},
-  optic_scope:  {model:'attachments/scope',       slot:'optic',  len:0.24, flip:false, sit:'rail'},
+  // `eye` is WHERE THIS SIGHT IS AIMED THROUGH, as a fraction of the piece's own height — see the marker in
+  // buildAttachment. A tube sight's axis is the centre of its tube, which sits high over the mount; a holographic is
+  // aimed through a window whose centre is lower and wider; a scope's tube is the highest of the three. These are the
+  // numbers that make every gun-and-optic combination line up without a table of poses, including combinations that
+  // have never been fitted.
+  red_dot:      {model:'attachments/red-dot',     slot:'optic',  len:0.10, flip:false, sit:'rail', eye:0.62},
+  holo_sight:   {model:'attachments/holographic', slot:'optic',  len:0.13, flip:true,  sit:'rail', eye:0.56},
+  optic_scope:  {model:'attachments/scope',       slot:'optic',  len:0.24, flip:false, sit:'rail', eye:0.66},
   suppressor:   {model:'attachments/suppressor',  slot:'muzzle', len:0.20, flip:true,  sit:'muzzle'},
   weapon_light: {model:'attachments/weapon-light',slot:'light',  len:0.11, flip:true,  sit:'side'},
   laser_sight:  {model:'attachments/laser',       slot:'laser',  len:0.09, flip:false, sit:'side'},
@@ -24964,8 +24973,19 @@ function buildAttachment(attId,spec,P,s,gy,gz,boreG){
   // line and pushed the glass above it — measured, ndc.y went from -0.02 to +0.09 on the red dot and -0.04 to +0.18
   // on the holographic, worse than having no anchor at all. This marker sits exactly where dotY says the window is,
   // so the pose and the correction agree by construction instead of by coincidence.
-  if(d.slot==='optic' && attId!=='optic_scope'){
-    const win=new THREE.Object3D(); win.position.set(0,H*0.62,0); win.userData.rearGlass=true; g.add(win); }
+  // EVERY OPTIC DECLARES ITS OWN AIMING AXIS (Ben: "neither the holosight or your created dot line up when ADS…
+  // its a dependency of wether or not there are iron sights, a dot sight, scope, or holosight. all aim differently").
+  // The marker below is what the aimed pose drives onto the camera axis, and it used to be one shared 0.62 of the
+  // piece's height with optic_scope EXCLUDED — so a fitted scope had no declared axis at all and the pose fell back
+  // to the gun's own iron sights, which is exactly why its reticle sat high and off centre. A scope's tube sits
+  // higher over the rail than a micro dot's and a holographic's window is lower and wider; one constant cannot be
+  // three sights.
+  // DECLARED, NOT TABULATED. d.eye is a fraction of the piece's OWN height, so it survives the mm-based rescale and
+  // needs no entry per gun: 22 guns times four optics is a table that would be wrong the first time anything moved,
+  // and this is the same reasoning that made grips and attachment sizes data. Any optic added later declares one
+  // number and is aligned on arrival, on every gun that takes it.
+  if(d.slot==='optic'){
+    const win=new THREE.Object3D(); win.position.set(0,H*(d.eye!=null?d.eye:0.62),0); win.userData.rearGlass=true; g.add(win); }
   g.userData.att=attId; g.userData.attSlot=d.slot; g.userData.attH=H;
   g.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
   return g;
@@ -26392,7 +26412,11 @@ function updateView(dt){ updateRecoil(dt);                                      
   // red dot or holographic sight must reach, or an optic is a lump on the rail you cannot aim with. The scope
   // attachment is deliberately not in this set: it wants the magnified pass, which is its own piece of work.
   const _fitOpt=(typeof attOf==='function'&&heldSlot())?(attOf(heldSlot())||{}).optic:null;
-  const isDotG=!!(ITEMS[view.id]&&ITEMS[view.id].dot) || _fitOpt==='red_dot' || _fitOpt==='holo_sight', isRev=gunKind==='revolver', isIronAR=(gunKind===true&&!isDotG)||gunKind==='auto'||gunKind==='shotgun';   // the 12 gauge aims over its bead the same way   // the minigun aims over its own irons too (Ben) — it was the one gun with no ADS at all   // a gun with a crafted Holosun; the Python + bare AR aim over their irons (Ben 07-20)
+  // A FITTED SCOPE IS A SIGHT TOO. This gate is what lets the aimed pose drive the optic's declared axis onto the eye
+  // line, and it listed the two dot sights by name — so fitting the scope aimed the gun over its IRONS with a scope
+  // body in the way, which is the whole of "the attachment scope's glass reticle is seated too high". Asking the slot
+  // instead of naming the pieces means the next optic added is included by being an optic.
+  const isDotG=!!(ITEMS[view.id]&&ITEMS[view.id].dot) || !!(_fitOpt && ATT_DEFS[_fitOpt] && ATT_DEFS[_fitOpt].slot==='optic'), isRev=gunKind==='revolver', isIronAR=(gunKind===true&&!isDotG)||gunKind==='auto'||gunKind==='shotgun';   // the 12 gauge aims over its bead the same way   // the minigun aims over its own irons too (Ben) — it was the one gun with no ADS at all   // a gun with a crafted Holosun; the Python + bare AR aim over their irons (Ben 07-20)
   // NO AIMING WITH A FULL LEFT HAND (Ben: "guns are no exception to that rule, and cannot be aimed when equipped with
   // something in an offhand"). Bringing a rifle to the eye is a two-handed act, and the left one is holding a shield or a
   // torch. Because this is recomputed every frame rather than latched on the click, it also DROPS an aim already up the
