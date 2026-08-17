@@ -1,19 +1,28 @@
-// SCRATCH BOOT PROBE. Five layers applied by the stack: do their values and the residual match record-only?
+// SCRATCH BOOT PROBE. The three layers the last run could not reach: sprint, swap and eat. Each needs a real state,
+// so each is driven the way a player drives it and the ledger is read while it is happening.
 import { openWorld, sleep } from './lib/rig.mjs';
 (async()=>{ const W=await openWorld({rd:6});
   try{ await sleep(2000);
     for(let i=0;i<40;i++){ const f=await W.page.evaluate('__hc.fill()'); if(f.meshed>=f.want) break; await sleep(400); }
     await W.page.evaluate('__hc.lock(true)');
     const show=async(tag)=>{ const r=await W.page.evaluate('__hc.pose()');
-      console.log(tag.padEnd(13)+'residual '+r.residual.mag+'   '+r.active.map(k=>k+' '+JSON.stringify(r.layers[k].pos)).join('  ')); };
-    await W.page.evaluate(`__hc.hold('ar15')`); await sleep(800); await show('idle');
-    await W.page.evaluate('__hc.aim(true)'); await sleep(900); await show('ads');
-    await W.page.evaluate('__hc.aim(false)'); await sleep(500);
-    await W.page.evaluate('__hc.attOpen(true)'); await sleep(1000); await show('attach');
-    await W.page.evaluate('__hc.attOpen(false)'); await sleep(700);
-    await W.page.evaluate(`__hc.hold('chassis_rifle')`); await sleep(600);
-    await W.page.evaluate('__hc.proneSet(true)'); await sleep(1800); await show('bipod');
-    console.log('  bipod hook '+JSON.stringify(await W.page.evaluate('__hc.bipod()')).slice(0,120));
-    await W.page.evaluate('__hc.proneSet(false)'); await sleep(900);
+      console.log(tag.padEnd(12)+'residual '+String(r.residual.mag).padEnd(8)+r.active.map(k=>k+' p'+JSON.stringify(r.layers[k].pos)+' r'+JSON.stringify(r.layers[k].rot)).join('   ')); };
+
+    // SPRINT — needs the player out of flight and actually moving, or `st` never latches.
+    await W.page.evaluate(`__hc.hold('ar15')`); await sleep(600);
+    await W.page.evaluate('__hc.move({fwd:1,sprint:1})');
+    await sleep(1600); await show('sprint');
+    console.log('  state '+JSON.stringify(await W.page.evaluate('__hc.moveState()')));
+    await W.page.evaluate('__hc.move({})'); await sleep(1200);
+
+    // SWAP — the dip decays fast, so the ledger is read immediately after the change.
+    await W.page.evaluate(`__hc.hold('revolver')`);
+    await sleep(120); await show('swap +120ms');
+    await sleep(260); await show('swap +380ms');
+    await sleep(1200);
+
+    // EAT — its own hook, sampled through the rise.
+    console.log('  eat '+JSON.stringify(await W.page.evaluate('__hc.eatStart()')).slice(0,110));
+    for(const ms of [200,300,400]){ await sleep(ms); await show('eat +'+ms); }
     console.log('errors: '+(W.errors.length?W.errors.slice(0,3).join(' | '):'none'));
   } finally { await W.close(); } })();
