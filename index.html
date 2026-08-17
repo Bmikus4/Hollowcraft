@@ -5132,6 +5132,10 @@ function _gc(i){ if(!PERF.on) return; const t=performance.now();
 // fBm — but the loop is a plain nested for, so it can simply stop and come back. A chunk stays
 // `generated=false` until every column is laid, and streamChunks already refuses to mesh a chunk whose
 // neighbours are not generated, so a half-built chunk is invisible to everything downstream by construction.
+// How many buried grass blocks the sweep below has demoted since boot. Zero would mean either that nothing ever
+// buries grass — which Ben's own eyes disprove — or that the sweep is not running, and those two look identical from
+// inside the game. __hc.buriedGrass reads it.
+let _buriedGrass=0;
 function generateChunk(c){
   _gc(0);
   const step = PERF.genColumnSlice>0 ? PERF.genColumnSlice : CK*CK;
@@ -5144,6 +5148,27 @@ function generateChunk(c){
   _gc(1);
   if(!brRegion(c.cx*CK)){ oreVeins(c); _gc(2); decorate(c); _gc(3); beachLog(c); _gc(4); enrichTerrain(c); } else { _gc(2); _gc(3); _gc(4); }   // THE BACKROOMS region is a hand-built voxel maze → skip ALL terrain decoration/ores/trees (Ben 07-24)
   _gc(5);
+  // NO GRASS UNDER A ROOF (Ben 08-17: "grass blocks cannot spawn under other grass blocks, they should be dirt").
+  // The column pass never puts grass anywhere but the top — `y<h` is dirt and only `y===h` gets the surface choice —
+  // so this is not where it came from. It came from the dozen writers that RAISE terrain afterwards: the trail cap,
+  // the mound cap, enrichTerrain's touched columns, the beach log, structures. Each one lays a fresh surface block on
+  // top of what was already a surface, and the one underneath is left as buried grass.
+  //   SO IT IS A SWEEP AND NOT A FIX AT ELEVEN CALL SITES. Chasing the writers means finding all of them and finding
+  // them again every time one is added; asking the finished chunk "is anything above this" is one pass over the block
+  // array, costs nothing next to the generation that just happened, and cannot be got wrong by a future placement.
+  //   THE TEST IS SOLIDITY, NOT AIR. A block under LEAVES or under a flower is still open ground and stays grass —
+  // isSolid is false for cross blocks and cutouts, which is exactly the distinction "under a roof" means. Water counts
+  // as covering it: a submerged grass block is a lake bed, and the mud rules already own that shape where they reach.
+  { const bl=c.blocks; let n=0;
+    for(let lz=0;lz<CK;lz++) for(let lx=0;lx<CK;lx++){
+      for(let y=1;y<WH-1;y++){
+        const v=bl[idx(lx,y,lz)]; if(v!==BID.grass) continue;
+        const up=bl[idx(lx,y+1,lz)];
+        if(up===AIR) continue;
+        if(up!==WATER && !isSolid[up]) continue;                     // leaves, flowers, tufts: still open ground
+        bl[idx(lx,y,lz)]=BID.dirt; n++;
+      } }
+    if(n) _buriedGrass+=n; }
   applyEdits(c);
   _gc(6);
   // DERIVE render flags from actual content (single source of truth) so no placement path can leave them stale →
@@ -10229,6 +10254,18 @@ function setBlockWorld(wx,wy,wz,b,record){
   if (wy<1||wy>=WH) return;
   const c=getChunk(wx>>4,wz>>4); if(!c||!c.generated) return;
   const lx=wx&15, lz=wz&15;
+  // COVERING GRASS TURNS IT TO DIRT, wherever the cover comes from (Ben: "grass blocks cannot spawn under other grass
+  // blocks, they should be dirt"). The generator's own sweep catches the columns it builds, and it is not enough: the
+  // trail cap, the mound cap, enrichTerrain, the beach log and every structure lay their surface through HERE, often
+  // into a NEIGHBOURING chunk that finished generating long ago and will never be swept again. It left 1,359 buried
+  // after the sweep had already demoted 3,044.
+  //   SOLID OR WATER ONLY, so leaves, flowers and grass tufts do not demote the ground they stand on — that is the
+  // difference between a roof and a plant. It runs on player placement too, which is the same rule and reads right:
+  // put a block on grass and the grass under it is no longer growing.
+  if(b!==AIR && (b===WATER || isSolid[b])){
+    const below=wy-1;
+    if(below>=1 && c.blocks[idx(lx,below,lz)]===BID.grass){ c.blocks[idx(lx,below,lz)]=BID.dirt; _buriedGrass++; }
+  }
   if(_bulk){ c.blocks[idx(lx,wy,lz)]=b;
     if(b===WATER) c.hasWater=true; else if(blockCat[b]==='cross') c.hasCross=true; else if(blockCat[b]==='model') c.hasModel=true;
     if(isLeafId(b)) c.hasLeaf=true;   // #68: a canopy placed or grown after generation still gets its sprigs
@@ -41658,6 +41695,16 @@ window.__hc={
   // reads and the wall-limited value -- not _lean, the one the key asks for.
   leanSet(v){ try{ player._lean=+v||0; player._leanShown=+v||0;
       return { lean:player._lean, shown:player._leanShown }; }catch(e){ return {err:String(e.message||e)}; } },
+  // Grass demoted to dirt because something sits on it, since boot, plus a live count of any that is still buried in
+  // the loaded world — the second number is what says the sweep is complete rather than merely running.
+  buriedGrass(){ try{ let live=0, scanned=0;
+      for(const [,c] of world){ if(!c||!c.generated) continue; const bl=c.blocks;
+        for(let lz=0;lz<CK;lz++) for(let lx=0;lx<CK;lx++) for(let y=1;y<WH-1;y++){
+          const v=bl[idx(lx,y,lz)]; if(v!==BID.grass) continue; scanned++;
+          const up=bl[idx(lx,y+1,lz)];
+          if(up!==AIR && (up===WATER || isSolid[up])) live++; } }
+      return { demoted:_buriedGrass, stillBuried:live, grassBlocks:scanned }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   stamped(){ try{ const got=_stampedTiles.slice().sort();
       const want=_stampWant.concat(_stampIntoWant);
       return { got:got.length, list:got, into:_stampInto,
