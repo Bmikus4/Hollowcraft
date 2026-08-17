@@ -5903,12 +5903,31 @@ function _transHash(wx,wz){ let h=Math.imul(wx|0,374761393) ^ Math.imul(wz|0,668
 // instead of salt and pepper -- an interlocking edge, which is what a transition looks like, rather than a dither.
 function _transTop(id, wx, wy, wz, g, lx, ly, lz){
   const fam=_TRANS_FAM[id]; if(!fam) return -1;
+  // ---- IT HAS TO BE VISIBLE (Ben 08-17: "also i dont see the clean blend between block types") ----
+  // The first version was one cell deep at a half-resolution hash: a 2x2 finger, on the seam row only, one time in
+  // three. That is a dentate edge you have to go looking for, which is what he said. Two things change and both are
+  // about SIZE rather than amount.
+  //   THE FINGER IS FOUR BLOCKS, not two. The hash is taken at quarter resolution, so a whole 4x4 patch decides
+  //   together and the seam grows tongues instead of teeth. This is the half that makes it read from standing height.
+  //   IT REACHES TWO CELLS IN, not one, and the second row is rarer than the first -- 0.30 against 0.50 -- so a tongue
+  //   tapers rather than ending on a straight line two blocks in.
+  // TWO CELLS WAS TRIED BEFORE AND REJECTED, and the note said why: at 55% and 22% on a HALF-res hash a beach turned to
+  // chequerboard, "almost every cell is within two of a different family, so almost every cell was substituted and the
+  // result read as noise". The failure was the finger size, not the depth: at 2x2 a dense substitution has no shape to
+  // it. At 4x4 the same density is a handful of big interlocking tongues, which is what a blend looks like.
+  const h=_transHash(wx>>2, wz>>2);
+  if(h>=0.50) return -1;                                  // cheapest gate first: half the world never looks at a neighbour
   let oid=0;
   for(const [ox,oz] of [[1,0],[-1,0],[0,1],[0,-1]]){
     const nid=g(lx+ox,ly,lz+oz), nf=_TRANS_FAM[nid];
     if(nf && nf!==fam){ oid=nid; break; } }
+  // THE SECOND ROW IS ONLY PAID FOR WHERE IT CAN LAND. Ring two is four more reads and it is taken only by the cells
+  // whose hash already puts them in the rarer band, so the common case is unchanged.
+  if(!oid && h<0.30){
+    for(const [ox,oz] of [[2,0],[-2,0],[0,2],[0,-2]]){
+      const nid=g(lx+ox,ly,lz+oz), nf=_TRANS_FAM[nid];
+      if(nf && nf!==fam){ oid=nid; break; } } }
   if(!oid) return -1;
-  if(_transHash(wx>>1, wz>>1) >= 0.34) return -1;
   // ---- A PATH IS A MADE THING AND ITS EDGE IS THE POINT (Ben 08-17: "dirt paths are still gone") ----
   // The blocks were never gone -- 1,062 of 1,078 trail columns around spawn are still dirt -- but a trail is a strip
   // three wide with grass on both sides, so EVERY cell of it is a family seam and one in three was drawing grass on
@@ -29651,14 +29670,21 @@ function updateView(dt){ updateRecoil(dt);                                      
       // So the base is re-marked HERE. It is not a layer -- a layer adds to a pose, and this one IS the pose.
       POSE.mark();
     }
-    // ---- THE SWAP DIP, AFTER THE HANDGUN REPLACEMENT AND NOT BEFORE IT ----
-    // It used to run up with the sprint fold, and for a HANDGUN it did nothing at all: the block above ASSIGNS
-    // view.group.position and then re-marks the base, so the dip's 0.62 of drop was overwritten every frame and only
-    // its rotation survived. Measured mid-swap to a revolver, the group read y -0.138 against a rest of -0.176 — the
-    // gun had gone UP and turned over, which is the "reaching onto their back" Ben is describing. It is a pure offset,
-    // which is the one thing POSE.add requires, so it can be ordered here.
+    // ---- THE SWAP REACHES BEHIND THE BACK (Ben: "no it SHOULD reach behind the back, IS currently lowering the
+    // weapon") ----
+    // I had this backwards. The gesture is a STOW: the hand takes the weapon back over the right shoulder and past the
+    // eye, and the next one comes out the same way. It is not a lower — a weapon that drops off the bottom of the frame
+    // is what he was reporting, not what he wanted.
+    // FIVE COMPONENTS AND EACH IS PART OF THE SAME MOVEMENT, so they are written together: out to the right as the
+    // elbow leaves the chest, up as the shoulder rolls, BACK past the camera, and the wrist turning over in pitch and
+    // yaw as the arm goes behind. The z is the load-bearing one — 0.62 takes a rifle's rest of about -0.50 to +0.12,
+    // which is behind the eye, and that is what both hides the mesh change and reads as reaching for your back.
+    // A SINE, so it leaves and returns with zero velocity; a linear ramp reads as the gun being yanked.
+    // AFTER THE HANDGUN REPLACEMENT, which is the one thing to keep from the version this corrects: that block ASSIGNS
+    // view.group.position and re-marks the base, so a layer ordered before it reaches a pistol in rotation only. One
+    // gesture for every gun rather than one for rifles and an accident for revolvers.
     { const _sw=swapDip();
-      if(_sw>0.001){ POSE.add('swap', 0, -0.62*_sw, 0.10*_sw, 0.85*_sw, 0, 0); view.swapDip=_sw; }
+      if(_sw>0.001){ POSE.add('swap', 0.18*_sw, 0.12*_sw, 0.62*_sw, 0.95*_sw, 0.55*_sw, 0); view.swapDip=_sw; }
       else view.swapDip=0; }
     // …AND THE SIGHTS STILL HAVE TO LAND ON THE EYE LINE (Ben 08-05: "In First person, the revolver is not aimed/lined up
     // properly"). The block above REPLACES the aimed translation with a grip anchor, and HG_ADS is a dialled point — so the one
@@ -29799,7 +29825,12 @@ function updateView(dt){ updateRecoil(dt);                                      
       // The magnification is untouched (2d653c9/a1d1457) and so is the reticle, which hangs on the camera and not on
       // the glass (d885b77): this moves where the eyepiece is, not what is drawn in it.
       const _sc=view.mesh.userData.scopeGun || (view.mesh.userData.attOn&&view.mesh.userData.attOn.optic==='optic_scope');
-      view._nearPush=nearPlaneClear(view, VIEW_NEAR_CLEAR*(1-0.7*clamp(bend,0,1))*(1-0.5*e) - (_sc?ADS_SCOPE_PULL*e:0));
+      // AND IT STANDS DOWN DURING A SWAP. The guard's whole job is to stop the pose accidentally putting the stock
+      // through the camera, and it does that by pushing the gun FORWARD — which is exactly the wrong answer for a
+      // weapon that has been taken behind the eye on purpose. Left running, it cancelled the reach frame by frame
+      // and the gun hovered in front of the face instead of going anywhere. Faded out by the dip itself, so the
+      // guard is at full strength the instant the swap ends and every other frame in the game is unchanged.
+      view._nearPush=nearPlaneClear(view, (VIEW_NEAR_CLEAR*(1-0.7*clamp(bend,0,1))*(1-0.5*e) - (_sc?ADS_SCOPE_PULL*e:0)) * (1-clamp(view.swapDip||0,0,1)));
       // THE GUARD IS A LAYER TOO, and the ledger found it: before this line was declared, the residual was 0.145 in z
       // at full ADS and 0.080 with the attach screen up -- almost all of the undeclared movement in the game, and all
       // of it on the axis this pushes along. It moves the gun MORE than any pose term does.
