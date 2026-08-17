@@ -26089,7 +26089,23 @@ const VIEW_EYE_BEAM=(()=>{ try{ const q=new URLSearchParams(location.search).get
   return isFinite(v)?Math.max(0,Math.min(2,v)):0.55; }catch(e){ return 0.55; } })();
 const _veyeAmt={value:VEYE_BASE};
 let _vfogHold=null;   // QA only (__hc.vfog) — pins the fog amount the weather would otherwise reassign every frame
-function applyViewFog(root){ if(!root)return; root.traverse(o=>{ if(!o.isMesh||!o.material)return; const mats=Array.isArray(o.material)?o.material:[o.material];
+// ---- AND THE THING IN YOUR HANDS IS UNDER THE SAME CANOPY YOU ARE (hcSkyBind, the second of its three unbound
+// consumers; creatures are the other terminal's) ----
+// The non-atlas prop fill in lights_fragment_end lifts every lit material that is not a block, and it was reaching the
+// viewmodel at full strength wherever the player stood — so a rifle carried into a cave or under a closed canopy took
+// the same daylight fill as one carried across an open field, and the held weapon was brighter than every surface
+// around it. uHcObj.x is the per-draw sky-and-canopy term and is 1 for anything unbound, which is exactly what the
+// viewmodel was.
+// PER MESH, NOT PER GROUP: three calls onBeforeRender on the object it is about to draw, and a group is never drawn.
+// This traverse already visits every mesh of every held, worn and offhand model, so one call here reaches all four of
+// the dispatches a held object has instead of four sites that can drift.
+// THE SAMPLE IS THE MESH'S OWN WORLD POSITION, which for a viewmodel is a hand's length in front of the eye — the same
+// column the player is standing in, which is the honest answer to "what sky is on this gun". objSkyRaw caches per cell
+// for 400 ms, so a dozen viewmodel meshes cost a dozen Map lookups a frame.
+// THE BAKED EYE FILL BELOW IS UNTOUCHED, and that is what keeps this from making a cave gun black: the fill that stops
+// an unlit face going to zero is added after tone mapping and is not a scene light, so it does not go through uHcObj.
+// What darkens is the daylight the gun should not be getting indoors.
+function applyViewFog(root){ if(!root)return; root.traverse(o=>{ if(o.isMesh && typeof hcSkyBind==='function') hcSkyBind(o); if(!o.isMesh||!o.material)return; const mats=Array.isArray(o.material)?o.material:[o.material];
   mats.forEach(m=>{ if(!m||m._vfog||m.isMeshBasicMaterial||m.transparent)return; m._vfog=true; const prev=m.onBeforeCompile;
     // NO FOG ON WHAT IS IN YOUR HANDS (Ben 08-05: "remove fog on items held in the hand"). The patch used to mix the scene's live fog
     // colour into the viewmodel by view depth, so a fog bank or a pale night sky greyed out a gun 30 cm from the eye — and the eye cannot
@@ -27880,9 +27896,15 @@ function anyWretch(fn){ const prev=wretch;
 function doSwing(){ return _doSwing(); }
 // WHAT COUNTS AS A BLADE. Swords are a tool kind; the hunting knife and the bayonet are pack items with no tool
 // record at all, so a test on `tool.kind` alone would give the two things most obviously knives the pickaxe's chop.
-const _BLADE_IDS={hunting_knife:1, bayonet:1, machete:1};
+// The value is the item's MELEE DAMAGE. A knife carried no tool record, so `it.tool ? WEAPON_DMG : 1` gave the two
+// most obviously lethal things in the game the bare-fist value of 1 — a hunting knife did exactly as much harm as
+// punching. Four is a wooden sword: sharper than one, and much shorter, which the reach below charges it for.
+const _BLADE_IDS={hunting_knife:4, bayonet:4, machete:5};
 function _isBlade(id){ const it=id!=null?ITEMS[id]:null;
   return !!it && ((it.tool && it.tool.kind==='sword') || !!_BLADE_IDS[id]); }
+// A KNIFE IS SHORT. Reach is what a knife trades its speed and concealment for, and giving it the sword's 3.6 blocks
+// would make it strictly better than a sword: same reach, faster strike, and a stab on the other button.
+const _KNIFE_REACH=2.5;
 // HOW FAR THROUGH THE STRIKE, 0 to 1, and 0 while idle. The one-shot click decays view.swing from 1 to 0, so progress
 // is its complement; a held button runs swingPhase up forever, so progress is where it sits inside the current half
 // turn. Taking the larger keeps a click that lands mid-loop from snapping the blade backwards.
@@ -28247,11 +28269,19 @@ function wretchBlowFails(){
 }
 function meleeAttack(){ return withNearestWretch(_meleeAttack); }   // every caller gets the binding, not just the ones that came through doSwing
 function _meleeAttack(){ const d=lookDir(), ox=player.pos.x, oy=player.pos.y+EYE, oz=player.pos.z;
-  const held=heldSlot(); const it=held?ITEMS[held.id]:null; const dmg=(it&&it.tool)?WEAPON_DMG(it.tool):1;   // empty hand = 1
-  const reach=3.6 + ((it&&it.tool&&it.tool.kind==='spear')?1.8:0);   // the spear jabs from further out
+  // A KNIFE IS A WEAPON AND NOT A FIST. `it.tool ? WEAPON_DMG : 1` covered swords, axes and spears; the hunting knife
+  // and the bayonet are pack ITEMS with no tool record, so both landed on the bare-hand 1 — and both are the sort of
+  // thing a player picks up expecting it to matter. _BLADE_IDS declares what they hit for.
+  const held=heldSlot(); const it=held?ITEMS[held.id]:null;
+  const knife=(held&&_BLADE_IDS[held.id])||0;
+  const dmg=(it&&it.tool)?WEAPON_DMG(it.tool):(knife||1);   // empty hand = 1
+  const reach=knife?_KNIFE_REACH:(3.6 + ((it&&it.tool&&it.tool.kind==='spear')?1.8:0));   // the spear jabs from further out; a knife reaches least of all
   if(wretch.active){ const wx=wretch.pos.x-ox, wz=wretch.pos.z-oz, wd=Math.hypot(wx,wz); if(wd<reach && (d.x*wx+d.z*wz)/(wd||1)>0.4){
       if(wretch.dragging){ wretchBlowFails(); return; }                                        // gripped: the blow LANDS and does nothing — see wretchBlowFails
-      if(!(it&&it.tool))achUnlock('fists'); hurtWretch(it&&it.tool?(5+Math.random()*3):2); return; } }   // any tool/sword = 5–8, fist = 2
+      // A KNIFE COUNTS AS A WEAPON HERE TOO, and it is the same omission twice: this branch also asked only about
+      // `it.tool`, so knifing the Wretch did fist damage AND unlocked the bare-hands achievement.
+      const armed=!!(it&&it.tool)||!!knife;
+      if(!armed)achUnlock('fists'); hurtWretch(armed?(5+Math.random()*3):2); return; } }   // any tool/sword/knife = 5–8, fist = 2
   if(typeof girlMeleeHit==="function" && girlMeleeHit(ox,oz,d.x,d.z,dmg)) return;   // a blade reaches her shins, and that is all it reaches
   let best=null,bd=reach; for(const a of animals){ if(a.dead)continue; const ax=a.x-ox, az=a.z-oz, ad=Math.hypot(ax,az); if(ad<bd && (d.x*ax+d.z*az)/(ad||1)>0.35){ bd=ad; best=a; } }
   if(best) hurtAnimal(best,dmg); }
@@ -41344,7 +41374,18 @@ window.__hc={
       for(let y=0;y<16;y++){ let n=0; for(let x=0;x<16;x++){ if(d[(y*16+x)*4+3]>40){ n++; cols[x]++; tot++; } } rows.push(n); }
       return { tot, rows, cols }; }catch(e){ return {err:String(e.message||e)}; } },
   iconRoute(id){ try{ const u=slotIconURL(id); return { threeD: _icon3D[id]===u }; }catch(e){ return {err:String(e.message||e)}; } },
-  toolDmg(id){ try{ const it=ITEMS[id]; return (it&&it.tool)?WEAPON_DMG(it.tool):null; }catch(e){ return {err:String(e.message||e)}; } },
+  toolDmg(id){ try{ const it=ITEMS[id]; if(!it) return null;
+      if(it.tool) return WEAPON_DMG(it.tool);
+      return _BLADE_IDS[id]||null; }catch(e){ return {err:String(e.message||e)}; } },
+  // What the thing in your hand actually hits for and how far it reaches, resolved the way _meleeAttack resolves it.
+  // "A knife does fist damage" was true for months and invisible, because the only number anywhere was toolDmg's, and
+  // toolDmg returned null for a knife rather than 1 -- an absent answer reads as "not applicable", not as a fault.
+  meleeStats(){ try{ const h=heldSlot(), it=h?ITEMS[h.id]:null, knife=(h&&_BLADE_IDS[h.id])||0;
+      return { id:h?h.id:null, blade:!!(h&&_isBlade(h.id)), knife:!!knife,
+               dmg:(it&&it.tool)?WEAPON_DMG(it.tool):(knife||1),
+               reach:knife?_KNIFE_REACH:(3.6+((it&&it.tool&&it.tool.kind==='spear')?1.8:0)),
+               wretch:(!!(it&&it.tool)||!!knife)?'5-8':'2' }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   // #66: fire the footfall the SOUND fires, and read where all four hand groups actually sit. Four, because the way
   // this breaks silently is the arm moving while the item it is holding stays nailed in space — one number per hand
   // cannot see that, and a check on the arms alone passes on it.
