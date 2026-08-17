@@ -46,7 +46,10 @@ function findBrowser(){ for(const p of ['C:\\Program Files\\Google\\Chrome\\Appl
     await sleep(2500);
     await page.evaluate(()=>window.__hc.hudVitals({health:14,hunger:11,water:17,stam:60}));
     await page.evaluate(()=>window.__hc.hudCompass(-35));
-    await sleep(400);
+    // The glyph row has to be photographed with a POSITIVE: an empty shield and three dark arcs is the same picture
+    // as a glyph that never drew. Force armour to 8 of 12 and a mic level into the top arc.
+    console.log('glyph', JSON.stringify((await page.evaluate(()=>window.__hc.hudVitals({armor:8,voice:0.72}))).glyph));
+    await sleep(900);
     await page.screenshot({path:path.join(OUT,'ui-hud.png')});
     await page.evaluate(()=>{ const b=document.getElementById('vitals').getBoundingClientRect(); window.__vb={x:b.x,y:b.y,w:b.width,h:b.height}; });
     const vb=await page.evaluate(()=>window.__vb);
