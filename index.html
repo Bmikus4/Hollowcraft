@@ -3862,13 +3862,14 @@ function block(name, def){
   return id;
 }
 block('air',    { cat:'air', solid:false, opaque:false });
-// A GRASS BLOCK IS GRASS ALL OVER (Ben 08-17: "i want grass blocks to be solid grass blocks"). It was a grass TOP on a
-// dirt cube: the sides were grass_side, which is bare dirt with a green fringe hanging over the waistband, and the
-// bottom was plain dirt. Cut a step into a hillside and every exposed face was dirt with a lip -- a lawn laid over
-// soil rather than turf. All three faces are the grass tile now.
-// grass_side IS STILL USED and still stamped: the leaf-litter variants below take it for their sides, where a fringe
-// over dirt is right, because those blocks ARE ground with litter on top rather than sod.
-block('grass',  { cat:'solid', t:['grass_top','grass_top','grass_top'], hard:0.6, tool:'shovel', drop:'dirt' });
+// A GRASS BLOCK IS AN ORDINARY GRASS BLOCK, and the grass on its EDGES is put there by the mesher, not by this table
+// (see _grassEdge). d96a394 wrote grass_top into all three faces for "i want grass blocks to be solid grass blocks" and
+// that hid soil that has to stay visible: the underside of the turf is the ceiling of any cut into a hillside, and it
+// went green. Ben's rule, 08-17: "grass faces should not spawn when up against another block, only when exposed to the
+// sky. I want one solid toplayer of grass, but everything below the surface, which would include intersecting edges,
+// can be normal grass." That is a per-FACE question and this table only knows about blocks, so the blanket is backed
+// out and the three tiles here are what a face falls back to when it is not sky-exposed.
+block('grass',  { cat:'solid', t:['grass_top','grass_side','dirt'], hard:0.6, tool:'shovel', drop:'dirt' });
 block('dirt',   { cat:'solid', t:['dirt','dirt','dirt'], hard:0.5, tool:'shovel' });
 block('stone',  { cat:'solid', t:['stone','stone','stone'], hard:1.5, tool:'pickaxe', drop:'cobble' });
 block('cobble', { cat:'solid', t:['cobble','cobble','cobble'], hard:2.0, tool:'pickaxe' });
@@ -5580,6 +5581,23 @@ function faceTile(id, d, back){
   if (d===1) return back? t[2] : t[0];   // y axis: back(-y)=bottom, front(+y)=top
   return t[1];
 }
+// ---- GRASS ON AN EXPOSED EDGE (Ben 08-17: "grass faces should not spawn when up against another block, only when
+// exposed to the sky. I want one solid toplayer of grass, but everything below the surface, which would include
+// intersecting edges, can be normal grass") ----
+// A SIDE FACE OF THE TOP LAYER draws that block's TOP tile, so a pit rim, a cliff edge and a cut terrace read as turf
+// with a thickness rather than as a lawn laid over soil. Every other face keeps the ordinary block: the underside of the
+// turf is DIRT, because a downward face cannot be exposed to the sky and it is the ceiling of every cut into a hillside
+// -- which is the thing d96a394's blanket grass_top hid and the whole of this fix.
+// THE SKY TEST IS THE MESHER'S OWN, not a second opinion: `sky` is already computed for this face from its air cell by
+// _sskyFace, and 15 is fully open. That matters because _sskyFace is a NEIGHBOURHOOD rule -- a cliff face 20 blocks down
+// still reads open, and so does ground under an eave -- so the edge of the top layer keeps its grass where a per-column
+// test would have stripped it. It costs one array lookup per face and no new state.
+// ITS OWN TOP TILE, not grass_top for everyone: a leaf-litter block's exposed edge wears its own litter, so the cube
+// reads as one material. Same argument d96a394 made for the plain block, now applied only where it is true.
+// NO EFFECT ON THE MERGE KEY: tile and sky are both already in the packed face, and the two cases differ in sky anyway.
+const _edgeGrass = new Uint8Array(N_BLOCKS);
+function _edgeGrassInit(){ for(const n of ['grass','grass_leaf1','grass_leaf2','grass_leaf3']) if(BID[n]!=null) _edgeGrass[BID[n]]=1; }
+function _grassEdge(id, sky){ if(!_edgeGrass[id] || sky<15) return -1; const t=B[id].tiles; return t?t[0]:-1; }
 // pack: 1 + back(1) + tile(9)<<1 + sky(4)<<10 + id(9)<<14
 // ---- SURFACE TRANSITIONS (Ben 08-17: "I want sand and dirt and sand and grass to transition smoothly into eachother
 // ... only on the surface") ----
@@ -5811,7 +5829,7 @@ let _SPRIG_FACE_N = true;   // __hc.sprigNormals(false) + a remesh is the A/B fo
 let _LEAF_UV_MIRROR = true;   // __hc.leafUV(false) + a world remesh is the A/B for the per-layer tile mirror below
 let _TRANS_ON=true;   // __hc.transitions(false) + a world remesh is the A/B
 function greedyMesh(c, pass){
-  _transInit();
+  _transInit(); if(!_edgeGrass[BID.grass]) _edgeGrassInit();   // both read the registry, which is built after this function is defined
   const cx0=c.cx*CK, cz0=c.cz*CK;   // the world column, for a hash that is continuous across chunk borders
   // pass: 'opaque' | 'cutout'
   const _leafUV = _LEAF_UV_MIRROR && pass==='leaf';
@@ -5851,8 +5869,12 @@ function greedyMesh(c, pass){
             // blended this way would paint sand up a cliff, and Ben's instruction is "only on the surface".
             let _tt=faceTile(id,d,false);
             if(_TRANS_ON && d===1 && pass==='opaque'){ const _s=_transTop(id, cx0+x[0], x[1], cz0+x[2], g, x[0],x[1],x[2]); if(_s>=0) _tt=_s; }
+            else if(d!==1){ const _e=_grassEdge(id,sky); if(_e>=0) _tt=_e; }   // a sky-exposed EDGE of the top layer wears its top tile (see _grassEdge)
             a=packFace(id,_tt,sky,false);} } }
-          if (x[d]<dD-1){ const xx=x[0]+q[0],xy=x[1]+q[1],xz=x[2]+q[2]; const id=g(xx,xy,xz); if(isSrc(id)){ const nid=g(x[0],x[1],x[2]); if(!hides(nid,id)){ const sky=Math.round((d===1?_sskyTop(x[0],x[1],x[2]):_sskyOpen(x[0],x[1],x[2]))*15); b=packFace(id,faceTile(id,d,true),sky,true);} } }
+          if (x[d]<dD-1){ const xx=x[0]+q[0],xy=x[1]+q[1],xz=x[2]+q[2]; const id=g(xx,xy,xz); if(isSrc(id)){ const nid=g(x[0],x[1],x[2]); if(!hides(nid,id)){ const sky=Math.round((d===1?_sskyTop(x[0],x[1],x[2]):_sskyOpen(x[0],x[1],x[2]))*15);
+            let _tb=faceTile(id,d,true);
+            if(d!==1){ const _e=_grassEdge(id,sky); if(_e>=0) _tb=_e; }   // the -x/-z side of the same rule; d===1 here is the UNDERSIDE and never takes it
+            b=packFace(id,_tb,sky,true);} } }
           // only one side wins (a face belongs to the solid side facing air)
           mask[n] = a ? a : b;
         }
@@ -32771,9 +32793,9 @@ function brGoreMats(){ if(_brGoreMat)return _brGoreMat;
   // but a circle's UVs also mean the splat is CLIPPED to the disc, which is why the flat colour stays as a multiply
   // underneath: the edge of a pool is the geometry's edge, and the map only breaks up its interior.
   const img=bloodAssetTex();
-  _brGoreMat={ blood:new THREE.MeshLambertMaterial({color:img?0xd8c8c8:0x4a0d0c, map:img, transparent:true, opacity:0.93, depthWrite:false,
+  _brGoreMat={ blood:new THREE.MeshLambertMaterial({color:img?0x6e1210:0x4a0d0c, map:img, transparent:true, opacity:0.93, depthWrite:false,
                  polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2 }),     // dark and matte: fresh-red reads as paint under warm light
-               dry:new THREE.MeshLambertMaterial({color:img?0x8e7a76:0x33100f, map:img?bloodAssetTex():null, transparent:true, opacity:0.8, depthWrite:false,
+               dry:new THREE.MeshLambertMaterial({color:img?0x4a2320:0x33100f, map:img?bloodAssetTex():null, transparent:true, opacity:0.8, depthWrite:false,
                  polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2 }),
                bone:new THREE.MeshLambertMaterial({color:0xcfc7ad}) };
   return _brGoreMat; }
@@ -35837,7 +35859,15 @@ function _marksInit(){ if(_markFoot) return;
   _markFoot =_markPool('foot', MARK_FOOT, 0x3a3a3c);   // grey: a scuff, not mud
   _markPaw  =_markPool('paw',  MARK_FOOT, 0x3a3a3c);
   _markClaw =_markPool('claw', 48,        0x3a3a3c);   // the same grey the boots leave: it is a scuff, not ink
-  _markBlood=_markPool('blood',MARK_BLOOD, bloodAssetTex()?0xffffff:0x6d0d0d); }   // white when the photo splat supplies the colour; the old dark-red tint only stands in for the drawn fallback
+  // BLOOD IS DARK, AND A WHITE TINT IS WHY IT WAS NOT (Ben: "blood also looks completely whitewashed"). The instance
+  // colour multiplies the map, so 0xffffff meant the keyed watercolour scan alone decided the colour — and those
+  // scans are pale washes on paper, lifted further by the Lambert term, which is a product that saturates toward
+  // white in daylight rather than a red that deepens. A dark saturated tint puts the value back where blood lives and
+  // keeps the splat's own internal variation, because it is a multiply and not a replacement.
+  //   IT IS NOT THE COLOUR-SPACE FIX. The pipeline mixes linear and sRGB — that is fault one in the lighting rebuild
+  // spec, it is why the sheen measured inert, and it is the real reason a mid-tone reads pale. This tint is the value
+  // correction that stands until the pipeline is linearised, and it must be RE-JUDGED then rather than kept.
+  _markBlood=_markPool('blood',MARK_BLOOD, bloodAssetTex()?0x7a0f0c:0x6d0d0d); }   // the drying fade multiplies it down further, which is also what real blood does
 // Put one mark on the ground under (x,y,z). Returns false when there was nowhere to put it, so a caller in a bad spot simply
 // stops spending instances: no ground under it, standing in water, or too far from the eye to be worth drawing.
 function addMark(pool, x, y, z, yaw, size, life){
@@ -42694,6 +42724,28 @@ window.__hc={
       // WHAT IS SITTING ON THEM. 841 is a number to chase; "841, and 700 of them are under logs" names the writer.
       const by={}; for(const k in _bgCover) by[k]=_bgCover[k];
       return { demoted:_buriedGrass, stillBuried:live, grassBlocks:scanned, coveredBy:by, samples:_bgWhere }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // EVERY DRAWN FACE OF EVERY GRASS BLOCK, by orientation and by whether it is sky-exposed, with the tile it will
+  // actually carry. "Grass covers up dirt" and "the top layer should read solid" are the same claim seen from two
+  // sides, and this is the only read that answers both: `under` must be 0 grass (the ceiling of a cut is soil) and
+  // `sideOpen` must be all grass (a cliff edge is turf). It runs the mesher's own snapshot and sky function, so it
+  // cannot drift from what is drawn.
+  grassEdges(){ try{ _edgeGrassInit();
+      const TN={}; for(const k in TILEIDX) TN[TILEIDX[k]]=k;
+      const bump=(o,k)=>{ o[k]=(o[k]|0)+1; };
+      const top={}, under={}, sideOpen={}, sideShut={};
+      for(const [,c] of world){ if(!c||!c.generated) continue; snapshotChunk(c); const bl=c.blocks;
+        for(let lz=0;lz<CK;lz++) for(let lx=0;lx<CK;lx++) for(let y=1;y<WH-1;y++){
+          const v=bl[idx(lx,y,lz)]; if(!_edgeGrass[v]) continue; const t=B[v].tiles;
+          for(const [dx,dy,dz] of [[0,1,0],[0,-1,0],[1,0,0],[-1,0,0],[0,0,1],[0,0,-1]]){
+            const ax=lx+dx, ay=y+dy, az=lz+dz;
+            const nb=(ax<0||ax>=CK||az<0||az>=CK)? getBlock(c.cx*CK+ax, ay, c.cz*CK+az) : bl[idx(ax,ay,az)];
+            if(nb!==AIR && isOpaque[nb]) continue;                      // no face is drawn here
+            const sky=Math.round(_sskyFace(ax,ay,az)*15);
+            if(dy>0) bump(top, TN[t[0]]);
+            else if(dy<0) bump(under, TN[t[2]]);
+            else { const e=_grassEdge(v,sky); bump(sky>=15?sideOpen:sideShut, TN[e>=0?e:t[1]]); } } } }
+      return { top, under, sideOpen, sideShut }; }
     catch(e){ return {err:String(e.message||e)}; } },
   // WHOSE TILE ENDS UP ON WHOSE UPWARD FACE at a family seam, split by whether that face is the world's surface or the
   // inside of a cut. _transTop substitutes a NEIGHBOUR's top tile onto this cell's upward face, so "grass is covering
