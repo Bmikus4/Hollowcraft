@@ -1453,12 +1453,22 @@ const HC_LIGHT_GLSL = [
     '  { float _pn=mix(1.0, mix(0.06, 1.0, clamp(uScotG.w,0.0,1.0)), clamp(uHcObj.y,0.0,1.0));\n'+
     '    vec3 _cel = reflectedLight.directDiffuse - hcPointLit;\n'+
     '    float _nt = (1.0-clamp(uScotG.w,0.0,1.0))*clamp(uHcObj.y,0.0,1.0);\n'+
+    // ---- AND THE RESIDUAL WAS THE INDIRECT, NOT THE MOON (measured; see below) ----
+    // Sweeping the flattening over grey 0..0.14 moved sulfur 8.31 / 7.06 / 7.24 / 8.53 / 7.54 against a ground of 1.16 —
+    // no response at all, which says the celestial direct term is not what keeps a bright prop visible after dark. What
+    // does is the ambient and hemisphere: `_pn` reads as 0.06 but resolves to mix(1, 0.06, 0.85) = 0.20, so a prop was
+    // holding a FIFTH of its daylight hemisphere all night, and that fifth is albedo-proportional — which is the whole of
+    // sulfur being bright and a door being a hole.
+    // So the flattening is applied to BOTH halves of the light, from one factor computed once. A term that treats the two
+    // differently is how this went round twice already.
+    '    vec3 _ind = reflectedLight.indirectDiffuse;\n'+
     '    if(uHcObj.z > 0.0 && _nt > 0.0){\n'+
     '      float _pal=dot(diffuseColor.rgb,'+L+');\n'+
-    '      if(_pal > 1e-5) _cel = mix(_cel, _cel*(uHcObj.z/_pal), _nt);\n'+
+    '      if(_pal > 1e-5){ float _flat=mix(1.0, uHcObj.z/_pal, _nt);\n'+
+    '        _cel *= _flat; _ind *= _flat; }\n'+
     '    }\n'+
     '    reflectedLight.directDiffuse = hcPointLit + _cel*_pn;\n'+
-    '    reflectedLight.indirectDiffuse *= _pn; }\n'+
+    '    reflectedLight.indirectDiffuse = _ind*_pn; }\n'+
     '  { float _pfd=clamp(dot(reflectedLight.directDiffuse,'+L+'),0.0,1.0);\n'+
     // AND IT IS OCCLUDED LIKE EVERYTHING ELSE. uHcObj.x is the object's own sky-and-canopy term, written per draw
     // (hcSkyBind) and 1 for anything that has not been bound - so an unbound object behaves exactly as it did.
@@ -37589,7 +37599,14 @@ function buildWell(){ if(_wellDone)return; const wx=spawnX+14, wz=spawnZ+34;
   for(let dx=-2;dx<=2;dx++)for(let dz=-2;dz<=2;dz++){ _clr(wx+dx,gy+1,gy+4,wz+dz);
     const rad=Math.max(Math.abs(dx),Math.abs(dz));
     if(rad===2) setBlockWorld(wx+dx,gy+1,wz+dz,BID.cobble,true);
-    else for(let y=gy;y>=gy-3;y--) setBlockWorld(wx+dx,y,wz+dz,BID.water,true); }
+    // A WELL IS DEEP, AND THAT IS WHY YOU CAN SEE THE WATER (Ben 08-17: "i cant see water in wells"). The water was
+    // always there -- 36 cells, a built surface of 54 vertices sitting at 46.88, visible, correctly placed. It read as
+    // an empty shaft because the water shader colours by DEPTH: absorption over a four-block column is almost nothing,
+    // and looking straight down kills the fresnel reflection too, so what was drawn was clear glass over dirt.
+    //   NINE BLOCKS is the fix, and it is the object rather than the shader: absorption over that column is the same
+    // dark the open sea gets, so the surface finally has something to be. It is also what a well IS -- four blocks is
+    // a puddle in a hole.
+    else for(let y=gy;y>=gy-8;y--) setBlockWorld(wx+dx,y,wz+dz,BID.water,true); }
   for(const [ox,oz] of [[-2,-2],[2,-2],[-2,2],[2,2]]) for(let y=2;y<=3;y++) setBlockWorld(wx+ox,gy+y,wz+oz,BID.fence,true);
   for(let dx=-2;dx<=2;dx++)for(let dz=-2;dz<=2;dz++) setBlockWorld(wx+dx,gy+4,wz+dz,BID.planks,true);
   setBlockWorld(wx,gy+3,wz,BID.lantern,true);
@@ -42091,6 +42108,39 @@ window.__hc={
       const c=getChunk(wx>>4,wz>>4);
       return { at:[wx,wz], ground:gy, sea:CFG.SEA, built:_wellDone,
                chunkHasWater:!!(c&&c.hasWater), meshed:!!(c&&c.meshed), column:col }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // Every water cell in the well's own chunk, and whether that chunk has a water MESH at all. This is the line between
+  // "no water was placed" and "water is there and is not drawn", which no amount of looking down the shaft settles.
+  wellWater(){ try{ const wx=spawnX+14, wz=spawnZ+34, c=getChunk(wx>>4,wz>>4);
+      if(!c) return {err:'chunk not loaded'};
+      let n=0, lo=1e9, hi=-1e9; const near=[];
+      for(let y=0;y<WH;y++) for(let lz=0;lz<CK;lz++) for(let lx=0;lx<CK;lx++){
+        if(c.blocks[idx(lx,y,lz)]!==WATER) continue; n++;
+        if(y<lo)lo=y; if(y>hi)hi=y;
+        const ax=(c.cx*CK)+lx, az=(c.cz*CK)+lz;
+        if(Math.abs(ax-wx)<=2 && Math.abs(az-wz)<=2 && near.length<14) near.push([ax,y,az]); }
+      // The mesh hangs off the chunk GROUP's userData (see the builder at `g.userData.water`), not off the chunk record.
+      // Reading c.waterMesh returned undefined for every chunk in the world, ocean included -- an instrument that can
+      // only ever say "no" is the trap this file keeps paying for, so the ocean control below is what proves it works.
+      const wm=(c.group&&c.group.userData&&c.group.userData.water)||null;
+      // Is the mesh actually being DRAWN, and where does its surface sit? A geometry that exists, is invisible, or has
+      // been curved down inside the terrain are three different faults with one symptom.
+      let vis=null, bs=null, sy=null;
+      if(wm){ vis=!!wm.visible && !!(c.group.visible);
+        const pa=wm.geometry.attributes.position;
+        if(pa){ let mx=-1e9,mn=1e9; for(let i=0;i<pa.count;i++){ const y=pa.getY(i); if(y>mx)mx=y; if(y<mn)mn=y; }
+          sy=[+mn.toFixed(3),+mx.toFixed(3)]; }
+        wm.geometry.computeBoundingSphere(); const b2=wm.geometry.boundingSphere;
+        if(b2) bs={c:[+b2.center.x.toFixed(1),+b2.center.y.toFixed(1),+b2.center.z.toFixed(1)], r:+b2.radius.toFixed(2)}; }
+      let ctlN=0, ctlV=0;
+      for(const [,o] of world){ if(!o||!o.group||!o.group.userData||!o.group.userData.water) continue;
+        ctlN++; const pa=o.group.userData.water.geometry&&o.group.userData.water.geometry.attributes.position;
+        if(pa) ctlV+=pa.count; }
+      return { chunk:[c.cx,c.cz], waterCells:n, yLo:n?lo:null, yHi:n?hi:null, sea:CFG.SEA,
+               nearWell:near, hasWaterFlag:!!c.hasWater,
+               waterMesh:!!wm, waterVerts:(wm&&wm.geometry&&wm.geometry.attributes.position)?wm.geometry.attributes.position.count:0,
+               chunksWithWaterMesh:ctlN, totalWaterVerts:ctlV,
+               meshVisible:vis, surfaceYLocal:sy, bound:bs, groupY:c.group?+c.group.position.y.toFixed(2):null }; }
     catch(e){ return {err:String(e.message||e)}; } },
   roofFit(){ try{ roofGeos();
       const g=_roofSlab, p=g.attributes.position, n=p.count;
