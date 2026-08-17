@@ -1,13 +1,18 @@
-// SCRATCH BOOT PROBE. The fox girl is gone: nothing references her, the world boots, and the giantess still exists.
-import { openWorld, sleep } from './lib/rig.mjs';
-(async()=>{ const W=await openWorld({rd:6});
+// SCRATCH BOOT PROBE. The cabin roof, outside and from below, which is what Ben asked to see.
+import { openWorld, sleep, OUT } from './lib/rig.mjs';
+import path from 'node:path';
+(async()=>{ const W=await openWorld({rd:10});
   try{ await sleep(2500);
+    for(let i=0;i<60;i++){ const f=await W.page.evaluate('__hc.fill()'); if(f.meshed>=f.want) break; await sleep(400); }
+    console.log('roofFit '+JSON.stringify(await W.page.evaluate('__hc.roofFit()')));
+    // The cabin sits at spawn+(22,-14) — inCabin()'s own centre.
+    const c=await W.page.evaluate('__hc.cabinAt()'); const at=[c.x,c.z,c.ground];
+    console.log('cabin at '+JSON.stringify(at));
+    await W.page.evaluate(`__hc.tp(${at[0]-14}, ${at[2]+13}, ${at[1]+14}, -2.36, -0.40)`);
     for(let i=0;i<40;i++){ const f=await W.page.evaluate('__hc.fill()'); if(f.meshed>=f.want) break; await sleep(400); }
-    console.log('boot ok');
-    console.log('probe    '+JSON.stringify(await W.page.evaluate("typeof __hc.foxgirl+' '+typeof __hc.foxgirlPose+' '+typeof __hc.foxgirlHurt")));
-    console.log('spawn    '+JSON.stringify(await W.page.evaluate("__hc.cmdRun('/spawn foxgirl 1 6')")));
-    console.log('cmd      '+JSON.stringify(await W.page.evaluate("__hc.cmdRun('/foxgirl')")));
-    console.log('giantess '+JSON.stringify(await W.page.evaluate("__hc.cmdRun('/spawn giantess 1 14')")));
     await sleep(1500);
-    console.log('errors: '+(W.errors.length?W.errors.slice(0,4).join(' | '):'none'));
+    await W.page.screenshot({path:path.join(OUT,'cabinroof-out.png')});
+    await W.page.evaluate(`__hc.tp(${at[0]}, ${at[2]+2.0}, ${at[1]}, 0.4, 1.05)`); await sleep(1200);
+    await W.page.screenshot({path:path.join(OUT,'cabinroof-under.png')});
+    console.log('errors: '+(W.errors.length?W.errors.slice(0,3).join(' | '):'none'));
   } finally { await W.close(); } })();
