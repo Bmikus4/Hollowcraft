@@ -7705,7 +7705,14 @@ const mountainMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false,
   // through a mountainside, which is most of why it read as a ghost pasted on the sky rather than as land. Distance drains
   // a distant thing's COLOUR toward the air, which the haze mix below already does; it does not make it see-through.
   // The weather term stays: rain really does hide a range.
-  '    float a=smoothstep(0.08,0.26,m.r)*clamp(1.0-uWx*1.25,0.0,1.0);',
+  // ...AND THE PRESENCE MASK NO LONGER SETS HOW SOLID IT IS. smoothstep(0.08,0.26,m.r) was the whole opacity: m.r is
+  // gate*rise, it sits in the low twenties over most of a run, and that put a mountainside on screen at about a third
+  // alpha over a sky of 147 — which is arithmetic for the pale wash above the treeline, measured at band luminance 112
+  // against rock whose own colour is under 40. It read as haze and no haze dial could touch it, because it was the sky.
+  // The mask decides WHERE the range stands and, since the taper above, HOW TALL it is. Rock is opaque at any height.
+  // The remaining feather is only the existence cutoff — below 0.06 there is no range on this bearing at all — and it
+  // has to stay narrow: the ends of a run are handled by the height going to zero, not by the rock going see-through.
+  '    float a=smoothstep(0.055,0.105,m.r)*clamp(1.0-uWx*1.25,0.0,1.0);',
   '    outc=mix(outc, col, a); outa=max(outa, a);',
   '  }',
   '  if(outa<0.004) discard;',
@@ -23396,19 +23403,21 @@ let _flashHold=false;   // QA only (__hc.flashHold) — see the flash-decay bloc
 // QA only (__hc.holoHide) — hides the reticle WITHOUT touching the pose, so a bench can subtract a reticle-off frame from a
 // reticle-on one and be left with the hologram alone. Counting "red pixels" absolutely cannot work: a foxglove or a berry bush
 // streaming into view behind the glass reads redder than a 15 px hologram, and which flora has loaded differs run to run.
-// ---- WHY A GAIN DOES NOT MAKE THE RETICLE GLOW, TESTED AND REMOVED ----
-// The proportions fix put the dot in the frame and left it legible rather than luminous, and its core alpha is
-// already 1.0, so the obvious next lever was to make it BRIGHTER THAN WHITE and let the bloom pass spread it. The
-// sun disc is the precedent: its comment says the seed only has to clip, and it is given a gain of 10.
-// A MeshBasic multiplies its map by its colour, so colour above 1 is that gain for free. Tried at 4.0, weighted red
-// so a clipping dot would stay red rather than blooming white. It changed nothing: the red-dominance detector read 1
-// pixel at best excess 16 against 4 at 15 with the reticle hidden — noise, in the wrong direction — and by eye the
-// dot is no brighter than before.
-// THE LIKELY REASON, AND IT IS WHY THIS IS NOT WORTH ANOTHER GAIN VALUE: a colour above 1 only survives if the
-// buffer it is written into can hold it. If the composer's render target is 8-bit rather than half-float, everything
-// clamps at 1.0 before the bloom pass ever samples it, and no multiplier here can clear a threshold. That is the
-// thing to check FIRST — the render target's type — because it decides whether the sun-disc trick is available to a
-// viewmodel overlay at all, and the answer applies to every other small bright thing drawn this late in the chain.
+// ---- IT GLOWS WHEN IT IS NOT TONE-MAPPED FIRST (Ben: "a tiny glowing dot") ----
+// A gain above white was the right instinct and it did nothing, and the reason was not the buffer. The composer's
+// targets are HalfFloatType and can hold values over 1 — that is recorded at _mkSceneRT and it was put there to fix
+// black lines in the night sky, so it is not in doubt. The clamp was closer than that: MeshBasicMaterial is
+// toneMapped by default, so a colour of 4.0 went through AgX before it was ever written and arrived under 1.
+// The bloom pass takes its threshold at 1.15 (UnrealBloomPass, strength 0.55, radius 0.34, threshold 1.15). Nothing
+// that has been through the tonemap can exceed that, which is why no gain value could ever have worked and why the
+// sun disc — which writes its own gain into the sky shader's output — can.
+// toneMapped:false sends this material's colour into the half-float buffer raw, and the gain then means what it says.
+// 2.2 x 0.95 opacity is 2.09 against a 1.15 threshold: the core clips and blooms, the halo under it does not, so the
+// glow is a real bloom around a hard dot rather than a bigger soft blob. Weighted red so a clipping core stays red
+// instead of blooming to white. ?retgain= sets it; 1.0 is under the threshold and is the no-glow A/B.
+const _RET_GAIN=(()=>{ const g=(()=>{ try{ const q=new URLSearchParams(location.search).get('retgain'); const v=q!=null?parseFloat(q):NaN;
+    return isFinite(v)?Math.max(0,Math.min(20,v)):2.2; }catch(e){ return 2.2; } })();
+  return new THREE.Color(g, g*0.34, g*0.28); })();
 let _holoHide=false;
 let _holoClip=true;   // QA only (__hc.holoClip): false leaves the reticle unclipped by the sight's aperture
 // How much room the held gun must keep in front of the near plane. One constant, because the fault it fixes was 14 of 16
@@ -26512,7 +26521,7 @@ function updateView(dt){ updateRecoil(dt);                                      
     // glass frame — and the four clip planes only cut it to the rear window's outline, which does nothing about the casing between.
     // With depth on, the gun occludes its own reticle and what is left is the part you can actually see through the glass.
     // depthWrite stays false: it is additive light, and nothing should be hidden BY it.
-    const m=new THREE.Mesh(new THREE.PlaneGeometry(S,S), new THREE.MeshBasicMaterial({map:_holoReticleTex(),transparent:true,opacity:0,depthTest:true,depthWrite:false,blending:THREE.AdditiveBlending}));
+    const m=new THREE.Mesh(new THREE.PlaneGeometry(S,S), new THREE.MeshBasicMaterial({map:_holoReticleTex(),color:_RET_GAIN,toneMapped:false,transparent:true,opacity:0,depthTest:true,depthWrite:false,blending:THREE.AdditiveBlending}));
     // ---- WHY THE DOT READS AS A DARK SMUDGE: TWO HYPOTHESES DOWN, RECORDED SO NEITHER IS TRIED AGAIN ----
     // Ben: the reticle is a dark mark in the glass rather than a glowing dot, worst against foliage.
     // NOT THE TEXTURE. _dotReticleTex draws a bright core with a halo and was already redrawn twice for this
