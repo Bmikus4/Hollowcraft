@@ -8840,7 +8840,7 @@ const waterMat = new THREE.ShaderMaterial({
   }),
   vertexShader:`
     attribute float aFar; varying float vFar; attribute float aTop; attribute float aDepth; attribute float aColD; attribute vec2 aFlow; varying float vTop; varying float vDepth; varying vec3 vW; varying vec3 vN; varying float vFog; varying float vCrest; varying vec2 vFlow;
-    uniform float uTime; uniform vec3 uCamPos; uniform float uCurveR, uCurveK, uCurveClamp, uCurveCap, uFlow;   // uCamPos is the SAME uniform the fragment stage already uses; declaring it in both stages costs nothing and avoids a second copy that could drift
+    uniform float uTime; uniform vec3 uCamPos; uniform float uCurveR, uCurveK, uCurveClamp, uCurveCap, uFlow, uDbgFlat;   // uCamPos is the SAME uniform the fragment stage already uses; declaring it in both stages costs nothing and avoids a second copy that could drift
     void main(){
       vFar=aFar; vTop=aTop; vDepth=aDepth; vFlow=aFlow*uFlow; vec3 p=position; vec3 wp=(modelMatrix*vec4(p,1.0)).xyz;
       if(uDbgFlat>0.5){ vN=vec3(0.0,1.0,0.0); vCrest=0.0; vW=wp; vec4 mv0=modelViewMatrix*vec4(p,1.0); vFog=-mv0.z; gl_Position=projectionMatrix*mv0; return; }
@@ -9747,7 +9747,7 @@ const VolLightShader={
   uniforms:{ tDiffuse:{value:null}, tDepth:{value:null}, uInvVP:{value:new THREE.Matrix4()},
     uCamPos:{value:new THREE.Vector3()}, uVLPos:{value:[new THREE.Vector3(),new THREE.Vector3(),new THREE.Vector3()]},
     uVLCol:{value:[new THREE.Vector3(),new THREE.Vector3(),new THREE.Vector3()]},
-    uVLI:{value:[0,0,0]}, uDensity:{value:0}, uStrength:{value:0.075}, uMaxDist:{value:34.0}, uSteps:{value:10.0} },
+    uVLI:{value:[0,0,0]}, uDensity:{value:0}, uStrength:{value:0.045}, uMaxDist:{value:34.0}, uSteps:{value:10.0} },
   vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
   fragmentShader:[
   'precision highp float; varying vec2 vUv;',
@@ -9789,10 +9789,20 @@ const VolLightShader={
   '    vec3 p=uCamPos + dir*((float(s)+jitter)*dt);',
   '    for(int l=0;l<3;l++){',
   '      if(uVLI[l]<=0.0) continue;',
-  '      vec3 dl=uVLPos[l]-p; float d2=dot(dl,dl)+0.25;',
+  '      vec3 dl=uVLPos[l]-p; float d2=dot(dl,dl)+2.0;',
   // Inverse-square with a softening term, and a mild forward phase: air scatters more of a light toward you when you
   // are looking into it, which is why a beam is brightest when you face the lamp and merely a glow when it is behind.
-  '      float att=uVLI[l]/d2;',
+  // ---- AND THE DOTS ARE SAMPLE VARIANCE, WHICH IS BOUNDED HERE OR NOWHERE ----
+  // Interleaved gradient noise did not remove them, and that is informative: the speckle is not a dither PATTERN, it is
+  // the variance of a ten-sample estimate of a function that spikes. Measured from the live selection, a lamp arrives at
+  // intensity 54 and d2 floors at 0.25, so a sample that lands next to a flame returns att = 216 while its neighbour a
+  // step away returns nearly nothing — and one such sample is worth 0.39 of display range on its own, which is a dot.
+  // Spreading the offsets more evenly cannot help when the offsets themselves are worth that much.
+  // SO THE PER-SAMPLE CONTRIBUTION IS CLAMPED, which is the same argument the end-of-shader clamp already makes —
+  // "inverse square has no upper bound" — applied where the unboundedness actually enters. 6.0 is far above the typical
+  // sample (the smooth field runs under 1) so the glow this pass exists for is untouched; what it removes is the spike
+  // that only one pixel in a neighbourhood happens to catch.
+  '      float att=min(uVLI[l]/d2, 3.0);',
   '      float ph=0.65+0.35*max(0.0, dot(dir, dl*inversesqrt(d2)));',
   '      acc+=uVLCol[l]*att*ph;',
   '    }',
@@ -42309,9 +42319,23 @@ window.__hc={
   waterProp(o){ try{ o=o||{}; const before={transparent:waterMat.transparent, depthWrite:waterMat.depthWrite, depthTest:waterMat.depthTest, side:waterMat.side};
       for(const k of ['transparent','depthWrite','depthTest','side']) if(o[k]!=null) waterMat[k]=o[k];
       if(o.curveK!=null && waterMat.uniforms.uCurveK) waterMat.uniforms.uCurveK.value=+o.curveK;
+      if(o.flat!=null && waterMat.uniforms.uDbgFlat) waterMat.uniforms.uDbgFlat.value=o.flat?1:0;
       waterMat.needsUpdate=true;
       return { before, now:{transparent:waterMat.transparent, depthWrite:waterMat.depthWrite, depthTest:waterMat.depthTest, side:waterMat.side,
-               curveK:waterMat.uniforms.uCurveK?waterMat.uniforms.uCurveK.value:null} }; }
+               curveK:waterMat.uniforms.uCurveK?waterMat.uniforms.uCurveK.value:null,
+               flat:waterMat.uniforms.uDbgFlat?waterMat.uniforms.uDbgFlat.value:null} }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // IS THE DRAW CALL EVEN ISSUED? Everything else says the mesh is correct and it still shows nothing, so this asks the
+  // renderer directly: triangles drawn with the mesh visible, then hidden. A difference of 18 (the 3x3 quad) means it
+  // is in the render list and the loss is downstream; no difference means three never draws it.
+  wellDrawn(){ try{ const wx=spawnX+14, wz=spawnZ+34, c=getChunk(wx>>4,wz>>4);
+      const wm=c&&c.group&&c.group.userData&&c.group.userData.water; if(!wm) return {err:'no water mesh'};
+      const read=()=>{ renderer.render(scene,camera); const i=renderer.info.render; return {calls:i.calls, tris:i.triangles}; };
+      const was=wm.visible;
+      wm.visible=true;  const on=read();
+      wm.visible=false; const off=read();
+      wm.visible=was;
+      return { on, off, trisDelta:on.tris-off.tris, callsDelta:on.calls-off.calls, expectTris:18 }; }
     catch(e){ return {err:String(e.message||e)}; } },
   wellRect(){ try{ const wx=spawnX+14, wz=spawnZ+34, gy=surfaceH(wx,wz), y=gy+1-WATER_SURF_DROP;
       const V=new THREE.Vector3(); let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9, behind=0;
