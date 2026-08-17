@@ -7554,12 +7554,14 @@ const _mtU={ uMask:{value:_mtTex}, uPine:_uCoastPine, uRock:_uMtnRock, uSnow:_uM
   // 235/255 leaves the average ridge bare and caps the tall ones — measured, 12k of the band's pixels are snow at noon
   // where sea+72/88 gave 36k and the pre-08-17 build gave all of them. Below about 200 it is a sheet again.
   uSnowY:{value:new THREE.Vector2(CFG.SEA+195, CFG.SEA+215)},
+  uBandOnly:{value:-1},   // QA: -1 both ranges, 0 near only, 1 far only. __hc.mtn({band:n})
+
   uMtnMax:{value:0.349} };  // 20 degrees of range above its own foot — Ben's number, set by eye after 13.7 read as too little
 const mountainMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false, side:THREE.BackSide, fog:false,
   uniforms:_mtU, vertexShader:_horizVert, fragmentShader:[
   'precision highp float; varying vec3 vPos;',
   'uniform sampler2D uMask; uniform vec3 uPine, uRock, uSnow, uAir, uFogCol, uSunCol; uniform vec2 uSunXZ;',
-  'uniform float uFogD, uWall, uCamY, uWx, uDay, uSunUp, uFogMul, uGain, uPixAng, uDbg, uMtnMax; uniform vec2 uMaskOff, uSnowY; uniform vec4 uScotG, uScotH;',
+  'uniform float uFogD, uWall, uCamY, uWx, uDay, uSunUp, uFogMul, uGain, uPixAng, uDbg, uMtnMax, uBandOnly; uniform vec2 uMaskOff, uSnowY; uniform vec4 uScotG, uScotH;',
   'float hash(float n){ return fract(sin(n)*43758.5453); }',
   'float nz(float x){ float i=floor(x), f=fract(x); return mix(hash(i),hash(i+1.0),f*f*(3.0-2.0*f)); }',
   'void main(){',
@@ -7567,6 +7569,11 @@ const mountainMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false,
   // (u is computed per band now, because the parallax shift depends on that band's distance)
   '  vec3 outc=vec3(0.0); float outa=0.0;',
   '  for(int b=1; b>=0; b--){',                                    // far range first, so the near one paints over it
+  // ISOLATE ONE RANGE, the way __hc.pines already isolates one distance band. Two ranges hazed to different depths
+  // stack into a single pale field, and no measurement of "the band" means anything while both are in the crop:
+  // the far one carries 0.62 of haze and is the same value at any gain, so it reads as the near one's colour going
+  // wrong. -1 draws both, which is the shipped path and costs one comparison against a uniform.
+  '    if(uBandOnly>-0.5 && abs(float(b)-uBandOnly)>0.5) continue;',
   // ---- PARALLAX ----
   // The mask is a set of bearings taken from ONE point - where the player stood when it was last rebuilt - so drawn
   // straight it is a skybox: the coast travels with you and never slides against the horizon, which is Ben 08-16, the
@@ -7661,16 +7668,19 @@ const mountainMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false,
 
   '    float per=0.80+0.34*mix(0.5, nz(az*(dist/18.0)), det);',    // face-to-face brightness across the range
   '    col*=per*uGain;',
+  '    vec3 _s1=col;',
   // SNOW IS LAID AFTER THE GAIN, and that is the difference between a cap and a slightly paler rock. uGain is 0.62 and
   // exists to sit a WOODED, rocky mass down into the scene; putting snow through it took a 0.62 white to 0.35 and then
   // the haze took what was left, which is why three tries at the snow LINE changed nothing visible. Snow has its own
   // exposure, still clamped under the air below like everything else on this horizon.
   '    col=mix(col, uSnow*(0.45+0.55*uSunUp)*per, snowT*smoothstep(0.15,0.5,uDay+0.15)*(0.45+0.55*uSunUp));',
+  '    vec3 _s2=col;',
   // The same key light the coast pines take, resolved per azimuth: the flank facing the sun is lit, the one away is a
   // silhouette. A range is a bigger, flatter thing than a treeline, so the contrast is wider.
   '    float face=clamp(-dot(normalize(vec2(d.x,d.z)), uSunXZ), -1.0, 1.0);',
   '    col*=mix(0.58, 1.30, clamp(face,0.0,1.0)*uSunUp);',
   '    col*=mix(1.0, 0.42, 1.0-smoothstep(0.0,0.18,t));',          // the valley floor at the foot is the darkest part
+  '    vec3 _s3=col;',
   // ---- HAZE ----
   // The terrain's own fog at this distance, then the aerial perspective toward the air's luminance carrying a third of
   // the range's hue - the same rule the coast bands use, and the same clamp under the air, so no part of a mountain can
@@ -7682,6 +7692,7 @@ const mountainMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false,
   '    float _cL=max(dot(col, vec3(0.2126,0.7152,0.0722)), 1e-4);',
   '    vec3 _hz=mix(uAir, col*(_aL/_cL), 0.35);',
   '    col=mix(col, _hz, haze);',
+  '    vec3 _s4=col;',
   // THE CLAMP IS NOT WHAT WASHES THIS RANGE OUT, measured 08-17 with it at 0.85, at 0.30 and removed entirely: the
   // crop moves by less than the frame's own noise at every hour, because the band never comes near 0.85 of the air in
   // the first place. Whatever makes the near range read as a pale sheet is upstream of here (bench/tmp-airclamp.mjs).
@@ -7699,7 +7710,12 @@ const mountainMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false,
   // 3 IS FLAT MAGENTA — the extent test, not a term. A pale band behind a dark wood cannot be told apart by eye from a
   // pale band in front of it, and per-pixel statistics against a wind-blown canopy are all inside their own noise
   // floor. Nothing in this world is magenta, so a magenta leaf is a leaf the horizon shell has drawn over.
-  '    if(uDbg>0.5){ if(uDbg<1.5) col=vec3(snowT,0.0,0.0); else if(uDbg<2.5) col=vec3(0.0, clamp((wy-snowY)/60.0+0.5,0.0,1.0), 0.0); else col=vec3(1.0,0.0,1.0); }',
+  // 4-7 ARE THE VALUE CHAIN ITSELF: rock and treeline after the gain, the same after snow, after the sun terms, and
+  // after the haze. A gain sweep that moves the finished band by 2 of 255 says something downstream is pinning it,
+  // and there is no way to find out which term from outside the shader — every one of them is invisible by the time
+  // the frame exists. Reading the stages out costs four temporaries in a branch nobody takes at runtime.
+  '    if(uDbg>0.5){ if(uDbg<1.5) col=vec3(snowT,0.0,0.0); else if(uDbg<2.5) col=vec3(0.0, clamp((wy-snowY)/60.0+0.5,0.0,1.0), 0.0);',
+  '      else if(uDbg<3.5) col=vec3(1.0,0.0,1.0); else if(uDbg<4.5) col=_s1; else if(uDbg<5.5) col=_s2; else if(uDbg<6.5) col=_s3; else col=_s4; }',
   // A MOUNTAIN IS OPAQUE (Ben, of his 00:25 frame: the sky and clouds show THROUGH it). The alpha carried a
   // `(1.0-0.45*haze)` factor, so the far range was drawn at 0.72 alpha and the near one at 0.95 — 28% of the sky came
   // through a mountainside, which is most of why it read as a ghost pasted on the sky rather than as land. Distance drains
@@ -43862,9 +43878,11 @@ window.__hc={
              // The snow line, low sun and high sun, in world height — against peaks that mtnMask() reports in the same
              // units, so the two readings can be compared without converting anything.
              if(o.snow!=null) _mtU.uSnowY.value.set(+o.snow[0], +o.snow[1]);
+             if(o.band!=null) _mtU.uBandOnly.value=+o.band;
              if(o.force){ _cpLastX=1e9; _cpLastZ=1e9; } }
       return { on:_mtWant, gain:_mtU.uGain.value, fogMul:_mtU.uFogMul.value,
                snow:[_mtU.uSnowY.value.x, _mtU.uSnowY.value.y],
+               band:_mtU.uBandOnly.value,
                deg:+(_mtU.uMtnMax.value*180/Math.PI).toFixed(2) }; }
     catch(e){ return String(e.message||e); } },
   // QA/bench: isolate one distance band (0 near, 1 mid, 2 far); -1 restores all three.
