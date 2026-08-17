@@ -12282,7 +12282,52 @@ const WALK_SLOW=1.7, WALK_MID=4.6, WALK_FAST=6.3;
 // below the midpoint and rises to this at the top. 2.6/s against the sprint's 7.3 makes a flat-out walk sustainable for
 // about forty seconds from full and a sprint for fourteen, which is the ordering that makes the dial worth having: it is
 // the pace you use to cover ground, not a cheaper sprint.
-const WALK_STAM=2.6;
+// =====================================================================
+//  WEIGHT — what he is carrying, and when it starts costing him wind (Ben)
+// =====================================================================
+// "walking, crouching, should not take stamina by default, and laying down and crawling should never take stamina, BUT we
+// need to create a weight system and if the player is heavy enough walking and crouch walking do take stamina."
+//
+// MASS IS DERIVED FROM BULK, WITH OVERRIDES, and that is not a shortcut — it is the only way to give three hundred and
+// ninety items a mass without inventing three hundred and ninety numbers, and the bulk is already authored. ITEM_SIZE
+// gives every item its footprint in grid cells (a rifle is 2x4, a cartridge 1x1) because Ben sized them himself, so cells
+// times a per-class density is a mass that agrees with what the thing looks like. The same shape as itemSize's own rule:
+// a table for what matters, a rule for the rest, so the next item added has a mass on arrival.
+// kg PER CELL by class. A gun is dense (steel and wood in a small footprint), armour denser, a block heavier still per
+// cell because a block is a cubic foot of stone, ammunition light per round but it stacks to 64 and that is the point.
+const MASS_PER_CELL={ gun:1.15, armor:1.40, tool:0.90, block:1.60, ammo:0.030, other:0.35 };
+// The few things whose mass is not a function of their footprint, in kg per unit. A minigun is not four rifles.
+const ITEM_MASS={ minigun:18.0, icbm:60.0, launch_console:12.0, ghost:9.0, backpack:1.2, alice_pack:2.0, field_pack:1.8,
+                  iron_chestplate:11.0, leather_chestplate:4.0, iron_leggings:8.0, leather_leggings:3.0,
+                  iron_helmet:2.6, leather_helmet:0.9, iron_boots:3.4, leather_boots:1.1,
+                  shield:5.5, raft:14.0, tent:6.0, gas_can:8.0, propane_tank:14.0, bear_trap:5.0,
+                  water_bottle:1.0, bandage:0.05, matchbox:0.02, flare:0.09 };
+function itemMass(id){ if(ITEM_MASS[id]!=null) return ITEM_MASS[id];
+  const it=ITEMS[id]; if(!it) return 0;
+  const sz=(typeof itemSize==='function')?itemSize(id):[1,1];
+  const cells=Math.max(1,(sz[0]||1)*(sz[1]||1));
+  const k = it.gun ? MASS_PER_CELL.gun : it.armor ? MASS_PER_CELL.armor
+          : (typeof isAmmo==='function'&&isAmmo(id)) ? MASS_PER_CELL.ammo
+          : it.tool ? MASS_PER_CELL.tool : (it.block!=null) ? MASS_PER_CELL.block : MASS_PER_CELL.other;
+  return cells*k; }
+// Everything he is actually carrying: the hotbar, the grid and every equipped slot. Recomputed on demand rather than
+// maintained incrementally, because every path that can change a stack would have to remember to update a running total
+// and one that forgets is a weight that silently drifts — and this is a few dozen table lookups, once a frame at most.
+function carriedWeight(){ let w=0;
+  const add=(st)=>{ if(st&&st.id) w+=itemMass(st.id)*(st.n||1); };
+  if(typeof inv!=='undefined') for(const st of inv) add(st);
+  if(typeof GRID!=='undefined'&&GRID.items) for(const st of GRID.items) add(st);
+  if(typeof armor!=='undefined') for(const st of armor) add(st);
+  return w; }
+// FREE UP TO 22 kg, CRUSHED AT 58. Under the threshold walking and crouch-walking are exactly free, which is Ben's "by
+// default" — an ordinary kit of a rifle, a sidearm, ammunition and food comes in around fifteen. 58 is a full set of iron
+// plus two long guns plus a stack of blocks: a load you can move under and would not want to.
+const CARRY_FREE=22, CARRY_MAX=58;
+let _wtCache=0, _wtT=0;
+function carryLoad(){ return Math.max(0, Math.min(1, (_wtCache-CARRY_FREE)/(CARRY_MAX-CARRY_FREE))); }
+// What an overloaded walk costs at full overload before the pace multiplier — a shade under the sprint's 7.3, so being
+// crushed and walking is nearly as expensive as running light, which is what makes the threshold worth respecting.
+const WALK_STAM=6.0;
 function walkSpeed(){ const l=Math.max(0,Math.min(1,player.walkLvl!=null?player.walkLvl:0.5));
   return l<=0.5 ? WALK_SLOW+(WALK_MID-WALK_SLOW)*(l/0.5) : WALK_MID+(WALK_FAST-WALK_MID)*((l-0.5)/0.5); }
 // The stamina share of the current level: 0 at or below the midpoint, 1 at the top. One function so the drain and the
@@ -12314,6 +12359,13 @@ function walkPipsDraw(){
       s.style.cssText='width:12px;height:5px;border-radius:2px;background:rgba(255,255,255,0.16);'+
         'box-shadow:inset 0 0 0 1px rgba(0,0,0,0.5);';
       d.appendChild(s); }
+    // AND THE CARRIED WEIGHT BESIDE IT (Ben: "Show the carried weight in the HUD"). One row with the pace, because the
+    // two are one thing to the player: how fast he has chosen to move and how much he is moving. It goes RED past the
+    // threshold, which is the moment walking starts costing him wind — the colour is the only warning he needs.
+    const kg=document.createElement('div'); kg.id='walkkg';
+    kg.style.cssText='margin-left:8px;font:11px/1 ui-monospace,monospace;letter-spacing:.5px;'+
+      'color:rgba(220,232,238,0.8);text-shadow:0 1px 2px rgba(0,0,0,0.8);align-self:center;';
+    d.appendChild(kg);
     document.body.appendChild(d); _walkPips=d; }
   const l=player.walkLvl!=null?player.walkLvl:0.5, on=Math.round(l*6);
   for(let i=0;i<7;i++){
@@ -12321,8 +12373,20 @@ function walkPipsDraw(){
     const lit=i<=on, hot=i>3;
     _walkPips.children[i].style.background = lit ? (hot?'rgba(255,'+(190-40*(i-3))+',120,0.92)':'rgba(220,232,238,0.85)')
                                                 : 'rgba(255,255,255,0.16)'; }
+  const kg=_walkPips.querySelector('#walkkg');
+  if(kg){ const ld=carryLoad();
+    kg.textContent=_wtCache.toFixed(1)+'kg';
+    kg.style.color = ld>0 ? 'rgba(255,'+Math.round(150-70*ld)+','+Math.round(110-60*ld)+',0.95)' : 'rgba(220,232,238,0.8)'; }
   _walkPips.style.opacity='1'; }
-function walkPipsTick(dt){ if(!_walkPips) return;
+function walkPipsTick(dt){
+  // THE WEIGHT IS RECOMPUTED FOUR TIMES A SECOND, not per frame: it changes when a stack does, which is orders of
+  // magnitude rarer than a frame, and the drain reads the cache so the cost cannot lag the readout.
+  _wtT-=dt; if(_wtT<=0){ _wtT=0.25; const w=carriedWeight();
+    if(Math.abs(w-_wtCache)>0.005){ _wtCache=w; if(_walkPips) walkPipsDraw(); } else _wtCache=w; }
+  if(!_walkPips) return;
+  // IT STAYS UP WHILE HE IS OVERLOADED. A readout that hides itself is fine for a pace he just set and wrong for a
+  // condition that is costing him wind every step — if the bar is draining, the reason for it is on screen.
+  if(carryLoad()>0){ _walkPips.style.opacity='1'; return; }
   if(_walkHideT>0){ _walkHideT-=dt; if(_walkHideT<=0 && Math.abs((player.walkLvl!=null?player.walkLvl:0.5)-0.5)<0.001) _walkPips.style.opacity='0'; } }
 const player={ pos:new THREE.Vector3(), vel:new THREE.Vector3(), yaw:0, pitch:0,
   onGround:false, fly:false, sneak:false, sprint:false, inWater:false,
@@ -12679,11 +12743,20 @@ function physics(dt){
     let drain=0;
     if(p.sprint && mag>0) drain+=7.3;                                 // 1.5x slower than the first pass (Ben): ~14 s of flat-out sprinting from full
     if(p.inWater && mag>0) drain+=3.3;
-    // THE PACE DIAL COSTS WIND AT ITS FAST END (Ben: "which should variably affect stamina"). walkEffort is 0 at and
-    // below the neutral pace and 1 at the top, so a creep and an ordinary walk are free exactly as they have always been
-    // and only the half above 4.6 is paid for. Not while sprinting — that is its own gait with its own 7.3 — and not in
-    // water, which already has its own drain and its own multipliers on the speed.
-    if(!p.sprint && !p.inWater && !p.prone && mag>0) drain += WALK_STAM*walkEffort();
+    // ---- WALKING IS FREE UNTIL HE IS LOADED (Ben, replacing the pace's own cost) ----
+    // "walking, crouching, should not take stamina by default, and laying down and crawling should never take stamina,
+    // BUT ... if the player is heavy enough walking and crouch walking do take stamina."
+    //   So the WEIGHT is the gate and the pace is only a multiplier on it. carryLoad() is 0 at or under 22 kg, which is
+    // what makes an ordinary kit cost exactly nothing and keeps the default build identical to the one before any of this.
+    //   PRONE IS EXEMPT UNCONDITIONALLY, whatever the load — crawling is how you move when you cannot afford to be seen
+    // and it must never be the thing that empties the bar. It is tested first for that reason rather than folded into the
+    // condition, so no future term can accidentally reach it.
+    //   The pace multiplies rather than adds: walking fast while overloaded is worse than walking, and walking slowly
+    // while overloaded is still work. 1 + effort, so neutral pace at full overload costs WALK_STAM and the top of the
+    // dial doubles it.
+    //   Not while sprinting (its own gait, its own 7.3) and not in water (its own drain and its own speed multipliers).
+    if(!p.prone && !p.sprint && !p.inWater && mag>0){
+      const _ld=carryLoad(); if(_ld>0) drain += WALK_STAM*_ld*(1+walkEffort()); }
     // The rush burns wind at a fifth of the rate, which turns fourteen seconds of sprint into seventy — most of the stim's own
     // minute. A multiplier and not an exemption, because a stim that made stamina irrelevant would delete the bar for a minute
     // rather than make it feel like something.
