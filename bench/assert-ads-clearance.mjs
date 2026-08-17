@@ -64,22 +64,35 @@ const HIP_MARGIN=0.09, ADS_MARGIN=0.045;   // just under the 0.10 / 0.05 the cod
       const ads=await page.evaluate('__hc.adsClearance()');
       await page.evaluate('__hc.aim(false)'); await sleep(150);
       rows.push({g, reachedAds:ok, hip:hip.clearance, ads:ads.clearance, hipClip:hip.clipped, adsClip:ads.clipped, near:ads.near,
-                 armHip:hip.armClearance, armAds:ads.armClearance, rear:ads.rearName, rearArm:ads.rearIsArm});
+                 armHip:hip.armClearance, armAds:ads.armClearance, rear:ads.rearName, rearArm:ads.rearIsArm,
+                 scoped:!!ads.scoped, pull:+ads.scopePull||0});
     }
-    for(const r of rows) console.log('     '+r.g.padEnd(30)+'hip '+String(r.hip).padStart(8)+'   ads '+String(r.ads).padStart(8)+(r.adsClip||r.hipClip?'   CLIPPED':''));
+    // A SCOPED GUN'S AIMED FLOOR IS NEGATIVE, and that is Ben's ruling rather than a slipped standard: "all sniper
+    // scopes need moved closer to the viewport when ADS", so the guard band goes negative by ADS_SCOPE_PULL as the raise
+    // completes and the buttstock passes the camera, where it is behind the near plane and drawn by nobody. Until this
+    // was taught to the bench it asserted the rule that instruction REPLACED -- all four scoped rifles failed every run
+    // and the failure carried no information. The floor for them is the sanctioned pull: a scope that goes FURTHER than
+    // that is still a fault, and the hip state is exempt from nothing.
+    const adsFloor=r=> (r.scoped ? -(r.pull||0) - 0.01 : ADS_MARGIN);
+    for(const r of rows) console.log('     '+r.g.padEnd(30)+'hip '+String(r.hip).padStart(8)+'   ads '+String(r.ads).padStart(8)
+      +(r.scoped?('   scoped(floor '+adsFloor(r).toFixed(2)+')'):'')
+      +((r.hipClip || (r.adsClip && !r.scoped))?'   CLIPPED':''));
 
     check('every gun reached a full aim', rows.every(r=>r.reachedAds), rows.filter(r=>!r.reachedAds).map(r=>r.g).join(' ')||'all');
-    const clipped=rows.filter(r=>r.adsClip||r.hipClip);
-    check('NO gun is cut by the near plane, hip or aimed', clipped.length===0, clipped.map(r=>r.g).join(' ')||`${rows.length} variants clear`);
+    const clipped=rows.filter(r=>r.hipClip || (r.adsClip && !r.scoped));
+    check('NO gun is cut by the near plane, hip or aimed (a scoped rifle aimed is excepted)', clipped.length===0,
+      clipped.map(r=>r.g).join(' ')||`${rows.length} variants clear`);
     // The guard band, not merely "not clipped": a gun 1mm in front of the near plane is still a stock in your eye. Each
     // state against its own band — see the note at the top for why one number could not cover both.
-    const tight=rows.filter(r=>r.ads<ADS_MARGIN||r.hip<HIP_MARGIN);
-    check(`every gun keeps its band (hip ${HIP_MARGIN} / aimed ${ADS_MARGIN})`, tight.length===0,
+    const tight=rows.filter(r=>r.ads<adsFloor(r)||r.hip<HIP_MARGIN);
+    check(`every gun keeps its band (hip ${HIP_MARGIN} / aimed ${ADS_MARGIN}, a scope's aimed floor is its own pull)`, tight.length===0,
       tight.length?tight.map(r=>`${r.g} hip ${r.hip} ads ${r.ads}`).join('; ')
                   :`worst hip ${Math.min(...rows.map(r=>r.hip))}, worst ads ${Math.min(...rows.map(r=>r.ads))}`);
-    // The bolt rifle is named because it was the worst: camera-space z +0.08, the stock BEHIND the eye.
+    // The bolt rifle is still named because it was the worst case (camera-space z +0.08, the stock behind the eye) and a
+    // regression there must not hide among the others -- but it is scoped, so it is held to the pull, not to the margin.
     const bolt=rows.find(r=>r.g==='hunting_rifle');
-    check('the bolt rifle in particular no longer has its stock behind the eye', bolt && bolt.ads>=ADS_MARGIN, bolt?`ads clearance ${bolt.ads}`:'not found');
+    check('the bolt rifle in particular stays within its sanctioned pull', bolt && bolt.ads>=adsFloor(bolt),
+      bolt?`ads clearance ${bolt.ads}, floor ${adsFloor(bolt).toFixed(3)}`:'not found');
     // THE ARM IS REPORTED, NEVER ASSERTED. It is behind the lens on purpose, and a row here is information about the pose,
     // not a failure — but it is printed, because an arm that suddenly reaches 0.5 back means a hand rig has come loose.
     const arms=rows.filter(r=>r.armAds!=null&&r.armAds<-0.45);
