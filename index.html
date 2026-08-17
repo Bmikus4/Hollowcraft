@@ -12275,11 +12275,27 @@ function _abandonStaged(){ if(_stagedG){ _stagedG.traverse(o=>{ if(o.isMesh){ o.
 // around surfaceH rather than the whole 256-high shaft: 1,792 array reads for a chunk, against the light bake and the
 // greedy mesh that are about to run on it. The deep sweep at generation stays, because it is the one that catches the
 // column pass's own output before anything is drawn from it.
+// htop IS NOT THE GROUND UNDER A TREE. It is built from occludesSky, so in a wood it is the top of the canopy —
+// ten blocks and more above the dirt — and a window of three cells around it swept nothing but leaves. That is why
+// 418 blocks survived every sweep in the file and why every one of them stood under a tuft, a bush or a canopy: the
+// pass that was meant to be the backstop was reading the wrong band of the column. It now walks DOWN from htop to
+// the first solid block that is not a trunk — the real surface — and sweeps three cells below that. A treeless
+// column stops on its first read, so the open ground this was costed for pays exactly what it paid before; a treed
+// one pays the height of its tree, capped, once per chunk build.
 function _surfaceGrassSweep(c){
   const bl=c.blocks; let n=0;
   for(let lz=0;lz<CK;lz++) for(let lx=0;lx<CK;lx++){
     const h=c.htop?c.htop[lx+lz*CK]:0; if(!h) continue;
-    const y0=Math.max(1,h-3), y1=Math.min(WH-2,h+3);
+    let g=Math.min(WH-2,h);
+    // htop CAN ALSO BE TOO LOW. It is rebuilt for the chunks a bulk build touched and not for every late single write,
+    // so a column raised after its last rebuild reports a top BELOW its own surface — measured: htop 66 under grass at
+    // 68 and 69. Climbing any solid run above it costs one read on a column whose htop is honest, which is all of them.
+    while(g<WH-2 && isSolid[bl[idx(lx,g+1,lz)]]) g++;
+    const lim=Math.max(1,g-40);                                  // 40: taller than any tree the generator plants, and a bound rather than a walk to bedrock
+    // A TRUNK AND A CANOPY ARE NOT THE GROUND. Logs are obvious; leaves_core is the one that hides, because it is
+    // OPAQUE and therefore solid, so a walk that only skipped logs stopped dead on the canopy of a mature oak.
+    while(g>lim){ const b=bl[idx(lx,g,lz)]; if(isSolid[b] && !isLogId(b) && !isLeafId(b)) break; g--; }
+    const y0=Math.max(1,g-3), y1=Math.min(WH-2,g+1);
     for(let y=y0;y<=y1;y++){
       if(bl[idx(lx,y,lz)]!==BID.grass) continue;
       const up=bl[idx(lx,y+1,lz)];
@@ -12288,6 +12304,24 @@ function _surfaceGrassSweep(c){
       bl[idx(lx,y,lz)]=BID.dirt; n++; } }
   if(n) _buriedGrass+=n;
   return n;
+}
+// A SWEEP AT BUILD TIME CANNOT SEE A WRITE THAT COMES AFTER IT. Every remaining buried block was written into a chunk
+// that had already been generated, swept and meshed — the structure builders, the trail and mound caps and the tree
+// bands all run on their own schedule, long after the chunk they land in was finished — and re-meshing does not clear
+// them, measured: 305 before a full remesh and 305 after. So the sweep also runs FOREVER, one chunk a frame, exactly
+// the way the bullet holes re-check their block: a fixed slice per frame, so the cost is the same with four hundred
+// chunks loaded as with four. It is the only shape that cannot be outrun by a writer that does not exist yet.
+//   IT MUST MARK A REMESH. At generation the sweep runs before the first mesh and is free; here the chunk is already
+// drawn, so a demoted block keeps its grass top until the mesh is rebuilt.
+//   OVER A SNAPSHOT, NOT OVER THE LIVE MAP. Streaming adds and drops chunks constantly, so an index taken modulo a
+// changing size walks a moving list and skips: it left 5 columns that no pass ever visited. The list is taken once
+// and walked to the end, then taken again — every chunk that existed when the round began is visited exactly once.
+let _grassRollI=0, _grassRollL=null;
+function _rollingGrassSweep(){
+  if(!_grassRollL || _grassRollI>=_grassRollL.length){ _grassRollL=Array.from(world.values()); _grassRollI=0; if(!_grassRollL.length){ _grassRollL=null; return; } }
+  const c=_grassRollL[_grassRollI++];
+  if(!c || !c.generated || !c.blocks || !world.has(key(c.cx,c.cz))) return;   // dropped by streaming since the list was taken
+  if(_surfaceGrassSweep(c)) markRemesh(c.cx,c.cz);
 }
 function buildChunkStaged(c){
   if(c && c.generated && c.blocks) _surfaceGrassSweep(c);
@@ -27605,6 +27639,20 @@ function handFootfall(power){ power=power||1;
   _hand.vy -= HAND_KICK*power;                                    // the body drops onto the planted foot: hands go DOWN first
   _hand.vx += (_hand.left?1:-1)*HAND_KICK*0.55*power;             // and rock to the side of the foot that landed
   _hand.left=!_hand.left; }
+// ---- THE ADDITIVE POSE STACK WAS BUILT AND BACKED OUT, 2026-08-17. READ THIS BEFORE BUILDING IT AGAIN ----
+// Ben's ask stands: "one additive pose stack, every feature a layer, nothing writing bones directly ... dials for
+// Ben". The mechanism is easy -- a POSE.add(layer, dx,dy,dz, rx,ry,rz) that applies the offset and records who
+// applied it -- and I had five of the post-passes (bipod, sprint, swap, attach, eat) migrated onto it, with a ledger
+// and a per-layer gain that demonstrably switched one layer off on its own.
+// IT WAS NOT BEHAVIOUR-NEUTRAL AND I COULD NOT ACCOUNT FOR WHY. assert-hand-motion's "aimed amplitude is a fraction
+// of hip" went from 19/19 to 18/19 with the stack applying, and the hip figure it measures collapsed from 0.0110 to
+// 0.0000 -- and back to 19/19 the moment the stack stopped applying. Each migrated call passes the same numbers in
+// the same order at the same point in the function, so the difference is something about the ORDER or the number of
+// times these offsets land that reading the code did not reveal. A viewmodel regression is the last thing to ship
+// unexplained, so the five sites are inline again exactly as they were.
+// WHAT THE NEXT ATTEMPT SHOULD DO FIRST: make POSE record WITHOUT applying, run assert-hand-motion, and confirm the
+// ledger's per-layer totals equal the offsets the inline lines produce, frame for frame. If they match and the bench
+// still moves, the fault is in how often updateView runs -- the probes call it directly, and so does the reload path.
 function handMotion(dt){
   dt=Math.min(dt,0.05);                                           // a long frame integrates the spring into a spasm
   _hand.t+=dt;
@@ -38812,6 +38860,7 @@ function updateBlockFx(dt){
   // cost is constant no matter how many are live. At 8 a frame a hundred holes are all re-checked inside a fifth of a
   // second, which is faster than a player can look back at the wall they just broke.
   _decalSweep(dt);
+  _rollingGrassSweep();   // one chunk a frame: no grass under a roof, however late the roof arrives
   if(!chestLid||!chestLidAnim.active)return; chestLidAnim.t+=dt*3.4*chestLidAnim.dir; const t=clamp(chestLidAnim.t,0,1); const e=t*t*(3-2*t); chestLid.rotation.x=-1.35*e;
   if(chestLidAnim.dir<0&&t<=0){ chestLid.visible=false; chestLidAnim.active=false; _lidRestore(); } if(chestLidAnim.dir>0&&t>=1) chestLidAnim.active=false; }
 let sfxCreak=null;
@@ -42513,16 +42562,21 @@ window.__hc={
       return { lean:player._lean, shown:player._leanShown }; }catch(e){ return {err:String(e.message||e)}; } },
   // Grass demoted to dirt because something sits on it, since boot, plus a live count of any that is still buried in
   // the loaded world — the second number is what says the sweep is complete rather than merely running.
-  buriedGrass(){ try{ let live=0, scanned=0; const _bgCover={};
+  buriedGrass(){ try{ let live=0, scanned=0; const _bgCover={}, _bgWhere=[];
       for(const [,c] of world){ if(!c||!c.generated) continue; const bl=c.blocks;
         for(let lz=0;lz<CK;lz++) for(let lx=0;lx<CK;lx++) for(let y=1;y<WH-1;y++){
           const v=bl[idx(lx,y,lz)]; if(v!==BID.grass) continue; scanned++;
           const up=bl[idx(lx,y+1,lz)];
           if(up!==AIR && (up===WATER || isSolid[up])){ live++;
-            const nm=(up===WATER)?'water':(B[up]?B[up].name:('id'+up)); _bgCover[nm]=(_bgCover[nm]|0)+1; } } }
+            const nm=(up===WATER)?'water':(B[up]?B[up].name:('id'+up)); _bgCover[nm]=(_bgCover[nm]|0)+1;
+            // AND WHERE. A count says a rule is leaking; the column says WHICH writer laid it — a cap over a cap
+            // reads differently from a trunk on a slope, and one of those is worth chasing and the other is not.
+            if(_bgWhere.length<8){ const col=[];
+              for(let yy=Math.max(1,y-2); yy<=Math.min(WH-1,y+4); yy++){ const b=bl[idx(lx,yy,lz)]; col.push(yy+':'+(b===AIR?'air':(b===WATER?'water':(B[b]?B[b].name:('id'+b))))); }
+              _bgWhere.push({x:c.cx*CK+lx, z:c.cz*CK+lz, y, htop:c.htop?c.htop[lx+lz*CK]:-1, col:col.join(' ')}); } } } }
       // WHAT IS SITTING ON THEM. 841 is a number to chase; "841, and 700 of them are under logs" names the writer.
       const by={}; for(const k in _bgCover) by[k]=_bgCover[k];
-      return { demoted:_buriedGrass, stillBuried:live, grassBlocks:scanned, coveredBy:by }; }
+      return { demoted:_buriedGrass, stillBuried:live, grassBlocks:scanned, coveredBy:by, samples:_bgWhere }; }
     catch(e){ return {err:String(e.message||e)}; } },
   // DO TWO ADJACENT ROOF TILES SHARE A VOLUME? Measured off the real geometry rather than from the numbers in the
   // source, so it cannot drift from what is drawn. Neighbours up a slope sit at (y+1,z+1), so the spacing between them
