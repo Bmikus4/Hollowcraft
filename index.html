@@ -16990,7 +16990,12 @@ function updateCamera(dt){
   // out the far side of it. Three getBlock calls a frame.
   //   NOT WHILE PRONE OR HELD. Prone already owns the body's roll and the grab owns everything.
   let wantLean=(keys.KeyQ?-1:0)+(keys.KeyE?1:0);
-  if(p.prone||player.grabbed||player.tied||player.dead) wantLean=0;
+  // PRONE LEANS TOO (Ben: "i cant lean while laying down"). The kill listed prone with the grab and the death, on the
+  // grounds that "prone already owns the body's roll" — but lying down is exactly the posture you lean out of, because
+  // it is the one you shoot from behind cover in. The roll they share is not a conflict: prone rotates the body about
+  // its own RIGHT axis (pitch, YXZ order) and the lean rotates the torso about z, so the two compose instead of
+  // fighting. The grab and the death stay: those own the whole body and nothing else may pose it.
+  if(player.grabbed||player.tied||player.dead) wantLean=0;
   p._lean=(p._lean||0)+(wantLean-(p._lean||0))*Math.min(1,dt*9);
   if(Math.abs(p._lean)<0.002) p._lean=0;
   let leanF=0;
@@ -17175,10 +17180,23 @@ function updateTpsBody(dt){
   // at 11 degrees over half a block it reads as one, and the alternative is a rig change.
   //   `_leanShown` and not `_lean`: it is what the wall ALLOWED, so a body pressed against cover does not lean
   // through it while the camera correctly refuses to.
+  // ---- THE TORSO LEANS AND THE HIPS DO NOT, AND IT GOES THE WAY THE KEY SAYS ----
+  // Two faults, both here (Ben: "leaning in 3rd person leans my whole body ... and the wrong way").
+  //   IT WAS THE WHOLE BODY because the roll and the offset were applied to P.group, which is the person including their
+  // feet — so leaning read as a felled tree, and the note above it admitted as much ("a plank from the ankles is not how
+  // a person leans ... the alternative is a rig change"). That rig change is now made: buildPlayerModel hinges everything
+  // above the waist on its own node, so this poses the torso and the legs stay planted.
+  //   IT WAS BACKWARDS because of the model's own yaw. The group is turned by bodyYaw + PI, so the model's local +x maps
+  // to world -x. Rz(θ) sends a point at +y toward -x, which is world +right — so leaning right wants a POSITIVE local z
+  // rotation and the sign here was negative. The camera's own roll is unaffected and stays as it was: it is in camera
+  // space, where there is no extra half turn.
+  //   AND THE SIDEWAYS TRAVEL IS LOCAL TOO. Shifting the group in world space needed the yaw resolved into x and z by
+  // hand, which is a second place for that half turn to be got wrong; the torso's own -x is world +right by the same
+  // rule as the roll, so one sign governs both and they cannot disagree.
   { const ln=player._leanShown||0;
-    P.group.rotation.z=-LEAN_ROLL*ln;
-    const rx=Math.cos(player.yaw)*LEAN_X*ln*0.55, rz=-Math.sin(player.yaw)*LEAN_X*ln*0.55;   // half the eye's travel: the feet stay put
-    P.group.position.set(player.pos.x+rx, player.pos.y, player.pos.z+rz); }
+    P.group.rotation.z=0;
+    if(P.torso){ P.torso.rotation.z=LEAN_ROLL*ln; P.torso.position.x=-LEAN_X*ln*0.55; }
+    P.group.position.set(player.pos.x, player.pos.y, player.pos.z); }
   // THE BODY HAS WEIGHT AND THE HEAD DOES NOT (Ben 08-04: "head should swivel on look in 3rd person, and turning should take some
   // more time/slightly more emphasized weight system"). A body welded to the mouse spins on the spot like a turret. So the torso
   // EASES toward where you are looking and the head takes up the difference immediately — which is exactly how a person looks
@@ -17227,8 +17245,18 @@ function updateTpsBody(dt){
   if(player.landT>0){ const k=Math.sin(Math.min(1,player.landT/0.34)*Math.PI)*0.5; P.legL.rotation.x+=k; P.legR.rotation.x+=k; }
   // THE CROUCH POSE, applied after the walk cycle for the same reason the knee-give is: the cycle ASSIGNS these angles, so
   // anything added before it is simply overwritten. Thighs fold forward, arms tuck in, and the gait shortens with them.
-  if(_cT>0.001){ P.legL.rotation.x=P.legL.rotation.x*0.55+0.78*_cT; P.legR.rotation.x=P.legR.rotation.x*0.55+0.78*_cT;
+  // ---- A CROUCH FOLDS AT THE KNEE (Ben: "crouching bends the entire legs still") ----
+  // The rig gained a knee and this pose did not use it, so the leg still hinged as one limb from the hip. It also went
+  // the wrong way: negative rotation.x sends a limb's far end toward the model's +z, which is the player's forward (the
+  // prone pose's arms are at -1.15 and its comment says "arms forward along the ground"), so +0.78 was swinging the
+  // knees BACKWARD while the comment beside it said the thighs fold forward.
+  // A squat is thigh forward, shin back under the hips, and the height drop is what is left over — which is why the sink
+  // above is unchanged. The knee's angle is close to twice the thigh's, as a real one is: the shin has to come back past
+  // vertical to put the foot under the body it is now carrying in front of the hip.
+  if(_cT>0.001){ P.legL.rotation.x=P.legL.rotation.x*0.55-0.85*_cT; P.legR.rotation.x=P.legR.rotation.x*0.55-0.85*_cT;
+    if(P.kneeL) P.kneeL.rotation.x=1.55*_cT; if(P.kneeR) P.kneeR.rotation.x=1.55*_cT;
     P.armL.rotation.x=P.armL.rotation.x*0.6-0.42*_cT; P.armR.rotation.x=P.armR.rotation.x*0.6-0.42*_cT; }
+  else if(P.kneeL){ P.kneeL.rotation.x=0; P.kneeR.rotation.x=0; }
   // YOUR OWN BODY EATING, after the walk cycle for the same reason everything else here is: the cycle ASSIGNS these
   // angles, so a pose added before it is simply overwritten. Identical numbers to the peer path — one animation for
   // every food means one animation on every rig, and if these two ever drift the bug is that a meal looks different
@@ -17500,7 +17528,7 @@ function netMsg(m){
   else if(m.t==='time'){ if(!NET.host){ if(m.tm!=null)worldTime=m.tm; if(typeof weather!=='undefined'){ if(m.rt!=null)weather.rainTgt=m.rt; if(m.ft!=null)weather.fogTgt=m.ft; } } }   // host clock (1Hz) + weather targets → guests lerp toward them
 
   else if(m.t==='peerLeave'){ removeAvatar(m.id); delete NET.peers[m.id]; if(wretch.owner===m.id) wretch.owner=NET.hostId; }
-  else if(m.t==='p'){ NET.peers[m.id]=m; ensureAvatar(m.id); const a=NET.avatars[m.id]; if(a){ a.tx=m.x; a.ty=m.y; a.tz=m.z; a.tyaw=m.yaw||0; a.tpitch=m.pitch||0; a.tied=!!m.tied; a.dead=!!m.dead; a.po=m.po|0; a.ea=+m.ea||0; a.sw=+m.sw||0; if(a.pack) a.pack.visible=!!m.pk;
+  else if(m.t==='p'){ NET.peers[m.id]=m; ensureAvatar(m.id); const a=NET.avatars[m.id]; if(a){ a.tx=m.x; a.ty=m.y; a.tz=m.z; a.tyaw=m.yaw||0; a.tpitch=m.pitch||0; a.tied=!!m.tied; a.dead=!!m.dead; a.po=m.po|0; a.ea=+m.ea||0; a.sw=+m.sw||0; a.tln=+m.ln||0; if(a.pack) a.pack.visible=!!m.pk;
     if(m.nm!==a.nm){ a.nm=m.nm; if(a.tag)a.g.remove(a.tag); a.tag=nameTag(m.nm); a.g.add(a.tag); }                          // nametag (server-set text, rendered locally)
     if(m.held!==a.held || (m.at||null)!==(a.at||null)){ a.held=m.held; a.at=m.at||null; setAvatarHeld(a,m.held,a.at); }   // held item shown in their hand, wearing whatever is fitted to it
     if((m.ch||null)!==(a.ch||null)) setAvatarChest(a,m.ch||null); } }                                                     // …and the chestplate on their body
@@ -17684,13 +17712,17 @@ function netUpdate(dt){ if(!NET.on)return;
       // invisible to everyone but its owner — a rifle with a scope on it looked bare in a teammate's hands. Sent
       // as a short string ('optic:red_dot|muzzle:suppressor') rather than an object because it also has to be
       // COMPARABLE for the send-on-change test below, and comparing objects there would send every frame.
-      at=(typeof attStr==='function')?attStr(s):null;
-    const moved = px!==NET._lx||py!==NET._ly||pz!==NET._lz||yaw!==NET._lyaw||pit!==NET._lpit||held!==NET._lheld||at!==NET._lat||tied!==NET._ltied||dead!==NET._ldead||po!==NET._lpo||pk!==NET._lpk||ch!==NET._lch;   // pk and ch in the CHANGE test, not just the payload: without it, putting the pack or the cuirass on only reaches peers on the next 0.5s heartbeat
-    if(moved || (NET._hb=(NET._hb|0)+1)>=10){ NET._hb=0; NET._lx=px;NET._ly=py;NET._lz=pz;NET._lyaw=yaw;NET._lpit=pit;NET._lheld=held;NET._lat=at;NET._ltied=tied;NET._ldead=dead;NET._lpo=po;NET._lpk=pk;NET._lch=ch;
+      at=(typeof attStr==='function')?attStr(s):null,
+      // `ln` = how far this player is leaning, -1 to 1, 0 when upright. _leanShown and not _lean: it is what the
+      // wall ALLOWED, so a peer pressed against cover does not lean through it on your screen while their own
+      // camera correctly refuses to.
+      ln=+((player._leanShown||0).toFixed(2));
+    const moved = px!==NET._lx||py!==NET._ly||pz!==NET._lz||yaw!==NET._lyaw||pit!==NET._lpit||held!==NET._lheld||at!==NET._lat||tied!==NET._ltied||dead!==NET._ldead||po!==NET._lpo||pk!==NET._lpk||ch!==NET._lch||ln!==NET._lln;   // ln here too: a peek is over before the next heartbeat   // pk and ch in the CHANGE test, not just the payload: without it, putting the pack or the cuirass on only reaches peers on the next 0.5s heartbeat
+    if(moved || (NET._hb=(NET._hb|0)+1)>=10){ NET._hb=0; NET._lx=px;NET._ly=py;NET._lz=pz;NET._lyaw=yaw;NET._lpit=pit;NET._lheld=held;NET._lat=at;NET._ltied=tied;NET._ldead=dead;NET._lpo=po;NET._lpk=pk;NET._lch=ch;NET._lln=ln;
       // `ea` = how far through a meal this player is, 0 when not eating. A FIELD ON THE EXISTING PLAYER PACKET
       // rather than a new message type: 'p' is already in ALLOWED and already sent every tick, so a peer's meal
       // costs one number and cannot be the next message that vanishes with both ends reporting success.
-      netSend({t:'p',x:px,y:py,z:pz,yaw,pitch:pit,held,at,nm:playerName,tied,dead,po,pk,ch,
+      netSend({t:'p',x:px,y:py,z:pz,yaw,pitch:pit,held,at,nm:playerName,tied,dead,po,pk,ch,ln,
                ea:(typeof EAT!=='undefined'&&EAT.active)?+Math.min(1,EAT.t/Math.max(0.001,EAT.dur)).toFixed(2):0,
                // `sw` = the swim phase, 0 when not swimming. The PHASE and not a pose, and not a stroke rate either:
                // the receiver re-solves the limbs from it, so the wire cost of a swimming peer is one number.
@@ -17709,9 +17741,13 @@ function netUpdate(dt){ if(!NET.on)return;
     a.crouchT=(a.crouchT||0)+(((a.po===1)?1:0)-(a.crouchT||0))*Math.min(1,dt*9);
     a.proneT=(a.proneT||0)+(((a.po===2)?1:0)-(a.proneT||0))*Math.min(1,dt*7);
     avatarBipod(a, a.proneT);   // a peer's rifle unfolds its legs as they go down — same driver as your own body, so one gun looks like one gun on both screens
+    // The same fold as your own body, same numbers — a peer crouching must look like you crouching, and the way these
+    // two drift is by being tuned separately.
     if(a.crouchT>0.001){ a.g.position.y-=0.15*a.crouchT;
-      a.legL.rotation.x=a.legL.rotation.x*0.55+0.78*a.crouchT; a.legR.rotation.x=a.legR.rotation.x*0.55+0.78*a.crouchT;
+      a.legL.rotation.x=a.legL.rotation.x*0.55-0.85*a.crouchT; a.legR.rotation.x=a.legR.rotation.x*0.55-0.85*a.crouchT;
+      if(a.kneeL){ a.kneeL.rotation.x=1.55*a.crouchT; a.kneeR.rotation.x=1.55*a.crouchT; }
       a.armL.rotation.x=a.armL.rotation.x*0.6-0.42*a.crouchT; a.armR.rotation.x=a.armR.rotation.x*0.6-0.42*a.crouchT; }
+    else if(a.kneeL){ a.kneeL.rotation.x=0; a.kneeR.rotation.x=0; }
     if(a.proneT>0.001){ const _k=1-a.proneT;
       if(a.g.rotation.order!=='YXZ') a.g.rotation.order='YXZ';
       a.g.rotation.x=(Math.PI/2)*a.proneT; a.g.position.y+=0.16*a.proneT;
@@ -17719,6 +17755,18 @@ function netUpdate(dt){ if(!NET.on)return;
       a.armL.rotation.x=a.armL.rotation.x*_k-1.15*a.proneT; a.armR.rotation.x=a.armR.rotation.x*_k-1.15*a.proneT;
       }
     else if(a.g.rotation.x) a.g.rotation.x=0;
+    // A PEER LEANING. Same shape and the same numbers as your own third-person body (updateTpsBody): a roll about the
+    // FEET plus half the eye's lateral travel, because this rig has no torso pivot either. Eased at 9/s to match the
+    // local ramp, so a peek looks the same length on both screens rather than arriving in one packet-sized step.
+    //   IT CANNOT FIGHT PRONE. The local lean is forced to zero while prone, so `ln` is already 0 whenever proneT is
+    // climbing; the rotation.x above and this rotation.z never both matter, and the YXZ order the prone branch sets is
+    // the order a roll about the body's own forward axis wants anyway.
+    a.lnT=(a.lnT||0)+(((a.tln||0))-(a.lnT||0))*Math.min(1,dt*9);
+    if(Math.abs(a.lnT)>0.002){
+      a.g.rotation.z=-LEAN_ROLL*a.lnT;
+      a.g.position.x+=Math.cos(a.tyaw)*LEAN_X*a.lnT*0.55;
+      a.g.position.z+=-Math.sin(a.tyaw)*LEAN_X*a.lnT*0.55;
+    } else if(a.g.rotation.z) a.g.rotation.z=0;
     // A PEER SWIMMING. Same shape as the eating pose and for the same reason: the wire carries a PHASE and the pose
     // is re-solved on the receiver's own rig, which is the giantess pattern and the only one that survives two
     // avatars that are not the same size. The numbers are the ones the local body uses, deliberately duplicated —
@@ -21808,7 +21856,7 @@ function buildPlayerModel(){ const g=new THREE.Group();
   // anchored, and takes the hem down to 0.90 — 0.12 below the top of the trousers, so it covers the waistband.
   // AND IT IS PROUD OF THEM, 0.25 deep against the trousers' 0.24 and already wider at 0.42 against 0.40. Cloth over
   // cloth at the same dimensions is coplanar in the overlap and z-fights; a hem has to sit outside what it covers.
-  mk(0.42,0.72,0.25,shirt,0,1.26,0);                                         // tunic (textured), hem over the waistband
+  const tunicM=mk(0.42,0.72,0.25,shirt,0,1.26,0);                            // tunic (textured), hem over the waistband
   mk(0.40,0.14,0.24,pants,0,0.95,0);                                         // waist/hips
   // THE FOUR LIMBS HANG FROM PIVOTS (Ben 08-04: third person has to show the player, and a mannequin sliding about is not a
   // player). Shoulder at 1.58, hip at 0.94, every mesh offset so its REST pose is voxel-for-voxel where it was when these were
@@ -21937,13 +21985,20 @@ function buildPlayerModel(){ const g=new THREE.Group();
             hzHead ]};   // the hood lives on the HEAD pivot, so it has to be listed here or taking the suit off would leave it floating
   hazmat.visible=false; g.add(hazmat);
   for(const grp of [helm,chest,legs,boots,hazmat]) _wornVis(grp,false);
+  // ---- THE UPPER BODY IS ITS OWN NODE, HINGED AT THE WAIST (Ben: "leaning in 3rd person leans my whole body") ----
+  // A lean was applied to the model group, which is the whole person including the feet, so the body tipped like a
+  // felled tree. Leaning out of cover is a spine: the hips and legs stay planted and everything above the waist goes
+  // over. There was no node for "everything above the waist" — the tunic, the shoulder pivots, the head group, the
+  // chest armour and the pack are all direct children of g — so one is made and they are moved into it.
+  // attach(), not add(): it preserves the world transform, so every part keeps the absolute build height it was authored
+  // at and the inventory paperdoll — which never rotates anything — is bit-identical. Nothing here needs re-measuring.
+  // AT 0.94, THE HIP, which is where the leg pivots are: a lean that hinges at the hip and legs that hinge at the same
+  // point cannot separate, and the tunic's hem already overlaps the waistband so the seam is covered as it turns.
+  const torso=new THREE.Group(); torso.position.set(0,0.94,0); g.add(torso);
+  for(const o of [tunicM, armL, armR, headG, chest, packG, hazmat]) if(o&&o.parent===g) torso.attach(o);
   return {group:g, armorMesh:[helm,chest,legs,boots], strawHat:straw, hazmat, pack:packG,
           armL, armR, legL, legR, kneeL, kneeR, hand, handOff, head:headG, hzHead, heldMesh:null, offMesh:null, gait:0, bodyYaw:null,
-          // THE TORSO IS ITS OWN NODE so a lean can turn it without the legs (Ben: "leaning in 3rd person leans my whole
-          // body"). Everything above the hips already hangs off either the tunic, the shoulder pivots or the head group,
-          // all of which are children of g — so the lean is applied to the two shoulder pivots and the head together
-          // rather than to g, and `torso` names that set for the one caller that needs it.
-          torso:[armL,armR,headG]}; }
+          torso}; }
 // A worn piece is its group PLUS the parts of it that had to be parented to a swinging limb. One helper so visibility and
 // tinting cannot end up disagreeing about which of those two lists they act on.
 function _wornVis(grp,on){ if(!grp) return; grp.visible=on; const ex=grp.userData&&grp.userData.extra; if(ex) for(const o of ex) o.visible=on; }
@@ -45732,14 +45787,18 @@ window.__hc={
                    target:[+a.tx.toFixed(2),+a.ty.toFixed(2),+a.tz.toFixed(2)] }; }) }; }catch(e){ return {err:String(e.message||e)}; } },
   // Pose the fake peer's limbs. A hip seam only opens when the leg rotates, so a standing avatar photographs a garment
   // that is fine and proves nothing about the frame Ben is complaining about.
-  peerPose(leg,arm,held,prone){ try{ const a=NET.avatars&&NET.avatars['bench']; if(!a) return {err:'no bench peer'};
+  peerPose(leg,arm,held,prone,lean){ try{ const a=NET.avatars&&NET.avatars['bench']; if(!a) return {err:'no bench peer'};
       const L=+leg||0, A=+arm||0;
       a.legL.rotation.x=L; a.legR.rotation.x=-L; a.armL.rotation.x=-A; a.armR.rotation.x=A;
       // A PEER'S RIFLE AND POSTURE. `po` is what the packet carries and what the eased proneT is derived from, so
       // setting it is the same path a real peer takes -- avatarBipod then folds or deploys the legs on its own.
       if(held!==undefined){ setAvatarHeld(a, held||null); a.held=held||null; }
       if(prone!==undefined){ a.po=prone?2:0; a.proneT=prone?1:0; avatarBipod(a, a.proneT); }
+      // `lean` drives the SAME field the packet carries, so what is set here is what a real peer's wire value does.
+      if(lean!==undefined){ a.tln=+lean||0; a.lnT=+lean||0; }
       return { leg:L, arm:A, held:a.held||null, po:a.po|0, proneT:+(a.proneT||0).toFixed(2),
+               tln:+(a.tln||0).toFixed(2), lnT:+(a.lnT||0).toFixed(2),
+               rollZ:+a.g.rotation.z.toFixed(4), atX:+a.g.position.x.toFixed(3),
                bipod:a._bipod?+(a._bipod.rotation.x*57.2958).toFixed(2):null }; }
     catch(e){ return {err:String(e.message||e)}; } },
   fakePeer(pk,dist,tint){ try{ if(typeof ensureAvatar!=='function') return {err:'no avatars'};
