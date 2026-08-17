@@ -39,10 +39,13 @@ const PIECES=['leather_helmet','leather_chestplate','leather_leggings','leather_
     await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:300000});
     await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:420000});
     // The third-person body has to EXIST before its overlays can be measured — armorProbe reads _tpsBody.
-    await page.evaluate(`__hc.lock(true); __hc.cmdRun('/gamemode creative'); __hc.tps&&__hc.tps(true);`).catch(()=>{});
+    // __hc.tps DOES NOT EXIST, and never did: the hook that turns third person on is tpsProbe. Every run of this
+    // bench since it was written has failed on 'no body built' at the first check and photographed nothing, which is
+    // why the armour it exists to measure has never been measured.
+    await page.evaluate(`__hc.lock(true); __hc.cmdRun('/gamemode creative'); __hc.tpsProbe&&__hc.tpsProbe(true);`).catch(()=>{});
     await sleep(1200);
     let P0=await page.evaluate(`__hc.armorProbe()`);
-    if(P0.err){ await page.evaluate(`__hc.cmdRun('/tps on')`).catch(()=>{}); await sleep(900); P0=await page.evaluate(`__hc.armorProbe()`); }
+    if(P0.err){ await page.evaluate(`__hc.tpsProbe&&__hc.tpsProbe(true)`).catch(()=>{}); await sleep(900); P0=await page.evaluate(`__hc.armorProbe()`); }
     check('the third-person body exists to measure armour on', !P0.err, P0.err||'ok');
     if(P0.err) throw new Error(P0.err);
 
