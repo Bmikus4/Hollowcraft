@@ -165,7 +165,15 @@ export function humanBuild(url, heightBlocks){
 export function humanProbe(url){
   const t = TPL.get(url);
   if (!t) return { loaded: false };
+  // PER PART, and not only per material. A primitive with no material at all gets the white fallback, which is a white
+  // object standing in the world — and from a distance a white object is indistinguishable from a cloud, which is exactly
+  // how the first frames read. The per-part box says WHERE each one landed, which is what catches a mesh whose transform
+  // did not come with it.
+  const box = new THREE.Box3(), v = new THREE.Vector3();
   return { loaded: true, parts: t.parts.length, tris: Math.round(t.tris),
+           partList: t.parts.map(p => { p.geo.computeBoundingBox(); const b = p.geo.boundingBox; b.getCenter(v);
+             return { node: p.node, mat: p.matIdx, tris: Math.round((p.geo.index ? p.geo.index.count : p.geo.getAttribute('position').count)/3),
+                      at: [+v.x.toFixed(2), +v.y.toFixed(2), +v.z.toFixed(2)] }; }),
            materials: t.mats.map(m => ({ name: m.name, map: !!m.mat.map, alphaTest: m.mat.alphaTest || 0 })),
            size: [ +t.size.x.toFixed(3), +t.size.y.toFixed(3), +t.size.z.toFixed(3) ],
            minY: +t.box.min.y.toFixed(3) };
