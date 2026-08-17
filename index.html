@@ -23225,6 +23225,23 @@ function _dropStep(d,dt){
     _de.x=Math.round(_de.x/q)*q; _de.z=Math.round(_de.z/q)*q;
     d.quat.setFromEuler(_de);
     _dm.makeRotationFromQuaternion(d.quat);
+    // IT MUST NOT COME TO REST ON ITS BARREL (Ben: "dropped items land on their barrels"). Standing upright IS a
+    // multiple of ninety degrees, so the snap above is free to choose it — and it chooses it whenever the tumble
+    // happened to leave the object near-vertical, which for a rifle is most of the time it lands nose-first. A long
+    // thin body balanced on its end is not a resting state: the support polygon under it is a few centimetres across
+    // and the real object would fall over.
+    //   THE TEST IS THE BODY'S OWN PROPORTIONS, not an item list. If the local axis now pointing up is the LONGEST
+    // one and it is more than 1.6x the shortest, the lie is unstable, and a quarter turn about world X or Z lays it
+    // down. Which of the two is chosen keeps the object's facing: turning about the axis it is already longest along
+    // in world terms leaves the yaw alone.
+    { const e=_dm.elements, h=d.half;
+      const upx=Math.abs(e[1]), upy=Math.abs(e[5]), upz=Math.abs(e[9]);   // which LOCAL axis is closest to world up
+      const li=(upx>=upy&&upx>=upz)?0:(upy>=upz?1:2);
+      const L=[h.x,h.y,h.z], up=L[li], lo=Math.min(L[0],L[1],L[2]);
+      if(up===Math.max(L[0],L[1],L[2]) && up>lo*1.6){
+        _dq.setFromAxisAngle(_dtmp.set(1,0,0), q);
+        d.quat.premultiply(_dq).normalize();
+        _dm.makeRotationFromQuaternion(d.quat); } }
     d.y=surf+_dropExt(d,1);                                // re-seat: the snapped lie has a different height
     d.rest=true; d.vx=d.vy=d.vz=0; d.av.set(0,0,0);
     if(typeof _dropRested==='function') _dropRested(d); }
@@ -25267,8 +25284,16 @@ function buildGlbGun(key,dot,suppressed,att){
     if(sl==='optic'){ UD.opticTop=a.position.y+(a.userData.attH||0);
       // THE OPTICAL AXIS MOVES TO THE OPTIC. dotY is what the aimed pose lifts the gun by, so leaving it on the iron
       // sight line would aim a rifle wearing a red dot as though the dot were not there — the window would sit above
-      // the eye. 0.62 of the body's height is the middle of the window on all three optics.
-      UD.dotY=a.position.y+(a.userData.attH||0)*0.62; }
+      // the eye.
+      // AND EACH SIGHT DECLARES WHERE ITS OWN WINDOW IS (Ben: "the attatchment scopes glass reticle is seated too
+      // high"). 0.62 was written as "the middle of the window on all three optics" and ATT_DEFS says otherwise — 0.62
+      // for a red dot, 0.56 for the holographic's wider lower window, 0.66 for a scope's tube. The same `eye` number
+      // already places the rearGlass marker the reticle is CLIPPED to, so the pose and the clip were centring two
+      // different points: measured at full ADS with __hc.opticEye, the holographic's window sat 0.0058 above the aim
+      // axis and the scope's glass 0.0033 below it — exactly (0.62 - eye) x the piece's own height in both cases, and
+      // the scope's sign is Ben's "seated too high" in one number. A red dot was unaffected, which is why this
+      // survived: the one optic whose eye fraction happens to be 0.62 is the one that reads correct.
+      UD.dotY=a.position.y+(a.userData.attH||0)*((ATT_DEFS[id]&&ATT_DEFS[id].eye!=null)?ATT_DEFS[id].eye:0.62); }
   }
   const railY=gy(P.railTop), gripZ=gz(P.gripPoint.position[0]);
   // MATTE BLACK IRON for the sights. At the guns' own shininess/specular the little posts caught the sky and read
@@ -39924,10 +39949,13 @@ window.__hc={
                   nearPush:view._nearPush!=null?+view._nearPush:null, bend:+((view.gunBend||0)).toFixed(4) };
       if(!a) return Object.assign(out,{optic:null});
       a.updateWorldMatrix(true,false);
-      // The optic's own window centre, by the same 0.62-of-height rule the pose uses to derive dotY — measuring a
-      // different point from the one the pose aims would compare two things and prove neither.
-      const H=a.userData.attH||0;
-      const w=new THREE.Vector3(0,H*0.62,0).applyMatrix4(a.matrixWorld);
+      // The optic's own window centre, by the same rule the pose uses to derive dotY — measuring a different point
+      // from the one the pose aims would compare two things and prove neither. That rule is the piece's DECLARED eye
+      // fraction (ATT_DEFS), not a shared 0.62: this probe and the pose both carried the constant, so the two agreed
+      // with each other and disagreed with the glass, and ndc.y read 0 on a sight whose window was 6 mm off the axis.
+      const _ad=ATT_DEFS[a.userData.att];
+      const H=a.userData.attH||0, EY=(_ad&&_ad.eye!=null)?_ad.eye:0.62;
+      const w=new THREE.Vector3(0,H*EY,0).applyMatrix4(a.matrixWorld);
       const cam=w.clone(); camera.worldToLocal(cam);
       const v=w.clone().project(camera);
       // AND THE WHOLE CHAIN THAT PUT IT THERE. ndc alone says a sight is off the axis and cannot say which node moved
@@ -45043,6 +45071,23 @@ window.__hc={
       return cursor?{id:cursor.id,n:cursor.n}:null; }catch(e){ return {err:String(e.message||e)}; } },
   qDrops(){ try{ const d=drops[drops.length-1]; return { n:drops.length, carrying:!!cursor,
       last:d?{id:d.id,n:d.n}:null }; }catch(e){ return {err:String(e.message||e)}; } },
+  // DROP A LONG THIN THING STANDING ON ITS END AND SETTLE IT. A rifle that lands nose-first is the case Ben reports,
+  // and it is rare enough in a random tumble that watching for it proves nothing -- so the upright lie is FORCED and
+  // the question is only whether the settle leaves it there. `tallBefore` against `tallAfter` is the answer: the
+  // world-vertical half-extent must come down from the long axis to a short one.
+  dropStandTrip(id){ try{ const it=id||'ar15';
+      spawnDrop(it,1, player.pos.x, player.pos.y+0.6, player.pos.z, 0, null, null);
+      const d=drops[drops.length-1]; if(!d) return {err:'nothing dropped'};
+      d.vx=d.vy=d.vz=0; d.av.set(0,0,0); d.rest=false;
+      d.quat.identity();                                          // most held models run along their own -z; stand it up
+      { const _e=new THREE.Euler(-Math.PI/2,0,0,'YXZ'); d.quat.setFromEuler(_e); }
+      const half=[+d.half.x.toFixed(3),+d.half.y.toFixed(3),+d.half.z.toFixed(3)];
+      _dm.makeRotationFromQuaternion(d.quat); const tallBefore=+_dropExt(d,1).toFixed(3);
+      for(let i=0;i<400 && !d.rest;i++) updateDrops(1/60);
+      _dm.makeRotationFromQuaternion(d.quat); const tallAfter=+_dropExt(d,1).toFixed(3);
+      return { id:it, half, tallBefore, tallAfter, rest:!!d.rest,
+               longest:+Math.max(d.half.x,d.half.y,d.half.z).toFixed(3) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   qSet(src,idx,id,n){ try{ setSlot(src,idx|0, id?{id,n:n|0||1}:null); renderInvUI(); return getSlot(src,idx|0); }catch(e){ return {err:String(e.message||e)}; } },
   qGet(src,idx){ try{ const s=getSlot(src,idx|0); return s?s.id+':'+s.n:null; }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: shields. hurt() drives the REAL damage() choke point rather than doing the arithmetic here, so what is under
