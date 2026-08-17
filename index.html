@@ -1120,12 +1120,20 @@ const _scotK = new Float32Array([0.45, 0, 0, 0]);
 // term out by the time a texture has any albedo of its own to carry the shading. __hc.sheen({k,knee}) is still the
 // dial; the difference is that the default is now a value he can react to instead of an absence.
 // [base level, wash A/B, BLACK-TEXEL SHEEN, its albedo knee]. The sheen is display-referred now (see the term in
-// dithering_fragment) so its units changed with it: 0.12 of a linear radiance was under a level of 255, and 0.045 of the
-// DISPLAY range is about eleven levels — enough that a lit trunk reads as bark rather than as a silhouette, and small
-// enough that it cannot lift a surface that has real light on it above what that light delivers.
-// The knee is 0.30 rather than 0.15 because the thing being rescued is dark BARK, not only a texel at zero: a log's side
-// sits around a tenth of the albedo range and the old knee excluded it.
-const _hcAux = new Float32Array([0.10, 0, 0.045, 0.30]);
+// dithering_fragment), so its units changed with it — 0.12 of a linear radiance was under one level of 255.
+// SWEPT AT THE DUSK VANTAGE, trunk crop against the lit grass beside it and the leaf band above:
+//     k 0      trunk lum  3.1   grass 27.8   leaves  2.7 sat 0.38     the bug: a silhouette
+//     k 0.008  trunk lum 17.2   grass 28.1   leaves 14.0 sat 0.63
+//     k 0.012  trunk lum 24.7   grass 29.6   leaves 20.0 sat 0.57     <- shipped
+//     k 0.020  trunk lum 37.5   grass 34.9   leaves 30.2 sat 0.50
+//     k 0.045  trunk lum 66.0   grass 57.0   leaves 52.8 sat 0.41     the whole frame washed flat
+// 0.012 is where the trunk reads as bark (24.7, brown, still darker than the grass it stands in at 29.6) while a surface
+// that already has real light on it barely moves — the grass gains 1.8 levels. Past that the term stops being a rescue and
+// becomes a fog: at 0.045 the grass has doubled and the leaf band's saturation has FALLEN from 0.57 to 0.41, which is the
+// signature of a flat add erasing contrast rather than restoring a texel.
+// The knee is 0.14, not the old 0.15 by accident but by the same sweep: wide enough to catch bark, which sits near a tenth
+// of the albedo range, and tight enough to leave grass and leaves alone.
+const _hcAux = new Float32Array([0.10, 0, 0.012, 0.14]);
 // ---- WHAT THE SKY CAN SEE OF THIS OBJECT (per-draw) ----
 // x is the sky-and-canopy multiplier for the object about to be drawn, and it DEFAULTS TO 1 so nothing changes until
 // something sets it. The world's blocks carry this per vertex (vSky/vCan, baked by the mesher); a creature, a prop, a
@@ -11176,7 +11184,17 @@ function roofGeos(){ if(_roofWedge) return;
     gm.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2)); gm.computeVertexNormals(); return gm; };
   _roofWedge    =mk([[A,C,D],[A,B,C],[D,C,E],[D,E,F],[A,E,B],[A,F,E]], true);    // bottom, back, slope
   _roofWedgeSide=mk([[A,D,F],[B,E,C]], false);                                   // the two gable ends
-  const slab=new THREE.BoxGeometry(1.0,0.12,1.5); slab.rotateX(-Math.PI/4); slab.translate(0,0.06,0.03); _roofSlab=slab; }   // thin tiled surface laid on the 45° slope, slight overhang
+  // THE SLAB IS EXACTLY THE CELL DIAGONAL (Ben 08-17: "roof tiles clip into eachother"). It was 1.5 long, described as
+  // a "slight overhang", and 1.5 is not slight: consecutive roof blocks up a slope sit at (y+1, z+1), so the spacing
+  // between neighbours ALONG THE SLOPE is the diagonal, sqrt(2) = 1.41421. A slab 1.5 long therefore reached 0.0858
+  // into the next cell's slab at BOTH ends, and two solid boxes sharing a volume is the clipping he is seeing — with
+  // z-fighting across the intersection wherever the two faces land on the same plane.
+  //   THE THICKNESS DOES NOT COUNT toward that: it is perpendicular to the slope, so it decides how proud the tiles sit
+  // off the planks, not how far up the roof they reach. Only the LENGTH had to change.
+  //   AND THE z NUDGE GOES WITH IT. The old +0.03 pushed every slab up-slope, which is half an overlap at the top edge
+  // and a gap at the bottom — a bias, not an overhang. The lift of half the thickness stays: that is what rests the
+  // tiles ON the slope rather than half-buried in it.
+  const slab=new THREE.BoxGeometry(1.0,0.12,Math.SQRT2); slab.rotateX(-Math.PI/4); slab.translate(0,0.06,0); _roofSlab=slab; }   // thin tiled surface laid flush on the 45° slope
 // ===== SANDBAGS ======================================================================================================
 // A revetment is bags LAID: courses about a quarter of a cell deep, each course turned across the one below so the wall
 // bonds, exactly why brickwork alternates stretchers and headers. block('sandbag') used to be a CUBE wearing a picture of
@@ -42012,6 +42030,24 @@ window.__hc={
           const up=bl[idx(lx,y+1,lz)];
           if(up!==AIR && (up===WATER || isSolid[up])) live++; } }
       return { demoted:_buriedGrass, stillBuried:live, grassBlocks:scanned }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // DO TWO ADJACENT ROOF TILES SHARE A VOLUME? Measured off the real geometry rather than from the numbers in the
+  // source, so it cannot drift from what is drawn. Neighbours up a slope sit at (y+1,z+1), so the spacing between them
+  // ALONG THE SLOPE is the cell diagonal; `overlap` is how far each slab reaches past that into the next one, and
+  // anything above zero is two solid boxes occupying the same space.
+  roofFit(){ try{ roofGeos();
+      const g=_roofSlab, p=g.attributes.position, n=p.count;
+      // The slope axis after the -45 rotation: up and toward +z, normalised.
+      const ax=[0, Math.SQRT1_2, Math.SQRT1_2];
+      let lo=1e9, hi=-1e9, tlo=1e9, thi=-1e9;
+      for(let i=0;i<n;i++){ const x=p.getX(i), y=p.getY(i), z=p.getZ(i);
+        const d=y*ax[1]+z*ax[2];              // distance along the slope
+        const t=y*ax[2]-z*ax[1];              // distance across it (the thickness axis)
+        if(d<lo)lo=d; if(d>hi)hi=d; if(t<tlo)tlo=t; if(t>thi)thi=t; }
+      const along=hi-lo, spacing=Math.SQRT2;
+      return { alongSlope:+along.toFixed(4), neighbourSpacing:+spacing.toFixed(4),
+               overlap:+(along-spacing).toFixed(4), thickness:+(thi-tlo).toFixed(4),
+               centreOffset:+((hi+lo)/2).toFixed(4) }; }
     catch(e){ return {err:String(e.message||e)}; } },
   stamped(){ try{ const got=_stampedTiles.slice().sort();
       const want=_stampWant.concat(_stampIntoWant);
