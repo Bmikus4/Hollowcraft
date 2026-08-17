@@ -3763,15 +3763,30 @@ function plainsAt(wx,wz){
 // Recomputed here rather than exported from surfaceH because surfaceH is memoised by column and returns only a height -
 // and a second, differently-written version of this test would drift from the first one the moment either is tuned.
 function _isleAt(wx,wz){ const idist=Math.hypot(wx-ISLE_X, wz-ISLE_Z); return 1-smooth(ISLE_R-ISLE_EDGE, ISLE_R, idist); }
+// IS THIS CELL RINGED BY LAND? The question "river or lake, not sea" is a question about the terrain around a column,
+// and _isleAt cannot answer it: it is the generator's FALLOFF ENVELOPE, which only begins to fall at 340 while the real
+// mean coast radius is 322, so it still reads 0.997 hundreds of blocks out into a bay. Measured before this existed,
+// 4900 of the 5568 columns the bed rule claimed were open ocean — 88 per cent — which is Ben's mud on the sea floor.
+// The mountain mask learned the same lesson in adf26ca and its note says it outright: ask surfaceH, not _isleAt.
+// Twelve bearings at 22 blocks, two thirds of them dry. A river ten wide has both banks inside that circle and passes
+// comfortably; a pond does; the sea floor off a beach has land on one side and fails. It costs twelve surfaceH calls,
+// which are cached and shared with every neighbouring column, and only for cells the cheap tests below have already
+// accepted — about an eighth of the submerged ones.
+function _ringedByLand(wx,wz){
+  let land=0;
+  for(let k=0;k<12;k++){ const th=k*0.5236;
+    if(surfaceH(wx+Math.round(Math.cos(th)*22), wz+Math.round(Math.sin(th)*22))>CFG.SEA){ land++; if(land>=8) return true; } }
+  return false;
+}
 function _inlandBed(wx,wz,h){
   if(h>=CFG.SEA) return false;                       // not under water at all: this is a bank, and the bank rule owns it
   // A river channel, by the same field and threshold the bank rule uses, so the bed and its banks cannot disagree about
-  // where the river is. Rivers reach the coast, so the river test alone would run mud out into the surf - hence it is
-  // still gated on being inside the landmass.
-  if(Math.abs(_riverField(wx,wz))<0.075 && _isleAt(wx,wz)>0.55) return true;
-  // A pond or a hollow: deep inside the island, where the falloff has taken nothing away, any column under the sea line
-  // is water that is not the ocean. 0.995 rather than 1 because smooth() approaches its limit asymptotically.
-  return _isleAt(wx,wz)>0.995;
+  // where the river is; or a pond, which has no river field at all. Both are CANDIDATES only — cheap tests that say
+  // "this might not be ocean" — and the ring test above is what actually decides. That split is deliberate: the cheap
+  // half keeps the expensive half off 88 per cent of the sea.
+  const river = Math.abs(_riverField(wx,wz))<0.075;
+  if(!river && _isleAt(wx,wz)<=0.995) return false;
+  return _ringedByLand(wx,wz);
 }
 function _wetNear(wx,wz){
   for(let r=1;r<=2;r++)
@@ -10533,6 +10548,84 @@ MODEL_ITEM_BUILDERS.monitor=()=>{ const g=new THREE.Group();
 MODEL_ITEM_BUILDERS.vault_door=(bd)=>_vaultLeaf(bd,false);
 MODEL_ITEM_BUILDERS.vault_door_open=(bd)=>_vaultLeaf(bd,true);
 MODEL_ITEM_BUILDERS.vault_part=()=>new THREE.Group();   // the three filler cells draw nothing: the origin's leaf already covers them
+// ============================================================================
+//  THE SEVEN PROPS THAT WERE ONLY EVER BUILT INSIDE THE CHUNK MESHER
+// ============================================================================
+// A bed, a flower pot, a potted fern, a rocking chair, a font, a bell and a bell button were each authored as a
+// run of addIM() calls inside buildChunkModels. That path is the WORLD's only, so all seven looked right where
+// they stood and were a flat untextured cuboid everywhere else: itemModel can reach MODEL_ITEM_BUILDERS and
+// nothing else, found no entry, and fell through to modelMeshFor's COLLISION BOX — twelve triangles wearing a
+// material with no tile. In the hand a bed was a cream slab and its hotbar icon baked to 42% of the tile in a
+// single colour. Measured across all 391 items by `__hc.itemAudit()`; the frames are bench/results/sweep-flatbox-*.
+//
+// THE PARTS ARE THE SHARED THING, NOT THE OBJECT. The two consumers want different objects out of the same
+// geometry — the mesher wants one InstancedMesh per part so a chunk full of beds costs three draws, and the
+// item view wants a Group of Meshes it can scale into a 100 px tile. So a recipe returns [geometry, material]
+// pairs authored in CELL-LOCAL space with the floor at y=0, and each consumer assembles what it needs. Copying
+// the geometry into a second builder instead would have left two versions of every prop to drift apart, which
+// is the fault this is fixing, one layer up.
+//
+// AND THE MESHER STILL GETS ITS INSTANCED PATH. The dispatch below runs where the seven inline branches used to,
+// which is BEFORE the `if(MODEL_ITEM_BUILDERS[m])` per-block-clone branch — so registering these in the table
+// does not move them onto it. That mattered: a bed is not a rare block, and the clone path is scoped to rare
+// ones. The order is what makes this safe, so do not hoist the table check above it.
+const PROP_PARTS={
+  bed:(bd,m)=>{ const wood=new THREE.MeshLambertMaterial({color:0x6a4326}), sheet=new THREE.MeshLambertMaterial({color:(bd&&bd.col)||0x9a3b3b}), P=[];
+    // a bed is TWO cells; every part spans the FULL cell so the pair reads as ONE solid continuous bed (Ben 07-20); the head cell adds the pillow
+    const legs=[]; for(const [lx,lz] of [[-0.42,-0.42],[0.42,-0.42],[-0.42,0.42],[0.42,0.42]]){ const l=box(0.1,0.26,0.1); l.translate(lx,0.13,lz); legs.push(l); }
+    P.push([_mergeGeos(legs), wood]);
+    const fr=box(1.0,0.14,1.0); fr.translate(0,0.31,0); P.push([fr, wood]);                    // wooden frame — full cell, zero seam across the halves
+    const mat2=box(1.0,0.18,1.0); mat2.translate(0,0.46,0); P.push([mat2, sheet]);             // mattress/sheet — full cell, zero seam
+    if(m==='bed_head'){ const pw=new THREE.MeshLambertMaterial({color:0xe8e2d4});
+      const pil=box(0.62,0.12,0.34); pil.translate(0,0.60,-0.22); P.push([pil, pw]); }         // PILLOW at the head (toward -z)
+    return P; },
+  flower_pot:(bd)=>{ const clay=new THREE.MeshLambertMaterial({color:0xa85a3a}), soil=new THREE.MeshLambertMaterial({color:0x3a2a18}), grn=new THREE.MeshLambertMaterial({color:0x5a8a3a}), bloom=new THREE.MeshLambertMaterial({color:(bd&&bd.col)||0xd85a7a});
+    const pot=box(0.3,0.26,0.3); pot.translate(0,0.13,0);
+    const s=box(0.26,0.05,0.26); s.translate(0,0.27,0);
+    const st=box(0.045,0.24,0.045); st.translate(0,0.42,0);
+    const bl=box(0.18,0.1,0.18); bl.translate(0,0.57,0);
+    return [[pot,clay],[s,soil],[st,grn],[bl,bloom]]; },                                       // a flower in the pot
+  potted_fern:()=>{ const clay=new THREE.MeshLambertMaterial({color:0xa85a3a}), grn=new THREE.MeshLambertMaterial({color:0x4a7a34});
+    const pot=box(0.3,0.26,0.3); pot.translate(0,0.13,0);
+    const fronds=[]; for(let a2=0;a2<5;a2++){ const fr2=box(0.05,0.36,0.14); fr2.rotateZ((a2-2)*0.34); fr2.rotateY(a2*1.257); fr2.translate(0,0.42,0); fronds.push(fr2); }
+    return [[pot,clay],[_mergeGeos(fronds),grn]]; },                                           // fern fronds spraying out of the pot
+  rocking_chair:(bd)=>{ const wood=new THREE.MeshLambertMaterial({map:tileTex('planks'),color:0xb59f8d}); const P=[];
+    const seat=box(0.44,0.06,0.42); seat.translate(0,0.4,0.02); P.push(seat);
+    const back=box(0.44,0.02,0.5); back.rotateX(1.36); back.translate(0,0.64,-0.2); P.push(back);   // reclined backrest
+    for(const bx of [-0.16,-0.055,0.055,0.16]){ const sp=box(0.03,0.03,0.5); sp.rotateX(1.36); sp.translate(bx,0.64,-0.2); P.push(sp); }   // back spindles
+    for(const [lx,lz] of [[-0.19,-0.15],[0.19,-0.15],[-0.19,0.17],[0.19,0.17]]){ const leg=box(0.05,0.38,0.05); leg.translate(lx,0.2,lz); P.push(leg); }
+    for(const sx of [-0.19,0.19]){ const R=0.8; const rk=new THREE.TorusGeometry(R,0.03,6,22,0.8); rk.rotateZ(-Math.PI/2-0.4); rk.rotateY(Math.PI/2); rk.translate(sx,R,0.01); P.push(rk);   // curved rocker rail — convex-down, front-to-back, sitting on the floor under the legs (verified in a render harness)
+      const arm=box(0.05,0.055,0.4); arm.translate(sx,0.53,0.0); P.push(arm);                        // armrest — sits level over the seat, back-to-front
+      const apost=box(0.045,0.16,0.045); apost.translate(sx,0.46,0.18); P.push(apost); }             // front post holding the armrest up (was floating unsupported)
+    const rcg=_mergeGeos(P); rcg.scale(2,2,2); if(bd&&bd.rotY)rcg.rotateY(bd.rotY);                  // 2× — a full-size sittable chair (Ben 07-20), base still on the floor
+    // rotY IS APPLIED HERE, not by the caller. The per-block clone path sets grp.rotation.y from bd.rotY, but
+    // these seven never reach it — so the west-facing chair carries its turn in the geometry, and it has to keep
+    // carrying it or rocking_chair_w faces the wrong way in the world AND in the hand.
+    return [[rcg, wood]]; },
+  font:()=>{ const stone=new THREE.MeshLambertMaterial({map:tileTex('cobble')}), wtr=new THREE.MeshBasicMaterial({color:0x9fdcff});   // HOLY-WATER FONT — pedestal + basin, the pool glows (unlit) in the dark nave
+    const ped=box(0.34,0.5,0.34); ped.translate(0,0.25,0);                                     // pedestal column
+    const bas=box(0.78,0.12,0.78); bas.translate(0,0.56,0);                                    // basin floor
+    const rims=[]; for(const [rx,rz,w,d] of [[-0.36,0,0.06,0.78],[0.36,0,0.06,0.78],[0,-0.36,0.78,0.06],[0,0.36,0.78,0.06]]){ const r2=box(w,0.18,d); r2.translate(rx,0.68,rz); rims.push(r2); }
+    const pool=box(0.64,0.04,0.64); pool.translate(0,0.70,0);                                   // the POOL itself
+    return [[ped,stone],[bas,stone],[_mergeGeos(rims),stone],[pool,wtr]]; },
+  bell:()=>{ const bronze=new THREE.MeshLambertMaterial({color:0xa8842c}), dk2=new THREE.MeshLambertMaterial({color:0x4a3a16});   // CHURCH BELL — hangs from the top of its cell
+    const yk=box(0.6,0.08,0.14); yk.translate(0,0.94,0);                                        // yoke beam
+    const crown=box(0.16,0.12,0.16); crown.translate(0,0.84,0);                                 // crown
+    const dome=box(0.4,0.3,0.4); dome.translate(0,0.62,0);                                      // dome
+    const flare=box(0.54,0.12,0.54); flare.translate(0,0.42,0);                                 // flared mouth
+    const clap=box(0.1,0.16,0.1); clap.translate(0,0.30,0);                                     // clapper peeking below the mouth
+    return [[yk,dk2],[crown,bronze],[dome,bronze],[flare,bronze],[clap,dk2]]; },
+  bell_button:()=>{ const stone=new THREE.MeshLambertMaterial({map:tileTex('cobble')}), brass=new THREE.MeshLambertMaterial({color:0xc8a850}), red=new THREE.MeshBasicMaterial({color:0xb02018});   // BELL SWITCH — a small altar plunger
+    const post=box(0.16,0.5,0.16); post.translate(0,0.25,0);
+    const cap=box(0.26,0.08,0.26); cap.translate(0,0.54,0);
+    const nub=box(0.1,0.08,0.1); nub.translate(0,0.62,0);
+    return [[post,stone],[cap,brass],[nub,red]]; },
+};
+PROP_PARTS.bed_head=(bd)=>PROP_PARTS.bed(bd,'bed_head');
+function _partsGroup(parts){ const g=new THREE.Group();
+  for(const [geo,mat] of parts){ const me=new THREE.Mesh(geo,mat); me.castShadow=true; me.receiveShadow=true; g.add(me); }
+  return g; }
+for(const _k in PROP_PARTS) MODEL_ITEM_BUILDERS[_k]=((k)=>(bd)=>_partsGroup(PROP_PARTS[k](bd||{}, k)))(_k);
 // chime — top disk + 5 hanging metal tubes in a circle + central clapper + bottom sail (hangs; recentred by callers)
 MODEL_ITEM_BUILDERS.chime=(bd)=>{ const g=new THREE.Group(); g.userData.chimeModel=1;
   const wood =new THREE.MeshLambertMaterial({color:bd.col!=null?bd.col:0x6b4a2a});
@@ -11119,24 +11212,11 @@ function buildModelBlocks(c,g){
             (byTile[t]=byTile[t]||[]).push(a); }
           for(const t in byTile) putRoof(_roofWedgeSide, new THREE.MeshLambertMaterial({map:tileTex(t),side:THREE.DoubleSide}), byTile[t]); }
         continue; }
-      if(m==='bed'||m==='bed_head'){ const wood=new THREE.MeshLambertMaterial({color:0x6a4326}), sheet=new THREE.MeshLambertMaterial({color:bd.col||0x9a3b3b});
-        // a bed is TWO cells; every part spans the FULL cell so the pair reads as ONE solid continuous bed (Ben 07-20); the head cell adds the pillow
-        const legs=[]; for(const [lx,lz] of [[-0.42,-0.42],[0.42,-0.42],[-0.42,0.42],[0.42,0.42]]){ const l=box(0.1,0.26,0.1); l.translate(lx,0.13,lz); legs.push(l); }
-        addIM(_mergeGeos(legs), wood, 0);                                                    // legs
-        const fr=box(1.0,0.14,1.0); fr.translate(0,0.31,0); addIM(fr, wood, 0);              // wooden frame — full cell, zero seam across the halves
-        const mat2=box(1.0,0.18,1.0); mat2.translate(0,0.46,0); addIM(mat2, sheet, 0);        // mattress/sheet — full cell, zero seam
-        if(m==='bed_head'){ const pw=new THREE.MeshLambertMaterial({color:0xe8e2d4});
-          const pil=box(0.62,0.12,0.34); pil.translate(0,0.60,-0.22); addIM(pil, pw, 0); }    // PILLOW at the head (toward -z)
-        continue; }
-      if(m==='flower_pot'){ const clay=new THREE.MeshLambertMaterial({color:0xa85a3a}), soil=new THREE.MeshLambertMaterial({color:0x3a2a18}), grn=new THREE.MeshLambertMaterial({color:0x5a8a3a}), bloom=new THREE.MeshLambertMaterial({color:bd.col||0xd85a7a});
-        const pot=box(0.3,0.26,0.3); pot.translate(0,0.13,0); addIM(pot, clay, 0);
-        const s=box(0.26,0.05,0.26); s.translate(0,0.27,0); addIM(s, soil, 0);
-        const st=box(0.045,0.24,0.045); st.translate(0,0.42,0); addIM(st, grn, 0);
-        const bl=box(0.18,0.1,0.18); bl.translate(0,0.57,0); addIM(bl, bloom, 0); continue; }   // a flower in the pot
-      if(m==='potted_fern'){ const clay=new THREE.MeshLambertMaterial({color:0xa85a3a}), grn=new THREE.MeshLambertMaterial({color:0x4a7a34});
-        const pot=box(0.3,0.26,0.3); pot.translate(0,0.13,0); addIM(pot, clay, 0);
-        const fronds=[]; for(let a2=0;a2<5;a2++){ const fr2=box(0.05,0.36,0.14); fr2.rotateZ((a2-2)*0.34); fr2.rotateY(a2*1.257); fr2.translate(0,0.42,0); fronds.push(fr2); }
-        addIM(_mergeGeos(fronds), grn, 0); continue; }   // fern fronds spraying out of the pot
+      // THE SEVEN SHARED PROPS — bed, bed_head, flower_pot, potted_fern, rocking_chair, font, bell, bell_button.
+      // Their geometry now lives in PROP_PARTS, which the item view reads too; see the note there for why the
+      // parts rather than the object are the shared thing. This branch sits where those seven inline ones did,
+      // ahead of the per-block-clone dispatch, so the world keeps the instanced path it has always had.
+      if(PROP_PARTS[m]){ for(const p of PROP_PARTS[m](bd,m)) addIM(p[0], p[1], 0); continue; }
       if(m==='sign'){ const wood=new THREE.MeshLambertMaterial({map:tileTex('planks')}), iron=new THREE.MeshLambertMaterial({color:0x24242a,shininess:60});
         const board=box(0.82,0.42,0.06); board.translate(0,0.5,0); addIM(board, wood, 0);   // wooden hanging board
         const parts=[]; const top=box(0.86,0.05,0.05); top.translate(0,0.82,0); parts.push(top);   // wrought-iron bar + spiral curls along the top
@@ -11148,29 +11228,6 @@ function buildModelBlocks(c,g){
       // never reaches the `_wooden` map/tint pass at the bottom of this loop, which is the whole reason the one chair you can
       // sit in was still flat brown. Same rule as that pass: the planks tile carries the wood, and the block's own 0x7a5230
       // is lerped 45% toward white first (-> 0xb59f8d) so multiplying by the tile does not darken it twice.
-      if(m==='rocking_chair'){ const wood=new THREE.MeshLambertMaterial({map:tileTex('planks'),color:0xb59f8d}); const P=[];
-        const seat=box(0.44,0.06,0.42); seat.translate(0,0.4,0.02); P.push(seat);
-        const back=box(0.44,0.02,0.5); back.rotateX(1.36); back.translate(0,0.64,-0.2); P.push(back);   // reclined backrest
-        for(const bx of [-0.16,-0.055,0.055,0.16]){ const sp=box(0.03,0.03,0.5); sp.rotateX(1.36); sp.translate(bx,0.64,-0.2); P.push(sp); }   // back spindles
-        for(const [lx,lz] of [[-0.19,-0.15],[0.19,-0.15],[-0.19,0.17],[0.19,0.17]]){ const leg=box(0.05,0.38,0.05); leg.translate(lx,0.2,lz); P.push(leg); }
-        for(const sx of [-0.19,0.19]){ const R=0.8; const rk=new THREE.TorusGeometry(R,0.03,6,22,0.8); rk.rotateZ(-Math.PI/2-0.4); rk.rotateY(Math.PI/2); rk.translate(sx,R,0.01); P.push(rk);   // curved rocker rail — convex-down, front-to-back, sitting on the floor under the legs (verified in a render harness)
-          const arm=box(0.05,0.055,0.4); arm.translate(sx,0.53,0.0); P.push(arm);                        // armrest — sits level over the seat, back-to-front
-          const apost=box(0.045,0.16,0.045); apost.translate(sx,0.46,0.18); P.push(apost); }             // front post holding the armrest up (was floating unsupported)
-        const rcg=_mergeGeos(P); rcg.scale(2,2,2); if(bd.rotY)rcg.rotateY(bd.rotY); addIM(rcg, wood, 0); continue; }   // 2× — a full-size sittable chair (Ben 07-20), base still on the floor; rotY spins the variant (this INSTANCED branch bypasses the per-block clone path where rotY normally applies)
-      if(m==='font'){ const stone=new THREE.MeshLambertMaterial({map:tileTex('cobble')}), wtr=new THREE.MeshBasicMaterial({color:0x9fdcff});   // HOLY-WATER FONT — pedestal + basin, the pool glows (unlit) in the dark nave
-        const ped=box(0.34,0.5,0.34); ped.translate(0,0.25,0); addIM(ped, stone, 0);           // pedestal column
-        const bas=box(0.78,0.12,0.78); bas.translate(0,0.56,0); addIM(bas, stone, 0);          // basin floor
-        const rims=[]; for(const [rx,rz,w,d] of [[-0.36,0,0.06,0.78],[0.36,0,0.06,0.78],[0,-0.36,0.78,0.06],[0,0.36,0.78,0.06]]){ const r2=box(w,0.18,d); r2.translate(rx,0.68,rz); rims.push(r2); }
-        addIM(_mergeGeos(rims), stone, 0);                                                      // raised rim — the little holder
-        const pool=box(0.64,0.04,0.64); pool.translate(0,0.70,0); addIM(pool, wtr, 0);          // the POOL itself
-        continue; }
-      if(m==='bell'){ const bronze=new THREE.MeshLambertMaterial({color:0xa8842c}), dk2=new THREE.MeshLambertMaterial({color:0x4a3a16});   // CHURCH BELL — hangs from the top of its cell
-        const yk=box(0.6,0.08,0.14); yk.translate(0,0.94,0); addIM(yk, dk2, 0);                 // yoke beam
-        const crown=box(0.16,0.12,0.16); crown.translate(0,0.84,0); addIM(crown, bronze, 0);    // crown
-        const dome=box(0.4,0.3,0.4); dome.translate(0,0.62,0); addIM(dome, bronze, 0);          // dome
-        const flare=box(0.54,0.12,0.54); flare.translate(0,0.42,0); addIM(flare, bronze, 0);    // flared mouth
-        const clap=box(0.1,0.16,0.1); clap.translate(0,0.30,0); addIM(clap, dk2, 0);            // clapper peeking below the mouth
-        continue; }
       // The world's copy of the missile: the same three geometries the icon and the hands use, instanced, so a silo full of them
       // costs three draws per chunk rather than three per missile.
       if(m==='icbm'){ const G=_icbmGeo(), M=_icbmMats();
@@ -11236,11 +11293,6 @@ function buildModelBlocks(c,g){
           const wx=cx0+a[0], wy=a[1], wz=cz0+a[2], sk=scrKey(wx,wy,wz);
           if(!screens[sk]) screens[sk]={tune:null};
           scrBuildScreen(wx,wy,wz,id); }
-        continue; }
-      if(m==='bell_button'){ const stone=new THREE.MeshLambertMaterial({map:tileTex('cobble')}), brass=new THREE.MeshLambertMaterial({color:0xc8a850}), red=new THREE.MeshBasicMaterial({color:0xb02018});   // BELL SWITCH — a small altar plunger
-        const post=box(0.16,0.5,0.16); post.translate(0,0.25,0); addIM(post, stone, 0);
-        const cap=box(0.26,0.08,0.26); cap.translate(0,0.54,0); addIM(cap, brass, 0);
-        const nub=box(0.1,0.08,0.1); nub.translate(0,0.62,0); addIM(nub, red, 0);
         continue; }
       if(m==='furnace'){ const stone=new THREE.MeshLambertMaterial({map:tileTex('cobble')}), iron=new THREE.MeshLambertMaterial({color:0x26262c}), dk=new THREE.MeshLambertMaterial({color:0x120e0c});
         // body with a REAL recessed firebox pocket in each face (0.54w × 0.40h opening, 0.18 deep): core + top/bottom
@@ -40713,6 +40765,27 @@ window.__hc={
       if(wet && (h<=CFG.SEA+3 || bank)){ mud++; if(bank && h>CFG.SEA+3) river++; if(h<minH)minH=h; if(h>maxH)maxH=h; } }
     return { dry, sand, nearWater, mud, mudOnStreamBanks:river, mudFrac:dry?+(mud/dry).toFixed(4):0,
              mudH:mud?[minH,maxH]:null, sea:CFG.SEA, spots:_mudSpots(P.x,P.z,R) }; },
+  // THE BED, which mudCensus cannot see: it skips every column at or under the sea line, so the one thing Ben
+  // photographed — mud on the SEA FLOOR — is invisible to it by construction. This walks the submerged columns and
+  // asks the generator's own _inlandBed, then splits them by how far out they are: a bed cell beyond the coast is
+  // ocean floor, and the count of those is the regression. _isleAt is reported with them because the gate is written
+  // in terms of it and the two together say WHY a cell was claimed.
+  mudBedCensus(r,step){ const R=r||420, ST=step||3, P={x:Math.round(player.pos.x), z:Math.round(player.pos.z)};
+    let wet=0, bed=0, far=0, near=0; const sample=[], bedSample=[]; let isleMin=9, isleMax=-9;
+    for(let dx=-R;dx<=R;dx+=ST)for(let dz=-R;dz<=R;dz+=ST){ const x=P.x+dx, z=P.z+dz, h=surfaceH(x,z);
+      if(h>=CFG.SEA) continue; wet++;
+      if(!_inlandBed(x,z,h)) continue;
+      bed++;
+      const ia=_isleAt(x,z); if(ia<isleMin)isleMin=ia; if(ia>isleMax)isleMax=ia;
+      // OPEN WATER OR NOT, asked of the terrain rather than of the falloff: how many of sixteen bearings at 24 blocks
+      // are dry land. A river bed or a pond is ringed by land; the sea floor near a beach is land on one side only.
+      let land=0; for(let k=0;k<16;k++){ const th=k*0.3927;
+        if(surfaceH(x+Math.round(Math.cos(th)*24), z+Math.round(Math.sin(th)*24))>CFG.SEA) land++; }
+      if(land>=11){ near++; if(bedSample.length<6) bedSample.push({at:[x,z], landOf16:land, h}); }
+      else { far++; if(sample.length<6) sample.push({at:[x,z], isle:+ia.toFixed(3), landOf16:land, h}); }
+    }
+    return { submerged:wet, claimedAsBed:bed, ringedByLand:near, openWater:far,
+             isle:[+isleMin.toFixed(3),+isleMax.toFixed(3)], openWaterSamples:sample, bedSamples:bedSample }; },
   // WHERE the mud is, not just how much: a handful of real columns to stand on. Every attempt to photograph mud so far
   // has aimed at a river cell and put the camera in the channel or under the bank — the bank is what you want to stand
   // on, and it is the column BESIDE the water, two or three blocks above it.
