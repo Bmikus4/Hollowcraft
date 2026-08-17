@@ -183,7 +183,18 @@ function stat(file,c){
     console.log(`  cave, unlit ${JSON.stringify(dark)}`);
     console.log(`  cave, lit   ${JSON.stringify(lit)}`);
     check('a lantern still lights the cave it stands in', lit.lum > dark.lum+8, `lum ${dark.lum} -> ${lit.lum}`);
-    check('and what it lights is coloured, not descended', lit.sat > 0.30, `sat ${lit.sat}`);
+    // THE DELTA A LAMP ADDS, NOT THE ABSOLUTE SATURATION OF THE WALL. This asked for lit.sat > 0.30 and read 0.208
+    // for as long as it has existed, and 0.208 was never a lighting fault: this file hunts a site with rock solidity
+    // > 0.98 so that vSky bakes to 0, which means its walls are grey STONE, and grey stone has no chroma of its own.
+    // Every bit of saturation in that crop is the lamp's. The same probe in a dirt-walled cave reads 0.359 for no
+    // reason but the dirt (bench/tmp-washoff.mjs), and switching the ENTIRE scotopic wash off moves saturation by
+    // 0.026 — so no term in the lighting could ever have carried this number to 0.30 on stone. Four terms were gated
+    // or switched chasing it: 509e09d, f201953, 11b4e4b, and the clock in pin() above.
+    // Lit minus unlit on the SAME crop is what the check is named after — whether what a lamp lights comes out
+    // coloured rather than descended to grey — and it is a property of the LAMP, so it holds on stone, dirt or
+    // anything else a cave is carved through.
+    console.log(`  the lamp adds sat ${(lit.sat-dark.sat).toFixed(3)}  (unlit ${dark.sat} -> lit ${lit.sat})`);
+    check('and what it lights is coloured, not descended', lit.sat - dark.sat > 0.10, `lamp adds ${(lit.sat-dark.sat).toFixed(3)} (floor 0.10)`);
 
     // ---- 4. THE OPEN NIGHT FIELD *DOES* DESCEND, AND THAT IS THE RULE NOW ------------------------------------------------
     // THIS CHECK USED TO ASSERT THE OPPOSITE AND IT WAS RIGHT WHEN IT WAS WRITTEN. The rule then was "the descent is about
