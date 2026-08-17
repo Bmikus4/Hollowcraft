@@ -41,6 +41,11 @@ const MAP = [
   ['grass_tall',     'short_grass',                     'tint', [60,99,49],  'painter base 52,86,42 + jitter 26'],
   ['grass_meadow',   'tall_grass_bottom',               'tint', [77,134,61], 'painter base 70,120,54 + jitter 28; the pack tall grass is the taller tuft'],
   ['grass_meadow_tall', ['tall_grass_bottom','tall_grass_top'], 'stack', [94,145,65], 'tall2: one quad stretched over two blocks, so the plant has to be stacked into one tile'],
+  // THE NEW TWO-BLOCK TUFT (Ben 08-17: "a new 2-block-tall tall grass ... needs a new texture, actually one might
+  // exist"). One does: this is the pack's own tall grass, taken as its two halves rather than stacked into one square,
+  // because this block is a bottom and a top on the door's pattern and each half gets its own tile.
+  ['tallgrass2',      'tall_grass_bottom',               'tint', [84,138,62], 'the lower half, from the same master grass_meadow takes'],
+  ['tallgrass2_top',  'tall_grass_top',                  'tint', [92,146,66], 'the upper half; a touch lighter, which is what the tips of a tuft do'],
   ['fern',           'cmodels/fern_leaves',             'tint', [50,88,46],  'painter base 44,76,40 + jitter 24'],
   ['bush',           'bush',                            'tint', [47,81,43],  'painter base 40,68,36 + jitter 26'],
   ['vine',           'cmodels/leave_vine1',             'tint', [40,70,36],  'painter strand 32,62,28 + jitter 16; the pack has no plain `vine`, it draws them as custom models'],
