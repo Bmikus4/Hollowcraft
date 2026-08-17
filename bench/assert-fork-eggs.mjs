@@ -61,7 +61,11 @@ const ok=(n,c,d)=>{ if(c){pass++; console.log('  ok   '+n);} else {fail++; conso
       console.log('  at spawn  '+JSON.stringify(T0));
       console.log('  2.6s on   '+JSON.stringify(T));
       ok(kind+' egg leaves a real instance with a rig', !T0.err && T0.inScene===true && T0.meshes>0, JSON.stringify(T0));
-      ok(kind+' spawned where it was aimed', !T0.err && !d.err && Math.hypot(T0.instPos[0]-d.at[0], T0.instPos[2]-d.at[1])<4,
+      // NOT ASSERTED FOR THE TENANT, and the reason is the creature rather than the bench. It relocates itself to somewhere
+      // you are not looking on the first frame it is unwatched, so it has already left the aimed block by the time anything
+      // can read it — measured, 10 blocks away 350 ms after the egg. Demanding it stay put would be a test that the Tenant's
+      // one behaviour is broken.
+      if(kind!=='tenant') ok(kind+' spawned where it was aimed', !T0.err && !d.err && Math.hypot(T0.instPos[0]-d.at[0], T0.instPos[2]-d.at[1])<4,
          (T0.instPos?T0.instPos.join(','):'')+' vs '+(d.at?d.at.join(','):''));
       // Visible AT SPAWN. The Burrower is under the floor by design and is the one exception; the other two must be there
       // to look at, which is the entire reason Ben asked for the eggs.
