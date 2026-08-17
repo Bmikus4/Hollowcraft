@@ -13818,7 +13818,7 @@ const _sunDir=new THREE.Vector3(), _keyDir=new THREE.Vector3(), _tmp=new THREE.V
 // the light was built with; nbMax = how far that bias may be multiplied as the light grazes. sinE is a readout.
 // snap = the texel-snap mode, and it is a dial because it is the A/B for shadow crawl: 1 is the light-space snap, 0 is
 // off. See the snap itself in updateSky for why the world-axis version it replaces could not work.
-const _sunArc={ floor:0.16, nb:0.45, nbMax:3.0, sinE:1, snap:1 };
+const _sunArc={ floor:0.16, nb:0.45, nbMax:3.0, sinE:1, snap:1, rMin:46, rMax:120, R:46 };
 const _snapR=new THREE.Vector3(), _snapU=new THREE.Vector3(), _snapD=new THREE.Vector3(), _snapCtr=new THREE.Vector3();
 // THE CELESTIAL MODEL'S ONE PARAMETER. See the arc in updateSky for why a latitude replaces the old constant tilt.
 const _SUN={ lat:51.5 };
@@ -13912,7 +13912,22 @@ function updateSky(dt){
     _sunArc.sinE=sinE;
     sunLight.shadow.normalBias = _sunArc.nb * Math.min(_sunArc.nbMax, 1/Math.max(sinE,0.10)); }
   // texel snap to kill shimmer
-  const sc=sunLight.shadow.camera, R=46;   // tight radius → shadows focus near the player (sharper, more visible) and the shadow pass covers far less canopy (big forest-FPS win)
+  // ---- THE BOX GROWS AS THE SUN SINKS, BECAUSE THAT IS WHEN THE SHADOWS ARE LONG ----
+  // 46 was a fixed radius chosen so shadows focus near the player and the shadow pass covers far less canopy, and as a
+  // constant it was defensible only while the sun barely moved: the old arc peaked at 70 degrees, where a 20-block
+  // tree lays a 7-block shadow that fits easily. With a real arc the same tree lays 25 blocks at noon and 113 blocks
+  // at 10 degrees of elevation, and everything past the box edge is simply not drawn — which is the "shadows
+  // disappear at certain angles" report that has been open for weeks, and it is geometry, not bias.
+  // SHADOW LENGTH GOES AS 1/tan(elevation), so the radius follows the same curve and is clamped at both ends: never
+  // tighter than the 46 that was signed off, never wider than max, because the box is a fixed number of texels and
+  // widening it trades resolution for reach. At the cap the texel goes 0.09 to about 0.21 of a block, which is the
+  // deliberate trade: a long shadow at a raking sun is soft and diffuse anyway, so blockiness there costs less than a
+  // shadow that stops in mid-air. It also costs fill — a wider box re-renders more casters — and that is real.
+  // __hc.sunArc({rMin,rMax}) is the dial and `R` is in the readout.
+  const sc=sunLight.shadow.camera;
+  const _sinE=Math.max(0.12, Math.abs(_sunArc.sinE)), _cosE=Math.sqrt(Math.max(0,1-_sinE*_sinE));
+  const R=Math.max(_sunArc.rMin, Math.min(_sunArc.rMax, _sunArc.rMin*(_cosE/_sinE)*0.55));
+  _sunArc.R=R;
   sc.left=-R; sc.right=R; sc.top=R; sc.bottom=-R; sc.near=1; sc.far=kd*2.2;
   // ---- THE SNAP IS IN THE LIGHT'S OWN SPACE, NOT IN WORLD X/Z ----
   // What was here rounded the light's world x and z to a texel. That is only the right grid when the light happens to
@@ -37381,7 +37396,14 @@ function attPick(pool,x,z){ const P=ATT_POOLS[pool]; if(!P||!P.length) return nu
   // the two share a divisor, so in a pool of THREE the empty case is exactly index 0 and the first entry can never
   // be picked — which silently deleted the suppressor, the only attachment that lives in one pool, from the world.
   return ((h>>>7)%3===0)?null:P[h%P.length]; }   // two chests in three — a can on every found rifle is not a find
-function lootChest(x,y,z,items,pool){ setBlockWorld(x,y,z,BID.chest,true); const key=x+','+y+','+z;
+// WHAT A STRUCTURE CHEST CAN CONTAIN, recorded as the world builds one. Chest contents are inline literals in the
+// worldgen functions, so they are the one source table __hc.itemSources cannot enumerate from a value; this is the
+// registry that lets it see them at all. It grows as chunks generate, which the hook reports as chestsSeen rather
+// than pretending to be complete.
+const _chestSeen=new Set();
+function lootChest(x,y,z,items,pool){
+  if(items) for(const row of items) _chestSeen.add(Array.isArray(row)?row[0]:row);
+  if(pool && typeof GUN_POOLS!=='undefined' && GUN_POOLS[pool]) for(const g of GUN_POOLS[pool]) _chestSeen.add(g); setBlockWorld(x,y,z,BID.chest,true); const key=x+','+y+','+z;
   if(pool){ const g=gunPick(pool,x,z); if(g && ITEMS[g]) items=items.concat([[g,1]]);
             const a=attPick(pool,x,z); if(a && ITEMS[a] && !items.some(it=>it[0]===a)) items=items.concat([[a,1]]); }
   if(chests[key]){ localChests.add(key); return; }   // resumed world — the saved contents (already looted or not) win over a fresh refill
@@ -46059,6 +46081,34 @@ window.__hc={
   // count and same bounding box means the id fell all the way through. That is a measurement of the branch
   // taken, not a guess from the shape.
   // `placeholder` is the magenta 0.2 cube returned for an id that is not in ITEMS at all.
+  // QA: CAN YOU GET IT? Every id in ITEMS against every table in the game that puts something in your hands, read
+  // LIVE — which is the whole reason this exists in the file rather than as a scan of the source. docs/ITEM-AUDIT.md
+  // was written from a text scan and reported every tool as unobtainable, because the sixteen tool recipes are added
+  // by a loop over the tier table (`shaped(tier+'_pickaxe', ...)`) and a regex for shaped('...') cannot see a
+  // template. It also missed the mob tables outright, which is how monk_cross came to be listed as sourceless when
+  // ANIMALS.monk has dropped it at 12% all along. RECIPES, COOK, B[].drop, ANIMALS[].drops, GUN_POOLS, the loot bags
+  // and STARTER_ITEMS are all values at runtime, so none of that can happen here.
+  //   THE ONE HONEST GAP IS CHESTS, and it is reported rather than papered over: structure chest contents are inline
+  // literals inside worldgen functions, so they only enter this audit as the world generates them. chestsSeen says how
+  // many have been opened to this audit; a fresh boot near spawn will have a handful, and an id whose only source is a
+  // chest in a structure nobody has walked to yet will read as sourceless until it does. Cross it with the static
+  // sweep before believing a single row.
+  itemSources(){ try{
+    const src=new Map(), add=(id,k)=>{ if(!id||!ITEMS[id]) return; if(!src.has(id))src.set(id,new Set()); src.get(id).add(k); };
+    for(const r of RECIPES) add(r.out,'craft');
+    for(const k in COOK) add(COOK[k],'cook');
+    for(let i=0;i<N_BLOCKS;i++){ const bd=B[i]; if(!bd) continue; add(bd.drop||bd.name,'block'); }
+    for(const a in ANIMALS){ const d=ANIMALS[a].drops||[]; for(const row of d) add(row[0],'mob:'+a); }
+    if(typeof GUN_POOLS!=='undefined') for(const pool in GUN_POOLS) for(const g of GUN_POOLS[pool]) add(g,'chest:'+pool);
+    for(const id in ITEMS){ const L=ITEMS[id].loot; if(L) for(const row of L) add(row[0],'lootbag:'+id); }
+    if(typeof STARTER_ITEMS!=='undefined') for(const row of STARTER_ITEMS) add(Array.isArray(row)?row[0]:row,'starter');
+    for(const id of _chestSeen) add(id,'chest');
+    const all=Object.keys(ITEMS);
+    const none=all.filter(id=>!src.has(id));
+    const byKind={}; for(const [,set] of src) for(const k of set){ const g=k.split(':')[0]; byKind[g]=(byKind[g]||0)+1; }
+    return { items:all.length, sourced:src.size, noSource:none.length, chestsSeen:_chestSeen.size, byKind,
+             none:none.sort(), how:Object.fromEntries([...src].map(([id,set])=>[id,[...set].join(',')])) };
+  }catch(e){ return {err:String(e&&e.stack||e)}; } },
   itemAudit(o){ try{
       const want=(o&&o.only)||null, out=[];
       const sig=(m)=>{ let meshes=0,tris=0,textured=0; m.updateMatrixWorld(true);
@@ -47021,9 +47071,13 @@ window.__hc={
                sunElevDeg:+(Math.asin(Math.max(-1,Math.min(1,globalU.uSunDir.value.y)))*57.29578).toFixed(2) }; }
     catch(e){ return {err:String(e.message||e)}; } },
   sunArc(o){ try{ if(o){ if(o.floor!=null) _sunArc.floor=+o.floor; if(o.nb!=null) _sunArc.nb=+o.nb; if(o.nbMax!=null) _sunArc.nbMax=+o.nbMax;
-        if(o.snap!=null) _sunArc.snap=o.snap?1:0; }
+        if(o.snap!=null) _sunArc.snap=o.snap?1:0;
+        // rMax === rMin is the A/B: it pins the box back to the fixed 46 the game shipped with.
+        if(o.rMin!=null) _sunArc.rMin=Math.max(8,Math.min(400,+o.rMin));
+        if(o.rMax!=null) _sunArc.rMax=Math.max(_sunArc.rMin,Math.min(400,+o.rMax)); }
       return { floor:+_sunArc.floor.toFixed(3), nb:+_sunArc.nb.toFixed(3), nbMax:+_sunArc.nbMax.toFixed(2),
-               snap:_sunArc.snap, texel:+((46*2)/sunLight.shadow.mapSize.width).toFixed(4),
+               snap:_sunArc.snap, rMin:_sunArc.rMin, rMax:_sunArc.rMax, R:+_sunArc.R.toFixed(1),
+               texel:+((_sunArc.R*2)/sunLight.shadow.mapSize.width).toFixed(4),
                elevDeg:+(Math.asin(Math.max(-1,Math.min(1,_sunArc.sinE)))*57.29578).toFixed(2),
                normalBias:+sunLight.shadow.normalBias.toFixed(3),
                sunElevDeg:+(Math.asin(Math.max(-1,Math.min(1,globalU.uSunDir.value.y)))*57.29578).toFixed(2) };
