@@ -19,8 +19,7 @@ try{
   await pin(W,0.25); await sleep(900); await pin(W,0.25);
   console.log('pines dial:', JSON.stringify(await W.ev(`__hc.pines(true)`)), 'at', JSON.stringify(spot));
   // the range OFF for all of this: two horizon layers in one crop is how the last set of readings went wrong.
-  await W.ev(`__hc.mtn(false)`); await sleep(500);
-  for(let k=0;k<8;k++){
+    for(let k=0;k<8;k++){
     const yaw=+(k*Math.PI/4).toFixed(3);
     await W.ev(`H.cam({yaw:${yaw}, pitch:0.02})`); await sleep(350);
     const a=px((await shots(W,`pc-on-${k}`,0.25,1))[0]);
@@ -33,5 +32,4 @@ try{
       if(d>10){ n++; cols.add(x); if(y<y0)y0=y; if(y>y1)y1=y; } }
     console.log(`yaw ${String(Math.round(yaw*57.3)).padStart(3)}deg  changed px ${String(n).padStart(6)}  cols ${String(cols.size).padStart(4)}  rows ${y1<0?'none':y0+'..'+y1}`);
   }
-  await W.ev(`__hc.mtn(true)`);
 }finally{ await W.close(); }

@@ -11,7 +11,7 @@ try{
     __hc.tpAt(bx, H.surfH(Math.round(bx),Math.round(bz))+2, bz); })()`);
   for(let i=0;i<50;i++){ if(await W.ev(`(()=>{const f=__hc.fill();return f.meshed>=f.want})()`)) break; await sleep(500); }
   await sleep(3000);
-  await W.ev(`__hc.fog(0); __hc.overcast(0); __hc.cinema(true); __hc.freezeT(120); __hc.mtn(false)`);
+  await W.ev(`__hc.fog(0); __hc.overcast(0); __hc.cinema(true); __hc.freezeT(120)`);
   await pin(W,0.25); await sleep(900); await pin(W,0.25);
   for(const [name,yaw] of [['sea90',1.571],['sea113',1.972],['coast293',5.105],['coast315',5.498]])
     for(const d of [2600,700,420]){
@@ -19,5 +19,5 @@ try{
       await shots(W,`pb-${name}-${d}`,0.25,1);
     }
   console.log('shot 12');
-  await W.ev(`__hc.pines(true,{d:2600}); __hc.mtn(true)`);
+  await W.ev(`__hc.pines(true,{d:2600});`);
 }finally{ await W.close(); }
