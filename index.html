@@ -3504,6 +3504,22 @@ paintTile('sunflower_stem', (x,y,r)=>{
   if(!stalk&&!leaf) return [0,0,0,0];
   return leaf?[52+v,96+v,44+v,255]:[42+v,78+v,34+v,255];
 });
+// THE WILD SUNFLOWER IS ONE CELL DRAWN TWO BLOCKS HIGH. The two-block pair works when a player places it and does not
+// survive worldgen: 56 stalks generated and not one head, through direct writes and through placeSet alike, and the
+// cell above a generated stalk reads AIR. tall2 is the mechanism the meadow grass already proves, so the world gets
+// its sunflowers from that and the door-pattern pair stays for placement. One tile, whole plant: head at the top,
+// stalk and leaves below, because tall2 stretches this square over both cells.
+paintTile('sunflower_wild', (x,y,r)=>{
+  const v=jit(r,0,14);
+  const d=Math.hypot(x-7.5, y-3.2);
+  if(d<1.9) return [92+v*0.6,58+v*0.5,26+v*0.4,255];
+  if(d<3.1) return [232+v,178+v,44+v,255];
+  if(d<4.1) return ((x+y)%2===0)?[212+v,150+v,32+v,255]:[0,0,0,0];
+  const stalk=(x===7||x===8)&&y>3;
+  const leaf=((y>7&&y<10)&&(x>3&&x<7)&&(x+y)%2===0)||((y>10&&y<13)&&(x>8&&x<12)&&(x+y)%2===1);
+  if(stalk||leaf) return leaf?[52+v,96+v,44+v,255]:[42+v,78+v,34+v,255];
+  return [0,0,0,0];
+});
 paintTile('sunflower_head', (x,y,r)=>{
   const d=Math.hypot(x-7.5, y-6.5), v=jit(r,0,16);
   if(y>11) return (x===7||x===8)?[42+v,78+v,34+v,255]:[0,0,0,0];   // the stalk carries on down into the lower cell
@@ -3932,6 +3948,7 @@ block('vine',         { cat:'cross', tile:'vine', opaque:false, solid:false, fol
 // The sunflower is TWO BLOCKS on the door's pattern: a bottom that carries the stalk and a top that carries the head.
 // Placing the bottom raises the top, breaking either takes both, and both drop the one item — all three of those are
 // the door's own code paths, extended rather than copied.
+block('sunflower_wild',{ cat:'cross', tile:'sunflower_wild', opaque:false, solid:false, foliage:true, tall2:true, hard:0.2, drop:'sunflower' });
 block('sunflower',    { cat:'cross', tile:'sunflower_stem', opaque:false, solid:false, foliage:true, hard:0.2, drop:'sunflower' });
 block('sunflower_top',{ cat:'cross', tile:'sunflower_head', opaque:false, solid:false, foliage:true, hard:0.2, drop:'sunflower' });
 block('tree_flower',  { cat:'cross', tile:'tree_flower', opaque:false, solid:false, foliage:true, hard:0.2, drop:null });
@@ -4949,8 +4966,11 @@ function enrichTerrain(c){
       if(c.blocks[idx(lx,hh+1,lz)]!==AIR || hh+2>=WH || c.blocks[idx(lx,hh+2,lz)]!==AIR) continue;
       // THROUGH placeSet, and the HEAD first. Writing c.blocks directly skips the render-flag bookkeeping placeSet
       // exists for, and the head is the cell at risk: worldgen put 56 stalks in the world and not one head.
-      placeSet(c, c.cx*CK+lx, hh+2, c.cz*CK+lz, BID.sunflower_top, true);
-      placeSet(c, c.cx*CK+lx, hh+1, c.cz*CK+lz, BID.sunflower, true); } } }
+      placeSet(c, c.cx*CK+lx, hh+1, c.cz*CK+lz, BID.sunflower_wild, true); } } }
+  // TREE FLOWERS ALSO GROW AS A SHRUB. The canopy placement below finds no leaf cell it can use at generation time,
+  // and a flower nobody can see is not a feature, so they clump on the ground as well - which is where a blossom
+  // shrub belongs anyway, and it is the change that most alters how a hillside reads at distance.
+  if(rng()<0.20){ s=spot(); if(grass(s.bx,s.bz,s.h)) scatter(s,8,2,BID.tree_flower); }
   // THE PALE BLOOM GROWS WHERE THE THING THAT HUNTS YOU LIVES, and the density is the message: a single flower a long
   // way out, a scattering nearer, a bed of them at the door. That gradient is the whole feature — a player who has
   // seen two of these and then walks into fifty knows what it means without being told.
@@ -6508,6 +6528,21 @@ function injectAtlas(mat, opts={}){
         'float _sdir;\n'+
         'irradiance = hcAmbient(irradiance, vObjN, vSky, vCan, reflectedLight.directDiffuse, uDayS,\n'+
         '                       uSkyDirAmt, uSkyDirDn, uSkyDirUp, uDayShade, uCanopy, uSkyCurve, _sdir);\n'+
+        // ---- THE MOON DOES NOT SHINE INTO A SEALED ROOM (Ben, three times: "real black cave darkness still isnt there") ----
+        // The key light stops CASTING at day<0.06 — the night shadow kill, which is a deliberate cost saving — and a
+        // directional light that casts no shadow is occluded by nothing at all. So all night the moon delivered its full
+        // 0.42 into every fragment in the world, including the inside faces of a sealed box, and no shader gate could
+        // refuse it because from the fragment's side that is real delivered light. assert-cave-black has been reporting
+        // exactly that shape all along: the interior sits at min channel 2 at midnight with the DESCENT BOTH ON AND OFF,
+        // i.e. whatever lights it is not something the descent can see.
+        // hcSkyDirect IS THE ANSWER AND IT WAS ALREADY WRITTEN. It is pow(sky, curve.y) with "No floor" in its own
+        // comment — "the SAME question asked of the direct term, so a face cannot be lit by a sun it cannot see" — and
+        // it had ZERO call sites, one of the ten helpers that were defined and never called. This is its first.
+        // ONLY WHERE THE SHADOW PASS IS NOT DOING IT. By day the shadow map answers this question properly, with real
+        // geometry, and gating the direct term by sky access as well would darken every canopy-shaded face twice (that
+        // is what hcCanopy is for). So the gate fades in exactly as casting fades out: nothing changes above uDayS 0.12,
+        // it is total below 0.03, and the shadow kill's own hysteresis sits inside that window at 0.06/0.12.
+        'reflectedLight.directDiffuse *= mix(1.0, hcSkyDirect(vSky, uSkyCurve), 1.0 - smoothstep(0.03, 0.12, uDayS));\n'+
         // TRIED AND REJECTED, 2026-08-05, for Ben's "black texels everywhere": relaxing this contrast at night —
         // `mix(0.80,0.26,uDay)` as the floor, so faces differ by 1.25x instead of 4x once the only thing being multiplied is the
         // ambient. The reasoning is sound and the effect is not there: pure-black share in the dark ground crop moved 1.063% ->
@@ -38521,7 +38556,7 @@ window.__hc={
   blockFlag(name,flag){ try{ const i=BID[name]; return (i==null||!B[i])?null:(B[i][flag]===undefined?null:B[i][flag]); }
     catch(e){ return {err:String(e.message||e)}; } },
   foliageCensus(names){ try{
-      const want=(names&&names.length?names:['vine','sunflower','sunflower_top','tree_flower','pale_bloom',
+      const want=(names&&names.length?names:['vine','sunflower','sunflower_wild','sunflower_top','tree_flower','pale_bloom',
                                              'foxglove','anemone','bellflower','yarrow','sage','bloodroot']);
       const idOf={}, count={}, cols={}, where={};
       for(const n of want){ const i=BID[n]; if(i!=null){ idOf[i]=n; count[n]=0; cols[n]=new Set(); } }
