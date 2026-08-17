@@ -10060,6 +10060,84 @@ const DofShader={
       gl_FragColor = vec4(acc/max(wsum,1e-4), col.a);
     }`
 };
+// =====================================================================
+//  VOXEL AMBIENT OCCLUSION — marched through the occupancy volume
+// =====================================================================
+// This is the AO the research pass chose over GTAO, and the reason is not cost: screen-space AO of any generation
+// can only occlude with geometry that is ON SCREEN. In first person the occluder is very often behind the camera or
+// just outside the frame — you standing in a doorway, a wall a step to your left — and no amount of horizon-slice
+// accuracy recovers a surface that was never rasterised. The occluding geometry here is a uniform grid we already
+// own, so the visibility question can be answered exactly instead of approximated, and it is answered the same way
+// whether the occluder is in frame or not.
+//
+// WORLD POSITION FROM DEPTH, NORMAL FROM ITS NEIGHBOURS. There is no normal buffer. Rather than depend on derivatives
+// (which need an extension declaration in this compile path), the normal is built by reconstructing the world
+// position one pixel right and one pixel up and crossing the two deltas. It costs two depth fetches and is exact on
+// the flat axis-aligned faces this world is made of.
+//
+// THE RAYS ARE FEW AND SHORT, WHICH IS THE WHOLE BUDGET ARGUMENT. Teardown gives a pixel two cosine-weighted AO rays
+// and full ambient by 24 units; this takes three rays of six blocks in eight steps, 24 volume samples, because a
+// half-block step through a one-block grid cannot tunnel through a wall. There is no denoiser here — this game has
+// no motion vectors and no history buffer — so the per-pixel jitter is the only noise control, and the ray count is
+// what buys smoothness instead. That is the honest trade and it is why the count is a dial.
+//
+// A RAY THAT LEAVES THE VOLUME IS UNOCCLUDED, not blocked. The volume is 64 blocks and the rays are six, so this only
+// happens at its faces; treating an exit as a hit would draw a dark shell around the player at a fixed radius.
+const VoxelAOShader={
+  uniforms:{ tDiffuse:{value:null}, tDepth:{value:null}, uResolution:{value:new THREE.Vector2(1,1)},
+             uNear:{value:0.1}, uFar:{value:1000}, uInvVP:{value:new THREE.Matrix4()}, uCamPos:{value:new THREE.Vector3()},
+             uOcc:{value:null}, uOccOrigin:{value:new THREE.Vector3()}, uOccSize:{value:64},
+             uAmt:{value:0.75},        // how dark a fully occluded fragment goes
+             uRays:{value:3.0}, uSteps:{value:8.0}, uReach:{value:6.0},
+             uBias:{value:0.55},       // metres along the normal before the first sample: the fragment's OWN cell is solid and would occlude everything
+             uNearCut:{value:0.35} },  // the viewmodel: not a surface in the world, has no cell, must not be occluded
+  vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
+  fragmentShader:`precision highp sampler3D;
+    varying vec2 vUv; uniform sampler2D tDiffuse, tDepth; uniform sampler3D uOcc;
+    uniform vec2 uResolution; uniform mat4 uInvVP; uniform vec3 uCamPos, uOccOrigin;
+    uniform float uNear, uFar, uOccSize, uAmt, uRays, uSteps, uReach, uBias, uNearCut;
+    float lin(float d){ return (2.0*uNear*uFar)/(uFar+uNear-(2.0*d-1.0)*(uFar-uNear)); }
+    vec3 wpos(vec2 uv, float d){ vec4 n=vec4(uv*2.0-1.0, d*2.0-1.0, 1.0); vec4 p=uInvVP*n; return p.xyz/p.w; }
+    float solid(vec3 w){ vec3 t=(w-uOccOrigin)/uOccSize;
+      if(any(lessThan(t,vec3(0.0))) || any(greaterThan(t,vec3(1.0)))) return -1.0;   // outside the volume: unknown, treated as open
+      return texture(uOcc, t).r > 0.5 ? 1.0 : 0.0; }
+    float h21(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+    void main(){
+      vec4 col = texture2D(tDiffuse, vUv);
+      float d = texture2D(tDepth, vUv).x;
+      if(d >= 0.9999 || uAmt <= 0.001){ gl_FragColor = col; return; }     // the sky has no surface to occlude
+      float z = lin(d);
+      if(z < uNearCut){ gl_FragColor = col; return; }                      // held item
+      vec3 P = wpos(vUv, d);
+      vec2 px = 1.0/uResolution;
+      vec3 Px = wpos(vUv+vec2(px.x,0.0), texture2D(tDepth, vUv+vec2(px.x,0.0)).x);
+      vec3 Py = wpos(vUv+vec2(0.0,px.y), texture2D(tDepth, vUv+vec2(0.0,px.y)).x);
+      vec3 N = normalize(cross(Px-P, Py-P));
+      if(dot(N, uCamPos-P) < 0.0) N = -N;                                  // the cross order flips with the winding of the two deltas
+      float jit = h21(gl_FragCoord.xy);
+      float occ = 0.0, wsum = 0.0;
+      for(int r=0;r<8;r++){
+        if(float(r) >= uRays) break;
+        float a = (float(r)+jit)*2.3999632297;                             // golden angle, so few rays still spread
+        float u = fract(jit*1.618 + float(r)*0.37);
+        float ct = sqrt(1.0-u), st = sqrt(u);                              // cosine-weighted around N
+        vec3 T = normalize(abs(N.y)<0.9 ? cross(N, vec3(0.0,1.0,0.0)) : cross(N, vec3(1.0,0.0,0.0)));
+        vec3 B = cross(N,T);
+        vec3 dir = normalize(N*ct + (T*cos(a)+B*sin(a))*st);
+        float hit = 0.0;
+        for(int s=0;s<16;s++){
+          if(float(s) >= uSteps) break;
+          float t = uBias + (float(s)+jit)*(uReach/uSteps);
+          float v = solid(P + dir*t);
+          if(v < 0.0) break;                                               // left the volume: stop, unoccluded
+          if(v > 0.5){ hit = 1.0 - t/uReach; break; }                      // nearer hits occlude harder
+        }
+        occ += hit; wsum += 1.0;
+      }
+      float ao = 1.0 - uAmt*(occ/max(wsum,1.0));
+      gl_FragColor = vec4(col.rgb*ao, col.a);
+    }`
+};
 const SSAOShader={
   uniforms:{ tDiffuse:{value:null}, tDepth:{value:null}, uResolution:{value:new THREE.Vector2(1,1)},
              // uRadius IS IN METRES, and uFocal is what turns it into pixels. It used to be a bare pixel number
@@ -10605,6 +10683,7 @@ const MotionBlurShader={
 let gradePass, ssaoPass=null, godrayPass=null, motionPass=null, _sceneRT=null, _mbMode=false;
 let smaaPass=null;   // see the import, and the add in buildComposer for why it is LAST
 let dofPass=null;    // depth of field — see DofShader for why it sits before bloom and before the tone map
+let vaoPass=null;    // voxel AO — see VoxelAOShader; it is what SSAO is being replaced by
 // THE DEPTH PATH IS NOT THE MOTION BLUR, and conflating the two is why Ben's god rays vanished (08-05: "god rays are gone from
 // the sun"). The scene's DEPTH exists only as a texture on _sceneRT, and _sceneRT was only built when the motion-blur SETTING was
 // on — so turning motion blur off in Settings silently deleted the god rays and the SSAO with it. Ben had every reason to turn it
@@ -10685,7 +10764,20 @@ function buildComposer(){
     ssaoPass.uniforms.uNear.value=camera.near; ssaoPass.uniforms.uFar.value=camera.far;
     ssaoPass.uniforms.uResolution.value.set(innerWidth, innerHeight);
     composer.addPass(ssaoPass);
-  } else ssaoPass=null;
+    // VOXEL AO SITS BESIDE IT AND SHIPS ON, WITH SSAO SHIPPED OFF. Both are built so the A/B is one call away
+    // (__hc.pass('ssao',true) / __hc.pass('vao',false)) rather than a rebuild, because this is a look change on
+    // every interior surface in the game and the comparison is the point. See VoxelAOShader for why the voxel
+    // version replaces rather than supplements: they answer the same question, and the screen-space one answers it
+    // wrongly wherever the occluder is not on screen.
+    vaoPass = new ShaderPass(VoxelAOShader);
+    vaoPass.material.depthTest=false; vaoPass.material.depthWrite=false;
+    vaoPass.uniforms.tDepth.value=_sceneRT.depthTexture;
+    vaoPass.uniforms.uNear.value=camera.near; vaoPass.uniforms.uFar.value=camera.far;
+    vaoPass.uniforms.uResolution.value.set(innerWidth, innerHeight);
+    vaoPass.uniforms.uOcc.value=_occTex;
+    composer.addPass(vaoPass);
+    ssaoPass.enabled=false;
+  } else { ssaoPass=null; vaoPass=null; }
   // HEIGHT FOG after AO and before the god rays, so a shaft is drawn through the mist rather than under it, and before
   // bloom so a lit bank glows. Same depth gate as the two passes around it: no depth attachment, no fog. Absent from the
   // chain entirely while off, so the default build pays nothing for it.
@@ -19418,6 +19510,20 @@ function loop(){ try{
     dofPass.uniforms.uNear.value = camera.near; dofPass.uniforms.uFar.value = camera.far;
     dofPass.uniforms.tDepth.value = _sceneRT ? _sceneRT.depthTexture : null;
   }
+  // Voxel AO needs the camera's inverse view-projection to turn a depth sample back into a world point, and the
+  // volume's live origin — which moves in 8-block steps as the player walks, so a stale copy puts every ray in the
+  // wrong place by up to eight blocks.
+  if(vaoPass && vaoPass.enabled){
+    camera.updateMatrixWorld();
+    _curVP.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    vaoPass.uniforms.uInvVP.value.copy(_curVP).invert();
+    vaoPass.uniforms.uCamPos.value.copy(camera.position);
+    vaoPass.uniforms.uResolution.value.set(innerWidth, innerHeight);
+    vaoPass.uniforms.uNear.value=camera.near; vaoPass.uniforms.uFar.value=camera.far;
+    vaoPass.uniforms.uOccOrigin.value.set(_occOx,_occOy,_occOz);
+    vaoPass.uniforms.uOccSize.value=OCC_N;
+    vaoPass.uniforms.uOcc.value=_occTex;
+  }
   if(ssaoPass && ssaoPass.enabled){
     ssaoPass.uniforms.uResolution.value.set(innerWidth, innerHeight);
     ssaoPass.uniforms.uFocal.value = (innerHeight*0.5)/Math.tan(camera.fov*Math.PI/360);
@@ -27705,11 +27811,27 @@ function buildFist(){ const g=new THREE.Group();                                
   const skin=new THREE.MeshLambertMaterial({color:_FIST_SKIN, map:skinTex()});
   const cloth=new THREE.MeshLambertMaterial({color:_FIST_SLEEVE, map:(typeof clothTex==='function')?clothTex('linen'):null});
   const box=(w,h,d,z,mat,x,y)=>{ const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mat); m.position.set(x||0,y||0,z); g.add(m); return m; };
-  box(0.105,0.115,0.30,-0.365,cloth);            // sleeve: the elbow end, and the widest part of the limb
-  box(0.118,0.128,0.045,-0.198,cloth);           // cuff: the one hard edge on the whole limb, where the eye reads a garment ending
-  box(0.082,0.092,0.10,-0.125,skin);             // wrist: narrower than both the sleeve and the fist, which is what makes the fist read as a fist
-  box(0.100,0.108,0.115,-0.017,skin);            // the fist itself
-  box(0.034,0.052,0.070,-0.030,skin,0.058,0.012);// thumb, outboard — mirrored with the group by whichever hand this is
+  // ---- THE LIMB WAS BUILT BACKWARDS AND FOUR OF ITS FIVE PARTS WERE BEHIND THE EYE (Ben: the hand "looks weird") ----
+  // The parts were laid out with the SLEEVE furthest forward at z -0.365 and the FIST at the pivot at -0.017 — an arm
+  // with its elbow out in front and its hand at the shoulder. Every group that carries this mesh sits at z +0.12, a
+  // hand's breadth BEHIND the eye (the empty-hand pose, mainArm and offArm all read ARM_REST_Z), so in camera space the
+  // cuff landed at -0.078, the wrist at -0.005 and the fist and thumb at +0.10 — past the 0.08 near plane, i.e. behind
+  // the camera. Measured with __hc.handParts: ONE of the five parts was drawn. What filled the corner of the frame was
+  // the sleeve alone, and a bare dark sleeve stub with no hand on the end of it is exactly what "looks weird" describes.
+  //   So the order is reversed: the sleeve enters from the body end nearest the eye and the fist is the far end. Nothing
+  // is resized and nothing is re-tinted — every width, height and depth here is the one that was authored, and they
+  // still abut in the same sequence, so the sleeve-cuff-wrist-fist join reads as it was designed to. Only z moved.
+  //   THE PALM LANDS AT 0.515 FROM THE PIVOT, and that number is not chosen here: OFF_PALM_Y has been computed as
+  // FIST_REST_Y + sin(0.06)*0.515 since the offhand was fitted, so 0.515 is what the rest of the file already believes
+  // the distance from the pivot to the palm is. It was 0.017. Putting the fist where the offhand's own arithmetic says
+  // it is makes those two agree instead of being 50 cm apart.
+  //   The sleeve's rear end still sits behind the near plane, and that is correct: a forearm comes from a shoulder that
+  // is behind your eye, so it must be cut by the near plane rather than end in mid-air.
+  box(0.105,0.115,0.30,-0.168,cloth);            // sleeve: the elbow end, nearest the eye, and the widest part of the limb
+  box(0.118,0.128,0.045,-0.340,cloth);           // cuff: the one hard edge on the whole limb, where the eye reads a garment ending
+  box(0.082,0.092,0.10,-0.412,skin);             // wrist: narrower than both the sleeve and the fist, which is what makes the fist read as a fist
+  box(0.100,0.108,0.115,-0.515,skin);            // the fist itself, at the palm distance the offhand pose already assumes
+  box(0.034,0.052,0.070,-0.528,skin,0.058,0.012);// thumb, outboard — mirrored with the group by whichever hand this is
   return g; }
 // HELD-ITEM FOG — the viewmodel sits ~0.5u from the eye where real scene fog is nil, so bake an EXAGGERATED
 // depth fog into its materials: the further a vertex extrudes from the body (camera-space depth), the more it
@@ -45860,6 +45982,26 @@ window.__hc={
              cutOverPeak:nz.length?+(nz[nz.length-1]/Math.max(...nz)).toFixed(3):0,
              first6:nz.slice(0,6).map(v=>+v.toFixed(5)) };
   }catch(e){ return {err:String(e&&e.message||e)}; } },
+  // QA: WHERE THE HAND ACTUALLY IS, in camera space, part by part, against the near plane. "The hand looks weird" cannot
+  // be read off a screenshot when the reason is that most of it is behind the eye: a part with z greater than -near is
+  // not drawn at all, and a corner full of sleeve with no fist in it looks like a badly modelled hand rather than like a
+  // correctly modelled one buried in the camera. clipped:true is the finding; the part names are the fist's own build
+  // order, elbow first.
+  handParts(){ try{ const m=view.mesh; if(!m) return {err:'nothing held'};
+    m.updateWorldMatrix(true,true); camera.updateMatrixWorld(true);
+    const inv=new THREE.Matrix4().copy(camera.matrixWorld).invert(), v=new THREE.Vector3();
+    const names=['sleeve','cuff','wrist','fist','thumb'], out=[]; let i=0;
+    m.traverse(o=>{ if(!o.isMesh) return; v.setFromMatrixPosition(o.matrixWorld).applyMatrix4(inv);
+      const p=o.geometry&&o.geometry.parameters;
+      // THE FRONT FACE DECIDES IT, not the centre. A 0.30-long forearm whose centre is behind the near plane is still
+      // three quarters drawn — that is what a limb entering from your shoulder looks like — so a centre test would
+      // report the fixed hand as broken. A part is clipped only when even its far face is behind the plane.
+      const d=p?p.depth:0;
+      out.push({ part:names[i]||('mesh'+i), z:+v.z.toFixed(4), y:+v.y.toFixed(4), x:+v.x.toFixed(4),
+                 depth:p?+p.depth.toFixed(3):null, clipped:(v.z-d/2) >= -camera.near }); i++; });
+    return { held:view.id, near:camera.near, group:[+view.group.position.x.toFixed(3),+view.group.position.y.toFixed(3),+view.group.position.z.toFixed(3)],
+             drawn:out.filter(r=>!r.clipped).length, of:out.length, parts:out };
+  }catch(e){ return {err:String(e&&e.message||e)}; } },
   nudgeActive(){ return !!_lookNudge; },                                                    // QA: is the one-shot look-up nudge still running?
   cineKill(){ if(typeof endBossCutscene==='function')endBossCutscene(); _lookNudge=null; return {cine:!!_cine}; },   // QA: end an arrival early
   summon(){ HORROR._firstNight=true; wretch.debug=false; if(!wretch.active){ wretch.spawnT=0; if(!spawnWretch(Math.random()*360,26)) wretch.spawnT=0.5; } return wretch.active; },
@@ -46107,7 +46249,19 @@ window.__hc={
                nearDead:r('uNearDead'), nearFall:r('uNearFall'), farDead:r('uFarDead'), farFall:r('uFarFall'),
                nearCut:r('uNearCut'), near:r('uNear'), far:r('uFar') }; }
     catch(e){ return {err:String(e.message||e)}; } },
-  pass(name, on){ try{ const P={ ssao:ssaoPass, godray:godrayPass, bloom:bloomPass, grade:gradePass, motion:motionPass, heightfog:heightFogPass, smaa:smaaPass, dof:dofPass };
+  // VOXEL AO, as dials and a readout. amt 0 is the A/B off; rays/steps/reach are the budget; bias is how far along the
+  // normal the first sample sits, and it exists because the fragment's OWN cell is solid and would otherwise occlude
+  // every ray it casts.
+  vao(o){ try{ if(!vaoPass) return {err:'no voxel AO pass: needs the depth path (_rtPath) and quality above Low'};
+      const U=vaoPass.uniforms, f=(k,u)=>{ if(o&&o[k]!=null) U[u].value=+o[k]; };
+      f('amt','uAmt'); f('rays','uRays'); f('steps','uSteps'); f('reach','uReach'); f('bias','uBias');
+      if(o&&o.on!=null) vaoPass.enabled=!!o.on;
+      const r=k=>+U[k].value.toFixed(3);
+      return { on:vaoPass.enabled, amt:r('uAmt'), rays:r('uRays'), steps:r('uSteps'), reach:r('uReach'), bias:r('uBias'),
+               occOrigin:[U.uOccOrigin.value.x,U.uOccOrigin.value.y,U.uOccOrigin.value.z], occSize:r('uOccSize'),
+               ssao:ssaoPass?ssaoPass.enabled:null }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  pass(name, on){ try{ const P={ ssao:ssaoPass, godray:godrayPass, bloom:bloomPass, grade:gradePass, motion:motionPass, heightfog:heightFogPass, smaa:smaaPass, dof:dofPass, vao:vaoPass };
       const p=P[name]; if(!p) return {err:'no such pass: '+name+' (have '+Object.keys(P).filter(k=>P[k]).join(',')+')'};
       if(on!=null) p.enabled=!!on;
       const st={}; for(const k of Object.keys(P)) st[k]=P[k]?!!P[k].enabled:null;
