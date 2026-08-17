@@ -7664,7 +7664,7 @@ const mountainMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false,
   // TRIAL 08-17 (Ben: "try removing that air clamp"): the clamp is off. It was setting the range's value outright —
   // tmp-horizon-dom shows the band barely moves for its own gain, snow line or haze — so the question is what the
   // mountains look like when their own terms are what you see. `node bench/tmp-airclamp.mjs before|after`.
-  '    col=min(col, uAir*0.30);',
+  '    col=min(col, uAir*0.85);',
   // ...AND THE CAPS ARE THE ONE THING ALLOWED THROUGH IT (Ben: punch through the cloud). The clamp above is the rule
   // that keeps this horizon honest - nothing on it may out-shine the air it is seen through - and it is exactly why the
   // snow sat INSIDE the cloud band rather than standing against it. Snow is the one surface out there that genuinely is
@@ -23352,6 +23352,20 @@ const VIEW_FILL_BASE=0.85;
 // How much of the beam comes back off what it is pointed at, onto the hands. ?vmbounce= sets it live, and 0 is the
 // build without it — which is the A/B, because the question here is not whether the gun is lit but whether lighting
 // it blows the lamp's own lens into a ball of bloom.
+// ---- AND HOW FAR THAT BOUNCE REACHES (Ben 08-17: raise the fill radius while the beam is on) ----
+// 1.3 is the radius the note above insists on, and the reason it gives is sound: a three PointLight takes no
+// occlusion, so anything that reaches past the hands lights the WORLD through walls, which Ben caught once from a
+// distance. It also means the fill cannot reach a rifle. viewFill sits at 0.32,0.22,0.22 and a long barrel's muzzle
+// is about 1.65 from it, where three's cutoff window has already taken the value to nothing — which is why the
+// bounce lifted the grip and left the muzzle black against its own lit disc.
+// SO THE RADIUS MOVES WITH THE BEAM AND ONLY WITH IT. The condition is the thing that makes this safe: while the
+// flashlight is off the fill is the 1.3 it has always been, and every frame in the game that does not have a beam
+// running is unchanged. While it IS on, the frame already contains a 150-intensity spot pointed at the world, so a
+// 1.3-intensity fill reaching 2.6 blocks is not what anyone is going to see leaking — and what it does leak, a soft
+// lift on what is close behind you while your own torch is lit, is bounce, which is the thing being modelled.
+// ?vmbouncer= sets it; 1.3 is the radius as it was, which is the A/B.
+const VIEW_FILL_BEAM_R=(()=>{ try{ const q=new URLSearchParams(location.search).get('vmbouncer'); const v=q!=null?parseFloat(q):NaN;
+  return isFinite(v)?Math.max(1.3,Math.min(6,v)):2.6; }catch(e){ return 2.6; } })();
 const VIEW_FILL_BEAM=(()=>{ try{ const q=new URLSearchParams(location.search).get('vmbounce'); const v=q!=null?parseFloat(q):NaN;
   return isFinite(v)?Math.max(0,Math.min(4,v)):0.45; }catch(e){ return 0.45; } })();
 let _flashHold=false;   // QA only (__hc.flashHold) — see the flash-decay block in updateView
@@ -25083,7 +25097,12 @@ const _vfogAmt={value:0};   // held-item fog strength — WEATHER FOG only (Ben 
 // from the sun when the sun is on it; this only stops the unlit side going to zero.
 // 0.32 of the fill lands on EVERY face regardless of facing: a pure facing term still left the side and underside faces
 // at zero, which is the same black slab in the corner, just a smaller one.
-const _veyeAmt={value:0.40};
+const VEYE_BASE=0.40;
+// How much the baked eye fill rises while the flashlight is on — the bounce that actually reaches the weapon, as
+// opposed to viewFill, which reaches the arm. ?vmeye= sets it and 0 is the build without it.
+const VIEW_EYE_BEAM=(()=>{ try{ const q=new URLSearchParams(location.search).get('vmeye'); const v=q!=null?parseFloat(q):NaN;
+  return isFinite(v)?Math.max(0,Math.min(2,v)):0.55; }catch(e){ return 0.55; } })();
+const _veyeAmt={value:VEYE_BASE};
 let _vfogHold=null;   // QA only (__hc.vfog) — pins the fog amount the weather would otherwise reassign every frame
 function applyViewFog(root){ if(!root)return; root.traverse(o=>{ if(!o.isMesh||!o.material)return; const mats=Array.isArray(o.material)?o.material:[o.material];
   mats.forEach(m=>{ if(!m||m._vfog||m.isMeshBasicMaterial||m.transparent)return; m._vfog=true; const prev=m.onBeforeCompile;
@@ -26655,7 +26674,21 @@ function updateView(dt){ updateRecoil(dt);                                      
   // of a rifle takes nearly three times the value written here. At 1.1 the front sight came out as a white blob
   // over the beam disc - the same blowout one object further along, which is the whole family being fixed. At 0.45
   // the weapon reads as a weapon and the beam is still the brightest thing in the frame.
-  else { muzzleLight.intensity=0; viewFill.intensity=VIEW_FILL_BASE + (flashLight.intensity>0.01 ? VIEW_FILL_BEAM : 0); }
+  else { muzzleLight.intensity=0; const _beam=flashLight.intensity>0.01;
+    viewFill.intensity=VIEW_FILL_BASE + (_beam ? VIEW_FILL_BEAM : 0);
+    viewFill.distance=_beam ? VIEW_FILL_BEAM_R : 1.3; }   // the radius goes back the moment the beam does — see VIEW_FILL_BEAM_R
+  // ---- AND THE GUN IS NOT LIT BY viewFill, WHICH IS WHY THE RADIUS ALONE DID NOT DO IT ----
+  // Measured: with the beam on, taking the fill to thirteen times its value AND six blocks of radius moved the
+  // weapon crop from 7.3 to 8.6. Nearly all of that is the arm, which is an ordinary Lambert mesh and does take a
+  // point light. The held models are patched by applyViewFog, and what lights them is uVEye — a BAKED fill added
+  // after dithering, proportional to how squarely a face meets the eye. That is not an accident: the note beside
+  // it records that a camera-mounted light cannot serve the viewmodel, because three collects lights against the
+  // CAMERA's layers, so a light restricted to a viewmodel layer is dropped from the render entirely.
+  // So the beam raises the term that actually reaches the weapon. It multiplies diffuseColor, so it lifts a gun
+  // out of silhouette without inventing light on a black texel — a dark weapon stays a dark weapon.
+  // IT IS WRITTEN EVERY FRAME, so __hc.vfog's eye argument is overwritten by the next one while a beam is running.
+  // That is the same trap _vfogAmt already carries and it is recorded there too; pin the beam off to use the hook.
+  _veyeAmt.value = VEYE_BASE + (flashLight.intensity>0.01 ? VIEW_EYE_BEAM : 0);
   // ---- MINIGUN — the barrel cluster SPINS while firing, and the muzzle tip heats to RED under sustained fire (Ben 07-21) ----
   { const ud=view.mesh&&view.mesh.userData, bar=ud&&ud.barrels, hot=ud&&ud.hotMat;
     if(bar){ const firing=view.flashT>0.001;
