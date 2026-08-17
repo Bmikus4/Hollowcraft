@@ -230,18 +230,21 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     // THROUGH THE REAL KEYBOARD, not the probe. Everything above drives attUIKey directly, which cannot catch the
     // one thing the key handler owns: whether T reaches the screen at all, and whether it still reaches the console
     // it used to open. Both are keydown-order questions, and only a real key event asks them.
+    // T IS HELD, NOT TAPPED, so `press` (down THEN up) opens and closes inside one call and can never see the screen
+    // up. The key is held down, the screen read, and only then released — which is also the only way to catch an
+    // autorepeat that closes what it just opened.
     await p.evaluate("__hc.hold('ar15'); __hc.attOpen(false); __hc.lock(true)"); await sleep(300);
-    await p.keyboard.press('KeyT'); await sleep(400);
+    await p.keyboard.down('KeyT'); await sleep(500);
     const openedByKey=await p.evaluate("__hc.attProbe().ui");
-    await p.keyboard.press('KeyT'); await sleep(400);
+    await p.keyboard.up('KeyT'); await sleep(400);
     const closedByKey=await p.evaluate("__hc.attProbe().ui");
     await p.keyboard.press('Slash'); await sleep(400);
     const consoleUp=await p.evaluate("(()=>{const e=document.getElementById('cmdline')||document.querySelector('#cmd,#console');"+
       "return !!(e&&getComputedStyle(e).display!=='none');})()");
     await p.keyboard.press('Escape'); await sleep(300);
     console.log('keys', JSON.stringify({openedByKey, closedByKey, consoleUp}));
-    T('the T key itself opens the screen', openedByKey===true, {openedByKey});
-    T('T closes it again', closedByKey===false, {closedByKey});
+    T('holding T opens the screen and it stays open', openedByKey===true, {openedByKey});
+    T('releasing T closes it', closedByKey===false, {closedByKey});
 
     // A GUN IN THE BAG KEEPS WHAT IS BOLTED TO IT. The hotbar always did — `inv` is serialised whole — but the bag
     // is written as a named field list, so a stack put away lost its attachments and its loaded rounds on reload.
