@@ -78,20 +78,30 @@ function bodyStats(withIt, without, box){
       console.log('  '+(kind+'/'+light).padEnd(18)+JSON.stringify(st));
     };
 
-    // The Wretch has to be summoned and held; the forks are spawned by their own QA hooks.
-    await ev('__hc.wretchArm(true,true)'); await ev('__hc.wretchAt(10)');
+    // ORDER MATTERS AND IT COST A RUN. The Tenant's room is built around the PLAYER, so building it first put the camera
+    // inside a sealed stone box for every other portrait: measured, the Meek came back as 30 pixels averaging 0.11 luminance
+    // in what was supposed to be daylight, which is a photograph of a dark wall. Outdoors is shot first, the room goes up last.
+    // THE WRETCH NEEDS FREEZING, NOT HOLDING. hwHold only stops the extras; the parent runs its own AI, and in daylight that
+    // means it flees and despawns, so every family portrait so far has come back "wretch/day: none alive" and the family has
+    // been photographed without its parent. __hc.freeze pins it and still drives placeWretch, which is the same path the live
+    // game animates through.
+    await ev('__hc.wretchAt(10)'); await ev('__hc.wretchArm(true,true)'); await sleep(400);
+    await ev('__hc.freeze(true,true)'); await sleep(400);
     await ev('__hc.meek(1)');
     await ev('__hc.burrower(9)');
     for(let i=0;i<40;i++){ const r=await ev('__hc.burrower()'); if(r.visible) break; await sleep(120); }
-    await ev('__hc.tenBox()'); await sleep(900); await ev('__hc.tenant(true)'); await sleep(600);
-
     for(const light of ['day','dark']){
-      console.log('\n['+light+']');
-      await portrait('wretch',  light, 9);
-      await portrait('meek',    light, 6);
-      await portrait('burrower',light, 8);
-      await portrait('tenant',  light, 6);
+      console.log('');
+      console.log('['+light+']');
+      // TEN BLOCKS AND NO CLOSER. At six the near corners of a body project from BEHIND the lens, the screen box degenerates
+      // to the whole frame, and the statistics then describe whatever else moved in it — in one run they described a villager
+      // walking along the beach. Ten is far enough that the projection is honest and near enough to fill the frame.
+      await portrait('wretch',  light, 11);
+      await portrait('meek',    light, 10);
+      await portrait('burrower',light, 10);
     }
+    await ev('__hc.tenBox()'); await sleep(1000); await ev('__hc.tenant(true)'); await sleep(700);
+    for(const light of ['day','dark']) await portrait('tenant', light, 9);
     console.log('\n  frames in '+OUT);
     console.log('  '+JSON.stringify(rows));
   } finally {
