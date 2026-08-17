@@ -230,7 +230,11 @@ for page in range(0, len(inscope), COLS * 6):
         col = {'TAKE':(150,210,140),'KEEP OURS':(210,190,140),'TINT FIRST':(230,150,120),
                'NO CANDIDATE':(150,150,150),'BEN TO JUDGE':(200,200,230)}.get(verdict,(220,214,196))
         d.text((cx, cy + 4), f'{t}  |  {cand or "none"}  [{verdict}]', fill=col)
+    # bench/results is gitignored, so the sheets the table cites also go somewhere versioned: a table whose pictures
+    # only exist on one machine is not a table anyone else can check.
     sheet.save(os.path.join(RES, f'crossref-{page//(COLS*6)+1}.png'))
+    os.makedirs(os.path.join(ROOT, 'docs', 'crossref'), exist_ok=True)
+    sheet.save(os.path.join(ROOT, 'docs', 'crossref', f'crossref-{page//(COLS*6)+1}.png'))
 
 # ---- THE TABLE -----------------------------------------------------------------------------------------------
 out = []
@@ -245,7 +249,7 @@ out.append('')
 out.append(f'Pack: {len(pack)} block textures, {len(has_pbr)} of them with a normal map. Ours: {len(TIDX)} painted tiles.')
 out.append('')
 out.append('Pictures, ours on the left of each pair: ' + ', '.join(
-    f'`bench/results/crossref-{i+1}.png`' for i in range((len(inscope) + 35) // 36)))
+    f'`docs/crossref/crossref-{i+1}.png`' for i in range((len(inscope) + 35) // 36)))
 out.append('')
 out.append('## Every state and direction, as asked — and there is almost nothing there')
 out.append('')

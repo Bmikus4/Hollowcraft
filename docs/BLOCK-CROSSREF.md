@@ -8,7 +8,7 @@ atlas has to grow from 256 to 2048 (16x16 tiles at 128px) to hold them.
 
 Pack: 1157 block textures, 941 of them with a normal map. Ours: 129 painted tiles.
 
-Pictures, ours on the left of each pair: `bench/results/crossref-1.png`, `bench/results/crossref-2.png`, `bench/results/crossref-3.png`
+Pictures, ours on the left of each pair: `docs/crossref/crossref-1.png`, `docs/crossref/crossref-2.png`, `docs/crossref/crossref-3.png`
 
 ## Every state and direction, as asked — and there is almost nothing there
 
