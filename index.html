@@ -12254,7 +12254,31 @@ let _stagedC=null, _stagedG=null;
 function _abandonStaged(){ if(_stagedG){ _stagedG.traverse(o=>{ if(o.isMesh){ o.geometry.dispose(); if(o.material&&o.material.userData&&o.material.userData.chunkClone) o.material.dispose(); } }); }
   const c=_stagedC; if(c&&c._oldL!==undefined&&c._oldL!==null){ if(c.light3D&&c.light3D!==c._oldL) c.light3D.dispose(); c.light3D=c._oldL; c._oldL=null; }   // restore the old (still-bound) light volume; free the orphaned stage-A bake
   _stagedC=null; _stagedG=null; }
+// A SHALLOW SWEEP, EVERY TIME A CHUNK IS ABOUT TO BE MESHED. The generator's own sweep runs once, at generation, and
+// 1,475 grass-under-grass blocks survived it -- created afterwards by builders that run frames later (the well, the
+// village, every groundStructure pad) and by decoration writing into a neighbour that had already been swept. Chasing
+// each writer means finding them all and finding them again every time one is added, which is the fault this rule
+// exists to end.
+// SHALLOW IS WHAT MAKES IT AFFORDABLE. Grass only ever exists at the surface, so this reads seven cells per column
+// around surfaceH rather than the whole 256-high shaft: 1,792 array reads for a chunk, against the light bake and the
+// greedy mesh that are about to run on it. The deep sweep at generation stays, because it is the one that catches the
+// column pass's own output before anything is drawn from it.
+function _surfaceGrassSweep(c){
+  const bl=c.blocks; let n=0;
+  for(let lz=0;lz<CK;lz++) for(let lx=0;lx<CK;lx++){
+    const h=c.htop?c.htop[lx+lz*CK]:0; if(!h) continue;
+    const y0=Math.max(1,h-3), y1=Math.min(WH-2,h+3);
+    for(let y=y0;y<=y1;y++){
+      if(bl[idx(lx,y,lz)]!==BID.grass) continue;
+      const up=bl[idx(lx,y+1,lz)];
+      if(up===AIR) continue;
+      if(up!==WATER && !isSolid[up]) continue;     // leaves, flowers and tufts are not a roof
+      bl[idx(lx,y,lz)]=BID.dirt; n++; } }
+  if(n) _buriedGrass+=n;
+  return n;
+}
 function buildChunkStaged(c){
+  if(c && c.generated && c.blocks) _surfaceGrassSweep(c);
   if(_stagedC!==c){                                    // ---- STAGE A: light bake + snapshot + opaque pass (the heavy half)
     if(_stagedC) _abandonStaged();                     // shouldn't happen (resume-first discipline), but never leak a partial build
     // CHOKEPOINT 4 of 4 for the decoration invariant, ONCE per chunk, immediately before its first mesh is built. The other
@@ -14724,15 +14748,35 @@ function lockNote(what,why){ LOCKLOG.push({t:Math.round(performance.now()), what
 const _lockDbg=(typeof Q!=='undefined'&&Q.get)?!!Q.get('dbglock'):false;
 // WANTED IS THE GAME'S OWN INTENT, kept separate from the browser's state. Only a deliberate release clears it, so
 // pointerlockchange can tell "the player opened their bag" from "the lock went away on its own".
-function requestLock(why){ _lockWanted=true; _lockBy=why||'';
-  lockNote('request',why);
-  const fail=(e)=>{ lockNote('REFUSED',(why||'')+' :: '+String(e&&e.name||e)); };
-  let pr=null; try{ pr=canvas.requestPointerLock({unadjustedMovement:true}); }catch(e){ fail(e); return; }
+// ASKING IS NOT GETTING, AND THE GAME WAS NOT CHECKING. Every close-a-screen path ends in one requestLock and
+// believes it: the promise's rejection was written to the ledger and nothing else happened, and the OLD API returns
+// no promise at all, so on those browsers a refusal was not even observable. A refusal here is never the player's
+// intent — they just shut their bag, or the console, or a container — so it is asked again, twice, 400ms apart, and
+// the pause card comes up only when the browser has said no three times. That card is the floor: whatever happens,
+// the player is never left with a free cursor and no way back in.
+//   THE RETAKE IN pointerlockchange DELIBERATELY DOES NOT USE THIS. There, a first refusal IS the answer: the
+// browser refuses a re-lock for about a second after a user-initiated exit, and that refusal is the only way the
+// game can tell Escape from a leak. Retrying it would swallow Escape as a pause.
+const LOCK_TRIES=3, LOCK_CHECK_MS=400; let _lockTimer=0;
+function _lockLive(){ return started && !player.dead && !openUI && _lockWanted && document.pointerLockElement!==canvas; }
+function requestLock(why,_try){ _lockWanted=true; _lockBy=why||''; const n=_try||0;
+  if(_lockTimer){ clearTimeout(_lockTimer); _lockTimer=0; }
+  lockNote(n?('request #'+(n+1)):'request',why);
+  const fail=(e)=>{ lockNote('refused',(why||'')+' :: '+String(e&&e.name||e)); };
+  let pr=null; try{ pr=canvas.requestPointerLock({unadjustedMovement:true}); }catch(e){ fail(e); }
   if(pr&&pr.catch)pr.catch(()=>{ let p2=null; try{ p2=canvas.requestPointerLock(); }catch(e){ fail(e); return; }
-    if(p2&&p2.catch)p2.catch(fail); }); }
+    if(p2&&p2.catch)p2.catch(fail); });
+  // The check is the mechanism, not the promise: it is the one signal both APIs give, and it is what a leak looks
+  // like from inside the game — we asked, and we are still not locked.
+  _lockTimer=setTimeout(()=>{ _lockTimer=0;
+    if(document.pointerLockElement===canvas || !_lockLive()) return;
+    if(n+1<LOCK_TRIES){ requestLock(why,n+1); return; }
+    lockNote('gave up',(why||'?')+' refused '+LOCK_TRIES+'x');
+    if(!player.grabbed && pause && pause.style.display==='none') showPause(); }, LOCK_CHECK_MS); }
 // EVERY DELIBERATE EXIT GOES THROUGH HERE. Scattered document.exitPointerLock() calls are indistinguishable from a
 // leak in the ledger, and worse, the re-acquire below cannot know not to fight them.
 function releaseLock(why){ _lockWanted=false; _lockBy=why||''; lockNote('release',why);
+  if(_lockTimer){ clearTimeout(_lockTimer); _lockTimer=0; }   // a pending retry must not fight a deliberate release (_lockWanted alone already stops it; this stops it costing a wake-up too)
   try{ document.exitPointerLock&&document.exitPointerLock(); }catch(e){} }
 document.addEventListener('pointerlockerror',()=>{ lockNote('ERROR','browser refused the lock for '+(_lockBy||'?')); });
 // =====================================================================
@@ -15343,6 +15387,11 @@ document.addEventListener('pointerlockchange',()=>{ locked=document.pointerLockE
   // browser hands Escape to us only as a lost pointer lock, so this is where that gesture arrives; the pause menu must not eat
   // it, and the second Escape — the one that leaves — is handled by the ID box's own key handler.
   else if(MON.on){ MON.look=false; monSync(); }
+  // MID-RITUAL THE LOCK WAS ABANDONED. Being grabbed skipped this whole branch — right, for the pause card, which
+  // must never cover a jumpscare — but it skipped the RETAKE with it, so a lock the browser dropped during the haul
+  // stayed dropped, and the player watched the rest of it with a free cursor. Ask again; the card stays suppressed
+  // (requestLock will not raise it while grabbed).
+  else if(started && !player.dead && !openUI && player.grabbed){ if(_lockWanted){ lockNote('lost','during the grab'); requestLock('retake mid-grab'); } }
   else if(started && !player.dead && !openUI && !player.grabbed && performance.now()>=_noPauseUntil){
     lockNote('lost', _lockWanted?('nobody released it — last taken for '+(_lockBy||'?')):('deliberate: '+(_lockBy||'?')));
     // A LOCK NOBODY RELEASED IS A LEAK, AND A LEAK IS NOT A PAUSE. This branch treated every exit as the player
@@ -20828,6 +20877,9 @@ function beginDrag(){ wretch.dragging=true; wretch.grabPhase='jumpscare'; wretch
   // pause menu, and hide the whole HUD so nothing but the throat jumpscare remains on screen.
   try{ if(typeof invuiEl!=='undefined'&&invuiEl)invuiEl.style.display='none'; if(typeof chestuiEl!=='undefined'&&chestuiEl)chestuiEl.style.display='none'; if(typeof creativeEl!=='undefined'&&creativeEl)creativeEl.style.display='none'; openUI=null;
     if(typeof pause!=='undefined'&&pause)pause.style.display='none'; const _uiEl=document.getElementById('ui'); if(_uiEl)_uiEl.style.display='none'; }catch(e){}
+  // Being taken WHILE YOUR BAG IS OPEN left the pointer free for the whole ritual: the screen it was released for is
+  // torn down here, and nothing ever asked for the lock back. The jumpscare is a camera event — it has to be captured.
+  try{ requestLock('grabbed'); }catch(e){}
   wretchVoice&&wretchVoice('scream',wretch.pos); wretchVoice&&wretchVoice('sting',wretch.pos);
   document.getElementById('dmg').style.opacity=0.4; flashDmg(); if(bloomPass)bloomPass.strength=1.7; }
 // FNAF jumpscare — face shoved into the lens, jaw wide, before the haul begins
@@ -21265,6 +21317,7 @@ function endDrag(devoured){ if(devoured||player.tied) player._dragUsed=false;   
   hideStruggleBar(); if(typeof hideEyeTrails==='function')hideEyeTrails(); if(typeof _scareVig!=='undefined')_scareVig.style.opacity=0;   // clear the jumpscare vignette + eye-trails
   try{ const _uiEl=document.getElementById('ui'); if(_uiEl)_uiEl.style.display=''; }catch(e){}   // restore the HUD hidden at grab
   player.grabbed=false; player.tied=false; wretch.dragging=false; wretch.captured=false; wretch.grabPhase='none'; wretch.struggle=0; wretch._mash=0; wretch.dragPath=null; wretch._devouring=false;
+  if(!devoured && !player.dead && started && !openUI) try{ requestLock('freed from the grab'); }catch(e){}   // the ritual is the one stretch where a lost lock is never retaken (see pointerlockchange); breaking free has to hand the camera back. NOT when devoured: die() is three lines below and the death card is clicked with a free cursor.
   wretch._clingN=null; wretch._faceLock=false; wretch._dunPhase=-1; wretch._glow=0; if(typeof setSymbolGlow==='function')setSymbolGlow(0); if(wretch.redLight)wretch.redLight.intensity=0;   // ritual dressing off
   if(!devoured){ blackOverlay.style.transition='opacity .5s'; blackOverlay.style.opacity='0';
     // RE-SEAT the freed player safely ON the surface — the haul/unstick can leave them embedded, so never wake underground
@@ -42448,13 +42501,16 @@ window.__hc={
       return { lean:player._lean, shown:player._leanShown }; }catch(e){ return {err:String(e.message||e)}; } },
   // Grass demoted to dirt because something sits on it, since boot, plus a live count of any that is still buried in
   // the loaded world — the second number is what says the sweep is complete rather than merely running.
-  buriedGrass(){ try{ let live=0, scanned=0;
+  buriedGrass(){ try{ let live=0, scanned=0; const _bgCover={};
       for(const [,c] of world){ if(!c||!c.generated) continue; const bl=c.blocks;
         for(let lz=0;lz<CK;lz++) for(let lx=0;lx<CK;lx++) for(let y=1;y<WH-1;y++){
           const v=bl[idx(lx,y,lz)]; if(v!==BID.grass) continue; scanned++;
           const up=bl[idx(lx,y+1,lz)];
-          if(up!==AIR && (up===WATER || isSolid[up])) live++; } }
-      return { demoted:_buriedGrass, stillBuried:live, grassBlocks:scanned }; }
+          if(up!==AIR && (up===WATER || isSolid[up])){ live++;
+            const nm=(up===WATER)?'water':(B[up]?B[up].name:('id'+up)); _bgCover[nm]=(_bgCover[nm]|0)+1; } } }
+      // WHAT IS SITTING ON THEM. 841 is a number to chase; "841, and 700 of them are under logs" names the writer.
+      const by={}; for(const k in _bgCover) by[k]=_bgCover[k];
+      return { demoted:_buriedGrass, stillBuried:live, grassBlocks:scanned, coveredBy:by }; }
     catch(e){ return {err:String(e.message||e)}; } },
   // DO TWO ADJACENT ROOF TILES SHARE A VOLUME? Measured off the real geometry rather than from the numbers in the
   // source, so it cannot drift from what is drawn. Neighbours up a slope sit at (y+1,z+1), so the spacing between them
