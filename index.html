@@ -7428,6 +7428,10 @@ _mtTex.wrapS=THREE.RepeatWrapping; _mtTex.minFilter=_mtTex.magFilter=THREE.Linea
 // The range's own profile. ridged() is the generator's own multifractal — the same one surfaceH uses for the island's
 // ridges — so the backdrop peaks are cut from the same cloth as the land underfoot, at a coarser frequency because a
 // range is a bigger thing than a hill. Sampled along the band rather than at a point so a peak spans several azimuths.
+// The envelope's ceiling, named once and used by BOTH the mask that writes heights and the shader that reads them. They
+// disagreed silently before: the mask divided by the world height and the shader multiplied by it, which is consistent
+// arithmetic over a range that does not fit in a world.
+const MTN_SPAN=334;
 function _mtnH(wx,wz){
   const r1=ridged(wx*0.0021, wz*0.0021, 91, 5);
   const r2=ridged(wx*0.0057, wz*0.0057, 137, 4);
@@ -7462,7 +7466,13 @@ function _mtnMask(b){
     const rise=Math.max(0, hMax-(SEA+34))/300;          // 0..1 of the range's own envelope
     const o=(row+i)*4;
     _mtData[o]   = Math.round(clamp(gate*smooth(0.06,0.30,rise), 0, 1)*255);
-    _mtData[o+1] = Math.round(clamp(hMax/WH, 0, 1)*255);
+    // THE RANGE'S HEIGHT IS STORED AGAINST ITS OWN CEILING, NOT THE WORLD'S, and that one line is what made Ben's slab.
+    // _mtnH runs to SEA+334 = 374 blocks; WH is 128. Dividing by WH gave 2.9, clamped to 1, on nearly every bearing —
+    // measured, peakMean 127.3 of a 128-block world across 206 of 384 open bearings. Every direction therefore claimed a
+    // mountain standing at the world ceiling, which is exactly a featureless wall of uniform height: the CLAMP destroyed
+    // the ridge shape, so there were no peaks left to see, only a slab with a jagged crown where the crest noise survived.
+    // Scaled by the envelope's own ceiling the ridges come back and the byte has range to hold them.
+    _mtData[o+1] = Math.round(clamp((hMax-SEA)/MTN_SPAN, 0, 1)*255);
     _mtData[o+2] = 255;
     _mtData[o+3] = 255;
   }
@@ -7520,7 +7530,7 @@ const mountainMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false,
   '    float haze=(b==0?0.12:0.62);',
   // The near band's haze came down with its distance: 0.35 was the aerial perspective of two render walls, and this
   // range now stands at one. The far band is untouched.
-  '    float peak=m.g*WORLD_H-uCamY;',
+  '    float peak=SEA_H+m.g*MTN_SPAN-uCamY;',
   // The ridge line, with a fine crest riding it. The crest is bandlimited the same way the pine crowns are: a feature
   // narrower than a pixel is not a feature, it is noise, and at these distances a 40-block crag is close to that.
   '    float cpx=(40.0/dist)/max(uPixAng,1e-6);',
@@ -12312,7 +12322,25 @@ function updateSky(dt){
   // exactly where it was (0.5 maps to 0.5) so nothing in the middle of the day shifts at all.
   // ENDPOINTS ARE EXACT: 1 maps to 1 and 0 to 0. Noon fog and night fog are still the colours they were tuned to — four separate
   // rulings that night fog must read as blackness are untouched, and this only changes HOW the curve arrives there.
-  const fogDay=day*day*(3-2*day);
+  // ---- AND THE AIR IS LIT BY THE SUN, NOT BY THE CLOCK (Ben 08-17, the dusk frames on the shore) ----
+  // At dusk the sand, the sea and the sky were one cream colour: the sun's own track on the water was drowned in a
+  // wash that reached from the shore to the horizon. The wash is this ramp. `day` is smooth(-0.46,0.46,elev), a
+  // deliberately very wide twilight band written for the SKY's colour transition, and with the disc five degrees above
+  // the water it still measures 0.68 — which through the smoothstep is 0.79 of the noon fog value. The air was being
+  // lit like a midday haze by a sun that had nearly gone.
+  // A LOW SUN DELIVERS LESS LIGHT TO THE AIR, and that is the whole of it: at five degrees the light reaching the haze
+  // in front of you has come through roughly ten times the air mass it does at noon. So the ramp is gated on the sun's
+  // real ELEVATION, the same quantity the haze's own warmth term is already gated on, rather than on a band that spends
+  // most of its width in twilight.
+  // THE DAY END IS UNTOUCHED BY CONSTRUCTION, which is what makes this safe against the ruling this ramp already
+  // carries — day^1.8 was tried once and rejected because it took mid-afternoon fog from 157 to 130 on screen and
+  // walked back into "volumetric fog isnt bright enough". This gate is exactly 1.0 above 15 degrees of elevation, and
+  // 15 degrees is `day` 0.87, so every hour from mid-morning to mid-afternoon is bit-identical.
+  // AND IT CAN ONLY EVER SUBTRACT, so the four separate rulings that night fog must read as blackness are safe the
+  // same way: at night fogDay is already near zero and this only takes it nearer.
+  // Everything downstream rides this one number — the clear-air colour, the rain haze and the weather bank all ramp on
+  // fogDay — so the dusk hand-over stays identical by construction rather than by three sets of numbers agreeing.
+  const fogDay=day*day*(3-2*day) * (0.34+0.66*smooth(0.02,0.26,elev));
   const fc=scene.fog.color; const dcol=0.0018+0.764*fogDay;
   // BLACK AT NIGHT (Ben, again: "nighttime fog, is still not blackness"). The floor was 0.028/0.042/0.072 -- a deep blue that
   // never let the far distance go dark, which is what he keeps seeing. It was put there because with no floor at all distant
@@ -43512,6 +43540,21 @@ window.__hc={
   // QA/bench + the A/B: the coast pines on or off, and their dials. ?pines=0 is the same switch at load.
   // QA/bench + the A/B: the inland ranges on or off. ?mtn=0 is the same switch at load.
   mtnDbg(v){ try{ if(v!=null) _mtU.uDbg.value=+v; return _mtU.uDbg.value; }catch(e){ return String(e.message||e); } },
+  // QA: what the mountain mask actually holds around the player. The band's height is (peak - cameraY)/distance, so a range
+  // that draws nothing is either gated off (r) or has no height to draw (g) — and those are opposite faults with opposite
+  // fixes. Reported as world heights rather than as bytes, because "is there a mountain here" is a question about the world.
+  mtnMask(){ try{
+      const rows=[];
+      for(let b=0;b<2;b++){
+        let maxG=0, sumG=0, openN=0, n=0;
+        for(let i=0;i<_CPN;i++){
+          const o=(b*_CPN+i)*4, r=_mtData[o]/255, g=_mtData[o+1]/255;
+          n++; if(r>0.08) openN++;
+          sumG+=g; if(g>maxG) maxG=g; }
+        rows.push({ band:b, cells:n, openBearings:openN,
+                    peakMax:+(maxG*WH).toFixed(1), peakMean:+((sumG/n)*WH).toFixed(1) }); }
+      return { camY:+camera.position.y.toFixed(1), sea:CFG.SEA, wall:_mtU.uWall.value, rows }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   mtn(v,o){ try{ if(v!=null) _mtWant=!!v;
       // HOW FAR A RANGE LOOMS IS BEN'S EYE, so it is a dial rather than a constant to be found. `deg` is the height of the
       // range above its own foot; the band measured 37-43 degrees when he called it a wall.
