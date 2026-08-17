@@ -106,7 +106,14 @@ function stat(file,c){
       return page;
     };
     // t=0.25 is NOON and t=0.75 MIDNIGHT on the real map — setTime's own comment is a quarter turn out (bench/tmp-elev.mjs).
-    const pin=async(page,t)=>{ await page.evaluate(`__hc.setTime(${t})`); await sleep(500); await page.evaluate(`__hc.setTime(${t})`); await sleep(240); };
+    // dayLock, NOT setTime, and it is called pin because that is what it was always meant to do. setTime SETS the
+    // hour and then the clock runs: the lit reading below is the median of five shots taken over several seconds
+    // after the call, so the hour walked out from under the measurement while it was being made. Same trap that had
+    // assert-cabin photographing a black frame tonight. Measured against a pinned clock in a carved cave with a
+    // placed lantern, the lit wall reads sat 0.359 — above this file's own 0.30 floor — while this file was
+    // reporting 0.204 (bench/tmp-washoff.mjs). The wash was never the cause: switching the ENTIRE wash off moves
+    // saturation by 0.026, so it could not have been.
+    const pin=async(page,t)=>{ await page.evaluate(`__hc.dayLock(${t})`); await sleep(500); await page.evaluate(`__hc.dayLock(${t})`); await sleep(240); };
     const WALL=[0.34,0.66,0.32,0.62];   // the far wall at frame centre — clear of the crosshair band's own pixels at 0.50 by width
     const page=await boot('');
 
