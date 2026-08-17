@@ -1242,12 +1242,34 @@ const HC_LIGHT_GLSL = [
 '// unlit leaf under open sky keeps a little of that same colour back. The multiplication order is preserved',
 '// exactly - fogF*_nt*_nt*_nt*fade, not fogF*(_nt^3)*fade - because this move has to cost nothing, and the',
 '// second term reads the luminance of the ALREADY-mixed colour, which is what makes it a floor and not a wash.',
-'vec3 hcFolNight(vec3 col, float fogF, float day, vec3 night, float amb, float fade, float sky){',
+'// ---- AND THE FLOOR CARRIES THE LEAF\'S OWN COLOUR (Ben: "trees looking too white washed at night") ----',
+'// MEASURED, midnight, standing in the densest canopy inside 200 m, crop over the foliage overhead: the canopy reads',
+'// luminance 16.15 with this term live and 2.64 with __hc.folAmb(0). So 84% of what a night canopy is made of is this',
+'// floor and only 16% is light — and the floor was a flat add of one colour, so it lifted every leaf toward the same',
+'// blue-grey regardless of what the leaf was. That is the whole of "white washed": a canopy whose brightness comes from',
+'// a constant has no colour of its own left and no shape either, because the addend does not vary with the surface.',
+'// SO IT IS TINTED, NOT REDUCED. The magnitude is a feel number and Ben has not ruled on it (__hc.folAmb is the dial,',
+'// and 0 is a black bush, which is what this term was added to prevent) — so the level is preserved EXACTLY and only the',
+'// hue moves. alb is the fragment\'s own albedo, normalised to luminance 1 so it is pure hue, and the tinted addend is',
+'// then renormalised back to the untinted one\'s luminance. A green leaf now gets green sky-light and a brown one brown,',
+'// at the identical brightness they had before, so every one of the four rulings about how dark night must be is',
+'// untouched by construction rather than by a number agreeing.',
+'// The same trick the fog\'s grazing warmth already uses — renormalise the target to the source\'s luminance before the',
+'// mix, so a hue rotation cannot become a value change.',
+'// CLAMPED both ways: a near-black leaf would divide by nothing, and a saturated one would push a channel far past the',
+'// addend it is tinting.',
+'vec3 hcFolNight(vec3 col, float fogF, float day, vec3 night, float amb, float fade, float sky, vec3 alb){',
+'  const vec3 LW=vec3(0.2126,0.7152,0.0722);',
 '  float _nt=1.0-day;',
 '  col=mix(col, night, clamp(fogF*_nt*_nt*_nt*fade,0.0,1.0));',
 '  float _na=_nt*_nt*_nt;',
-'  float _nl2=dot(col, vec3(0.2126,0.7152,0.0722));',
-'  col += night*amb*_na*clamp(sky,0.0,1.0)*(1.0-clamp(_nl2*2.2,0.0,1.0));',
+'  float _nl2=dot(col, LW);',
+'  vec3 _add = night*amb*_na*clamp(sky,0.0,1.0)*(1.0-clamp(_nl2*2.2,0.0,1.0));',
+'  float _al=dot(alb, LW);',
+'  vec3 _tint = clamp((_al>1e-4)?(alb/_al):vec3(1.0), vec3(0.30), vec3(2.4));',
+'  vec3 _t = _add*_tint;',
+'  float _l0=dot(_add,LW), _l1=dot(_t,LW);',
+'  col += (_l1>1e-6) ? _t*(_l0/_l1) : _add;',
 '  return col; }',
 '// ---- THE AMBIENT CHAIN, in the shipped order. One copy of that order lives here. ----',
 '// sdirOut is handed back because ?dbg=sdir draws the term itself, and a debug view that stopped',
@@ -6488,7 +6510,10 @@ function injectAtlas(mat, opts={}){
         // silhouette of whatever colour the target is. 0.72 leaves better than a quarter of the leaf's own lit colour at
         // every distance, so a fogged night wood still reads as leaves. Daylight is untouched: the term is gated on
         // (1-uDayF) and is exactly zero at noon.
-        '\ngl_FragColor.rgb = hcFolNight(gl_FragColor.rgb, fogFactor, uDayF, uFolNight, uFolAmb, uFolFade, vSky);':''))
+        // diffuseColor is the leaf's own albedo and is still in scope here — three declares it in map_fragment and
+        // fog_fragment is near the end of main — so the floor can be tinted by the surface it is lifting without a
+        // second sample or a new varying. See the note on hcFolNight for why it is a tint and not a reduction.
+        '\ngl_FragColor.rgb = hcFolNight(gl_FragColor.rgb, fogFactor, uDayF, uFolNight, uFolAmb, uFolFade, vSky, diffuseColor.rgb);':''))
       // THE SHADED SIDE OF A LEAF IS STILL GREEN (Ben 08-05: "make the un-lit side of foliage look not solid black"). These quads
       // are DoubleSide, so one of every crossed pair faces away from the sun; with N·L negative that face keeps only ambient and
       // goes to black, and a blade of grass turns into a black slit. Real foliage does not do this because it is thin enough to
@@ -27147,9 +27172,14 @@ function updateView(dt){ updateRecoil(dt);                                      
       if(UD && UD.bipod && (view.bipodT||0)>0.001){
         const gnd=(typeof groundYAt==='function'?groundYAt(player.pos.x,player.pos.z):player.pos.y)-camera.position.y;
         const feet=view.group.position.y + UD.bipod.position.y + (UD.bipodLegY||0)*Math.cos(UD.bipod.rotation.x);
-        view.group.position.y += clamp(gnd-feet, -0.10, 0.32)*view.bipodT;
-        view.bipodLift=+(gnd-feet).toFixed(4); }
-      else view.bipodLift=0; }
+        const raw=gnd-feet, put=clamp(raw, -0.10, 0.32)*view.bipodT;
+        view.group.position.y += put;
+        // BOTH NUMBERS, because they differ by a factor of eight during the drop and only one of them is the gun.
+        // Reporting the raw solve alone said the weapon lurched 0.45 of a block downward on the way to prone; what
+        // actually moved it was 0.055, the rest having been eaten by the clamp. An instrument that reports something
+        // other than what the game did is the failure mode this file has paid for more than any other.
+        view.bipodLift=+put.toFixed(4); view.bipodSolve=+raw.toFixed(4); }
+      else { view.bipodLift=0; view.bipodSolve=0; } }
     // SPRINTING CARRIES IT ACROSS THE CHEST (Ben 2026-08-12: "guns should cross the chest to the left when sprinting").
     // A post-pass on the finished pose, not a fourth pose in the blend: it has to vanish the moment the gun comes up, so
     // it is scaled by (1-e) as well as by its own latch — raising a sight while sprinting is aiming, and an aim that
@@ -40395,7 +40425,9 @@ window.__hc={
       const t=view.bipodT||0, k=1-_bipod.steady*t;
       return { has:!!p, id:view.id, t:+t.toFixed(3), deg:p?+(p.rotation.x*57.2958).toFixed(2):null,
                foldDeg:+(BIPOD_FOLD*57.2958).toFixed(2), legDrop:UD.bipodLegY!=null?+UD.bipodLegY.toFixed(4):null,
-               lift:view.bipodLift!=null?+view.bipodLift:null, prone:!!player.prone,
+               lift:view.bipodLift!=null?+view.bipodLift:null,          // what the gun actually moved, clamp and ease applied
+               solve:view.bipodSolve!=null?+view.bipodSolve:null,       // what the raw ground solve asked for, before the clamp
+               prone:!!player.prone,
                steady:_bipod.steady, deployS:_bipod.deployS,
                sway:{ now:+Math.hypot(view.swayX||0,view.swayY||0).toFixed(5),
                       unsteadied:+(Math.hypot(view.swayX||0,view.swayY||0)/Math.max(k,1e-4)).toFixed(5), factor:+k.toFixed(4) } };
@@ -45575,10 +45607,16 @@ window.__hc={
                    target:[+a.tx.toFixed(2),+a.ty.toFixed(2),+a.tz.toFixed(2)] }; }) }; }catch(e){ return {err:String(e.message||e)}; } },
   // Pose the fake peer's limbs. A hip seam only opens when the leg rotates, so a standing avatar photographs a garment
   // that is fine and proves nothing about the frame Ben is complaining about.
-  peerPose(leg,arm){ try{ const a=NET.avatars&&NET.avatars['bench']; if(!a) return {err:'no bench peer'};
+  peerPose(leg,arm,held,prone){ try{ const a=NET.avatars&&NET.avatars['bench']; if(!a) return {err:'no bench peer'};
       const L=+leg||0, A=+arm||0;
       a.legL.rotation.x=L; a.legR.rotation.x=-L; a.armL.rotation.x=-A; a.armR.rotation.x=A;
-      return { leg:L, arm:A }; }catch(e){ return {err:String(e.message||e)}; } },
+      // A PEER'S RIFLE AND POSTURE. `po` is what the packet carries and what the eased proneT is derived from, so
+      // setting it is the same path a real peer takes -- avatarBipod then folds or deploys the legs on its own.
+      if(held!==undefined){ setAvatarHeld(a, held||null); a.held=held||null; }
+      if(prone!==undefined){ a.po=prone?2:0; a.proneT=prone?1:0; avatarBipod(a, a.proneT); }
+      return { leg:L, arm:A, held:a.held||null, po:a.po|0, proneT:+(a.proneT||0).toFixed(2),
+               bipod:a._bipod?+(a._bipod.rotation.x*57.2958).toFixed(2):null }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   fakePeer(pk,dist,tint){ try{ if(typeof ensureAvatar!=='function') return {err:'no avatars'};
       NET.avatars=NET.avatars||{}; ensureAvatar('bench');
       const a=NET.avatars['bench']; if(!a) return {err:'avatar not built'};
