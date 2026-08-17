@@ -26,9 +26,31 @@ import path from 'node:path';
     await W.page.evaluate('__hc.cam({pitch:-1.05})'); await sleep(900);
     await W.page.evaluate('__hc.waterNan(0)'); await sleep(300);
     console.log('rect '+JSON.stringify(await W.page.evaluate('__hc.wellRect()')));
+    console.log('cull '+JSON.stringify(await W.page.evaluate('__hc.wellCull()')));
+    console.log('drawn '+JSON.stringify(await W.page.evaluate('__hc.wellDrawn()')));
+    console.log('attrs '+JSON.stringify(await W.page.evaluate('__hc.wellAttrs()')));
     await W.page.screenshot({path:path.join(OUT,'wellA.png')});
     await W.page.evaluate('__hc.waterNan(2)'); await sleep(400);
     await W.page.screenshot({path:path.join(OUT,'wellB.png')});
     await W.page.evaluate('__hc.waterNan(0)');
+    // THE ONE-LINE EXPERIMENT: cull off, same camera, magenta on. If the surface appears now it was the frustum test.
+    console.log('culloff '+JSON.stringify(await W.page.evaluate('__hc.wellCull(false)')));
+    // PLAIN MATERIAL, no shader at all: does the quad exist on screen?
+    console.log('basic '+JSON.stringify(await W.page.evaluate('__hc.wellBasic(true)'))); await sleep(600);
+    await W.page.screenshot({path:path.join(OUT,'wellBasic.png')});
+    await W.page.evaluate('__hc.wellBasic(false)'); await sleep(400);
+    // Bisect waterMat: opaque pass, then depth-write off, then the world curve off. One shot each.
+    for(const [tag,arg] of [['opaque',"{transparent:false}"],['nodw',"{transparent:true,depthWrite:false}"],['nocurve',"{depthWrite:true,curveK:0}"]]){
+      console.log(tag+' '+JSON.stringify(await W.page.evaluate('__hc.waterProp('+arg+')')));
+      await sleep(500); await W.page.screenshot({path:path.join(OUT,'wellP-'+tag+'.png')}); }
+    await W.page.evaluate('__hc.waterProp({transparent:true,depthWrite:false,depthTest:true,curveK:2.6e-6})');
+    // BYPASS THE CUSTOM VERTEX STAGE entirely: same material, same fragment stage, plain transform.
+    console.log('flat '+JSON.stringify(await W.page.evaluate('__hc.waterProp({flat:1})'))); await sleep(600);
+    await W.page.screenshot({path:path.join(OUT,'wellP-flat.png')});
+    await W.page.evaluate('__hc.waterProp({flat:0})');
+    await W.page.evaluate('__hc.waterNan(2)'); await sleep(500);
+    await W.page.screenshot({path:path.join(OUT,'wellC.png')});
+    await W.page.evaluate('__hc.waterNan(0)'); await sleep(300);
+    await W.page.screenshot({path:path.join(OUT,'wellD.png')});
     console.log('errors: '+(W.errors.length?W.errors.slice(0,3).join(' | '):'none'));
   } finally { await W.close(); } })();
