@@ -1109,9 +1109,14 @@ const _scotK = new Float32Array([0.45, 0, 0, 0]);
 // 4.121 / 4.125 against a baseline of 4.13.
 // x = the base lighting level. y, z and w are spare, so the next dial costs no new uniform.
 // x = the base lighting level (albedo*k). y = the held/placed A-B gate. z = the ALBEDO-INDEPENDENT sheen, the term
-// that keeps a lit black texel visible; w = the albedo it fades out by. z starts at 0: it is a look change and
-// only Ben can set its size, so __hc.sheen({k,knee}) is the dial and the frames come to him.
-const _hcAux = new Float32Array([0.10, 0, 0, 0.15]);
+// that keeps a lit black texel visible; w = the albedo it fades out by.
+// z SHIPS AT 0.12, NOT AT 0. It sat at 0 waiting for Ben to choose a size, and a term at zero is not a feature —
+// he read the whole thing as never built ("we havent started real daytime darkness"), and he was right from where
+// he sits: nothing on screen had changed. 0.12 means a texel with no albedo at all returns 12% of the light that
+// reaches it, so a black texel on a lit face reads as dark MATERIAL rather than as a hole, and w=0.15 fades the
+// term out by the time a texture has any albedo of its own to carry the shading. __hc.sheen({k,knee}) is still the
+// dial; the difference is that the default is now a value he can react to instead of an absence.
+const _hcAux = new Float32Array([0.10, 0, 0.12, 0.15]);
 // ---- WHAT THE SKY CAN SEE OF THIS OBJECT (per-draw) ----
 // x is the sky-and-canopy multiplier for the object about to be drawn, and it DEFAULTS TO 1 so nothing changes until
 // something sets it. The world's blocks carry this per vertex (vSky/vCan, baked by the mesher); a creature, a prop, a
@@ -2866,7 +2871,13 @@ const smooth=(a,b,x)=>{ const t=clamp((x-a)/(b-a),0,1); return t*t*(3-2*t); };
 //  TEXTURE ATLAS  (16x16 tiles packed into one 256x256 canvas)
 //  Muted, wet, dark-cottagecore palette. Deterministic per-tile grain.
 // =====================================================================
-const ATLAS_TILES = 16, TILE = 16, ATLAS_PX = ATLAS_TILES * TILE;
+// 128x IS BEN'S REQUIREMENT, so the atlas is 16x16 tiles of 128 px = 2048x2048, which is about 16 MB and fits
+// comfortably. PAINT_PX is the coordinate system every existing painter was WRITTEN in: those functions test things
+// like `x<1||x>14` and `x%4===0` and `Math.hypot(x-5,y-6)`, all of which mean a 16-wide tile. Raising TILE without
+// this would not sharpen them, it would shrink every pattern into the tile's top-left corner. So paintTile keeps
+// handing painters 0..15 and simply fills 8x8 device pixels per logical pixel — and the pack's 128px images, which
+// are the point of the change, land at full resolution beside them.
+const ATLAS_TILES = 16, TILE = 128, PAINT_PX = 16, ATLAS_PX = ATLAS_TILES * TILE;
 const atlasCanvas = document.createElement('canvas');
 atlasCanvas.width = atlasCanvas.height = ATLAS_PX;
 const actx = atlasCanvas.getContext('2d');
@@ -2882,11 +2893,18 @@ function paintTile(name, fn){
   const img = actx.createImageData(TILE, TILE);
   const d = img.data;
   const rng = tileRng(idx+1);
-  for (let y=0;y<TILE;y++) for (let x=0;x<TILE;x++){
-    const c = fn(x, y, rng);
-    const o = (y*TILE+x)*4;
-    d[o]=clamp(c[0]|0,0,255); d[o+1]=clamp(c[1]|0,0,255); d[o+2]=clamp(c[2]|0,0,255);
-    d[o+3]=c[3]===undefined?255:clamp(c[3]|0,0,255);
+  // ONE CALL PER LOGICAL PIXEL, not per device pixel. Calling fn per device pixel would run the painter's own r() 64
+  // times where it used to run once, which changes the character of every noisy tile — a jitter that was one texel of
+  // grain becomes fine sand. So the painter is asked 16x16 times, exactly as before, and each answer fills a K x K
+  // block. Tiles that ship as art (see stampTile) overwrite their cell afterwards at the full 128.
+  const K = TILE / PAINT_PX;
+  for (let ly=0;ly<PAINT_PX;ly++) for (let lx=0;lx<PAINT_PX;lx++){
+    const c = fn(lx, ly, rng);
+    const r0=clamp(c[0]|0,0,255), g0=clamp(c[1]|0,0,255), b0=clamp(c[2]|0,0,255);
+    const a0=c[3]===undefined?255:clamp(c[3]|0,0,255);
+    for(let sy=0;sy<K;sy++){ const yy=ly*K+sy;
+      for(let sx=0;sx<K;sx++){ const o=(yy*TILE+lx*K+sx)*4;
+        d[o]=r0; d[o+1]=g0; d[o+2]=b0; d[o+3]=a0; } }
   }
   // ---- ALPHA DILATION, and it is why thin cutouts go black at distance ----
   // A transparent texel in these tiles is written [0,0,0,0] — transparent AND black. That is invisible at mip 0, where
@@ -3300,33 +3318,10 @@ paintTile('kelp_small',(x,y,r)=>{ const up=15-y; if(up>8) return [0,0,0,0];    /
   if(d>1.1 && !frond) return [0,0,0,0];
   const v=jit(r,0,20), lit=up/8;
   return [24+v*0.5+14*lit, 58+v+22*lit, 32+v*0.4+8*lit, 255]; });
-const ATLAS_COUNT = _tileCursor;
-
-// ---- DataArrayTexture: one layer per tile → zero atlas bleed + per-layer mipmaps ----
-const LAYER_TEXELS = TILE*TILE;
-const arrData = new Uint8Array(LAYER_TEXELS*4*ATLAS_COUNT);
-for(let i=0;i<ATLAS_COUNT;i++){
-  const tx=(i%ATLAS_TILES)*TILE, ty=((i/ATLAS_TILES)|0)*TILE;
-  const src=actx.getImageData(tx,ty,TILE,TILE).data;
-  arrData.set(src, i*LAYER_TEXELS*4);
-}
-const arrayTex = new THREE.DataArrayTexture(arrData, TILE, TILE, ATLAS_COUNT);
-arrayTex.format=THREE.RGBAFormat; arrayTex.type=THREE.UnsignedByteType;
-arrayTex.colorSpace=THREE.SRGBColorSpace;
-arrayTex.magFilter=THREE.NearestFilter; arrayTex.minFilter=THREE.NearestMipmapLinearFilter;   // crisp pixel-art voxels (nearest within a mip), mip blend at distance
-arrayTex.wrapS=arrayTex.wrapT=THREE.RepeatWrapping;
-arrayTex.generateMipmaps=true; arrayTex.anisotropy=4;
-if(Q.get('nomip')){ arrayTex.generateMipmaps=false; arrayTex.minFilter=THREE.NearestFilter; arrayTex.anisotropy=1; }
-if(Q.get('albedo')){ arrayTex.minFilter=THREE.NearestFilter; arrayTex.generateMipmaps=false; }   // ?albedo diagnostic (see grade/shader): render flat texture, no lighting → isolates texture-vs-lighting for the black-pixel hunt
-arrayTex.needsUpdate=true;
-
-// =====================================================================
-//  BLOCK REGISTRY
-//   cat: 'solid' opaque cube | 'cutout' alpha-tested cube (leaves/glass)
-//        'liquid' | 'cross' billboard | 'model' custom block-entity | 'air'
-//   t: face tiles [top, side, bottom] (name keys) or single
-// =====================================================================
-const B = {};   // id -> def
+// THE PAINTERS BELOW MUST RUN BEFORE THIS LINE. ATLAS_COUNT freezes the layer count, and the DataArrayTexture the
+// GPU actually samples is built from it — a painter that runs afterwards fills the canvas cell and gets no layer,
+// so its block samples out of range while every canvas-reading probe (atlasPNG, the contact sheets) shows it
+// perfectly. That is how the 52 new blocks came to pass every check and still have no texture on the GPU.
 // =====================================================================
 //  THE 52-BLOCK APPEND — the painters (A5)
 // =====================================================================
@@ -3476,7 +3471,6 @@ paintTile('shelf_boards',      (x,y,r)=>_boards(x,y,r,[150,116,72],[52,38,24],5)
 paintTile('scaffold_board',    (x,y,r)=>{ const band=(y<2||y>13), v=jit(r,0,14);
   const grain=((x*3+((y*5)|0))%7===0)?-18:0;   // sawn face, so the grain runs the length of the board
   return band?[132+v,134+v,138+v]:[196+v+grain,172+v+grain,124+v+grain*0.7]; });
-
 // =====================================================================
 //  THE FOLIAGE OVERHAUL — the four new types (A6)
 // =====================================================================
@@ -3547,6 +3541,67 @@ paintTile('pale_bloom', (x,y,r)=>{
     return (d>1.6+star*2.0) ? [252,252,248,255] : [226+v,228+v,224+v,255]; }   // rim brighter than the petal
   return [0,0,0,0];
 });
+
+const ATLAS_COUNT = _tileCursor;
+
+// ---- DataArrayTexture: one layer per tile → zero atlas bleed + per-layer mipmaps ----
+const LAYER_TEXELS = TILE*TILE;
+const arrData = new Uint8Array(LAYER_TEXELS*4*ATLAS_COUNT);
+for(let i=0;i<ATLAS_COUNT;i++){
+  const tx=(i%ATLAS_TILES)*TILE, ty=((i/ATLAS_TILES)|0)*TILE;
+  const src=actx.getImageData(tx,ty,TILE,TILE).data;
+  arrData.set(src, i*LAYER_TEXELS*4);
+}
+const arrayTex = new THREE.DataArrayTexture(arrData, TILE, TILE, ATLAS_COUNT);
+arrayTex.format=THREE.RGBAFormat; arrayTex.type=THREE.UnsignedByteType;
+arrayTex.colorSpace=THREE.SRGBColorSpace;
+arrayTex.magFilter=THREE.NearestFilter; arrayTex.minFilter=THREE.NearestMipmapLinearFilter;   // crisp pixel-art voxels (nearest within a mip), mip blend at distance
+arrayTex.wrapS=arrayTex.wrapT=THREE.RepeatWrapping;
+arrayTex.generateMipmaps=true; arrayTex.anisotropy=4;
+if(Q.get('nomip')){ arrayTex.generateMipmaps=false; arrayTex.minFilter=THREE.NearestFilter; arrayTex.anisotropy=1; }
+if(Q.get('albedo')){ arrayTex.minFilter=THREE.NearestFilter; arrayTex.generateMipmaps=false; }   // ?albedo diagnostic (see grade/shader): render flat texture, no lighting → isolates texture-vs-lighting for the black-pixel hunt
+arrayTex.needsUpdate=true;
+
+// ---- APPLYING THE PACK: a stamp replaces a PAINTER'S OUTPUT, cell for cell ----
+// There are no texture files in this game, so "import the pack" means: paint the tile as before, then draw the pack's
+// 128px image over that cell and re-upload the one layer the GPU reads. Three consequences worth stating.
+// IT IS ASYNCHRONOUS AND THAT IS DELIBERATE. The atlas is built synchronously at boot; images are not. Blocking boot on
+// 42 decodes to save a few hundred milliseconds of procedural tile would risk the whole start-up, so the painter's
+// output IS the fallback and each cell upgrades the moment its file lands. A missing or broken file therefore costs
+// nothing but the old look.
+// THE CANVAS IS NOT WHAT DRAWS. arrData/arrayTex is, so both are written; forgetting the second is invisible in every
+// probe that reads the canvas.
+// AND MIPMAPS COME FROM THE UPLOAD, so needsUpdate is set once per stamp rather than batched — 42 uploads at boot is
+// nothing next to one wrong-looking world.
+const _stampedTiles=[];
+function stampTile(name, file){
+  const i = TILEIDX[name];
+  if(i===undefined || i>=ATLAS_COUNT) return;                       // no such tile, or no layer for it
+  const im = new Image();
+  im.onload = ()=>{
+    try{
+      const tx=(i%ATLAS_TILES)*TILE, ty=((i/ATLAS_TILES)|0)*TILE;
+      actx.clearRect(tx,ty,TILE,TILE);
+      actx.imageSmoothingEnabled=false;
+      actx.drawImage(im, tx, ty, TILE, TILE);
+      arrData.set(actx.getImageData(tx,ty,TILE,TILE).data, i*LAYER_TEXELS*4);
+      arrayTex.needsUpdate=true;
+      _stampedTiles.push(name);
+    }catch(e){}
+  };
+  im.src = file;
+}
+// Ben's 43 from docs/BLOCK-CROSSREF.md, less ind_plate: the pack ships no pressure-plate texture at all, so that one
+// keeps its painter and the table's candidate for it was wrong.
+['barrel_side','barrel_top','bedrock','birch_side','birch_top','bookshelf','coal_ore','cobble','diamond_ore','dirt','furnace_front','furnace_top','glass','gold_block','gravel','hay','hay_top','ice','ind_concrete','ind_grate','ind_metal','ind_panel','ind_rust','iron_ore','ladder','lantern','log_side','log_top','mossy','mud','netherite','netherrack','oak_side','oak_top','planks','planks_white','sand','snow','stone','thatch','torch','wool'].forEach(n=>stampTile(n, 'assets/blocks/'+n+'.png'));
+
+// =====================================================================
+//  BLOCK REGISTRY
+//   cat: 'solid' opaque cube | 'cutout' alpha-tested cube (leaves/glass)
+//        'liquid' | 'cross' billboard | 'model' custom block-entity | 'air'
+//   t: face tiles [top, side, bottom] (name keys) or single
+// =====================================================================
+const B = {};   // id -> def
 
 const BID = {};  // name -> id
 let _bid = 0;
@@ -38299,6 +38354,31 @@ window.__hc={
     catch(e){ return {err:String(e.message||e)}; } },
   blockAt(x,y,z){ try{ return getBlock(x,y,z); }catch(e){ return e.message; } },
   bid(name){ try{ return BID[name]; }catch(e){ return null; } },   // QA: block ids are module scope, so a bench comparing blockAt() to a named block has no way to name it
+  // DOES BEN'S IMAGE REACH THE SCREEN? One call, end to end, because that is the whole question and it has been asked
+  // three times: is assets/horizon/treeline.png decoded, is it bound to the material the horizon quad draws with, is
+  // that quad in the scene and visible and unculled, how tall is it in DEGREES, and what opacity does it carry. Also
+  // returns the bearing with the strongest band so a camera can be pointed at it instead of swept round hoping.
+  // USE_SKYCUBE is in here on purpose: it once moved the sky dome into skyScene and hid this exact layer, which is why
+  // it is opt-in, and "confirm nothing took that path again" is a one-line answer that belongs beside the rest.
+  pinesProbe(){ try{
+      const u=_cpU, tex=u.uTree&&u.uTree.value, img=tex&&tex.image;   // uTree is the uniform holding treeline.png
+      const N=_CPN; let best=-1, bestI=0;
+      const sm=(e,a2,b2)=>{ const t=Math.max(0,Math.min(1,(e-a2)/(b2-a2))); return t*t*(3-2*t); };
+      for(let i=0;i<N;i++){ const env=_cpData[i*4+3]/255, f=sm(env,0.12,0.34)*(1-sm(env,0.58,0.86));
+        if(f>best){ best=f; bestI=i; } }
+      const az=(bestI/N)*6.2831853-3.14159265;
+      return { texture:{ bound:!!tex, decoded:!!(img&&(img.complete!==false)&&(img.width>0)),
+                         w:img?img.width:null, h:img?img.height:null, src:img&&img.src?String(img.src).split('/').pop():null },
+               quad:{ inScene:!!(coastPines&&coastPines.parent), visible:!!(coastPines&&coastPines.visible),
+                      frustumCulled:!!(coastPines&&coastPines.frustumCulled), renderOrder:coastPines?coastPines.renderOrder:null,
+                      parentVisible:!!(coastPines&&coastPines.parent&&coastPines.parent.visible),
+                      material:coastPines?coastPines.material.type:null, transparent:coastPines?!!coastPines.material.transparent:null },
+               canopyDeg:+((u.uTreeH.value/u.uHorizD.value)*180/Math.PI).toFixed(3),
+               apparentDistance:u.uHorizD.value, treeHeight:u.uTreeH.value, gain:u.uGain.value,
+               strongestBearing:{ cell:bestI, azRad:+az.toFixed(4), flank:+best.toFixed(3),
+                                  lookYaw:+Math.atan2(-Math.cos(az), -Math.sin(az)).toFixed(4) },
+               skycube:USE_SKYCUBE }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   // QA: HOW MANY BEARINGS ACTUALLY CARRY A TREELINE. __hc.pines() reports the dials; this reports the OUTCOME, which is
   // the number Ben's "I still dont see skybox pines" needs. Per band: how many of the 384 azimuth cells hold presence
   // at all, and how many survive the shader's own flank band-pass — because that expression, not the dials, is what
