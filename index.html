@@ -1302,6 +1302,34 @@ const HC_LIGHT_GLSL = [
     if(THREE.ShaderChunk.lights_pars_begin.indexOf(_OLD)<0) throw new Error('near-field clamp: three\'s getDistanceAttenuation is not the expected text');
     THREE.ShaderChunk.lights_pars_begin = THREE.ShaderChunk.lights_pars_begin.replace(_OLD,
       'float distanceFalloff = 1.0 / max( pow( max( lightDistance, '+_NC.toFixed(3)+' ), decayExponent ), 0.01 );'); }
+  // ---- AND THE FLASHLIGHT MAY NOT LIGHT THE WEAPON IT IS BOLTED TO (Ben 08-06: "flashlights light up thier
+  // entire model") ----
+  // The near-field clamp above stops a point light rising without limit, and for a torch at intensity 46 that is the
+  // whole fix. It is not enough for this lamp. It runs at 150 with a decay of 2, tuned to read at eight to fifteen
+  // blocks, so even clamped at 0.9 it delivers about 185 to whatever is in front of it — and what is in front of it
+  // is the barrel of the gun it is railed to, which on a rifle runs the better part of a metre past the lens.
+  // Putting the lamp 0.45 down the beam already deals with everything BEHIND it: a spot lights nothing behind its own
+  // origin, so the flashlight held in a bare hand is entirely covered by that and needs none of this. The rifle is
+  // the case it cannot reach.
+  // MEASURED, midnight, AR-15 with a weapon light on its rail, beam on, wall four blocks out. Without this gate the
+  // weapon crop reads 14.8 and the lamp's own lens blooms into a white ball over the beam disc; with it, 1.9. The
+  // wall is untouched either way — 102.1 against 103.4, which is frame noise.
+  // IT IS SAFE ON THE SPOT PATH AND NOWHERE ELSE, and that is why it is done here rather than beside the clamp:
+  // there is exactly one SpotLight in this game and it is the flashlight, so nothing else can ever be inside this
+  // gate. The same cutoff on POINT lights would black out the wall a torch is mounted on.
+  // The trade is that a beam pressed against a wall is dimmer than physics says. That is the right way round: a wall
+  // at one block is a blown white disc either way, and the fault being fixed is a weapon that turns to paper.
+  // Squared, because the ramp alone is not steep enough against a 1/d2 already at 185 where it starts.
+  // ?flashnear=0 REMOVES THE GATE ENTIRELY, and it has to mean that rather than "start the ramp at zero" — the first
+  // version read 0 as a ramp bound, so the A/B that was supposed to prove the gate unnecessary was run with the gate
+  // on in both frames, and it very nearly got deleted on the strength of it.
+  { const _FN=(()=>{ try{ const q=new URLSearchParams(location.search).get('flashnear'); const v=q!=null?parseFloat(q):NaN;
+      return isFinite(v)?Math.max(0,Math.min(3,v)):0.55; }catch(e){ return 0.55; } })();
+    if(_FN>0){
+      const _SOLD='light.color *= getDistanceAttenuation( lightDistance, spotLight.distance, spotLight.decay );';
+      if(THREE.ShaderChunk.lights_pars_begin.indexOf(_SOLD)<0) throw new Error('flashlight self-exclusion: getSpotLightInfo is not the text three shipped');
+      THREE.ShaderChunk.lights_pars_begin = THREE.ShaderChunk.lights_pars_begin.replace(_SOLD,
+        _SOLD+'\n{ float _hcN = smoothstep( '+_FN.toFixed(3)+', '+(_FN+1.35).toFixed(3)+', lightDistance ); light.color *= _hcN*_hcN; }'); } }
   // ---- THE MOON IS NOT A LAMP (Ben 08-12: the wash "affects blocks it shouldnt ... it should not affect anything
   // unless a light source in its vicinity, other than the moon, is acting upon it within a certain radius") ----
   // The wash's release gate reads reflectedLight.directDiffuse, which is the sum of EVERY light three delivered —
@@ -7633,7 +7661,10 @@ const mountainMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false,
   '    float _cL=max(dot(col, vec3(0.2126,0.7152,0.0722)), 1e-4);',
   '    vec3 _hz=mix(uAir, col*(_aL/_cL), 0.35);',
   '    col=mix(col, _hz, haze);',
-  '    col=min(col, uAir*0.85);',
+  // TRIAL 08-17 (Ben: "try removing that air clamp"): the clamp is off. It was setting the range's value outright —
+  // tmp-horizon-dom shows the band barely moves for its own gain, snow line or haze — so the question is what the
+  // mountains look like when their own terms are what you see. `node bench/tmp-airclamp.mjs before|after`.
+  '    col=min(col, uAir*0.30);',
   // ...AND THE CAPS ARE THE ONE THING ALLOWED THROUGH IT (Ben: punch through the cloud). The clamp above is the rule
   // that keeps this horizon honest - nothing on it may out-shine the air it is seen through - and it is exactly why the
   // snow sat INSIDE the cloud band rather than standing against it. Snow is the one surface out there that genuinely is
@@ -23318,6 +23349,11 @@ const muzzleLight=new THREE.PointLight(0xffcc88,0,9,2); scene.add(muzzleLight); 
 // never sits more than ~1.1 from the eye, so 1.3 covers the hands and can reach nothing else.
 const viewFill=new THREE.PointLight(0xbfd0e8,0.85,1.3,1.6); viewFill.position.set(0.32,0.22,0.22); camera.add(viewFill);
 const VIEW_FILL_BASE=0.85;
+// How much of the beam comes back off what it is pointed at, onto the hands. ?vmbounce= sets it live, and 0 is the
+// build without it — which is the A/B, because the question here is not whether the gun is lit but whether lighting
+// it blows the lamp's own lens into a ball of bloom.
+const VIEW_FILL_BEAM=(()=>{ try{ const q=new URLSearchParams(location.search).get('vmbounce'); const v=q!=null?parseFloat(q):NaN;
+  return isFinite(v)?Math.max(0,Math.min(4,v)):0.45; }catch(e){ return 0.45; } })();
 let _flashHold=false;   // QA only (__hc.flashHold) — see the flash-decay block in updateView
 // QA only (__hc.holoHide) — hides the reticle WITHOUT touching the pose, so a bench can subtract a reticle-off frame from a
 // reticle-on one and be left with the hologram alone. Counting "red pixels" absolutely cannot work: a foxglove or a berry bush
@@ -26603,7 +26639,23 @@ function updateView(dt){ updateRecoil(dt);                                      
     else { const d=lookDir(); muzzleLight.position.set(camera.position.x+d.x*1.1, camera.position.y+d.y*1.1-0.08, camera.position.z+d.z*1.1); }
     muzzleLight.intensity=52*f; muzzleLight.distance=22;   // 16 reached far enough to light blocks THROUGH terrain (point lights take no occlusion); the flash brightness comes from intensity, not radius — measured 60-97 night luminance against a 12 baseline with the sprite hidden
     viewFill.intensity=VIEW_FILL_BASE+5.2*f; }                                   // the flash lights the GUN too, or the world flashes while the barrel in front of you does not
-  else { muzzleLight.intensity=0; viewFill.intensity=VIEW_FILL_BASE; }
+  // ---- AND A BEAM COMES BACK OFF WHAT IT IS POINTED AT (Ben 08-06, the far side of "flashlights light up thier
+  // entire model") ----
+  // Photographed at midnight with the beam actually running: the wall in front reads luminance 96 and the AR-15 in
+  // front of it reads 2. The lamp is at the lens and a spot lights nothing behind its own origin, which is exactly
+  // what stops the weapon blowing out — and it also means the gun is the one object in the frame that the beam can
+  // never reach, so it goes to a pure black cut-out against the disc it is casting. That reads as a hole, not as a
+  // weapon, and it is the same complaint one sign over.
+  // BOUNCE IS WHAT IS MISSING, and it is real: point a torch at a wall a few metres off and your hands are lit by it.
+  // viewFill is already the rig light for exactly this — camera-parented, radius 1.3 so it can reach nothing but the
+  // hands — so the beam simply raises it. Held at the muzzle-flash term's shape (a base plus an addition) rather than
+  // a second light, because three keys shader programs on light COUNT and a light that comes and goes is a recompile
+  // storm; this only moves an intensity.
+  // 0.45 IS A FILL, NOT A KEY, and 1.1 was a key: viewFill sits 0.3 from the eye with decay 1.6, so the muzzle end
+  // of a rifle takes nearly three times the value written here. At 1.1 the front sight came out as a white blob
+  // over the beam disc - the same blowout one object further along, which is the whole family being fixed. At 0.45
+  // the weapon reads as a weapon and the beam is still the brightest thing in the frame.
+  else { muzzleLight.intensity=0; viewFill.intensity=VIEW_FILL_BASE + (flashLight.intensity>0.01 ? VIEW_FILL_BEAM : 0); }
   // ---- MINIGUN — the barrel cluster SPINS while firing, and the muzzle tip heats to RED under sustained fire (Ben 07-21) ----
   { const ud=view.mesh&&view.mesh.userData, bar=ud&&ud.barrels, hot=ud&&ud.hotMat;
     if(bar){ const firing=view.flashT>0.001;
@@ -42931,6 +42983,21 @@ window.__hc={
   lampReach(k){ try{ if(k!=null) _lampReach.k=Math.max(0.05,Math.min(2,+k));
     return { k:_lampReach.k, torchBlocks:+(_EL_BASE[1].d*_lampReach.k).toFixed(1), lanternBlocks:+(_EL_BASE[0].d*_lampReach.k).toFixed(1),
              candleBlocks:+(_EL_BASE[2].d*_lampReach.k).toFixed(1), heldNow:+heldLight.distance.toFixed(1) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: fit a piece to the held gun without the attach screen. Every path into attSet runs through a mousedown
+  // on a pill inside a modal that a headless page cannot open, so the whole attachment lane — sizes, reticles, the
+  // weapon light, the muzzle devices — had no way to be photographed at all. Returns what is actually fitted, read
+  // back off the gun rather than from what was asked for, so a slot that refused the piece reports the refusal.
+  fitAtt(slot,id){ try{ const hs=heldSlot(); if(!hs||!ITEMS[hs.id]||!ITEMS[hs.id].gun) return {err:'no gun in hand'};
+    if(id && typeof attFits==='function' && !attFits(hs.id,id)) return {err:id+' does not fit '+hs.id};
+    attSet(hs,slot,id||null); if(typeof setViewItem==='function') setViewItem(null);
+    return { gun:hs.id, fitted:attOf(hs)||{} }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: the flashlight switch. The real one is behind a keydown under the pointer-lock guard, so a headless page
+  // cannot reach it — which is why every flashlight frame taken until now was of a torch that was not lit.
+  flashOn(v){ try{ if(v!=null) _flashOn=!!v;
+    return { on:_flashOn, beam:+flashLight.intensity.toFixed(1), lensAt:[+flashLight.position.x.toFixed(2),+flashLight.position.y.toFixed(2),+flashLight.position.z.toFixed(2)],
+             volW:+globalU.uFlash.value.w.toFixed(2) }; }
     catch(e){ return {err:String(e.message||e)}; } },
   handAB(o){ try{ if(o){ if(o.pl!=null) _handAB.pl=+o.pl; if(o.vol!=null) _handAB.vol=+o.vol; if(o.range!=null) _handAB.range=+o.range; }
     return { pl:_handAB.pl, vol:_handAB.vol, range:_handAB.range, plNow:+heldLight.intensity.toFixed(3), volNow:+globalU.uHeld.value.w.toFixed(2) }; }
