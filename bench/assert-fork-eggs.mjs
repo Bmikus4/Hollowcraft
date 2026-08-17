@@ -1,11 +1,10 @@
 // THE THREE NEW CREATURES HAVE SPAWN EGGS, AND THE EGGS PRODUCE THE REAL CREATURE. Ben: "all of the nerw creatures need
-// spawn eggs" — and the thing that makes an egg worth having is that it is the same creature the world spawns. An egg with
-// its own private construction path summons something the game never produces, and every test written against it is green
-// about a creature nobody meets.
+// spawn eggs" — and what makes an egg worth having is that it summons the same creature the world does. An egg with its own
+// private construction path produces something the game never spawns, and every check written against it is green about a
+// creature nobody meets.
 //
-// So this checks the egg exists in all three forms it has to exist in (registered item, inventory icon, right-click route),
-// and then that using it leaves an ACTIVE instance of the right kind, at the aimed spot, with a rig — not merely that the
-// call did not throw.
+// Registering an item and routing its right-click are separate facts and neither implies the other, so both are read here,
+// and the spawn goes through spawnFromEgg — the chokepoint the real handler calls.
 //
 //   node bench/assert-fork-eggs.mjs
 import { spawn } from 'node:child_process'; import { createServer } from 'node:net';
@@ -31,37 +30,47 @@ const ok=(n,c,d)=>{ if(c){pass++; console.log('  ok   '+n);} else {fail++; conso
     await pg.waitForFunction("(()=>{try{const l=document.getElementById('load');return !l||l.style.display==='none';}catch(e){return false;}})()",null,{timeout:300000});
     await pg.waitForFunction('(()=>{try{return __hc.probe().chunkHere===true;}catch(e){return false;}})()',null,{timeout:180000});
     await sleep(4000); const ev=s=>pg.evaluate(s);
-    await ev('__hc.qaLocked(true)'); await ev('__hc.setTime(0.25)');
+    // NIGHT, AND A ROOF FOR THE TENANT. These are not bench conveniences, they are the creatures' own conditions: the Meek
+    // retires on the first tick after sunrise and the Tenant retires the moment it finds no ceiling. Testing them at noon
+    // under open sky measures the retirement, not the egg.
+    await ev('__hc.qaLocked(true)'); await ev('__hc.setTime(0.85)');
+    await sleep(800);
 
     for(const [kind,label] of [['meek','The Meek'],['burrower','The Burrower'],['tenant','The Tenant']]){
-      const it=await ev(`(()=>{const i=__hc.itemDef?__hc.itemDef('egg_${kind}'):null; return i;})()`)
-             .catch(()=>null);
-      console.log('\n['+kind+']');
-      // The item's own record, read through the game rather than assumed from the source.
-      const d=await ev(`(()=>{try{const i=ITEMS['egg_${kind}']; return i?{name:i.name,egg:i.egg,max:i.max,icon:i.icon&&i.icon.t,c:i.icon&&i.icon.c}:null;}catch(e){return {err:String(e.message||e)};}})()`);
-      console.log('  item '+JSON.stringify(d));
-      ok(kind+' egg is a registered item', !!d && !d.err, JSON.stringify(d));
-      ok(kind+' egg is named for the creature', !!d && d.name===label+' Spawn Egg', d&&d.name);
-      ok(kind+' egg routes to the right spawn type', !!d && d.egg===kind, d&&d.egg);
-      // ICON, HELD AND DROPPED ARE SEPARATE DISPATCHES in this codebase and an item can exist in one and not the others.
-      // All three eggs ride the SAME generic egg forms the other seventeen use, which is the point: icon t:'egg' plus a
-      // colour is what makes the inventory tile, the item in hand and the dropped body all appear without a new model.
-      ok(kind+' egg has the shared egg icon form', !!d && d.icon==='egg' && !!d.c, JSON.stringify(d));
+      console.log('');
+      console.log('['+kind+']');
+      if(kind==='tenant'){ await ev('__hc.tenBox()'); await sleep(1200); }   // the roof it needs, built the way the tenant bench builds it
+      const d=await ev(`__hc.useEgg('egg_${kind}', ${kind==='tenant'?3:9})`);
+      console.log('  egg '+JSON.stringify(d));
+      ok(kind+' egg is a registered spawn egg', !d.err, d.err);
+      ok(kind+' egg is named for the creature', d.name===label+' Spawn Egg', d.name);
+      ok(kind+' egg routes to the right spawn type', d.egg===kind, d.egg);
+      // ICON, HELD AND DROPPED ARE SEPARATE DISPATCHES here and an item can exist in one and not the others. All three ride
+      // the SAME generic egg forms the other seventeen use — icon t:'egg' plus a colour — which is what makes the inventory
+      // tile, the item in hand and the dropped body all appear without anyone building a new model.
+      ok(kind+' egg has the shared egg icon form', d.icon==='egg' && !!d.colour, JSON.stringify(d));
 
-      const before=await ev(`__hc.${kind==='meek'?'meek':kind}()`);
-      const r=await ev(`(()=>{ const p=player.pos, L=lookDir();
-          spawnFromEgg('${kind}', {x:Math.floor(p.x+L.x*9), y:0, z:Math.floor(p.z+L.z*9)});
-          return true; })()`);
-      await sleep(2500);
+      // TWO SAMPLES, AND THE FIRST ONE IS THE ONE THAT ANSWERS "DID THE EGG WORK". A single reading seconds later cannot
+      // tell a creature that never spawned from one that spawned and left, and these three creatures LEAVE: the Meek's
+      // whole behaviour is to go when you look at it, and the Burrower travels submerged the moment it exists.
+      await sleep(350);
+      const T0=await ev(`__hc.kindDrawn('${kind}')`);
+      await sleep(2600);
       const T=await ev(`__hc.kindDrawn('${kind}')`);
       const S=await ev(`__hc.limbTable('${kind}')`);
-      console.log('  drawn '+JSON.stringify(T));
-      ok(kind+' egg leaves a real instance with a rig', !T.err && T.inScene===true && T.meshes>0, JSON.stringify(T));
-      ok(kind+' spawned near where it was aimed', !T.err && Math.abs(T.instPos[0]-(await ev('Math.floor(player.pos.x+lookDir().x*9)')))<6,
-         T.instPos&&T.instPos.join(','));
+      console.log('  at spawn  '+JSON.stringify(T0));
+      console.log('  2.6s on   '+JSON.stringify(T));
+      ok(kind+' egg leaves a real instance with a rig', !T0.err && T0.inScene===true && T0.meshes>0, JSON.stringify(T0));
+      ok(kind+' spawned where it was aimed', !T0.err && !d.err && Math.hypot(T0.instPos[0]-d.at[0], T0.instPos[2]-d.at[1])<4,
+         (T0.instPos?T0.instPos.join(','):'')+' vs '+(d.at?d.at.join(','):''));
+      // Visible AT SPAWN. The Burrower is under the floor by design and is the one exception; the other two must be there
+      // to look at, which is the entire reason Ben asked for the eggs.
+      if(kind!=='burrower') ok(kind+' is visible when it arrives', !T0.err && T0.groupVisible===true && T0.chainVisible===true,
+         JSON.stringify(T0));
       ok(kind+' arms are not crossed after an egg spawn', !S.err && S.arms.every(a=>a.cross!=='CROSSED'),
          S.arms?S.arms.map(a=>a.cross).join('/'):S.err);
     }
-    console.log('\n  '+pass+' passed, '+fail+' failed');
+    console.log('');
+    console.log('  '+pass+' passed, '+fail+' failed');
   } finally { try{ if(b) await b.close(); }catch(e){} try{ srv.kill(); }catch(e){} process.exit(fail?1:0); }
 })();
