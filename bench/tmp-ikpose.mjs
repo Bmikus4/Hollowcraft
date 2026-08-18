@@ -66,33 +66,48 @@ const fb=()=>['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Progra
       console.log('  footIK '+(on?'on ':'off')+' '+JSON.stringify(await ev('__hc.footIK()')).slice(0,110));
       await shoot('wretch',10,on?'ik-on':'ik-off'); }
     await ev('__hc.footIK(true)');
-    // AND THE FORELIMB RETRACTION, which 8b8061f measured and did not look at. Placing the creature among the
-    // trees was not enough -- limbInSolid read 0 arms in solid at that spot, so the rule was correctly inert and
-    // the two frames were the same pose. A trunk has to be PUT where an arm is, so a pillar is built one block in
-    // front of the frozen body at arm height and the integrator is given a moment to answer it.
-    for(const on of [true,false]){
-      await ev('__hc.armFold('+on+')');
-      await ev('__hc.freeze(false,false)');
-      await ev('__hc.wretchAt(7)');
-      await sleep(1500);
-      await ev('__hc.freeze(true,true)'); await sleep(250);
-      const built=await ev(`(()=>{ const w=__hc.wpos(); if(!w) return null;
-        const yaw=__hc.wretchPose? (__hc.wretchPose().yaw||0) : 0;
-        const fx=Math.round(w[0]-Math.sin(yaw)*1.2), fz=Math.round(w[2]-Math.cos(yaw)*1.2);
-        const put=[];
-        for(let dy=0; dy<=2; dy++) for(let dx=-1; dx<=1; dx++) for(let dz=-1; dz<=1; dz++){
-          const x=fx+dx, y=Math.round(w[1])+dy, z=fz+dz;
-          if(__hc.blockAt(x,y,z)!==0) continue;
-          __hc.setBlk(x,y,z,'stone'); put.push([x,y,z]); }
-        return {fx, fz, n:put.length}; })()`);
-      // IT STAYS FROZEN WHILE IT ANSWERS. Unfreezing to let the integrator run also lets the creature WALK, and
-      // with the collision envelope shipped it simply steps away from the pillar that was just built for it --
-      // arms 0 in solid, twice. freeze(on,moving) keeps the rig animating while the body holds still, which is
-      // the only state in which a limb can be measured against something put deliberately in its way.
-      await sleep(1400);
-      console.log('  armFold '+(on?'on ':'off')+' '+JSON.stringify(await ev('__hc.armFold()')).slice(0,90)
-        +'  built '+JSON.stringify(built)+'  inSolid '+JSON.stringify(await ev('__hc.limbInSolid()')));
-      await shoot('wretch',7,on?'arm-on':'arm-off'); }
+    // AND THE FORELIMB RETRACTION, AS A MATCHED PAIR. 32a3535 could not stage one: wretchAt places the creature
+    // along the player's CURRENT look direction, kindLook moves the camera between conditions, and the two runs
+    // landed eleven blocks apart so the obstacle built into its arms in one missed them in the other. wretchPut
+    // fixes the position and the facing, so both conditions get the same body in the same place against the same
+    // stone, and the only difference in the frame is the dial.
+    {
+      // one spot, chosen once, from where the creature already is
+      await ev('__hc.freeze(false,false)'); await ev('__hc.wretchAt(8)'); await sleep(900);
+      const w=await ev('__hc.wpos()'); const yaw=await ev('(__hc.wretchPose&&__hc.wretchPose().yaw)||0');
+      const SPOT={x:Math.round(w[0]), z:Math.round(w[2]), yaw:+yaw||0};
+      console.log('  staged at '+JSON.stringify(SPOT));
+      // A CAP SWEEP, not an on/off. At 0.75 the staged frame shows the arms thrown up and the body rearing --
+      // the measurement said the limbs left the stone and the silhouette says the pose paid too much for it.
+      for(const cap of [0.75, 0.45, 0.25, 0]){
+        await ev('__hc.armFold('+cap+')');
+        await ev('__hc.freeze(true,true)');                       // body still, rig still animating
+        await ev(`__hc.wretchPut(${SPOT.x}, ${SPOT.z}, ${SPOT.yaw})`);
+        await sleep(600);
+        // the same stone, in the same cells, both times
+        // A RING AT ARM HEIGHT, not a pillar in its own cells. Building into the body's own column put the stone
+        // under its feet -- it was ground-snapped onto the pile and read 0 limbs in solid twice. The ring leaves
+        // the middle 3x3 clear so the creature stands where it was put, and fills the shell an arm reaches into
+        // whichever way it happens to be facing, which is what a wood is from a forelimb's point of view.
+        const built=await ev(`(()=>{ const y=Math.round(__hc.wpos()[1]); const put=[];
+          for(let dy=1; dy<=2; dy++) for(let dx=-2; dx<=2; dx++) for(let dz=-2; dz<=2; dz++){
+            if(Math.max(Math.abs(dx),Math.abs(dz))!==2) continue;
+            const x=${SPOT.x}+dx, z=${SPOT.z}+dz;
+            if(__hc.blockAt(x,y+dy,z)!==0) continue;
+            __hc.setBlk(x,y+dy,z,'stone'); put.push([x,y+dy,z]); }
+          return put.length; })()`);
+        await ev(`__hc.wretchPut(${SPOT.x}, ${SPOT.z}, ${SPOT.yaw})`);   // the build may have nudged the ground under it
+        await sleep(1500);                                        // let the integrator answer the stone
+        console.log('  armFold '+String(cap).padEnd(5)+' '+JSON.stringify(await ev('__hc.armFold()')).slice(0,70)
+          +'  stone '+built+'  inSolid '+JSON.stringify(await ev('__hc.limbInSolid()')));
+        await shoot('wretch',7,'arm-'+String(cap).replace('.','p'));
+        // clear the stone for the next condition so both build into open air
+        await ev(`(()=>{ const y=Math.round(__hc.wpos()[1]);
+          for(let dy=1; dy<=2; dy++) for(let dx=-2; dx<=2; dx++) for(let dz=-2; dz<=2; dz++){
+            if(Math.max(Math.abs(dx),Math.abs(dz))!==2) continue;
+            __hc.setBlk(${SPOT.x}+dx, y+dy, ${SPOT.z}+dz, 'air'); }
+          return true; })()`); }
+    }
     await ev('__hc.armFold(true)');
     console.log('\n  frames in '+OUT);
   } finally { try{ if(b) await b.close(); }catch(e){} try{ srv.kill(); }catch(e){} }
