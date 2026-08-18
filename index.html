@@ -12754,49 +12754,44 @@ function modelBlockMat(m, bd, colOverride){
 // The model block's block-light term: rgb is the emitter colour a prop is lit by, a is the gain. Shared by reference
 // like uWhiteTile, so every fresh modelBlockMat and every clone moves together. 0.55/0.42/0.22 is LIGHT_PAL's warm
 // entry; the gain is swept in the commit that added it. __hc.modelLight({gain,r,g,b}) and gain 0 is the A/B.
-// GAIN SHIPS AT 0, WHICH MEANS THIS IS PLUMBING AND NOT YET A FEATURE — said plainly so nobody reads it as done.
-// The attribute, the varying and the add are all in place and correct; what is missing is a gain chosen by
-// measurement. The sweep that should have chosen it was contaminated and is recorded rather than trusted: at gains
-// 0 / 0.5 / 1.0 the fence read 0.76 / 0.74 / 0.74 (no response at all), then 2.61 at 1.6, while the SAND control —
-// which cannot be touched by this uniform — jumped from 24 to 92.55 at gain 2.4. A control that moves means the frame
-// moved for another reason, so none of those numbers can choose a default.
-// RE-MEASURED ON A CLEAN INSTRUMENT AND THE TERM IS INERT, which is a different problem from an unchosen gain.
-// Fresh boot per gain, a fence box built around the player, lantern at the centre with four seconds to relight, a
-// crop half the frame wide, and a sky control that this uniform cannot touch:
-//     gain 0    fence 19.98    sky control 67.02
-//     gain 1.0  fence 19.70    sky control 66.82
-//     gain 2.0  fence 20.01    sky control 67.11
-// The control is stable to 0.3 across three separate boots, so the instrument is sound this time — and the gain moves
-// nothing. So the add is not reaching the fragment, and the gain is not what to look at.
-// ONE FAULT FOUND AND FIXED, AND IT WAS NOT ENOUGH. a[0..2] are chunk-LOCAL (list.push([lx,ly,lz,id])), so the
-// original `a[0]-cx0` drove the index negative and the bounds test rejected every instance. That is corrected above.
-// Re-swept on the same clean instrument afterwards and it is STILL inert:
-//     gain 0 / 0.6 / 1.2 / 2.0  ->  fence 20.14 / 20.09 / 19.85 / 20.16, sky control 67.00 / 66.99 / 66.94 / 67.13
-// THE CROP WAS CHECKED AND IT IS NOT THE CROP. Photographed at pitch -0.75 the fence box fills the centre of the
-// frame as black silhouettes against clearly lit grass — the defect itself, on camera. Measured there, fresh boot per
-// gain: gain 0 -> lum 14.80, black 46.341%; gain 2.0 -> lum 14.68, black 46.340%. Identical. The term is inert with
-// the fences provably in frame, so it is the shader path and not the measurement.
-// USE THIS VANTAGE, it is the one that works: fence box radius 2, three tall, around (276, surf+2.2, 8), lantern at
-// the centre, camera yaw 0.8 pitch -0.75, crop [0.25-0.75] x [0.28-0.72], and read blackPct rather than the mean.
-// THE TWO SUSPECTS LEFT are structural rather than numeric. Whether these fence meshes are InstancedMesh at all —
-// the #ifdef USE_INSTANCING branch sets vMLit to 0.0 for anything merged rather than instanced, and this builder
-// merges some model blocks. And whether customProgramCacheKey returning the constant 'modellit' lets one cached
-// program serve materials whose uniforms were never bound. Check the first with a traverse for isInstancedMesh, the
-// second by giving the key a real discriminator.
-// (superseded) That crop read 20.14 at night where a fence measured 0.23 in the same
-// conditions earlier, so it is almost certainly not looking at fence at all — the fence box may be below the frame at
-// pitch -0.35. Photograph the frame and confirm fence fills the crop BEFORE drawing any conclusion about the term.
-// Then, if it is genuinely inert: read aMLit directly rather than through pixels, and check the attribute survives
-// the geo.clone(). Do not sweep the gain again until one of those is proven.
+// ---- A LAMP LIGHTS A PROP THE SAME WAY IT LIGHTS THE BLOCK BESIDE IT: ONE VOLUME, SAMPLED PER FRAGMENT ----
+// A cat:'model' block is not in the atlas mesh, so it was outside the baked light volume entirely and an emitter
+// reached it only through the 16-slot point-light pool. Measured: a fence with a lantern ONE BLOCK away sat at 0.74
+// of 255 against the sand's 24.12, thirty-three times darker, and with no lamp at all 46x darker than the ground it
+// stands in. That is Ben's "the light sources are not right".
+// THE FIRST ATTEMPT WAS A PER-INSTANCE ATTRIBUTE (aMLit) AND IT MEASURED INERT THROUGH FOUR SWEEPS. The reason was
+// never the gain and never the crop: the attribute is baked in buildModelBlocks at MESH time, and relightChunk
+// re-floods _lvData and updates the 3D texture IN PLACE without re-meshing -- so a lamp placed after the chunk meshed
+// reached every atlas block and could never reach a model block. Every test placed the lantern after the world was
+// built, which is why the term looked correct and did nothing.
+// The two structural suspects recorded before it are both DEAD, read out of vendor/three.module.js rather than
+// guessed: addIM builds an InstancedMesh for every model block so USE_INSTANCING is always set, and
+// materialProperties.programs is a per-MATERIAL Map while getProgramCacheKey appends customProgramCacheKey to the
+// full parameter hash -- so a constant key cannot serve one material's uniforms to another, and onBeforeCompile runs
+// once per material either way.
+// SO THE ATTRIBUTE IS GONE AND THE PROP SAMPLES uLight3D, the same sampler3D the atlas samples, at its own
+// chunk-local position. It cannot go stale, because the texture is what relight updates; it is per FRAGMENT rather
+// than per instance, so a fence rail has falloff along its length instead of one flat level for the whole post; and a
+// prop and the block it stands in read the same number by construction rather than by two systems agreeing.
+// +0.5 IN Y is the same air-cell offset the atlas makes along the face normal, for the same reason: the cell the prop
+// occupies is the solid one and reads 0, and the light it is lit by is in the air cell above it.
+// uChunkTint carries the hue, as it does for the atlas, so a crimson shrine torch and a cold lamp do not both come
+// out orange. uMBLit.a is the gain and rgb a colour multiplier on top -- __hc.modelLight({gain,r,g,b}), gain 0 is the
+// A/B, and the default is set by the sweep in the commit that shipped this.
 const _uMBLit={ value:new THREE.Vector4(0.55,0.42,0.22,0.0) };
 function _modelLit(m){
   const prev=m.onBeforeCompile;
   m.onBeforeCompile=(sh,r)=>{ if(prev) prev(sh,r);
     sh.uniforms.uSkyCurve = globalU.uSkyCurve;
     sh.uniforms.uMBLit = _uMBLit;
-    sh.vertexShader = 'attribute float aMSky;\nattribute float aMLit;\nvarying float vMSky;\nvarying float vMLit;\n' + sh.vertexShader
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\n#ifdef USE_INSTANCING\n vMSky = aMSky;\n vMLit = aMLit;\n#else\n vMSky = 1.0;\n vMLit = 0.0;\n#endif');
-    sh.fragmentShader = 'varying float vMSky;\nvarying float vMLit;\nuniform vec2 uSkyCurve;\nuniform vec4 uMBLit;\n' + sh.fragmentShader
+    if(!sh.uniforms.uLight3D)   sh.uniforms.uLight3D   = { value:_emptyLight3D };     // a per-chunk clone overrides this at compile (see _chunkMat)
+    if(!sh.uniforms.uChunkTint) sh.uniforms.uChunkTint = { value:new THREE.Color(LIGHT_PAL[0][0],LIGHT_PAL[0][1],LIGHT_PAL[0][2]) };
+    sh.vertexShader = 'attribute float aMSky;\nvarying float vMSky;\nvarying vec3 vMLP;\n' + sh.vertexShader
+      // vMLP is CHUNK-LOCAL: the instance matrix is a chunk-local translation (addIM) and the chunk group carries the
+      // origin, so this addresses the chunk's own volume without a second uniform. Anything not instanced -- the held
+      // model, the hotbar icon, the dropped item -- takes sky 1 and a position outside the volume, which samples 0.
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\n#ifdef USE_INSTANCING\n vMSky = aMSky;\n vMLP = (instanceMatrix * vec4(transformed,1.0)).xyz;\n#else\n vMSky = 1.0;\n vMLP = vec3(-1.0);\n#endif');
+    sh.fragmentShader = 'precision highp sampler3D;\nvarying float vMSky;\nvarying vec3 vMLP;\nuniform sampler3D uLight3D;\nuniform vec3 uChunkTint;\nuniform vec2 uSkyCurve;\nuniform vec4 uMBLit;\n' + sh.fragmentShader
       // hcSkyAmbient is the atlas's own function and uSkyCurve its own curve, so a prop and a block cannot answer
       // "how much of the sky does this see" with two different numbers.
       // THE BLOCK LIGHT IS ADDED AFTER THE SKY SCALES, not before, because the sky term is a multiply on daylight and a
@@ -12804,9 +12799,18 @@ function _modelLit(m){
       // walling it in, which is the opposite of what a torch is for. Same order the atlas composes them in.
       .replace('#include <lights_fragment_end>',
         '#include <lights_fragment_end>\n reflectedLight.indirectDiffuse *= hcSkyAmbient(clamp(vMSky,0.0,1.0), uSkyCurve);'+
-        '\n reflectedLight.indirectDiffuse += clamp(vMLit,0.0,1.0) * uMBLit.rgb * uMBLit.a;');
+        '\n{ vec3 _mlc = vMLP + vec3(0.0,0.5,0.0);'+
+        '\n  float _mbl = texture(uLight3D, vec3(_mlc.x/'+CK.toFixed(1)+', _mlc.y/'+WH.toFixed(1)+', _mlc.z/'+CK.toFixed(1)+')).r;'+
+        '\n  reflectedLight.indirectDiffuse += _mbl * uChunkTint * uMBLit.rgb * uMBLit.a; }');
+    // DBG ?dbg=mbl: the sampled level itself, white at 1. It separates the two faults a dark prop has — the add not
+    // reaching the fragment, and the sample returning zero — which four sweeps of a gain could not tell apart.
+    if(Q.get('dbg')==='mbl') sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>',
+      '#include <dithering_fragment>\n{ vec3 _c = vMLP + vec3(0.0,0.5,0.0);'+
+      '\n  float _v = texture(uLight3D, vec3(_c.x/'+CK.toFixed(1)+', _c.y/'+WH.toFixed(1)+', _c.z/'+CK.toFixed(1)+')).r;'+
+      '\n  gl_FragColor = vec4(vec3(_v),1.0); }');
     m.needsUpdate=true; };
   m.customProgramCacheKey=()=>'modellit';
+  m.userData.modelLit=true;                                  // the flag addIM binds the chunk volume on: a torch's wood, its flame and the rest are not on this path and must not be cloned per chunk
   return m; }
 function buildModelBlocks(c,g){
   c.emitters=[];
@@ -12862,29 +12866,18 @@ function buildModelBlocks(c,g){
       // A geometry is shared between chunks by the model cache, so the attribute goes on the INSTANCED MESH's own copy —
       // setAttribute on a shared BufferGeometry would have every chunk overwriting its neighbours' sky.
       const sky=new Float32Array(arr.length);
-      // PER-INSTANCE BLOCK LIGHT, the other half of the atlas path and the one that was missing. A cat:'model' block was
-      // excluded from the baked light volume, so an emitter reached it only through the 16-slot point-light pool —
-      // measured, a fence with a lantern ONE BLOCK away sat at 0.74 of 255 against the sand's 24.12, thirty-three times
-      // darker, and with no lamp at all it is 46x darker than the ground it stands in. That is Ben's "fences and doors
-      // unchanged at night" having crossed all the way past the target.
-      // SAMPLED FROM c._lvData, THE VOLUME ITSELF, so a prop and the block beside it read the same number rather than
-      // two systems' guesses. buildLightTexture runs before buildModelBlocks in the same function, so it is populated.
-      // Same cell as the sky sample — one ABOVE the block, the air the prop is lit through, not the solid it occupies.
-      const lit=new Float32Array(arr.length);
-      for(let i=0;i<arr.length;i++){ const a=arr[i];
-        sky[i]=(typeof skyExposure==='function')?skyExposure(a[0],a[1]+1,a[2]):1;
-        // a[0..2] ARE CHUNK-LOCAL — list.push([lx,ly,lz,id]) — which is the whole of why this term measured inert on
-        // its first outing. Subtracting the chunk origin from an already-local coordinate drove the index negative,
-        // the bounds test rejected every instance, and aMLit was 0 everywhere however the gain was swept.
-        let L=0;
-        if(c._lvData){ const _lx=a[0], _lz=a[2], _ly=a[1]+1;
-          if(_lx>=0&&_lx<CK&&_lz>=0&&_lz<CK&&_ly>=0&&_ly<WH) L=c._lvData[_lx + CK*(_ly + WH*_lz)]/255; }
-        lit[i]=L; }
+      for(let i=0;i<arr.length;i++){ const a=arr[i]; sky[i]=(typeof skyExposure==='function')?skyExposure(a[0],a[1]+1,a[2]):1; }
       im.geometry=geo.clone();
       im.geometry.setAttribute('aMSky', new THREE.InstancedBufferAttribute(sky,1));
-      im.geometry.setAttribute('aMLit', new THREE.InstancedBufferAttribute(lit,1));
       for(let i=0;i<arr.length;i++){ const a=arr[i]; m4.makeTranslation(a[0]+0.5,a[1]+yo,a[2]+0.5); im.setMatrixAt(i,m4); }
-      im.instanceMatrix.needsUpdate=true; im.userData.modelMat=mat; im.userData.mbName=_mbName; if(extra)extra(im); g.add(im); return im; };
+      im.instanceMatrix.needsUpdate=true;
+      // THE BLOCK LIGHT IS THE CHUNK'S OWN VOLUME, bound here and rebound by relightChunk. baseMat is the name that
+      // traverse looks for, so a model block now follows exactly the same rebinding path an atlas mesh does; without
+      // it a lamp placed after the chunk meshed would never reach the prop, which is what made the attribute this
+      // replaces measure inert through four sweeps.
+      im.userData.baseMat=mat; im.userData.modelMat=mat; im.userData.mbName=_mbName;
+      if(c.light3D && mat.userData && mat.userData.modelLit) im.material=_chunkMat(mat, c.light3D);
+      if(extra)extra(im); g.add(im); return im; };
     let arr, _mbName=null;
     for(const idk in byId){ const id=+idk, bd=B[id], m=bd.model; arr=byId[idk]; _mbName=bd.name;
       if(m==='torch'){ const wd=torchWoodMat();                                                                                              // faceted 2-segment box shaft (not a cylinder), longer
@@ -27456,6 +27449,77 @@ function blockOutHand(v, bend, tilt, pull, cant){
 // front-most corner BACK inside the 0.45 a player can stand from a wall, and a shotgun's z extent once stood up exceeds the
 // 0.27 that leaves. The band gives, and it can afford to: the fault it was bought to fix is an AIMED one, and the aim is now
 // refused while bent, so it cannot occur in the state that relaxes the band. 0.03 still keeps the mesh out of the near plane.
+// ---- THE HAND DOES NOT GO INTO A BLOCK (Ben 2026-08-18: "a HARD CONSTRAINT, not a soft correction") ----
+// What already exists is a SOFT one and it stays: blockOutHand bends the weapon up when a wall is within a metre and a
+// half, eased at 10/s, so walking at a wall reads as raising the gun rather than as a collision. Eased means it lags,
+// and lag means the hand sits inside the stone for a few frames — which is the report.
+//   THIS RUNS AFTER EVERY POSE TERM AND OWNS THE LAST WORD. It samples the drawn geometry, not the player: three
+// points down the held object's own length in the group's space (the hand, the middle and the far end), lifted into
+// world space through the camera. Any that is inside a solid block is pushed out along the FACE it is least deep
+// through — which is the surface normal for an axis-aligned box, and the only definition of "out" a voxel has.
+//   ONE PUSH FOR THE WHOLE MODEL, the largest the three points need, applied to the group. Pushing each point would
+// tear the object apart; the group is what is drawn.
+//   THREE PASSES, because a corner is two faces and a doorway is three. Each pass re-samples, so the second push is
+// measured against where the first one put it rather than guessed.
+//   THE CAP IS 0.75 AND IT IS REPORTED, not silent. The Wretch's arm retraction (8b8061f, 32a3535, 1b1766f) is the
+// standing lesson here: a clamp that quietly swallows an impossible correction reads as the feature working, and the
+// pegged-at-the-cap case is the one worth seeing. __hc.handClamp reports the push and whether it hit the cap.
+const HAND_CLAMP={ on:true, cap:0.75, skin:0.045, passes:3 };
+const _hcP=new THREE.Vector3(), _hcQ=new THREE.Vector3(), _hcD=new THREE.Vector3();
+function handClampToWorld(){
+  const st={ pushed:0, capped:false, points:0, hits:0, at:null };
+  if(!HAND_CLAMP.on || !view.group.visible || _tpsAct) return st;
+  const m=view.mesh; if(!m) return st;
+  // THE THREE POINTS ARE THE OBJECT'S OWN, IN WORLD SPACE, and getting that wrong is what made the first version
+  // report zero against a block sitting on the barrel: Box3.setFromObject returns a WORLD box, and treating it as
+  // group-local and then calling localToWorld transforms it twice — the samples land metres from the gun, in open air.
+  // So the samples are built in world space directly: the hand is the group's own origin, the far end is the corner of
+  // the world box furthest from the eye (a muzzle, a haft's head, the front of a slab), and the third is between them.
+  view.group.updateMatrixWorld(true);
+  const bb=new THREE.Box3().setFromObject(m); if(bb.isEmpty()) return st;
+  const hand=_hcP.setFromMatrixPosition(view.group.matrixWorld).clone();
+  let far=null, fd=-1;
+  for(const cx of [bb.min.x,bb.max.x]) for(const cy of [bb.min.y,bb.max.y]) for(const cz of [bb.min.z,bb.max.z]){
+    const d=(cx-camera.position.x)**2+(cy-camera.position.y)**2+(cz-camera.position.z)**2;
+    if(d>fd){ fd=d; far=[cx,cy,cz]; } }
+  const pts=[ [hand.x,hand.y,hand.z],
+              [(hand.x+far[0])/2,(hand.y+far[1])/2,(hand.z+far[2])/2],
+              far ];
+  const skin=HAND_CLAMP.skin;
+  for(let pass=0; pass<HAND_CLAMP.passes; pass++){
+    let bx=0, by=0, bz=0, best=0;
+    for(const q of pts){
+      st.points++;
+      _hcP.set(q[0],q[1],q[2]);
+      if(!solidAt(_hcP.x,_hcP.y,_hcP.z)) continue;
+      st.hits++;
+      // HOW FAR OUT OF THIS BLOCK, ON EACH AXIS, AND THE SHALLOWEST WINS. A voxel's faces are the six axis planes, so
+      // the least penetration IS the nearest surface and its sign IS that surface's normal.
+      const fx=_hcP.x-Math.floor(_hcP.x), fy=_hcP.y-Math.floor(_hcP.y), fz=_hcP.z-Math.floor(_hcP.z);
+      const cand=[[-(fx+skin),0,0],[(1-fx)+skin,0,0],[0,-(fy+skin),0],[0,(1-fy)+skin,0],[0,0,-(fz+skin)],[0,0,(1-fz)+skin]];
+      let pick=null, pd=Infinity;
+      for(const c of cand){ const d=Math.abs(c[0]+c[1]+c[2]);
+        // A FACE THAT OPENS INTO ANOTHER SOLID BLOCK IS NOT A WAY OUT. Without this the model is pushed into the wall
+        // behind the wall, which is how a "collision" ends up deeper inside the world than it started.
+        const ox=_hcP.x+c[0]*1.02, oy=_hcP.y+c[1]*1.02, oz=_hcP.z+c[2]*1.02;
+        if(solidAt(ox,oy,oz)) continue;
+        if(d<pd){ pd=d; pick=c; } }
+      if(!pick) continue;
+      if(pd>best){ best=pd; bx=pick[0]; by=pick[1]; bz=pick[2]; } }
+    if(pass===0) st.at=pts.map(q=>[+q[0].toFixed(2),+q[1].toFixed(2),+q[2].toFixed(2)]);   // WHERE it sampled, so a test can put a block on one of these points instead of guessing a cell
+    if(!best) break;
+    // WORLD PUSH INTO THE GROUP'S OWN SPACE. view.group hangs off the camera, so a world vector becomes a local one by
+    // the camera's inverse rotation and nothing else — there is no scale on this chain.
+    _hcD.set(bx,by,bz);
+    const len=_hcD.length(); if(len>HAND_CLAMP.cap){ _hcD.multiplyScalar(HAND_CLAMP.cap/len); st.capped=true; }
+    _hcQ.copy(_hcD).applyQuaternion(camera.getWorldQuaternion(_hcTmpQ).invert());
+    view.group.position.add(_hcQ);
+    st.pushed+=_hcD.length();
+    view.group.updateMatrixWorld(true);
+    // THE SAMPLES MOVE WITH THE MODEL, or the second pass re-measures the first pass's penetration and pushes twice.
+    for(const q of pts){ q[0]+=_hcD.x; q[1]+=_hcD.y; q[2]+=_hcD.z; } }
+  return st; }
+const _hcTmpQ=new THREE.Quaternion();
 function nearPlaneClear(v, band){
   const m=v.mesh; if(!m) return 0;
   let bb=m.userData._vbb; if(!bb){ bb=_viewLocalBox(m); m.userData._vbb=bb; }
@@ -31692,6 +31756,13 @@ function updateView(dt){ updateRecoil(dt);                                      
     const pl=sm.userData.plunger; if(pl)pl.position.y=-0.11*plunge;                             // clear plunger travel — the visible "injection"
     if(view.injectT<=0)sm.visible=false; }
   else if(view.injectMesh) view.injectMesh.visible=false;
+  // ---- AND NOTHING OF IT IS ALLOWED TO BE INSIDE A BLOCK ----
+  // Last, after the pose, the block-out, the near-plane guard and every layer: this is a constraint on the result, and
+  // a constraint that runs before something that can move the model is not a constraint. Witnessed in the ledger as a
+  // note rather than an add, for the reason POSE.note exists — handClampToWorld has already moved the group.
+  { const _hc=handClampToWorld();
+    view._handClamp=_hc.pushed; view._handClampCap=!!_hc.capped; view._handClampAt=_hc.at; view._handClampHits=_hc.hits;
+    if(_hc.pushed>0) POSE.note('handclamp', 0,0,0); }
   POSE.end(); }        // close the ledger: everything the group moved since mark(), minus what the layers declared
 
 // ---- COMBAT (left-click swing → melee the wretch or an animal in front) ----
@@ -39367,20 +39438,51 @@ function clothTex(kind){ if(_clothTexCache[kind]) return _clothTexCache[kind];
 // material.color, so brown hair and a grey beard are one texture at two tints and neither is multiplied by itself.
 // THE STRANDS RUN DOWN THE V AXIS. Hair falls, and every surface this lands on is a box whose UVs put v vertically, so a
 // vertical streak is a lock of hair on the crown, the locks and the beard alike without a per-part map.
-let _hairTex=null;
-function hairTex(){ if(_hairTex) return _hairTex;
-  const S=64, cv=document.createElement('canvas'); cv.width=cv.height=S; const c=cv.getContext('2d');
+// PER CHARACTER, NOT ONE TEXTURE AT TWO TINTS (Ben 08-18: "matched to each characters hair"). The first pass drew
+// both from one canvas and separated them on material.color alone, which is why an old man's beard and a young
+// man's hair had the same strand size, the same spacing and the same contrast. A grey beard is coarse, soft-edged
+// and full of white; brown hair is finer, denser and higher in contrast. Those are three numbers each, so they are
+// three numbers each, and nothing else about the two figures had to change.
+// NEAR-WHITE, FOR THE REASON clothTex IS: the pattern is a light map and the colour stays on material.color, so
+// neither figure's hair is multiplied by itself.
+// THE STRANDS RUN DOWN v. Hair falls, and every surface this lands on is a box whose UVs put v vertically, so a
+// vertical streak is a lock on the crown, the side locks and the beard alike without a per-part map.
+const HAIR_KINDS={
+  grey:  { n:170, wMin:0.9, wVar:1.6, dark:0.07, darkVar:0.13, lightBias:0.52, grain:26, rep:[1,1.5] },
+  brown: { n:230, wMin:0.5, wVar:1.1, dark:0.13, darkVar:0.24, lightBias:0.30, grain:18, rep:[1,2.0] },
+};
+const _hairTexCache={};
+function hairTex(kind){ const k=HAIR_KINDS[kind]?kind:'grey';
+  if(_hairTexCache[k]) return _hairTexCache[k];
+  const K=HAIR_KINDS[k], S=64, cv=document.createElement('canvas'); cv.width=cv.height=S; const c=cv.getContext('2d');
   c.fillStyle='rgb(238,238,238)'; c.fillRect(0,0,S,S);
   c.lineCap='round';
-  for(let k=0;k<150;k++){ const x=Math.random()*S, w=0.6+Math.random()*1.5, dark=Math.random()<0.62;
-    c.strokeStyle=dark?'rgba(0,0,0,'+(0.10+Math.random()*0.16).toFixed(2)+')':'rgba(255,255,255,'+(0.10+Math.random()*0.18).toFixed(2)+')';
+  for(let i=0;i<K.n;i++){ const x=Math.random()*S, w=K.wMin+Math.random()*K.wVar, light=Math.random()<K.lightBias;
+    c.strokeStyle=light?'rgba(255,255,255,'+(0.10+Math.random()*0.20).toFixed(2)+')'
+                      :'rgba(0,0,0,'+(K.dark+Math.random()*K.darkVar).toFixed(2)+')';
     c.lineWidth=w; c.beginPath(); c.moveTo(x,-4);
     c.bezierCurveTo(x+(Math.random()*5-2.5),S*0.35, x+(Math.random()*7-3.5),S*0.7, x+(Math.random()*9-4.5),S+4); c.stroke(); }
   const img=c.getImageData(0,0,S,S), d=img.data;                                   // per-texel grain: a strand is never one value along its length
-  for(let i=0;i<d.length;i+=4){ const j=(Math.random()-0.5)*20; d[i]+=j; d[i+1]+=j; d[i+2]+=j; }
+  for(let i=0;i<d.length;i+=4){ const j=(Math.random()-0.5)*K.grain; d[i]+=j; d[i+1]+=j; d[i+2]+=j; }
   c.putImageData(img,0,0);
-  const tx=new THREE.CanvasTexture(cv); tx.colorSpace=THREE.SRGBColorSpace; tx.wrapS=tx.wrapT=THREE.RepeatWrapping; tx.anisotropy=2;
-  tx.name='hair'; _hairTex=tx; return tx; }
+  const tx=new THREE.CanvasTexture(cv); tx.colorSpace=THREE.SRGBColorSpace; tx.wrapS=tx.wrapT=THREE.RepeatWrapping;
+  tx.repeat.set(K.rep[0],K.rep[1]); tx.anisotropy=4;
+  tx.name='hair:'+k; _hairTexCache[k]=tx; return tx; }
+// ---- AND THE MAP HAS TO SURVIVE THE LIGHTING, WHICH IS THE OTHER HALF OF "FLAT" ----
+// Both figures are deliberately self-lit so they do not read as dark silhouettes (Ben 07-21), and emissive without an
+// emissiveMap adds a CONSTANT to every texel: the strand pattern is still there and the flat term sits on top of it,
+// which is exactly what a flat beard looks like and is why it reads worst at night, when the emissive is most of the
+// light. The same texture on emissiveMap makes the self-lit term follow the strands instead of drowning them.
+// bumpMap gives the relief Ben asked for by name -- Lambert supports it, so the strands catch and lose the sun as the
+// head turns, which no colour map alone can do.
+// ONE REGISTRY so the maps can be pulled off every hair surface at once: that is the control the measurement needs,
+// and a texture change with no way to remove it cannot be shown to have done anything.
+const _hairMats=new Set();
+function hairMaterial(kind, color, emissive, emissiveIntensity){
+  const tx=hairTex(kind);
+  const m=new THREE.MeshLambertMaterial({ color, emissive, emissiveIntensity, map:tx, emissiveMap:tx, bumpMap:tx,
+    bumpScale:(kind==='grey'?0.9:0.7) });
+  m.userData.hairTex=tx; _hairMats.add(m); return m; }
 // A ROBE IS CLOTH, NOT A LATHE. Both robes were `CylinderGeometry(rTop,rBot,h,10)` — a smooth ten-sided cone, the one
 // silhouette hanging cloth never has. This is the same taper carrying vertical FOLDS whose amplitude OPENS TOWARD THE HEM
 // (a robe is pinched at the shoulder and full at the floor, so a uniform ripple looks like fluting on a column) and a hem
@@ -39495,7 +39597,7 @@ function buildAnimalMesh(type,corrupt){ const spec=ANIMALS[type], g=new THREE.Gr
     for(const sx of [-1,1]){ const arm=new THREE.Mesh(new THREE.BoxGeometry(0.09*s,0.4*s,0.11*s),robe); arm.position.set(sx*0.22*s,0.6*s,0); g.add(arm); }
     for(const sx of [-1,1]){ const leg=new THREE.Mesh(new THREE.BoxGeometry(0.11*s,0.42*s,0.13*s),new THREE.MeshLambertMaterial({color:0x3a3550})); leg.position.set(sx*0.09*s,0.21*s,0); g.add(leg); }
     animalGroup.add(g); return g; }
-  if(type==='jesus'){ const robe=new THREE.MeshLambertMaterial({color:0xf1ede1,emissive:0x50483a,emissiveIntensity:0.55,map:clothTex('linen')}), skin=new THREE.MeshLambertMaterial({color:0xd9b48c,emissive:0x4a3626,emissiveIntensity:0.5}), hair=new THREE.MeshLambertMaterial({color:0x5a3a22,emissive:0x2a1c12,emissiveIntensity:0.45,map:hairTex()}), sash=new THREE.MeshLambertMaterial({color:0x9a2a2a,emissive:0x4a1414,emissiveIntensity:0.5,map:clothTex('linen')});   // white robe, olive skin, brown hair/beard, red sash — self-lit so the holy figure reads bright, not a dark silhouette (Ben 07-21)
+  if(type==='jesus'){ const robe=new THREE.MeshLambertMaterial({color:0xf1ede1,emissive:0x50483a,emissiveIntensity:0.55,map:clothTex('linen')}), skin=new THREE.MeshLambertMaterial({color:0xd9b48c,emissive:0x4a3626,emissiveIntensity:0.5}), hair=hairMaterial('brown',0x5a3a22,0x2a1c12,0.45), sash=new THREE.MeshLambertMaterial({color:0x9a2a2a,emissive:0x4a1414,emissiveIntensity:0.5,map:clothTex('linen')});   // white robe, olive skin, brown hair/beard, red sash — self-lit so the holy figure reads bright, not a dark silhouette (Ben 07-21)
     // LINEN, FOLDED (see robeGeo). The hem widens 0.30 -> 0.34 with the folds, so the fullness comes from cloth rather than
     // from a wider cone: the fold valleys still sit inside the old silhouette.
     const robeB=new THREE.Mesh(robeGeo(0.20*s,0.34*s,0.9*s,12,0.10,0.030*s),robe); robeB.position.y=0.55*s; robeB.castShadow=true; g.add(robeB);
@@ -39532,7 +39634,7 @@ function buildAnimalMesh(type,corrupt){ const spec=ANIMALS[type], g=new THREE.Gr
     // plus nearly double the self-lighting is what makes the shaded half of the robe still say BLUE.
     const robe=new THREE.MeshLambertMaterial({color:0x223160,emissive:0x18214c,emissiveIntensity:0.80,map:clothTex('wool')}),
           skin=new THREE.MeshLambertMaterial({color:0xd0ab84,emissive:0x3c2c1e,emissiveIntensity:0.45}),
-          beardM=new THREE.MeshLambertMaterial({color:0xd8d4c8,emissive:0x38383a,emissiveIntensity:0.4,map:hairTex()}),
+          beardM=hairMaterial('grey',0xd8d4c8,0x38383a,0.4),
           gold=new THREE.MeshBasicMaterial({color:0xd4af37}),
           bookM=new THREE.MeshLambertMaterial({color:0x4a2a18,emissive:0x1e100a,emissiveIntensity:0.4});
     const cross=(h,w,th)=>buildMonkCross(h,w,th,gold);   // the monk and the carried relic are now literally the same geometry
@@ -45059,6 +45161,14 @@ window.__hc={
                ready:{ cmd:+((player._readyCmd||0)).toFixed(3), eased:+((player._ready||0)).toFixed(3) },
                alt:_altDown(), ads:+((view&&view.adsT)||0).toFixed(2), swapping:(typeof swapping==='function')?swapping():null }; }
     catch(e){ return {err:String(e&&e.message||e)}; } },
+  // THE HAND'S HARD CONSTRAINT: the dial, and what it did on the last frame. `pushed` is how far the model had to come
+  // out of the world, `capped` says the correction was bigger than the cap allows — which is the case worth seeing,
+  // and the reason it is reported rather than swallowed.
+  handClamp(o){ try{ if(o) for(const k in o) if(k in HAND_CLAMP) HAND_CLAMP[k]=(k==='on')?!!o[k]:+o[k];
+      return { dial:Object.assign({},HAND_CLAMP), pushed:+((view._handClamp||0)).toFixed(4), capped:!!view._handClampCap,
+               at:view._handClampAt||null, hits:view._handClampHits|0,
+               held:view.id||null, groupPos:[+view.group.position.x.toFixed(3),+view.group.position.y.toFixed(3),+view.group.position.z.toFixed(3)] }; }
+    catch(e){ return {err:String(e&&e.message||e)}; } },
   // HOW FAR RIGHT THE HAND SITS in first person, and what the four anchors it feeds currently read. 0 is the
   // placement before Ben asked for the nudge, which makes the aimed-sight control a two-call A/B rather than a
   // rebuild: the ADS pose does not carry HAND_X at all, so opticEye must not move between the two.
@@ -46552,6 +46662,23 @@ window.__hc={
   // THE NEAREST LIVE FIGURE OF A TYPE, with the height of its head. __hc.monks() answers this for monks only, and
   // a harness that has to photograph a FACE needs it for Jesus and for anything else with one -- `animals` is module
   // scope, so without this a bench can spawn a figure and then have no way to find or frame it.
+  // STRIP OR RESTORE EVERY HAIR MAP AT ONCE (see hairMaterial). 0 leaves the two figures' hair as the flat Lambert
+  // colours it was before this work, which is the control side of the measurement: a texture change with no way to
+  // remove it cannot be shown to have changed anything.
+  hairMap(v){ try{ const on=(v==null)?null:!!v;
+      if(on!==null) for(const m of _hairMats){ const tx=m.userData.hairTex;
+        m.map=on?tx:null; m.emissiveMap=on?tx:null; m.bumpMap=on?tx:null; m.needsUpdate=true; }
+      const any=_hairMats.values().next().value;
+      return { mats:_hairMats.size, mapped:any?!!any.map:null, bump:any?+(any.bumpScale||0).toFixed(2):null,
+               kinds:[..._hairMats].map(m=>m.userData.hairTex&&m.userData.hairTex.name) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // HOLD A FIGURE STILL. __hc.monkPark does this for monks only, and Jesus walks on water and never stops -- four
+  // states of him measured from four different distances, none of them the one asked for. Same three fields the monk
+  // park uses, for whichever figure is nearest.
+  figurePark(type){ try{ const t=String(type||'monk'); let n=0;
+      for(const a of animals){ if(a.type!==t || a.dead) continue; a.grazeT=1e9; a.goal=null; a.flee=0; n++; }
+      return { parked:n, type:t }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   figureAt(type){ try{ const t=String(type||'monk'); let best=null, bd=1e9;
       for(const a of animals){ if(a.type!==t || a.dead) continue;
         const d=Math.hypot(a.x-player.pos.x, a.z-player.pos.z); if(d<bd){ bd=d; best=a; } }
@@ -48908,6 +49035,17 @@ window.__hc={
   // A wall face is lit by the AIR cell in front of it, so that is what is sampled: the chunk's own baked light volume (c._lvData, level
   // x17) at the air cell, plus whether that column is roofed at all — htop/opaqueTop is what the shader's sky term reads, and a hole in
   // the ceiling is the one thing that can make a handful of blocks in a sealed room brighter than the rest.
+  // QA: THE BAKED BLOCK LIGHT AT ONE WORLD CELL, which is the number every lit surface in the game is built on and
+  // which no hook could read. A model block now samples this same volume per fragment (see _modelLit), so "the prop is
+  // dark" and "no light ever arrived" are two different faults and this is what tells them apart -- four sweeps of a
+  // gain were spent on the first when it was the second.
+  blockLight(x,y,z){ try{ x=Math.floor(x); y=Math.floor(y); z=Math.floor(z);
+      const c=world.get(key(x>>4,z>>4));
+      if(!c) return { at:[x,y,z], chunk:false };
+      return { at:[x,y,z], chunk:true, vol:!!c._lvData, tex:!!c.light3D, meshed:!!c.meshed, dirty:!!c.dirty,
+               lit: c._lvData ? c._lvData[(x&15) + CK*(y + WH*(z&15))] : null,     // 0..255, the byte the sampler3D reads
+               block: getBlock(x,y,z) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   dunWallLight(){ try{ const L=wretch.lair; if(!L||L.fy==null) return {no:'no lair yet'};
       const cx=L.cx, cz=L.cz, fy=L.fy, fw=fy+1, DR=13, DH=11;
       const lightAt=(x,y,z)=>{ const c=world.get(key(x>>4,z>>4)); if(!c||!c._lvData) return null;
