@@ -101,6 +101,8 @@ const ARM = process.env.HC_ARM==null ? null : (process.env.HC_ARM!=='0');
       +'  arms max '+mx(iks.map(k=>mx(k.arms||[]))).toFixed(3)
       +'  frames with an arm fold '+iks.filter(k=>mx(k.arms||[])>0.01).length+' of '+iks.length
       +'  gate open '+iks.filter(k=>k.armGate).length+'  frames the rule SAW an arm in solid '+iks.filter(k=>(k.armSeen||0)>0).length
+      +'  reaching frames '+iks.filter(k=>k.armGate===2).length
+      +'  max fold while reaching '+mx(iks.filter(k=>k.armGate===2).map(k=>mx(k.arms||[]))).toFixed(3)
       +'  frames with a leg offset '+iks.filter(k=>mx(k.legs||[])>0.01).length+' of '+iks.length);
     // AND HOW HARD IT PULLS. The same column-height probe that defeated the forelimb version lets a leg beside a
     // trunk read as deeply underground, so the distribution matters: a median near the cap would be a creature
