@@ -66,6 +66,34 @@ const fb=()=>['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Progra
       console.log('  footIK '+(on?'on ':'off')+' '+JSON.stringify(await ev('__hc.footIK()')).slice(0,110));
       await shoot('wretch',10,on?'ik-on':'ik-off'); }
     await ev('__hc.footIK(true)');
+    // AND THE FORELIMB RETRACTION, which 8b8061f measured and did not look at. Placing the creature among the
+    // trees was not enough -- limbInSolid read 0 arms in solid at that spot, so the rule was correctly inert and
+    // the two frames were the same pose. A trunk has to be PUT where an arm is, so a pillar is built one block in
+    // front of the frozen body at arm height and the integrator is given a moment to answer it.
+    for(const on of [true,false]){
+      await ev('__hc.armFold('+on+')');
+      await ev('__hc.freeze(false,false)');
+      await ev('__hc.wretchAt(7)');
+      await sleep(1500);
+      await ev('__hc.freeze(true,true)'); await sleep(250);
+      const built=await ev(`(()=>{ const w=__hc.wpos(); if(!w) return null;
+        const yaw=__hc.wretchPose? (__hc.wretchPose().yaw||0) : 0;
+        const fx=Math.round(w[0]-Math.sin(yaw)*1.2), fz=Math.round(w[2]-Math.cos(yaw)*1.2);
+        const put=[];
+        for(let dy=0; dy<=2; dy++) for(let dx=-1; dx<=1; dx++) for(let dz=-1; dz<=1; dz++){
+          const x=fx+dx, y=Math.round(w[1])+dy, z=fz+dz;
+          if(__hc.blockAt(x,y,z)!==0) continue;
+          __hc.setBlk(x,y,z,'stone'); put.push([x,y,z]); }
+        return {fx, fz, n:put.length}; })()`);
+      // IT STAYS FROZEN WHILE IT ANSWERS. Unfreezing to let the integrator run also lets the creature WALK, and
+      // with the collision envelope shipped it simply steps away from the pillar that was just built for it --
+      // arms 0 in solid, twice. freeze(on,moving) keeps the rig animating while the body holds still, which is
+      // the only state in which a limb can be measured against something put deliberately in its way.
+      await sleep(1400);
+      console.log('  armFold '+(on?'on ':'off')+' '+JSON.stringify(await ev('__hc.armFold()')).slice(0,90)
+        +'  built '+JSON.stringify(built)+'  inSolid '+JSON.stringify(await ev('__hc.limbInSolid()')));
+      await shoot('wretch',7,on?'arm-on':'arm-off'); }
+    await ev('__hc.armFold(true)');
     console.log('\n  frames in '+OUT);
   } finally { try{ if(b) await b.close(); }catch(e){} try{ srv.kill(); }catch(e){} }
 })();
