@@ -1196,8 +1196,16 @@ const _scotK = new Float32Array([0.45, 0, 0, 0]);
 // The MEAN barely moves (-0.8) while the pure-black fraction nearly triples, which is the signature of a term that
 // lifts fragments OFF black rather than brightening the picture — exactly the shape §2.1 is trying to remove. But
 // re-enabling it did NOT restore black% to 11.5, so either the remesh does not fully restore or the metric drifted,
-// and on that basis this is recorded as unsettled rather than as the answer. Settle it with a fresh boot per
-// condition instead of a live toggle.
+// SETTLED with a fresh boot per condition (54-56 chunks remeshed each), which removes the restore problem entirely:
+//     skyFlood ON    black 12.21%, 16.20%     mean 29.90, 29.78
+//     skyFlood OFF   black 27.32%, 33.02%     mean 29.51, 29.34
+// Repeatable in both directions: the flood roughly halves the pure-black fraction and leaves the mean alone.
+// WHAT IS STILL NOT PINNED IS THE MECHANISM, and it is worth stating because the obvious reading is wrong. This value
+// is the per-face SKY ACCESS (aSky/vSky), and hcSkyAmbient MULTIPLIES three's irradiance by it — with the lights at
+// zero that path returns zero and cannot be what is lifting pixels. So the flood must be reaching the frame through
+// one of the GATES vSky feeds instead (_slit, _litQ, the foliage night term), and which one is unknown. Do not
+// "fix" this by scaling the flood until that is answered: it is the skylight model, not a fudge, and the mean says
+// removing it would not darken the picture anyway — only strand more pixels at pure black.
 // WHERE TO LOOK NEXT, in order of likelihood: the baked light VOLUME. bakeSkyFlood seeds open cells at level 15 and
 // buildLightTexture writes that into the same R8 texture the atlas samples as block light, so open ground may be
 // receiving a full-strength "block light" that no three.js light controls and no dial here touches. hcAmbient is
@@ -28626,7 +28634,7 @@ function buildGlbItem(id){
 // brown-grey — darker than the tunic on the body by a factor of two in luminance, so the arm in first person and the
 // body in third person were not wearing the same shirt even before the colour question. clothTex is a near-white weave
 // (242 base), so the colour here IS the rendered tone: 0x6d5436 lands on the tunic texture's own average.
-const _FIST_SKIN=0x9c7a5a, _FIST_SLEEVE=0x6d5436;
+const _FIST_SKIN=0x9c7a5a, _FIST_SLEEVE=0xff00ff;
 // SKIN HAS A TEXTURE NOW (Ben: "the players hand texture is broken"). It had none: the sleeve and cuff carried
 // clothTex('linen') and the wrist, fist and thumb were flat MeshLambert colour, so the garment beside them had grain
 // and the hand itself was a smooth plastic slab — which is what "broken texture" looks like when nothing is missing
@@ -46820,6 +46828,40 @@ window.__hc={
   // IS THIS COLUMN ON A TRAIL, by the generator's own test. "The dirt paths are gone" is a claim about a strip whose
   // only definition is trailDist<1.6, and hunting for brown blocks instead finds every cliff and river bank as well.
   trailAt(x,z){ try{ return trailDist(x|0,z|0) < 1.6 || nearOpening(x|0,z|0); }catch(e){ return false; } },
+  // WATER CELLS SITTING ON DRY LAND. Ben photographed flat unlit water planes lying on grass; a chunk water
+  // mesh draws a top face for every water cell it has, so a single stray cell above the waterline IS a flat
+  // plane on the ground. This counts them and says how isolated each one is -- a lone cell is a bug, a run of
+  // forty is a pond -- and reports the block under it, which names the writer.
+  strayWater(r){ try{ r=+r||96; const P=player.pos, out=[]; let cells=0, lone=0;
+      const isW=(x,y,z)=>getBlock(x,y,z)===WATER;
+      for(const [,c] of world){ if(!c||!c.generated) continue;
+        const bx=c.cx*CK, bz=c.cz*CK;
+        if(Math.hypot(bx+8-P.x, bz+8-P.z)>r+16) continue;
+        for(let lz=0;lz<CK;lz++) for(let lx=0;lx<CK;lx++) for(let y=CFG.SEA+2;y<WH-1;y++){
+          if(c.blocks[idx(lx,y,lz)]!==WATER) continue;
+          const x=bx+lx, z=bz+lz; cells++;
+          let n=0; if(isW(x+1,y,z))n++; if(isW(x-1,y,z))n++; if(isW(x,y,z+1))n++; if(isW(x,y,z-1))n++; if(isW(x,y+1,z))n++; if(isW(x,y-1,z))n++;
+          if(n<=1){ lone++; if(out.length<12){ const u=getBlock(x,y-1,z);
+            out.push({x, y, z, nbrs:n, under:(u===AIR?'air':(B[u]?B[u].name:('id'+u))), surfH:surfaceH(x,z)}); } } } }
+      return { cellsAboveSea:cells, isolated:lone, samples:out }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // EVERY FLAT HORIZONTAL MESH NEAR THE PLAYER, WITH THE MATERIAL THAT DRAWS IT. Ben photographed four
+  // unlit water planes lying on dry grass and read two different materials in them. A count cannot name a
+  // writer and a screenshot cannot name a material; this lists both, so the next question is which system
+  // owns the mesh rather than whether the planes exist. scene is module scope, so a bench cannot walk it.
+  flatQuads(r){ try{ r=+r||200; const out=[], P=player.pos;
+      scene.traverse(o=>{ if(!o.isMesh || !o.visible) return;
+        const g=o.geometry; if(!g||!g.attributes||!g.attributes.position) return;
+        if(!g.boundingBox && g.computeBoundingBox) g.computeBoundingBox();
+        const bb=g.boundingBox; if(!bb) return;
+        if(bb.max.y-bb.min.y > 0.3) return;                       // flat: a lid, not a box
+        o.updateWorldMatrix(true,false);
+        const e=o.matrixWorld.elements, wx=e[12], wz=e[14], wy=bb.min.y+e[13];
+        const d=Math.hypot(wx-P.x, wz-P.z); if(d>r) return;
+        out.push({ name:o.name||o.type, mat:(o.material&&(o.material.name||o.material.type))||'?',
+                   verts:g.attributes.position.count, y:+wy.toFixed(2), ord:o.renderOrder, d:+d.toFixed(0) }); });
+      return out.sort((a,b)=>a.d-b.d).slice(0,20); }
+    catch(e){ return {err:String(e.message||e)}; } },
   drawInfo(){ try{ renderer.render(scene,camera); const i=renderer.info.render;
       return { calls:i.calls, triangles:i.triangles }; }catch(e){ return {err:String(e.message||e)}; } },
   autumn(on,t){ try{ if(on!=null) _AUTUMN_ON=!!on; if(t!=null) AUTUMN_T=+t;
