@@ -12791,7 +12791,13 @@ function modelBlockMat(m, bd, colOverride){
 // uChunkTint carries the hue, as it does for the atlas, so a crimson shrine torch and a cold lamp do not both come
 // out orange. uMBLit.a is the gain and rgb a colour multiplier on top -- __hc.modelLight({gain,r,g,b}), gain 0 is the
 // A/B, and the default is set by the sweep in the commit that shipped this.
-const _uMBLit={ value:new THREE.Vector4(0.55,0.42,0.22,0.0) };
+// 1.2 IS MEASURED, at the recorded vantage with the lantern placed AFTER the chunk meshed: the fence reads 1.14 of
+// 255 at gain 0 and 44.05 / 54.19 / 64.91 / 79.99 at 0.5 / 0.8 / 1.2 / 2.0, against lit ground in the same frame that
+// holds 81-89 throughout. 1.2 puts a bark post at 65 beside ground at 83 -- the same order, still visibly darker than
+// the floor, which is what a fence beside a lamp looks like. 2.0 matches the ground exactly and reads as glowing wood.
+// It cannot touch Ben's pitch-black night: the term is the BAKED BLOCK LIGHT times this gain, and with no emitter in
+// the chunk that level is zero, so a prop with no lamp near it is exactly as black as it was.
+const _uMBLit={ value:new THREE.Vector4(0.55,0.42,0.22,1.2) };
 function _modelLit(m){
   const prev=m.onBeforeCompile;
   m.onBeforeCompile=(sh,r)=>{ if(prev) prev(sh,r);
@@ -12812,9 +12818,9 @@ function _modelLit(m){
       // walling it in, which is the opposite of what a torch is for. Same order the atlas composes them in.
       .replace('#include <lights_fragment_end>',
         '#include <lights_fragment_end>\n reflectedLight.indirectDiffuse *= hcSkyAmbient(clamp(vMSky,0.0,1.0), uSkyCurve);'+
-        '\n{ vec3 _mlc = floor(vMLP) + 0.5 + normalize(vMN)*0.75;'+
+        '\n if(vMLP.x >= 0.0){ vec3 _mlc = floor(vMLP) + 0.5 + normalize(vMN)*0.75;'+
         '\n  float _mbl = texture(uLight3D, vec3(_mlc.x/'+CK.toFixed(1)+', _mlc.y/'+WH.toFixed(1)+', _mlc.z/'+CK.toFixed(1)+')).r;'+
-        '\n  reflectedLight.indirectDiffuse += _mbl * uChunkTint * uMBLit.rgb * uMBLit.a; }');
+        '\n  reflectedLight.indirectDiffuse += _mbl * uChunkTint * uMBLit.rgb * uMBLit.a; }');   // the guard is the non-instanced branch's vMLP of -1: uLight3D is CLAMPED, not repeated, so sampling outside the volume returns the edge texel and would light a held model, a hotbar icon and a dropped item off whatever the chunk edge happens to hold
     // DBG ?dbg=mbl: the sampled level itself, white at 1. It separates the two faults a dark prop has — the add not
     // reaching the fragment, and the sample returning zero — which four sweeps of a gain could not tell apart.
     if(Q.get('dbg')==='mbl') sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>',
@@ -27487,7 +27493,10 @@ const HAND_CLAMP={ on:true, cap:0.75, skin:0.045, passes:3 };
 const _hcP=new THREE.Vector3(), _hcQ=new THREE.Vector3(), _hcD=new THREE.Vector3();
 function handClampToWorld(){
   const st={ pushed:0, capped:false, points:0, hits:0, at:null };
-  if(!HAND_CLAMP.on || !view.group.visible || _tpsAct) return st;
+  // OFF STILL MEASURES. `on:false` must be the A/B control, not a blind spot: it samples and reports the hits and
+  // leaves the model where the pose put it, so "with the constraint off the corners are in the block, with it on they
+  // are not" is one pair of readings rather than a claim.
+  if(!view.group.visible || _tpsAct) return st;
   const m=view.mesh; if(!m) return st;
   // ---- THE SAMPLES ARE POINTS ON THE OBJECT, TAKEN IN THE OBJECT'S OWN SPACE ----
   // Two attempts got this wrong and both are worth recording. Box3.setFromObject returns a WORLD box, so treating it
@@ -27512,8 +27521,14 @@ function handClampToWorld(){
     bb.union(_hcB2.copy(o.geometry.boundingBox).applyMatrix4(o.matrixWorld)); });
   if(bb.isEmpty()) return st;
   bb.applyMatrix4(_hcM.copy(view.group.matrixWorld).invert());
-  const lx=(bb.min.x+bb.max.x)*0.5, ly=(bb.min.y+bb.max.y)*0.5;
-  const local=[[lx,ly,bb.max.z],[lx,ly,(bb.min.z+bb.max.z)*0.5],[lx,ly,bb.min.z]];
+  //   THE AXIS LINE IS NOT THE OBJECT. Three points down the centre of the box miss everything the box is WIDE at: the
+  // hand slab's outer face, a rifle's flank, the head of an axe. Measured — looking straight down at the floor and
+  // standing against a wall, all three centre points read air while the model is plainly against the world. So the
+  // samples are the box's own eight CORNERS plus the three centre points: eleven tests, which is nothing beside the
+  // 140-lookup raycasts this file already runs per frame, and they cover the silhouette rather than its spine.
+  const lx=(bb.min.x+bb.max.x)*0.5, ly=(bb.min.y+bb.max.y)*0.5, lz=(bb.min.z+bb.max.z)*0.5;
+  const local=[[lx,ly,bb.max.z],[lx,ly,lz],[lx,ly,bb.min.z]];
+  for(const qx of [bb.min.x,bb.max.x]) for(const qy of [bb.min.y,bb.max.y]) for(const qz of [bb.min.z,bb.max.z]) local.push([qx,qy,qz]);
   const pts=local.map(q=>{ _hcP.set(q[0],q[1],q[2]); view.group.localToWorld(_hcP); return [_hcP.x,_hcP.y,_hcP.z]; });
   const skin=HAND_CLAMP.skin;
   for(let pass=0; pass<HAND_CLAMP.passes; pass++){
@@ -27537,7 +27552,7 @@ function handClampToWorld(){
       if(!pick) continue;
       if(pd>best){ best=pd; bx=pick[0]; by=pick[1]; bz=pick[2]; } }
     if(pass===0) st.at=pts.map(q=>[+q[0].toFixed(2),+q[1].toFixed(2),+q[2].toFixed(2)]);   // WHERE it sampled, so a test can put a block on one of these points instead of guessing a cell
-    if(!best) break;
+    if(!best || !HAND_CLAMP.on) break;
     // WORLD PUSH INTO THE GROUP'S OWN SPACE. view.group hangs off the camera, so a world vector becomes a local one by
     // the camera's inverse rotation and nothing else — there is no scale on this chain.
     _hcD.set(bx,by,bz);
@@ -40151,6 +40166,22 @@ function pushRagdoll(mesh,o){ o=o||{};
   return rd; }
 function _rgDispose(rd){ if(!rd)return; const m=rd.mesh; try{ if(m.parent)m.parent.remove(m); }catch(e){}
   m.traverse(o=>{ if(o.material)(Array.isArray(o.material)?o.material:[o.material]).forEach(mm=>mm&&mm.dispose&&mm.dispose()); }); }
+// ---- THE SURFACE A BODY RESTS ON IS THE ONE UNDER IT, NOT THE FIRST ONE ABOVE IT ----
+// Ben 08-18: when a monk dies its body floats above a roof. groundYAt(x,z,fromY) walks DOWN from the height it is
+// given and returns the first solid it meets, and both callers here handed it rd.y + the body's own height + 2. For a
+// body under a roof that start is ABOVE the roof, so the first solid found IS the roof and the clamp lifted the
+// corpse onto it -- the body rested on a plane over its head instead of the floor it died on.
+// THE SCAN STARTS AT THE BODY'S OWN LOWEST CORNER. Half a block of margin above it, so a body already resting
+// exactly on a surface still finds that surface, and everything below it is what it can fall to. The four cases this
+// has to get right all follow from that one start: under a roof it skips the roof and finds the floor; ON a roof it
+// finds the roof, because that IS the surface it died on; beside a building it finds the ground rather than the wall
+// top; and falling from a height it finds the first solid below, which is where it lands.
+// THE SAME MISTAKE, IN THE SAME SHAPE, was the Wretch's foot IK: a probe started at the body's height read a TRUNK
+// beside the foot as the floor and pegged the correction at its cap. A ground probe must start at the thing being
+// grounded.
+function _rgGroundY(rd){ return groundYAt(rd.x!=null?rd.x:rd.mesh.position.x,
+                                          rd.z!=null?rd.z:rd.mesh.position.z,
+                                          (rd.y!=null?rd.y:rd.mesh.position.y) + _rgLowY(rd) + 0.5); }
 function _rgLowY(rd){ let lo=1e9; const mn=rd.cmin||rd.bmin, mx=rd.cmax||rd.bmax;                         // lowest world-Y over the 8 oriented-box corners → ground clearance for the clamp body (compact box if set: the seraph rests its BODY, not its 39m wingspan)
   for(let i=0;i<8;i++){ _rgV.set((i&1)?mx.x:mn.x,(i&2)?mx.y:mn.y,(i&4)?mx.z:mn.z).applyQuaternion(rd.q); if(_rgV.y<lo)lo=_rgV.y; }
   return lo; }
@@ -40162,7 +40193,7 @@ function updateRagdolls(dt){ if(dt>0.05)dt=0.05;
     if(!rd.grounded){ rd.vy-=_RG_G*dt; _rgQ.setFromAxisAngle(rd.ax, rd.spin*dt); rd.q.premultiply(_rgQ);   // fall + free tumble
       rd.x+=rd.vx*dt; rd.y+=rd.vy*dt; rd.z+=rd.vz*dt; }
     else { rd.q.slerp(rd.restQ, Math.min(1,dt*5)); rd.vx*=0.82; rd.vz*=0.82; rd.x+=rd.vx*dt; rd.z+=rd.vz*dt; }   // flop flat + slide to a stop
-    const gy=groundYAt(rd.x,rd.z,rd.y+(rd.bmax.y-rd.bmin.y)+2), minY=gy-_rgLowY(rd);                     // clamp the lowest corner exactly onto the terrain
+    const gy=_rgGroundY(rd), minY=gy-_rgLowY(rd);                                                        // clamp the lowest corner exactly onto the surface UNDER it (see _rgGroundY)
     if(rd.grounded){ rd.y=minY; }
     else if(rd.y<=minY){ rd.y=minY; rd.grounded=true; rd.vy=0;
       const yaw=Math.random()*6.283, tip=(Math.random()<0.5?1:-1)*Math.PI*0.5, pitch=(Math.random()-0.5)*0.5;   // lock a flopped-onto-its-flank rest pose
@@ -51788,7 +51819,7 @@ window.__hc={
     const rd=boss?_seraphRagdoll:_wretchCorpse;
     return { ok:!!rd, x:+x.toFixed(2), z:+z.toFixed(2), gy:+gy.toFixed(2), startY:rd?+rd.mesh.position.y.toFixed(2):null }; },
   ragState(){ const B=new THREE.Box3(); return _ragdolls.map(rd=>{ B.setFromObject(rd.mesh);   // QA: per-corpse settle + how far the lowest point sits under the terrain (must be ≥ ~0)
-    const gy=groundYAt(rd.mesh.position.x,rd.mesh.position.z,rd.mesh.position.y+(rd.bmax.y-rd.bmin.y)+4);
+    const gy=_rgGroundY(rd);   // the same helper the simulation clamps with, or this instrument reports the roof as "the ground" too
     return { boss:rd.boss, ttl:rd.ttl===Infinity?'inf':rd.ttl, settled:rd.settled, landed:rd.landed, x:+rd.mesh.position.x.toFixed(2), z:+rd.mesh.position.z.toFixed(2), y:+rd.mesh.position.y.toFixed(2), gy:+gy.toFixed(2), aboveGround:+(rd.mesh.position.y-gy).toFixed(2), boxH:+(B.max.y-B.min.y).toFixed(2), underGround:+(B.min.y-gy).toFixed(3) }; }); },
   bulletPunch(){ const bx=Math.round(player.pos.x)+3, bz=Math.round(player.pos.z), by=Math.round(player.pos.y);   // QA: pillar in front, punch a bullet hole in its player-facing face
     setBlockWorld(bx,by,bz,BID.cobble,true); setBlockWorld(bx,by+1,bz,BID.cobble,true);
