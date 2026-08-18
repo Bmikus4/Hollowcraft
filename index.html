@@ -12684,8 +12684,13 @@ function modelBlockMat(m, bd, colOverride){
             : (bd.col!=null ? bd.col : (bd.pale?0xb9ad8c : bd.wattle?0x7a5a34 : 0x8a7048));
   // A FENCE POST IS A TENTH OF A BLOCK WIDE, so it zooms into the tile rather than fitting a whole one onto a sliver
   // (Ben 08-04: "fence textures have too many lines on them"). It reads the same in the hand as in the ground.
+  // AND IT GOES THROUGH _modelLit LIKE EVERY OTHER MODEL BLOCK. This early return was added for the tile ZOOM and it
+  // took the fence off the model-block light path entirely — the one surface every measurement of that path was taken
+  // on. Four sweeps of __hc.modelLight read inert, a per-instance attribute was written and rewritten, and two
+  // structural suspects were raised, against a material that was never on the path at all. Any early return here has
+  // to end in _modelLit or the block it is for silently leaves the light model (§1.4).
   if(m==='fence'){ const t=tileTex('log_side',0.34,0.34);
-    return new THREE.MeshLambertMaterial(t?{map:t,color:col}:{color:col}); }
+    return _modelLit(new THREE.MeshLambertMaterial(t?{map:t,color:col}:{color:col})); }
   // TEXTURED, NOT TINTED (Ben 08-04: "fences, scarecrows, trapdoors, and gates should all be textured" / "also texture
   // doors" / "also texture chests"). The block's own declared tile wins; anything wooden without one gets planks; the
   // colour stays a MULTIPLY so the pastel and wattle variants keep the difference they were given. Metal (bars,
@@ -12773,8 +12778,16 @@ function modelBlockMat(m, bd, colOverride){
 // chunk-local position. It cannot go stale, because the texture is what relight updates; it is per FRAGMENT rather
 // than per instance, so a fence rail has falloff along its length instead of one flat level for the whole post; and a
 // prop and the block it stands in read the same number by construction rather than by two systems agreeing.
-// +0.5 IN Y is the same air-cell offset the atlas makes along the face normal, for the same reason: the cell the prop
-// occupies is the solid one and reads 0, and the light it is lit by is in the air cell above it.
+// THE SAMPLE IS TAKEN FROM THE CELL CENTRE, PUSHED OUT ALONG THE FACE NORMAL, and both halves of that were paid for
+// with a photograph. A prop is not on a cell boundary the way an atlas face is: it sits INSIDE a cell the light flood
+// marked solid, so that cell reads 0 and any sample near the geometry reads 0 with it. Offsetting from the vertex by
+// half a cell lit a fence's POSTS and left its RAILS black under ?dbg=mbl -- a post's top reaches the air above and a
+// rail sits low enough that half a cell up is still inside its own solid cell. From the CELL CENTRE, 0.75 clears the
+// boundary at 0.5 and lands a quarter of a cell into the neighbour, and the volume's trilinear filter still blends
+// the solid cell back in, which is what makes the falloff soft instead of a step at the block edge. It is the atlas's
+// own rule -- lit by the air in front of your own face -- with the offset measured from the cell rather than from a
+// face that is not on the boundary. Instance matrices here are pure translations, so the object normal is already the
+// chunk-space one.
 // uChunkTint carries the hue, as it does for the atlas, so a crimson shrine torch and a cold lamp do not both come
 // out orange. uMBLit.a is the gain and rgb a colour multiplier on top -- __hc.modelLight({gain,r,g,b}), gain 0 is the
 // A/B, and the default is set by the sweep in the commit that shipped this.
@@ -12786,12 +12799,12 @@ function _modelLit(m){
     sh.uniforms.uMBLit = _uMBLit;
     if(!sh.uniforms.uLight3D)   sh.uniforms.uLight3D   = { value:_emptyLight3D };     // a per-chunk clone overrides this at compile (see _chunkMat)
     if(!sh.uniforms.uChunkTint) sh.uniforms.uChunkTint = { value:new THREE.Color(LIGHT_PAL[0][0],LIGHT_PAL[0][1],LIGHT_PAL[0][2]) };
-    sh.vertexShader = 'attribute float aMSky;\nvarying float vMSky;\nvarying vec3 vMLP;\n' + sh.vertexShader
+    sh.vertexShader = 'attribute float aMSky;\nvarying float vMSky;\nvarying vec3 vMLP;\nvarying vec3 vMN;\n' + sh.vertexShader
       // vMLP is CHUNK-LOCAL: the instance matrix is a chunk-local translation (addIM) and the chunk group carries the
       // origin, so this addresses the chunk's own volume without a second uniform. Anything not instanced -- the held
       // model, the hotbar icon, the dropped item -- takes sky 1 and a position outside the volume, which samples 0.
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\n#ifdef USE_INSTANCING\n vMSky = aMSky;\n vMLP = (instanceMatrix * vec4(transformed,1.0)).xyz;\n#else\n vMSky = 1.0;\n vMLP = vec3(-1.0);\n#endif');
-    sh.fragmentShader = 'precision highp sampler3D;\nvarying float vMSky;\nvarying vec3 vMLP;\nuniform sampler3D uLight3D;\nuniform vec3 uChunkTint;\nuniform vec2 uSkyCurve;\nuniform vec4 uMBLit;\n' + sh.fragmentShader
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\n#ifdef USE_INSTANCING\n vMSky = aMSky;\n vMLP = (instanceMatrix * vec4(transformed,1.0)).xyz;\n vMN = normal;\n#else\n vMSky = 1.0;\n vMLP = vec3(-1.0);\n vMN = vec3(0.0,1.0,0.0);\n#endif');
+    sh.fragmentShader = 'precision highp sampler3D;\nvarying float vMSky;\nvarying vec3 vMLP;\nvarying vec3 vMN;\nuniform sampler3D uLight3D;\nuniform vec3 uChunkTint;\nuniform vec2 uSkyCurve;\nuniform vec4 uMBLit;\n' + sh.fragmentShader
       // hcSkyAmbient is the atlas's own function and uSkyCurve its own curve, so a prop and a block cannot answer
       // "how much of the sky does this see" with two different numbers.
       // THE BLOCK LIGHT IS ADDED AFTER THE SKY SCALES, not before, because the sky term is a multiply on daylight and a
@@ -12799,13 +12812,13 @@ function _modelLit(m){
       // walling it in, which is the opposite of what a torch is for. Same order the atlas composes them in.
       .replace('#include <lights_fragment_end>',
         '#include <lights_fragment_end>\n reflectedLight.indirectDiffuse *= hcSkyAmbient(clamp(vMSky,0.0,1.0), uSkyCurve);'+
-        '\n{ vec3 _mlc = vMLP + vec3(0.0,0.5,0.0);'+
+        '\n{ vec3 _mlc = floor(vMLP) + 0.5 + normalize(vMN)*0.75;'+
         '\n  float _mbl = texture(uLight3D, vec3(_mlc.x/'+CK.toFixed(1)+', _mlc.y/'+WH.toFixed(1)+', _mlc.z/'+CK.toFixed(1)+')).r;'+
         '\n  reflectedLight.indirectDiffuse += _mbl * uChunkTint * uMBLit.rgb * uMBLit.a; }');
     // DBG ?dbg=mbl: the sampled level itself, white at 1. It separates the two faults a dark prop has — the add not
     // reaching the fragment, and the sample returning zero — which four sweeps of a gain could not tell apart.
     if(Q.get('dbg')==='mbl') sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>',
-      '#include <dithering_fragment>\n{ vec3 _c = vMLP + vec3(0.0,0.5,0.0);'+
+      '#include <dithering_fragment>\n{ vec3 _c = floor(vMLP) + 0.5 + normalize(vMN)*0.75;'+
       '\n  float _v = texture(uLight3D, vec3(_c.x/'+CK.toFixed(1)+', _c.y/'+WH.toFixed(1)+', _c.z/'+CK.toFixed(1)+')).r;'+
       '\n  gl_FragColor = vec4(vec3(_v),1.0); }');
     m.needsUpdate=true; };
@@ -12859,24 +12872,30 @@ function buildModelBlocks(c,g){
   if(list.length){
     const byId={}; for(const e of list){ (byId[e[3]]=byId[e[3]]||[]).push(e); }
     const m4=new THREE.Matrix4(), _q=new THREE.Quaternion(), _e=new THREE.Euler(), _v=new THREE.Vector3(), _one=new THREE.Vector3(1,1,1);
+    // EVERY INSTANCED MODEL MESH JOINS THE LIGHT PATH THROUGH THIS ONE CALL, and it exists because seven builders in
+    // this function roll their own InstancedMesh and every one of them silently left the path: no per-instance sky, no
+    // chunk light volume, no rebinding on relight. The fence is the case that cost the time -- its POSTS go through
+    // addIM and its RAILS do not, so under ?dbg=mbl the posts read white beside a lantern and the rails read pure
+    // black, in the same mesh group, wearing the same material. A builder that adds an InstancedMesh and does not call
+    // this is a surface class that has fallen off the model (§1.4).
+    const _mbBind=(im,mat,cl)=>{
+      const sky=new Float32Array(cl.length);
+      for(let i=0;i<cl.length;i++){ const a=cl[i]; sky[i]=(typeof skyExposure==='function')?skyExposure(a[0],a[1]+1,a[2]):1; }
+      im.geometry=im.geometry.clone();                                       // the model cache shares geometry between chunks; the attribute is this mesh's own
+      im.geometry.setAttribute('aMSky', new THREE.InstancedBufferAttribute(sky,1));
+      im.userData.baseMat=mat; im.userData.modelMat=mat;
+      if(c.light3D && mat.userData && mat.userData.modelLit) im.material=_chunkMat(mat, c.light3D);
+      return im; };
     const addIM=(geo,mat,yo,cast,extra)=>{ const im=new THREE.InstancedMesh(geo,mat,arr.length); im.castShadow=cast!==false; im.receiveShadow=cast!==false;
       // PER-INSTANCE SKY ACCESS — the model block's half of the atlas light path (see _modelLit). Sampled one cell ABOVE
       // the block, because what a prop is lit by is the sky its own air cell can see, not the sky of the solid it occupies;
       // that is the same offset the atlas makes along the face normal for the light volume, for the same reason.
       // A geometry is shared between chunks by the model cache, so the attribute goes on the INSTANCED MESH's own copy —
       // setAttribute on a shared BufferGeometry would have every chunk overwriting its neighbours' sky.
-      const sky=new Float32Array(arr.length);
-      for(let i=0;i<arr.length;i++){ const a=arr[i]; sky[i]=(typeof skyExposure==='function')?skyExposure(a[0],a[1]+1,a[2]):1; }
-      im.geometry=geo.clone();
-      im.geometry.setAttribute('aMSky', new THREE.InstancedBufferAttribute(sky,1));
       for(let i=0;i<arr.length;i++){ const a=arr[i]; m4.makeTranslation(a[0]+0.5,a[1]+yo,a[2]+0.5); im.setMatrixAt(i,m4); }
       im.instanceMatrix.needsUpdate=true;
-      // THE BLOCK LIGHT IS THE CHUNK'S OWN VOLUME, bound here and rebound by relightChunk. baseMat is the name that
-      // traverse looks for, so a model block now follows exactly the same rebinding path an atlas mesh does; without
-      // it a lamp placed after the chunk meshed would never reach the prop, which is what made the attribute this
-      // replaces measure inert through four sweeps.
-      im.userData.baseMat=mat; im.userData.modelMat=mat; im.userData.mbName=_mbName;
-      if(c.light3D && mat.userData && mat.userData.modelLit) im.material=_chunkMat(mat, c.light3D);
+      _mbBind(im, mat, arr);
+      im.userData.mbName=_mbName;
       if(extra)extra(im); g.add(im); return im; };
     let arr, _mbName=null;
     for(const idk in byId){ const id=+idk, bd=B[id], m=bd.model; arr=byId[idk]; _mbName=bd.name;
@@ -12941,7 +12960,7 @@ function buildModelBlocks(c,g){
         // That coupling is why this number moved with the thickness above.
         for(const rot of [0.0,Math.PI/2]){ const im=new THREE.InstancedMesh(logGeo,wood,arr.length); im.castShadow=true; im.receiveShadow=true;
           for(let i=0;i<arr.length;i++){ const a=arr[i]; _e.set(0,rot,Math.PI*0.46); _q.setFromEuler(_e); _v.set(a[0]+0.5,a[1]+0.125,a[2]+0.5); m4.compose(_v,_q,_one); im.setMatrixAt(i,m4); }
-          im.instanceMatrix.needsUpdate=true; im.userData.modelMat=wood; g.add(im); }
+          im.instanceMatrix.needsUpdate=true; _mbBind(im,wood,arr); g.add(im); }
         // NO STONE RING (Ben 08-11: "the stones around campfires look bad, lets undo that"). It was nine cobble boxes on a
         // 0.40 radius, added this morning off "you can add stones around them by placing pebbles in them" — read as a
         // standing feature of every campfire, which is not what that sentence asks for. A ring the player builds out of
@@ -12975,7 +12994,7 @@ function buildModelBlocks(c,g){
         const bedroll=new THREE.MeshLambertMaterial({color:0x8a5a3a});
         for(const s of [-1,1]){ const im=new THREE.InstancedMesh(planeG(0.98,1.02),canvas,arr.length); im.castShadow=true; im.receiveShadow=true;
           for(let i=0;i<arr.length;i++){ const a=arr[i]; _e.set(0,0,s*0.46); _q.setFromEuler(_e); _v.set(a[0]+0.5+s*0.225,a[1]+0.46,a[2]+0.5); m4.compose(_v,_q,_one); im.setMatrixAt(i,m4); }
-          im.instanceMatrix.needsUpdate=true; im.userData.modelMat=canvas; g.add(im); }
+          im.instanceMatrix.needsUpdate=true; _mbBind(im,canvas,arr); g.add(im); }
         for(const s of [-1,1]) for(const zz of [-0.46,0.46]){ const leg=cyl(0.025,0.025,1.0,4);
           leg.rotateZ(s*0.46); leg.translate(s*0.225, 0, zz); addIM(leg, pole, 0.46); }                 // the A-frame legs, ON the panels' own pitch
         { const ridge=cyl(0.03,0.03,0.98,4); ridge.rotateX(Math.PI/2); addIM(ridge, pole, 0.92); }      // ridge beam along the tent, at the apex
@@ -12991,7 +13010,7 @@ function buildModelBlocks(c,g){
         for(const a of arr){ const gd=perp(getBlock(cx0+a[0]+fv[0], a[1], cz0+a[2]+fv[1]));            // look at the stair the tall side faces
           if(gd){ const key=(F==='n'||F==='s')?(F+gd):(gd+F); (corners[key]=corners[key]||[]).push(a); } else straight.push(a); }
         const put=(geo,cl)=>{ if(!cl.length)return; const im=new THREE.InstancedMesh(geo,wm,cl.length); im.castShadow=true; im.receiveShadow=true;
-          for(let i=0;i<cl.length;i++){ const a=cl[i]; m4.makeTranslation(a[0]+0.5,a[1]+0.75,a[2]+0.5); im.setMatrixAt(i,m4); } im.instanceMatrix.needsUpdate=true; im.userData.modelMat=wm; g.add(im); };
+          for(let i=0;i<cl.length;i++){ const a=cl[i]; m4.makeTranslation(a[0]+0.5,a[1]+0.75,a[2]+0.5); im.setMatrixAt(i,m4); } im.instanceMatrix.needsUpdate=true; _mbBind(im,wm,cl); g.add(im); };
         if(straight.length){ const up=box(1,0.5,0.5); if(F==='n')up.translate(0,0,0.25); else if(F==='s')up.translate(0,0,-0.25); else if(F==='e')up.translate(0.25,0,0); else up.translate(-0.25,0,0); put(up,straight); }
         for(const key in corners){ const q=box(0.5,0.5,0.5); q.translate(key.indexOf('e')>=0?0.25:-0.25,0,key.indexOf('n')>=0?0.25:-0.25); put(q,corners[key]); }
         continue; }
@@ -13003,7 +13022,7 @@ function buildModelBlocks(c,g){
         const rot={n:0,e:Math.PI/2,s:Math.PI,w:-Math.PI/2}[bd.dir]||0;
         const putRoof=(geo,mat,cells)=>{ if(!cells.length) return; const im=new THREE.InstancedMesh(geo,mat,cells.length); im.castShadow=true; im.receiveShadow=true;
           for(let i=0;i<cells.length;i++){ const a=cells[i]; _e.set(0,rot,0); _q.setFromEuler(_e); _v.set(a[0]+0.5,a[1]+0.5,a[2]+0.5); m4.compose(_v,_q,_one); im.setMatrixAt(i,m4); }
-          im.instanceMatrix.needsUpdate=true; im.userData.modelMat=mat; g.add(im); };
+          im.instanceMatrix.needsUpdate=true; _mbBind(im,mat,cells); g.add(im); };
         putRoof(_roofWedge,plankMat,arr); putRoof(_roofSlab,tileMat,arr);
         // The gable ends take the SIDE tile of whatever the roof stands on, so a run of roof over a stone wall reads as that
         // wall carried up to the ridge rather than as a plank box (Ben 08-11); a roof standing on nothing gets log_side.
@@ -13122,7 +13141,7 @@ function buildModelBlocks(c,g){
         const dirs=[[1,0],[-1,0],[0,1],[0,-1]], cells=[[],[],[],[]];
         for(const a of arr){ for(let di=0;di<4;di++){ if(links(getBlock(cx0+a[0]+dirs[di][0], a[1], cz0+a[2]+dirs[di][1]))) cells[di].push(a); } }
         for(let di=0;di<4;di++){ const cl=cells[di]; if(!cl.length)continue; const im=new THREE.InstancedMesh(railGeo(dirs[di][0],dirs[di][1]), fmat, cl.length); im.castShadow=true; im.receiveShadow=true;
-          for(let i=0;i<cl.length;i++){ const a=cl[i]; m4.makeTranslation(a[0]+0.5, a[1], a[2]+0.5); im.setMatrixAt(i,m4); } im.instanceMatrix.needsUpdate=true; im.userData.modelMat=fmat; g.add(im); }
+          for(let i=0;i<cl.length;i++){ const a=cl[i]; m4.makeTranslation(a[0]+0.5, a[1], a[2]+0.5); im.setMatrixAt(i,m4); } im.instanceMatrix.needsUpdate=true; _mbBind(im,fmat,cl); g.add(im); }
         continue; }
       if(m==='chainlink'){ const cmat=_chainlinkMat(), dmat=_clDepth();
         const links=(nid)=> nid!==undefined && nid!==AIR && (B[nid].connect || isOpaque[nid] || B[nid].model==='gate' || B[nid].model==='gate_open');
@@ -13141,7 +13160,7 @@ function buildModelBlocks(c,g){
         const put=(geo,cl,nm)=>{ if(!cl.length)return; const im=new THREE.InstancedMesh(geo,cmat,cl.length);
           im.castShadow=true; im.receiveShadow=true; im.name=nm; im.customDepthMaterial=dmat;
           for(let i=0;i<cl.length;i++){ const a=cl[i]; m4.makeTranslation(a[0]+0.5,a[1],a[2]+0.5); im.setMatrixAt(i,m4); }
-          im.instanceMatrix.needsUpdate=true; im.userData.modelMat=cmat; g.add(im); };
+          im.instanceMatrix.needsUpdate=true; _mbBind(im,cmat,cl); g.add(im); };
         for(let di=0;di<4;di++) put(_chainlinkArm(dirs[di][0],dirs[di][1]), cells[di], 'clArm');
         put(_chainlinkPost(), posts, 'clPost');
         continue; }
@@ -13155,7 +13174,7 @@ function buildModelBlocks(c,g){
         for(let v=0;v<2;v++){ const cl=cells[v]; if(!cl.length)continue;
           const im=new THREE.InstancedMesh(_sandbagPileGeo(v), mat, cl.length); im.castShadow=true; im.receiveShadow=true; im.name='sandbagPile';
           for(let i=0;i<cl.length;i++){ const a=cl[i]; m4.makeTranslation(a[0]+0.5,a[1],a[2]+0.5); im.setMatrixAt(i,m4); }
-          im.instanceMatrix.needsUpdate=true; im.userData.modelMat=mat; g.add(im); }
+          im.instanceMatrix.needsUpdate=true; _mbBind(im,mat,cl); g.add(im); }
         continue; }
       // The neighbour mask is what lets a run of the SAME block build as one object rather than as N copies — the bench
       // drops the legs and lengthens the shelf where another bench continues the run. Second argument, so every other
@@ -27470,21 +27489,32 @@ function handClampToWorld(){
   const st={ pushed:0, capped:false, points:0, hits:0, at:null };
   if(!HAND_CLAMP.on || !view.group.visible || _tpsAct) return st;
   const m=view.mesh; if(!m) return st;
-  // THE THREE POINTS ARE THE OBJECT'S OWN, IN WORLD SPACE, and getting that wrong is what made the first version
-  // report zero against a block sitting on the barrel: Box3.setFromObject returns a WORLD box, and treating it as
-  // group-local and then calling localToWorld transforms it twice — the samples land metres from the gun, in open air.
-  // So the samples are built in world space directly: the hand is the group's own origin, the far end is the corner of
-  // the world box furthest from the eye (a muzzle, a haft's head, the front of a slab), and the third is between them.
+  // ---- THE SAMPLES ARE POINTS ON THE OBJECT, TAKEN IN THE OBJECT'S OWN SPACE ----
+  // Two attempts got this wrong and both are worth recording. Box3.setFromObject returns a WORLD box, so treating it
+  // as group-local and calling localToWorld transformed it twice and put every sample metres away in open air. Then
+  // sampling the world box's FURTHEST CORNER moved the sample 0.6 of a block between frames: the box has eight
+  // corners, two of them are nearly equidistant from the eye, and which one is "furthest" flips as the pose sways —
+  // so a test that placed a block on the reported point found the muzzle had already left that cell.
+  //   The stable answer is the model's own axis: the world box is pulled back through the group's inverse matrix, and
+  // three points are taken down its LOCAL z at the box's own centre — the hand end, the middle, and the far end, which
+  // is a muzzle on a gun, the head of a haft on a tool and the front face of a carried block. Local points do not flip
+  // and they follow the pose exactly, because they ARE the pose.
+  //   AND THE BOX IS THE DRAWN OBJECT, NOT THE SUBTREE. setFromObject counts every child, and two of them are not the
+  // weapon: the muzzle flash, which is a hidden sprite until the frame it fires, and attachGunHand's forearm, which
+  // runs BACKWARD past the eye by design and is marked _noBB for exactly this reason. With the arm in the box the far
+  // sample sat behind the camera in open air and swung a full block between frames as the arm posed — which is why a
+  // block set on the reported point never hit anything.
   view.group.updateMatrixWorld(true);
-  const bb=new THREE.Box3().setFromObject(m); if(bb.isEmpty()) return st;
-  const hand=_hcP.setFromMatrixPosition(view.group.matrixWorld).clone();
-  let far=null, fd=-1;
-  for(const cx of [bb.min.x,bb.max.x]) for(const cy of [bb.min.y,bb.max.y]) for(const cz of [bb.min.z,bb.max.z]){
-    const d=(cx-camera.position.x)**2+(cy-camera.position.y)**2+(cz-camera.position.z)**2;
-    if(d>fd){ fd=d; far=[cx,cy,cz]; } }
-  const pts=[ [hand.x,hand.y,hand.z],
-              [(hand.x+far[0])/2,(hand.y+far[1])/2,(hand.z+far[2])/2],
-              far ];
+  const bb=_hcB.makeEmpty();
+  m.traverse(o=>{ if(!o.isMesh || o.visible===false) return;
+    for(let q=o; q && q!==m.parent; q=q.parent){ if(q.visible===false || (q.userData && q.userData._noBB)) return; }
+    if(!o.geometry) return; if(!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+    bb.union(_hcB2.copy(o.geometry.boundingBox).applyMatrix4(o.matrixWorld)); });
+  if(bb.isEmpty()) return st;
+  bb.applyMatrix4(_hcM.copy(view.group.matrixWorld).invert());
+  const lx=(bb.min.x+bb.max.x)*0.5, ly=(bb.min.y+bb.max.y)*0.5;
+  const local=[[lx,ly,bb.max.z],[lx,ly,(bb.min.z+bb.max.z)*0.5],[lx,ly,bb.min.z]];
+  const pts=local.map(q=>{ _hcP.set(q[0],q[1],q[2]); view.group.localToWorld(_hcP); return [_hcP.x,_hcP.y,_hcP.z]; });
   const skin=HAND_CLAMP.skin;
   for(let pass=0; pass<HAND_CLAMP.passes; pass++){
     let bx=0, by=0, bz=0, best=0;
@@ -27519,7 +27549,8 @@ function handClampToWorld(){
     // THE SAMPLES MOVE WITH THE MODEL, or the second pass re-measures the first pass's penetration and pushes twice.
     for(const q of pts){ q[0]+=_hcD.x; q[1]+=_hcD.y; q[2]+=_hcD.z; } }
   return st; }
-const _hcTmpQ=new THREE.Quaternion();
+const _hcTmpQ=new THREE.Quaternion(); const _hcM=new THREE.Matrix4();
+const _hcB=new THREE.Box3(), _hcB2=new THREE.Box3();
 function nearPlaneClear(v, band){
   const m=v.mesh; if(!m) return 0;
   let bb=m.userData._vbb; if(!bb){ bb=_viewLocalBox(m); m.userData._vbb=bb; }
@@ -39449,7 +39480,10 @@ function clothTex(kind){ if(_clothTexCache[kind]) return _clothTexCache[kind];
 // vertical streak is a lock on the crown, the side locks and the beard alike without a per-part map.
 const HAIR_KINDS={
   grey:  { n:170, wMin:0.9, wVar:1.6, dark:0.07, darkVar:0.13, lightBias:0.52, grain:26, rep:[1,1.5] },
-  brown: { n:230, wMin:0.5, wVar:1.1, dark:0.13, darkVar:0.24, lightBias:0.30, grain:18, rep:[1,2.0] },
+  // A DARK HEAD IS SEPARATED BY HIGHLIGHTS AND A WHITE ONE BY SHADOW, which is the whole of what "matched to each
+  // characters hair" means here. Dark strands on dark brown cancel: photographed facing camera, Jesus's beard read
+  // as one brown block while the same numbers made the monk's grey beard read as locks. So brown leads with light.
+  brown: { n:230, wMin:0.5, wVar:1.1, dark:0.10, darkVar:0.18, lightBias:0.58, grain:22, rep:[1,2.0] },
 };
 const _hairTexCache={};
 function hairTex(kind){ const k=HAIR_KINDS[kind]?kind:'grey';
@@ -46675,6 +46709,15 @@ window.__hc={
   // HOLD A FIGURE STILL. __hc.monkPark does this for monks only, and Jesus walks on water and never stops -- four
   // states of him measured from four different distances, none of them the one asked for. Same three fields the monk
   // park uses, for whichever figure is nearest.
+  // TURN A FIGURE TO FACE THE CAMERA. __hc.monkFace does this for monks, which is the only reason a monk was ever
+  // measurable: Jesus has no such hook, so every frame of him came out from BEHIND -- back of the robe, red sash, no
+  // beard -- and no sweep of the camera's own look can change which side of him you are standing on.
+  figureFace(type){ try{ const t=String(type||'monk'); let n=0;
+      for(const a of animals){ if(a.type!==t || a.dead) continue;
+        a.yaw=Math.atan2(player.pos.x-a.x, player.pos.z-a.z); a.desYaw=a.yaw;
+        if(a.mesh) a.mesh.rotation.y=a.yaw; n++; }
+      return { turned:n, type:t }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   figurePark(type){ try{ const t=String(type||'monk'); let n=0;
       for(const a of animals){ if(a.type!==t || a.dead) continue; a.grazeT=1e9; a.goal=null; a.flee=0; n++; }
       return { parked:n, type:t }; }
@@ -46684,7 +46727,7 @@ window.__hc={
         const d=Math.hypot(a.x-player.pos.x, a.z-player.pos.z); if(d<bd){ bd=d; best=a; } }
       if(!best) return null;
       const spec=ANIMALS[t];
-      return { type:t, x:+best.x.toFixed(2), y:+best.y.toFixed(2), z:+best.z.toFixed(2),
+      return { type:t, x:+best.x.toFixed(2), y:+best.y.toFixed(2), z:+best.z.toFixed(2), yaw:+(best.yaw||0).toFixed(3),
                h:spec?spec.h:null, headY:+(best.y+(spec?spec.h*0.82:1.5)).toFixed(2), dist:+bd.toFixed(2) }; }
     catch(e){ return {err:String(e.message||e)}; } },
   monks(){ try{ return { wrath:HORROR.monkWrath|0, gate:MONK_WRATH_KILLS, max:MONK_MAX,
