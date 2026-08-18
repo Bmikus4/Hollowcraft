@@ -135,6 +135,38 @@ async function boot(b, base, tag){
     // NOT ASSERTED: playback. Recorded rather than skipped silently.
     console.log('note: B AudioContext is', vB1.ctx, '— playback is not asserted, only delivery');
 
+    // ---- 5. THE WORN CUIRASS, THE CROUCH KNEE AND THE BIPOD, ON A REAL PEER --------------------------------------
+    // All three run the same code on a peer that they run on your own body, and none had ever been driven across a
+    // wire. po and crouchT say what the packet ASKED for; shell, kneeLx and bipodDeg say whether the rig is in it,
+    // which is the difference between a posture arriving and a posture being drawn.
+    await A.evaluate("__hc.tp(" + (pa.x) + ", " + (pa.y) + ", " + (pa.z) + ", 0, 0)");
+    await sleep(1200);
+    const peer=async()=>{ const r=await B.evaluate("__hc.mpPeers()"); return (r.peers||[])[0]||{}; };
+
+    await A.evaluate("__hc.wornArmor('iron_chestplate')"); await sleep(1800);
+    const pA=await peer();
+    console.log('peer sees chest:', JSON.stringify({shell:pA.shell}));
+    T("a peer sees the worn cuirass", pA.shell==='iron_chestplate', {shell:pA.shell});
+    await A.evaluate("__hc.wornArmor(null)"); await sleep(900);
+
+    await A.keyboard.down('Control'); await sleep(1800);
+    const pC=await peer();
+    console.log('peer sees crouch:', JSON.stringify({po:pC.po, crouchT:pC.crouchT, kneeLx:pC.kneeLx}));
+    T("a peer sees the crouch posture", pC.po===1, {po:pC.po});
+    T("and the peer's knee is folded, not the whole leg", (pC.kneeLx||0)>0.5, {kneeLx:pC.kneeLx});
+    await A.keyboard.up('Control'); await sleep(1200);
+
+    await A.evaluate("(()=>{__hc.cmdRun('/clearinv'); __hc.giveItem('chassis_rifle',1); __hc.hold('chassis_rifle');})()");
+    await sleep(1200);
+    const pB0=await peer();
+    await A.evaluate("__hc.proneSet(true)"); await sleep(2600);
+    const pB1=await peer();
+    console.log('peer sees prone:', JSON.stringify({po:pB1.po, proneT:pB1.proneT, bipodFolded:pB0.bipodDeg, bipodNow:pB1.bipodDeg}));
+    T("a peer sees the prone posture", pB1.po===2, {po:pB1.po});
+    T("and the peer's bipod has deployed", pB0.bipodDeg!=null && pB1.bipodDeg!=null && pB1.bipodDeg < pB0.bipodDeg-10,
+      {folded:pB0.bipodDeg, deployed:pB1.bipodDeg});
+    await A.evaluate("__hc.proneSet(false)"); await sleep(900);
+
     T('the relay dropped no message type during this run', !relayLog.some(l=>/DROPPED/.test(l)),
       relayLog.filter(l=>/DROPPED/.test(l)).slice(0,4));
 
