@@ -65,25 +65,62 @@ async function rowStats(page,file){
         for(let s=1; s<3000; s+=2){ const x=Math.round(${found.x}+${dx}*s), z=Math.round(${found.z}+${dz}*s);
           if(__hc.groundY(x,z)>${SEA}) far=s; }
         return far; })()`);
-      const yaw=Math.atan2(-dx,-dz);
+      // TWO LOOKS PER SIDE. Straight out to sea is where a treeline must NOT be, and 70 degrees off it is along the
+      // coast, which is where Ben's "the coast extends well beyond the render distance" actually asks for one. Judging
+      // only the seaward look reads an empty horizon as a failure; judging only the tangent misses the panel over water.
+      for(const [view,off] of [['out',0],['along',70]]){
+      const yaw=Math.atan2(-dx,-dz)+off*Math.PI/180;
       await page.evaluate(`__hc.tpAt(${found.x}+0.5, ${found.g}+1, ${found.z}+0.5); __hc.cam({yaw:${yaw}, pitch:0});`);
       for(let i=0;i<30;i++){ const f=await page.evaluate('__hc.fill()'); if(f&&f.meshed>=f.want) break; await sleep(400); }
       await sleep(2500);
       for(const [when,t] of HOURS){
         await page.evaluate(`__hc.setTime(${t})`); await sleep(900); await page.evaluate(`__hc.setTime(${t})`); await sleep(500);
-        const f=path.join(OUT,`p4-${TAG}-${name}-${when}.png`); await page.screenshot({path:f});
+        const f=path.join(OUT,`p4-${TAG}-${name}${view==='out'?'':'x'}-${when}.png`); await page.screenshot({path:f});
         const on=await rowStats(page,f);
         // WHERE THE BAND IS IN THE FRAME, measured not eyeballed: with the pines off and on, the rows whose median
         // level moved are the band's own rows, so its top and bottom in pixels are a fact about the two frames.
         await page.evaluate('__hc.pines(0)'); await sleep(700);
-        const fo=path.join(OUT,`p4-${TAG}-${name}-${when}-off.png`); await page.screenshot({path:fo});
+        const fo=path.join(OUT,`p4-${TAG}-${name}${view==='out'?'':'x'}-${when}-off.png`); await page.screenshot({path:fo});
         const off=await rowStats(page,fo);
         await page.evaluate('__hc.pines(1)'); await sleep(700);
         let top=-1,bot=-1,moved=0; const green=[];
         for(let y=0;y<on.length;y++){ const dl=Math.abs(on[y].l-off[y].l);
           if(dl>1.2){ if(top<0) top=y; bot=y; moved++; green.push(on[y].g); } }
         const gm=green.length?+(green.reduce((a,b)=>a+b,0)/green.length).toFixed(2):0;
-        console.log(`  ${name} ${when}: shore(${found.x},${found.z}) g=${found.g} lastLand=${last}b  bandRows ${top}..${bot} (${moved}/720)  green ${gm}  -> ${path.basename(f)}`);
+        console.log(`  ${name}-${view} ${when}: shore(${found.x},${found.z}) g=${found.g} lastLand=${last}b  bandRows ${top}..${bot} (${moved}/720)  green ${gm}  -> ${path.basename(f)}`);
+      }
+      }
+    }
+    // ---- AND BEN'S OWN FRAME: INSIDE THE FOREST, LOOKING OUT OVER THE CANOPY ----
+    // Screenshot 2026-08-18 091325 is taken from high ground inland with the real wood in front of the band, which is the
+    // only vantage where "the bands sit well above the real treeline with open sky beneath" can be judged. The spot is
+    // FOUND: the highest grass column inside half the island radius, so it is a hill in a wood and not a beach.
+    // A WOODED RISE, NOT THE SUMMIT. The first cut of this took the highest column inside half the radius and landed on a
+    // mountain peak at y=100, above the haze, with no terrain drawn below it at all - a frame that isolates the band
+    // beautifully and cannot show whether the real forest hides its foot, which is the whole question. Ben's frame is
+    // taken from a rise INSIDE the wood, so the search wants the highest column in the window a forest occupies.
+    const hill=await page.evaluate(`(()=>{ let best=null;
+      for(let r=60; r<${IC.R}*0.7; r+=7) for(let k=0;k<48;k++){ const th=k/48*6.2831853;
+        const x=Math.round(${IC.x}+Math.cos(th)*r), z=Math.round(${IC.z}+Math.sin(th)*r), g=__hc.groundY(x,z);
+        if(g>${SEA}+14 && g<${SEA}+30 && (!best || g>best.g)) best={x,z,g}; }
+      return best; })()`);
+    if(hill){
+      for(const [tag,yaw] of [['f0',0],['f90',Math.PI/2],['f180',Math.PI],['f270',-Math.PI/2]]){
+        await page.evaluate(`__hc.tpAt(${hill.x}+0.5, ${hill.g}+1, ${hill.z}+0.5); __hc.cam({yaw:${yaw}, pitch:0});`);
+        for(let i=0;i<30;i++){ const f=await page.evaluate('__hc.fill()'); if(f&&f.meshed>=f.want) break; await sleep(400); }
+        await sleep(2500);
+        for(const [when,t] of HOURS){
+          await page.evaluate(`__hc.setTime(${t})`); await sleep(900); await page.evaluate(`__hc.setTime(${t})`); await sleep(500);
+          const f=path.join(OUT,`p4-${TAG}-${tag}-${when}.png`); await page.screenshot({path:f});
+          const on=await rowStats(page,f);
+          await page.evaluate('__hc.pines(0)'); await sleep(700);
+          const fo=path.join(OUT,`p4-${TAG}-${tag}-${when}-off.png`); await page.screenshot({path:fo});
+          const off=await rowStats(page,fo);
+          await page.evaluate('__hc.pines(1)'); await sleep(700);
+          let top=-1,bot=-1,moved=0;
+          for(let y=0;y<on.length;y++){ if(Math.abs(on[y].l-off[y].l)>1.2){ if(top<0) top=y; bot=y; moved++; } }
+          console.log(`  forest-${tag} ${when}: hill(${hill.x},${hill.z}) g=${hill.g}  bandRows ${top}..${bot} (${moved}/720)  -> ${path.basename(f)}`);
+        }
       }
     }
   } finally { try{ if(browser) await browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }
