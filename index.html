@@ -12645,17 +12645,35 @@ function modelBlockMat(m, bd, colOverride){
 //
 // AN UNSET ATTRIBUTE READS 1.0, which is exactly the old behaviour, so anything that reaches this material without
 // per-instance sky — the held model, the inventory icon, the dropped item — is bit-identical.
+// The model block's block-light term: rgb is the emitter colour a prop is lit by, a is the gain. Shared by reference
+// like uWhiteTile, so every fresh modelBlockMat and every clone moves together. 0.55/0.42/0.22 is LIGHT_PAL's warm
+// entry; the gain is swept in the commit that added it. __hc.modelLight({gain,r,g,b}) and gain 0 is the A/B.
+// GAIN SHIPS AT 0, WHICH MEANS THIS IS PLUMBING AND NOT YET A FEATURE — said plainly so nobody reads it as done.
+// The attribute, the varying and the add are all in place and correct; what is missing is a gain chosen by
+// measurement. The sweep that should have chosen it was contaminated and is recorded rather than trusted: at gains
+// 0 / 0.5 / 1.0 the fence read 0.76 / 0.74 / 0.74 (no response at all), then 2.61 at 1.6, while the SAND control —
+// which cannot be touched by this uniform — jumped from 24 to 92.55 at gain 2.4. A control that moves means the frame
+// moved for another reason, so none of those numbers can choose a default.
+// TO FINISH IT: fresh boot per gain, lantern placed and given time to relight before the first shot, and a fence crop
+// large enough to be robust (the one used was 45x84 px). Target: a fence beside a lantern reading in the same order
+// as the sand beside it rather than 33x darker.
+const _uMBLit={ value:new THREE.Vector4(0.55,0.42,0.22,0.0) };
 function _modelLit(m){
   const prev=m.onBeforeCompile;
   m.onBeforeCompile=(sh,r)=>{ if(prev) prev(sh,r);
     sh.uniforms.uSkyCurve = globalU.uSkyCurve;
-    sh.vertexShader = 'attribute float aMSky;\nvarying float vMSky;\n' + sh.vertexShader
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\n#ifdef USE_INSTANCING\n vMSky = aMSky;\n#else\n vMSky = 1.0;\n#endif');
-    sh.fragmentShader = 'varying float vMSky;\nuniform vec2 uSkyCurve;\n' + sh.fragmentShader
+    sh.uniforms.uMBLit = _uMBLit;
+    sh.vertexShader = 'attribute float aMSky;\nattribute float aMLit;\nvarying float vMSky;\nvarying float vMLit;\n' + sh.vertexShader
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\n#ifdef USE_INSTANCING\n vMSky = aMSky;\n vMLit = aMLit;\n#else\n vMSky = 1.0;\n vMLit = 0.0;\n#endif');
+    sh.fragmentShader = 'varying float vMSky;\nvarying float vMLit;\nuniform vec2 uSkyCurve;\nuniform vec4 uMBLit;\n' + sh.fragmentShader
       // hcSkyAmbient is the atlas's own function and uSkyCurve its own curve, so a prop and a block cannot answer
       // "how much of the sky does this see" with two different numbers.
+      // THE BLOCK LIGHT IS ADDED AFTER THE SKY SCALES, not before, because the sky term is a multiply on daylight and a
+      // lamp is not daylight: scaling an emitter's contribution by how much SKY the prop sees would put a torch out by
+      // walling it in, which is the opposite of what a torch is for. Same order the atlas composes them in.
       .replace('#include <lights_fragment_end>',
-        '#include <lights_fragment_end>\n reflectedLight.indirectDiffuse *= hcSkyAmbient(clamp(vMSky,0.0,1.0), uSkyCurve);');
+        '#include <lights_fragment_end>\n reflectedLight.indirectDiffuse *= hcSkyAmbient(clamp(vMSky,0.0,1.0), uSkyCurve);'+
+        '\n reflectedLight.indirectDiffuse += clamp(vMLit,0.0,1.0) * uMBLit.rgb * uMBLit.a;');
     m.needsUpdate=true; };
   m.customProgramCacheKey=()=>'modellit';
   return m; }
@@ -12713,10 +12731,24 @@ function buildModelBlocks(c,g){
       // A geometry is shared between chunks by the model cache, so the attribute goes on the INSTANCED MESH's own copy —
       // setAttribute on a shared BufferGeometry would have every chunk overwriting its neighbours' sky.
       const sky=new Float32Array(arr.length);
+      // PER-INSTANCE BLOCK LIGHT, the other half of the atlas path and the one that was missing. A cat:'model' block was
+      // excluded from the baked light volume, so an emitter reached it only through the 16-slot point-light pool —
+      // measured, a fence with a lantern ONE BLOCK away sat at 0.74 of 255 against the sand's 24.12, thirty-three times
+      // darker, and with no lamp at all it is 46x darker than the ground it stands in. That is Ben's "fences and doors
+      // unchanged at night" having crossed all the way past the target.
+      // SAMPLED FROM c._lvData, THE VOLUME ITSELF, so a prop and the block beside it read the same number rather than
+      // two systems' guesses. buildLightTexture runs before buildModelBlocks in the same function, so it is populated.
+      // Same cell as the sky sample — one ABOVE the block, the air the prop is lit through, not the solid it occupies.
+      const lit=new Float32Array(arr.length);
       for(let i=0;i<arr.length;i++){ const a=arr[i];
-        sky[i]=(typeof skyExposure==='function')?skyExposure(a[0],a[1]+1,a[2]):1; }
+        sky[i]=(typeof skyExposure==='function')?skyExposure(a[0],a[1]+1,a[2]):1;
+        let L=0;
+        if(c._lvData){ const _lx=a[0]-cx0, _lz=a[2]-cz0, _ly=a[1]+1;
+          if(_lx>=0&&_lx<CK&&_lz>=0&&_lz<CK&&_ly>=0&&_ly<WH) L=c._lvData[_lx + CK*(_ly + WH*_lz)]/255; }
+        lit[i]=L; }
       im.geometry=geo.clone();
       im.geometry.setAttribute('aMSky', new THREE.InstancedBufferAttribute(sky,1));
+      im.geometry.setAttribute('aMLit', new THREE.InstancedBufferAttribute(lit,1));
       for(let i=0;i<arr.length;i++){ const a=arr[i]; m4.makeTranslation(a[0]+0.5,a[1]+yo,a[2]+0.5); im.setMatrixAt(i,m4); }
       im.instanceMatrix.needsUpdate=true; im.userData.modelMat=mat; im.userData.mbName=_mbName; if(extra)extra(im); g.add(im); return im; };
     let arr, _mbName=null;
@@ -44304,6 +44336,44 @@ window.__hc={
     catch(e){ return {err:String(e.message||e)}; } },
   // WHAT FINISH IS THIS GUN WEARING? Holds it and reads the material off the built mesh — which texture, how glossy,
   // and whether the map actually decoded — so "shiny guns are shiny" is a number per gun rather than a screenshot.
+  // IS THE FITTED PIECE ACTUALLY DARK AND SHINY? gunFinish answers this for the GUN and cannot see an attachment at
+  // all: it reports meshes, maps and the max gloss over the whole model, and a fitted optic is a subtree of that model
+  // whose parts are all mapped, so a pale optic on a dark rifle reads as "19 of 19 mapped, nothing bare". Ben has
+  // reported these as pale grey three times against a file that says they are anodised black, so the number that
+  // settles it has to be per PIECE, in the terms _attStyle works in: the albedo it produced, that albedo's luminance
+  // against the ATT_ANOD it is supposed to be scaled to, and the specular and shininess over the top of it.
+  //   The subtree is found by the mark buildAttachment leaves (userData.att), not by name or by position.
+  attFinish(){ try{ const m=view.mesh; if(!m) return {err:'nothing held'};
+      const rows=[]; const lum=c=>0.2126*c.r+0.7152*c.g+0.0722*c.b;
+      m.traverse(o=>{ if(!o.isMesh||!o.material||Array.isArray(o.material)) return;
+        let att=null; for(let q=o; q; q=q.parent) if(q.userData&&q.userData.att){ att=q.userData.att; break; }
+        if(!att) return;
+        const mt=o.material;
+        // …AND A MATERIAL WITHOUT A COLOUR AT ALL is the scope's lens shader, which has no albedo to judge.
+        if(!mt.color||!mt.color.getHexString){ rows.push({ att, part:(o.name||'').slice(0,28), type:mt.type, col:null, lum:null, spec:null, shine:0, map:false, opacity:1 }); return; }
+        // A MATERIAL WITHOUT A SPECULAR IS THE FINDING, NOT AN ERROR. The first version read mt.specular.getHexString()
+        // and threw on the suppressor, the light and the laser — which is the answer: those are Lambert, they have no
+        // specular term at all, and "shiny dark gunmetal" cannot be true of them however dark the albedo is.
+        rows.push({ att, part:(o.name||'').slice(0,28), type:mt.type, col:'#'+mt.color.getHexString(), lum:+lum(mt.color).toFixed(4),
+                    spec:(mt.specular&&mt.specular.getHexString)?('#'+mt.specular.getHexString()):null, shine:mt.shininess|0,
+                    map:!!mt.map, opacity:+(mt.opacity!=null?mt.opacity:1).toFixed(2) }); });
+      // AND THE GUN'S OWN METAL, because "dark gunmetal" has a reference in the same frame: the rifle the piece is
+      // bolted to. An optic judged against a number is judged against an opinion; judged against the receiver beside
+      // it, it is either darker, the same, or the pale thing in the photograph.
+      const gun=[]; m.traverse(o=>{ if(!o.isMesh||!o.material||Array.isArray(o.material)) return;
+        let att=null; for(let q=o; q; q=q.parent) if(q.userData&&q.userData.att){ att=q.userData.att; break; }
+        if(att||!o.material.color||!o.material.color.getHexString) return;
+        gun.push({ lum:+lum(o.material.color).toFixed(4), col:'#'+o.material.color.getHexString() }); });
+      gun.sort((a,b)=>a.lum-b.lum);
+      const byAtt={}; for(const r of rows){ if(r.lum==null) continue; (byAtt[r.att]=byAtt[r.att]||[]).push(r.lum); }
+      const summary={}; for(const k in byAtt){ const v=byAtt[k].slice().sort((a,b)=>a-b);
+        summary[k]={ parts:v.length, minLum:+v[0].toFixed(4), maxLum:+v[v.length-1].toFixed(4) }; }
+      const gmid=gun.length?gun[gun.length>>1]:null;
+      return { held:view.id, anod:ATT_ANOD, spec:'#'+new THREE.Color(ATT_SPEC).getHexString(), shine:ATT_SHINE,
+               gun:{ parts:gun.length, minLum:gun.length?gun[0].lum:null, medLum:gmid?gmid.lum:null, medCol:gmid?gmid.col:null,
+                     maxLum:gun.length?gun[gun.length-1].lum:null },
+               summary, rows }; }
+    catch(e){ return {err:String(e&&e.message||e)}; } },
   gunFinish(id){ try{ if(id){ inv[selSlot]={id,n:1}; refreshHotbar(); setViewItem(id); }
       const F=GUN_FINISH[view.id]||null; let meshes=0, mapped=0, shin=0, size=null, tex=null;
       // WHICH PARTS ARE BARE, not just how many. "6 of 18 mapped" cannot be acted on: the six could be the whole
@@ -50713,6 +50783,13 @@ window.__hc={
   // and dusk light changes fast enough that an A/B across two shots measures the sunset rather than the change.
   // QA/bench: scale the key light without touching its colour or its ramp. 1 is the shipped build.
   keyMul(v){ try{ if(v!=null) _keyMul=+v; return { keyMul:_keyMul, intensity:+sunLight.intensity.toFixed(3) }; }catch(e){ return String(e.message||e); } },
+  // The model block's share of the baked light volume. gain 0 is the A/B — the state before model blocks were put on
+  // the volume at all, where a lamp reached them only through the 16-slot pool.
+  modelLight(o){ try{ const v=_uMBLit.value;
+      if(o){ if(o.gain!=null) v.w=Math.max(0,Math.min(8,+o.gain));
+        if(o.r!=null) v.x=+o.r; if(o.g!=null) v.y=+o.g; if(o.b!=null) v.z=+o.b; }
+      return { gain:+v.w.toFixed(3), col:[+v.x.toFixed(3),+v.y.toFixed(3),+v.z.toFixed(3)] }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   // THE FILL, AS THE A/B IT NEVER HAD. hemi and amb are multipliers on the shipped day curves, so 1 is the frame as
   // it ships and 0 removes the term outright. With keyMul beside it these three decompose the frame: set two to zero
   // and what is left is the third's contribution. That decomposition is the thing §2.1 needs before anyone can make
