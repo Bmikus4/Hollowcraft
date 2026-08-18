@@ -9106,7 +9106,12 @@ uDbgAll:{value:0}, uTree:{value:_treeTex}, uHorizD:{value:2600.0}, uTreeH:{value
   //           two fifths of the stand showing above the real treeline and buries the rest.
   //  dive     radians the whole band is pushed down where there is no coast at all, so an open-sea bearing goes under
   //           the waterline instead of being cut out of the ring.
-  uSinkF:{value:0.60}, uDive:{value:0.09} };
+  //  diveP    how sharply the dive keys off presence. The dive exists for "there is no coast on this bearing at all",
+  //           and it was LINEAR in (1-pres), which meant an ordinary partial-coast bearing at pres 0.47 took 2.73 of
+  //           the 2.86 degrees the band had above the waterline and put the whole stand under the sea. Raising it to a
+  //           power moves the term into the tail where it belongs: at pres 0.47 it costs 0.77 degrees, at pres 0 it
+  //           still delivers the full dive.
+  uSinkF:{value:0.60}, uDive:{value:0.09}, uDiveP:{value:3.0} };
 // HOW MANY COPIES OF THE STRIP FIT AROUND THE RING, at the photograph's own aspect. One copy is as wide as it is tall,
 // so its angular width is the band's angular height times the texture's aspect, and the count is the circle divided by
 // that. Rounded to a whole number, because a fractional count leaves a partial copy at the wrap and that partial copy is
@@ -9119,7 +9124,7 @@ const coastPineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false
   'precision highp float; varying vec3 vPos;',
   'uniform sampler2D uMask; uniform vec3 uPine, uAir, uFogCol, uSunCol; uniform vec2 uSunXZ;',
   'uniform float uFogD, uWall, uCamY, uWx, uDay, uSunUp, uFogMul, uGain, uDbgAll; uniform vec2 uMaskOff; uniform vec4 uScotG, uScotH;',
-  'uniform sampler2D uTree; uniform float uHorizD, uTreeH, uTreeP, uColour, uSinkF, uDive;',
+  'uniform sampler2D uTree; uniform float uHorizD, uTreeH, uTreeP, uColour, uSinkF, uDive, uDiveP;',
   'void main(){',
   // 1 = paint the whole quad, FIRST LINE, because every later placement sat behind a discard. The upper bound matters as
   // much as the lower: without it mode 2 (paint where the band SURVIVED every gate) never reached its own line and
@@ -9178,7 +9183,17 @@ const coastPineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false
   // nothing else. If the wave was added to hide the flat bottom edge, that is the wrong solution - delete it." It was
   // also what gave the pale band under the treeline its sine-wave upper edge in his frame, because the ocean ring was
   // painting over everything the wave pushed down. The tile's own crowns are the variation.
-  '  float foot=(SEA_H-uCamY)/uHorizD - tip*uSinkF - (1.0-pres)*uDive;',
+  // ---- AND THE DIVE IS A TAIL TERM, NOT A LINEAR ONE ----
+  // This line is why the band vanished. sinkF 0.60 leaves 0.40 of a 7.16-degree stand above the waterline, which is
+  // 2.86 degrees; the dive was (1.0-pres)*uDive, and a perfectly ordinary partial-coast bearing sits at pres 0.47, so
+  // it subtracted 0.53*0.09 = 2.73 degrees and left 0.13 of a degree. The ocean plane covers everything below the
+  // waterline, so the band was under the sea on every bearing it drew on and the horizon was bare. Measured: at the
+  // shipped values the surviving fragments landed on rows 460-473 of a 720-row frame whose horizon is row 367.
+  // THE WAVE WAS LOAD-BEARING AND NOBODY KNEW. The crown undulation deleted in bbc7c62 moved the whole stand by up to
+  // a third of its height, which lifted it back over the water on the bearings where it happened to be positive --
+  // so Ben's 12:04 frame had visible pines and the same build with the wave removed has none. Deleting it was right;
+  // it was masking this.
+  '  float foot=(SEA_H-uCamY)/uHorizD - tip*uSinkF - pow(1.0-pres, uDiveP)*uDive;',
   '  float top=foot+tip;',
   '  if(elev>top || elev<foot) discard;',
   '  float t=clamp((elev-foot)/tip,0.0,1.0);',
@@ -44175,6 +44190,26 @@ window.__hc={
   // USE_SKYCUBE is in here on purpose: it once moved the sky dome into skyScene and hid this exact layer, which is why
   // it is opt-in, and "confirm nothing took that path again" is a one-line answer that belongs beside the rest.
   pinesAll(v){ try{ _cpU.uDbgAll.value=(v===true?1:(+v||0)); return _cpU.uDbgAll.value; }catch(e){ return String(e.message||e); } },
+  // QA/bench: WHERE THE PINE QUAD IS, against the camera and the far plane. pinesProbe answers "is the mesh in the
+  // scene and visible", which was true on a frame that drew ZERO pine fragments — uDbgAll mode 1 paints the whole quad
+  // magenta before any gate and measured 0.000% of the frame. A visible, unculled, in-scene mesh that rasterizes
+  // nothing is a PLACEMENT fault, and none of the existing probes could see it: the cylinder is centred on
+  // oceanLayer, which only tracks the camera inside updateHorizon(), and its wall sits at FAR*1.1 while the camera
+  // clips at CFG.RD_MAX*CK*1.7. If the layer stops tracking, the whole wall goes behind the far plane and every
+  // fragment is clipped before the shader runs.
+  pineDraw(){ try{
+      const lp=oceanLayer.position, cp=camera.position;
+      const drift=Math.hypot(lp.x-cp.x, lp.y-cp.y, lp.z-cp.z);
+      const R=FAR*1.1;
+      // Nearest and furthest point of the cylinder WALL from the camera, along the drift direction. Both must land
+      // inside [camera.near, camera.far] or the band is clipped rather than discarded.
+      return { camFar:+camera.far.toFixed(2), wallR:+R.toFixed(2), layerDriftFromCamera:+drift.toFixed(2),
+               nearestWall:+(R-drift).toFixed(2), furthestWall:+(R+drift).toFixed(2),
+               wallInsideFarPlane:(R+drift)<=camera.far, anyWallInsideFarPlane:(R-drift)<=camera.far,
+               camY:+cp.y.toFixed(2), uCamY:+_cpU.uCamY.value.toFixed(2), uWall:_cpU.uWall.value,
+               pinesVisible:!!coastPines.visible, inScene:!!coastPines.parent,
+               parentVisible:!!oceanLayer.visible, ringMatVisible:!!oceanMat.visible }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: DOES THE BAND'S FOOT SHOW ABOVE THE REAL WORLD, per bearing, from where the camera is standing.
   // Ben's eighth rejection is one geometric claim -- "the bands sit well above the real treeline with open sky beneath
   // and a hard flat BLACK BOTTOM EDGE" -- and a screenshot diff cannot settle it: five cuts of a forest harness could
@@ -44204,7 +44239,9 @@ window.__hc={
           const e=(top-eye)/r; if(e>sil) sil=e; }
         const ci=((Math.round(((az+3.14159265)/6.2831853)*N)%N)+N)%N, o=ci*4;
         const env=_cpData[o+3]/255, pres=sm(env,0.04,0.55);
-        const foot=(CFG.SEA-eye)/_cpU.uHorizD.value - tip*_cpU.uSinkF.value - (1.0-pres)*_cpU.uDive.value;
+        // Same expression as the shader, including the dive's power. A CPU model that drifts from the GPU is how this
+        // probe reported visibleBearings:0 on a frame where uDbgAll mode 2 showed a treeline.
+        const foot=(CFG.SEA-eye)/_cpU.uHorizD.value - tip*_cpU.uSinkF.value - Math.pow(1.0-pres,_cpU.uDiveP.value)*_cpU.uDive.value;
         if(pres<=0.02 || foot+tip<=sil) continue;
         drawn++; sumAbove+=(foot+tip-sil);
         if(foot>sil){ floating++; if(foot-sil>worst){ worst=foot-sil; worstAz=az; } } }
@@ -51794,11 +51831,12 @@ window.__hc={
              if(o.colour!=null) _cpU.uColour.value=Math.max(0,Math.min(1,+o.colour));
              if(o.sinkF!=null) _cpU.uSinkF.value=Math.max(0,Math.min(2,+o.sinkF));
              if(o.dive!=null) _cpU.uDive.value=Math.max(0,+o.dive);
+             if(o.diveP!=null) _cpU.uDiveP.value=Math.max(1,+o.diveP);
              if(o.force) { _cpLastX=1e9; _cpLastZ=1e9; } }
       const _deg=(_cpU.uTreeH.value/_cpU.uHorizD.value)*180/Math.PI;
       return { on:_cpWant, gain:_cpU.uGain.value, fogMul:_cpU.uFogMul.value, wall:_cpU.uWall.value, buildMs:+_cpMs.toFixed(2), n:_CPN,
                d:_cpU.uHorizD.value, h:_cpU.uTreeH.value, p:_cpU.uTreeP.value, colour:_cpU.uColour.value,
-               sinkF:_cpU.uSinkF.value, dive:_cpU.uDive.value,
+               sinkF:_cpU.uSinkF.value, dive:_cpU.uDive.value, diveP:_cpU.uDiveP.value,
                bandDeg:+_deg.toFixed(3), aboveWaterDeg:+(_deg*(1-_cpU.uSinkF.value)).toFixed(3),
                copyDeg:+(360/_cpU.uTreeP.value).toFixed(3), stretch:+((360/_cpU.uTreeP.value)/(_deg*TREE_ASPECT)).toFixed(3) }; }
     catch(e){ return String(e.message||e); } },
