@@ -1282,10 +1282,19 @@ const _hcLamp = new Float32Array([1.0, 0.35, 18.7, 0.85]);
 // So a model block falls five times further than the terrain it stands on, and in absolute terms it lands at 0.23 of
 // 255 against the ground's 10.65 — 46x darker than what it is standing in. That is not "dark", it is gone, and it is
 // the same shape as Ben's sulfur-renders-black report.
-// NOT CHANGED HERE. Whether props keep a night fill is the one-material-interface stage's call, and the point of that
-// stage is that it must be answered once for every surface class rather than by nudging this array. Ben's original
-// complaint was the OPPOSITE — "fences and doors unchanged at night" — so this path has already swung past the target
-// once, and the next move on it should be made with both numbers in view.
+// AND THE PREMISE OF THE DAY GATE DOES NOT HOLD. It is gated to zero at night on the reasoning that the light in a
+// night scene should come from lamps. Tested with a lantern ONE BLOCK away, same crop, same night:
+//     no lamp    fence 0.24    sand 10.66
+//     lantern    fence 0.74    sand 24.12
+// The lamp does reach the fence — it triples it, proportionally more than the sand's 2.3x — and the fence is still at
+// 0.74 of 255 against the sand's 24.12, THIRTY-THREE TIMES DARKER with an emitter at point-blank range. So "lamps
+// will light them" is not what happens, and the reason is structural rather than a tuning error: a cat:'model' block
+// is deliberately excluded from the baked block-light volume (see the note at the model-block sky path), so an
+// emitter reaches it only through the 16-slot point-light pool and never through the volume every atlas face reads.
+// NOT CHANGED HERE. The fix is to put model blocks on the volume, which is the one-material-interface stage's whole
+// job — answer it once for every surface class rather than by nudging this array. Ben's original complaint was the
+// OPPOSITE ("fences and doors unchanged at night"), so this path has already crossed the target once; the next move
+// wants all three numbers in view.
 const _propFill = new Float32Array([0.237, 0.267, 0.30, 0.03]);
 // THE REBUILD'S SET-ASIDE SWITCH lives here rather than beside __hc.oldLight because these are the arrays it moves,
 // and the snapshot has to be taken from their SHIPPED values — captured on first use, so a dial swept before the
@@ -23622,30 +23631,42 @@ function animateWretch(dt, moving){
     let footT=footPlant*stanceW + footFK*(1-stanceW);
     if(sn>0.001) footT=footT*(1-sn)+(-0.62-limbLift(uk,0.7)*0.25)*sn;                 // ballerina point — all the weight rides the toes, heels never touch
     const ft=spr(SS('lf'+li),footT,legOm[2],clamp(legZe[2]*zScale,0.2,0.95),dt);
-    L.thigh.rotation.set(th, 0, spr(SS('lz'+li),splayZ,22,0.6,dt));                   // splay on Z (sprung so it eases in/out with the crawl)
-    L.shin.rotation.set(revKnee? -Math.abs(sh) : sh, 0,0);
-    L.foot.rotation.set(ft,0,0);
+    // THE FOOT-IK OFFSET (see L2 - FOOT IK below, which is what integrates it). Folding the knee is what raises
+    // the foot, so the shin carries the offset and the thigh carries enough of it to keep the foot under the body
+    // instead of swinging it backwards as it lifts.
+    const ik=(W_FOOTIK>0 && wretch._ikOff) ? (wretch._ikOff[li]||0) : 0;
+    L.thigh.rotation.set(th + ik*0.55, 0, spr(SS('lz'+li),splayZ,22,0.6,dt));         // splay on Z (sprung so it eases in/out with the crawl)
+    L.shin.rotation.set((revKnee? -Math.abs(sh) : sh) - ik, 0,0);
+    L.foot.rotation.set(ft + ik*0.45,0,0);
   }
 
   // ============================== L2 — FOOT IK ==============================
   // 873d919's second named fix: "then foot IK, because the legs are FK with no world target and nothing puts a
   // foot on the surface." Everything above this line is FK -- every thigh, shin and foot angle is a function of
   // the gait phase and nothing else -- so the pose is identical whether the creature is on a lawn, on a stair or
-  // straddling a one-block step. The body's own y comes from groundYAt at the body's COLUMN, and a foot stands
-  // half a block to the side, so on any break in the ground one foot is through the floor. rigSpan reads the
-  // rig's lowest point at 0.98 to 1.07 blocks BELOW wretch.pos on a stalk: that is a whole block of leg in the dirt.
-  // IT IS A PELVIS LIFT, NOT A TWO-BONE SOLVE, and the choice is the point. The feet hang off the pelvis, so
-  // raising the pelvis raises both feet together and no bone angle the gait computed is overwritten -- the
-  // animation is untouched and only its height above the world changes. A per-leg solve would have to re-derive
-  // knee angles every frame against a gait that is already sprung, and would fight the springs it is inside.
+  // straddling a one-block step. The body's own y comes from groundYAt at its COLUMN and a foot stands half a
+  // block to the side, so on any break in the ground a foot is through the floor: rigSpan reads the rig's lowest
+  // point a median 0.47 and a worst 1.40 blocks BELOW the creature's own ground contact.
+  //
+  // A PELVIS LIFT WAS TRIED FIRST AND IT FLOATS. Raising the pelvis by the deepest foot's penetration is the
+  // cheap version of this and its burial numbers are spectacular -- 94.7% to 29.2% -- because on uneven ground
+  // the body rides the HIGHEST foot and stops touching anything at all: the rig's lowest point ended a median
+  // 0.59 blocks ABOVE the ground it was supposedly standing on. A number that good from a shortcut that crude is
+  // the shape of a measurement measuring the wrong thing, and it is kept here because the burial rate alone would
+  // have shipped it.
+  //
+  // SO EACH LEG ANSWERS TO ITS OWN GROUND and the body stays exactly where the mover put it. Per leg, one stored
+  // offset, integrated: fold the knee while the foot is under the surface, unfold while it has air beneath it.
+  // The equilibrium is a foot ON the ground, and the offset PERSISTS there, which is what makes it hold a step --
+  // a proportional controller settling at its own error is the whole of what an IK solve does here, without
+  // re-deriving a knee angle every frame against gait springs it would be fighting.
   // THE MEASUREMENT IS THE FOOT'S OWN LOWEST WORLD CORNER, not the ankle joint's origin. 873d919 paid for that
-  // distinction once already, on the arms: a joint ORIGIN is not the limb, and with the whole foot in the ground
-  // the ankle can sit in open air above it.
-  // CLAMPED AND SPRUNG. A foot inside a wall would otherwise launch the body a metre; 0.9 is the highest lift
-  // that can be a step rather than a throw, and the spring keeps a stair from popping the whole creature.
-  // NOT WHILE CLINGING: on a wall or a ceiling the surface under a foot is not the thing it is standing on.
+  // distinction once on the arms: a joint ORIGIN is not the limb, and with the whole foot in the ground the ankle
+  // sits in open air above it.
+  // NOT WHILE CLINGING: on a wall or a ceiling the surface under a foot is not what it stands on.
   if(W_FOOTIK>0 && !clinging && P.legs && P.legs.length){
-    let pen=0;
+    if(!wretch._ikOff || wretch._ikOff.length!==P.legs.length) wretch._ikOff=P.legs.map(()=>0);
+    let worst=0;
     for(let li=0; li<P.legs.length; li++){ const F=P.legs[li] && P.legs[li].foot; if(!F) continue;
       F.updateWorldMatrix(true,false);
       let lo=1e9, lx=0, lz=0;
@@ -23655,11 +23676,13 @@ function animateWretch(dt, moving){
         for(let i=0;i<8;i++){ _ikV.set(i&1?bb.max.x:bb.min.x, i&2?bb.max.y:bb.min.y, i&4?bb.max.z:bb.min.z).applyMatrix4(o.matrixWorld);
           if(_ikV.y<lo){ lo=_ikV.y; lx=_ikV.x; lz=_ikV.z; } } });
       if(lo>1e8) continue;
-      const gy=groundYAt(lx,lz,wretch.pos.y+1.5);
-      if(gy-lo>pen) pen=gy-lo; }
-    wretch._ikLift = Math.min(pen, W_FOOTIK);
-    pelvis.position.y += spr(SS('ik'), wretch._ikLift, 14, 0.75, dt);
-  } else { wretch._ikLift=0; pelvis.position.y += spr(SS('ik'), 0, 14, 0.75, dt); }
+      const err=groundYAt(lx,lz,wretch.pos.y+1.5)-lo;                 // + = the foot is under the surface
+      if(err>worst) worst=err;
+      // 1.6 radians per block of error is a step small enough that the gait springs absorb it and large enough to
+      // clear a one-block riser inside half a second. The cap is W_FOOTIK, in radians of knee fold.
+      wretch._ikOff[li] = Math.max(0, Math.min(wretch._ikOff[li] + err*1.6*Math.min(dt,0.05)*20, W_FOOTIK)); }
+    wretch._ikLift=worst;
+  } else if(wretch._ikOff){ for(let li=0;li<wretch._ikOff.length;li++) wretch._ikOff[li]*=Math.max(0,1-dt*6); wretch._ikLift=0; }
 
   // ============================== L1/L3 — ARMS AS FORELIMBS ==================
   const armOm=_wArmOm, armZe=_wArmZe;
