@@ -3,6 +3,7 @@
 // call cost at the published rate. If you want three clips, run it three times and look at each one.
 //
 //   node scripts/fal.mjs image  <slug> "<prompt>"          ~$0.04   fal-ai/flux-pro/kontext/text-to-image
+//   node scripts/fal.mjs edit   <slug> "<prompt>" <image>  ~$0.04   fal-ai/flux-pro/kontext (restyle a real frame)
 //   node scripts/fal.mjs video  <slug> "<prompt>" [image]  ~$0.07/s kling 2.5 turbo pro, 5s = $0.35
 //
 // The key lives in .env (gitignored) and must never reach a commit, a bench fixture or a log line.
@@ -11,13 +12,31 @@ const ROOT='D:/Code/Minecraft';
 const KEY=(fs.readFileSync(path.join(ROOT,'.env'),'utf8').match(/FAL_KEY=(.+)/)||[])[1];
 if(!KEY) { console.error('no FAL_KEY in .env'); process.exit(1); }
 const [kind,slug,prompt,img]=process.argv.slice(2);
+// A LOCAL FILE IS ALLOWED WHERE A URL IS, and that is the whole point of this argument now: Ben asked for the
+// jumpscare to be built off REAL reference screenshots of the creature rather than a text-to-image invention of
+// it, and the real ones only exist on this disk. Anything that is not http(s) is read and inlined as a data URI,
+// which the image-to-video endpoints accept in place of a hosted URL -- no upload step, no bucket, nothing left
+// on someone else's storage afterwards.
+let imgRef=img;
+if(img && !/^https?:|^data:/.test(img)){
+  const bin=fs.readFileSync(path.isAbsolute(img)?img:path.join(ROOT,img));
+  const mime=/\.png$/i.test(img)?'image/png':'image/jpeg';
+  imgRef='data:'+mime+';base64,'+bin.toString('base64');
+  console.log('reference '+img+'  '+(bin.length/1024).toFixed(0)+' KB inlined');
+}
 if(!kind||!slug||!prompt){ console.error('usage: node scripts/fal.mjs image|video <slug> "<prompt>" [image-url]'); process.exit(1); }
 
 const MODELS={
   image:{ ep:'fal-ai/flux-pro/kontext/text-to-image', body:{prompt, aspect_ratio:'16:9', output_format:'jpeg'}, cost:0.04, ext:'jpg' },
+  // EDIT KEEPS THE CREATURE AND CHANGES THE RENDER. The first jumpscare clip came back unmistakably the Wretch --
+  // same crimson flesh, same gaunt limbs -- and rendered in the game's own blocky look, because image-to-video
+  // preserves the style of the frame it is given. Ben asked for hyperrealistic, so the plate is restyled first at
+  // four cents and looked at before anything spends thirty-five on five seconds of the wrong look.
+  edit:{ ep:'fal-ai/flux-pro/kontext', body:{prompt, image_url:'', output_format:'jpeg'}, cost:0.04, ext:'jpg' },
   video:{ ep:img?'fal-ai/kling-video/v2.5-turbo/pro/image-to-video':'fal-ai/kling-video/v2.5-turbo/pro/text-to-video',
-          body:img?{prompt, image_url:img, duration:'5'}:{prompt, duration:'5'}, cost:0.35, ext:'mp4' } };
-const M=MODELS[kind]; if(!M){ console.error('kind must be image or video'); process.exit(1); }
+          body:img?{prompt, image_url:imgRef, duration:'5'}:{prompt, duration:'5'}, cost:0.35, ext:'mp4' } };
+const M=MODELS[kind]; if(!M){ console.error('kind must be image, edit or video'); process.exit(1); }
+if(kind==='edit'){ if(!imgRef){ console.error('edit needs an image: node scripts/fal.mjs edit <slug> "<prompt>" <file-or-url>'); process.exit(1); } M.body.image_url=imgRef; }
 console.log('model '+M.ep+'   estimated cost $'+M.cost.toFixed(2)+'   (one generation, no batch)');
 
 const H={'Authorization':'Key '+KEY,'Content-Type':'application/json'};
