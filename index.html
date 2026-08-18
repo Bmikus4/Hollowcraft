@@ -9264,6 +9264,76 @@ function updateWaypoint(){
   }
   tp.needsUpdate=true; _wpTicks.geometry.computeBoundingSphere();
 }
+// =====================================================================
+//  HORIZON PINES — FLAT IMAGES, PLACED BY BEARING
+// =====================================================================
+// Ben 08-18, after ten rejections of the old wrapped band and its removal: "the player is standing at 150, the
+// two skybox pines images should appear at 105 and -165", and "you should not place them as bands. just flat
+// images."
+//
+// So there is no mask, no envelope, no per-bearing walk and nothing that guesses. Each placement is ONE flat
+// quad of assets/horizon/treeline.png standing at a world bearing that Ben names off the /waypoint radius dial,
+// at its own natural aspect. Bearings are atan2(z,x) degrees, the same ones /navigator and the dial print, so
+// "105" means the same direction in all three places.
+//
+// THE GROUP FOLLOWS THE CAMERA'S POSITION AND NOT ITS ROTATION, which is what makes them a backdrop: they hold
+// their bearing and their apparent size however far the player walks, and the real world in front still
+// occludes them because they are ordinary depth-tested geometry out past the render wall.
+// The distance is inside camera.far (326.4) on purpose -- beyond it the quads would be clipped away entirely,
+// which is the failure the old band spent a session on.
+const _PIN_ASPECT=772/694;
+// HOW MUCH OF THE STRIP IS TREES. treeline.png is 772x694 and its alpha was measured row by row: everything
+// below v 0.6 is 100% opaque understory -- a solid dark slab the cut script grew on purpose so no sky could show
+// under the old wrapped band. On a flat quad standing on the waterline that slab is just a dark rectangle with
+// hard edges, which is the "sticker on the sky" this asset has been rejected for before. So only the top of the
+// image is used, and the quad is sized to the part that is actually trees.
+let _pinCrop=0.45;
+let _pinGroup=null, _pinTex=null, _pinMat=null, _pinAt=[], _pinDist=280, _pinH=70;
+function _pinEnsure(){ if(_pinGroup) return _pinGroup;
+  _pinTex=new THREE.TextureLoader().load('assets/horizon/treeline.png');
+  _pinTex.colorSpace=THREE.SRGBColorSpace; _pinTex.anisotropy=8;
+  _pinMat=new THREE.MeshBasicMaterial({ map:_pinTex, transparent:true, alphaTest:0.35,
+    depthWrite:false, side:THREE.DoubleSide, fog:false });
+  _pinGroup=new THREE.Group(); _pinGroup.frustumCulled=false; scene.add(_pinGroup);
+  return _pinGroup; }
+function _pinRebuild(){
+  _pinEnsure();
+  for(let i=_pinGroup.children.length-1;i>=0;i--){ const c=_pinGroup.children[i];
+    _pinGroup.remove(c); if(c.geometry) c.geometry.dispose(); }
+  // The quad is as wide as the crop is tall, at the IMAGE's aspect, so one image is its own shape and nothing
+  // is stretched: the crop takes _pinCrop of the height, so the width follows from the full-image aspect.
+  const h=_pinH, w=h*_PIN_ASPECT/_pinCrop;
+  for(const deg of _pinAt){
+    const th=deg*Math.PI/180;
+    const geo=new THREE.PlaneGeometry(w,h);
+    // UVs to the TOP _pinCrop of the texture. v runs 0 at the bottom, so the trees are 1-crop .. 1.
+    { const uv=geo.attributes.uv;
+      for(let i=0;i<uv.count;i++) uv.setY(i, 1-_pinCrop + uv.getY(i)*_pinCrop);
+      uv.needsUpdate=true; }
+    const m=new THREE.Mesh(geo, _pinMat);
+    m.frustumCulled=false; m.renderOrder=-4;
+    m.userData.az=th;
+    _pinGroup.add(m); }
+  _pinPlace(); }
+function _pinPlace(){
+  if(!_pinGroup || !_pinGroup.children.length) return;
+  _pinGroup.position.set(camera.position.x, camera.position.y, camera.position.z);
+  // The foot sits on the WATERLINE: at the group's origin the camera is local zero, so sea level is at
+  // (SEA - eye), and the quad is raised half its height so its bottom edge lands there rather than its middle.
+  const footY=(CFG.SEA-camera.position.y);
+  for(const m of _pinGroup.children){
+    const th=m.userData.az;
+    m.position.set(Math.cos(th)*_pinDist, footY+_pinH*0.5, Math.sin(th)*_pinDist);
+    // ---- ALWAYS FACING THE PLAYER (Ben 08-18) ----
+    // Turned about Y only. A full lookAt would tip the image back as the player looks up, and a treeline that
+    // leans is worse than one that is slightly off-normal.
+    // A PlaneGeometry's normal is +Z, and a yaw of phi sends +Z to (sin phi, cos phi) in xz. The quad sits at
+    // (cos th, sin th) * dist from the player at the origin, so its normal has to be the opposite of that:
+    //   sin phi = -cos th,  cos phi = -sin th,  phi = atan2(-cos th, -sin th)
+    // The first cut wrote -th + PI/2, which is that direction turned by half a circle -- the quad faced AWAY,
+    // and only survived being seen at all because the material is DoubleSide. What it drew was the treeline
+    // MIRRORED, which is the fault this asset has already been rejected for once.
+    m.rotation.set(0, Math.atan2(-Math.cos(th), -Math.sin(th)), 0); } }
 // OFF BY DEFAULT, behind /navigator (Ben 08-18: "gate the bands visibility behind a command"). It is an
 // instrument, and one that deliberately draws over the world; ?hzruler=1 turns it on at load for a bench.
 let _hzRulerWant=(Q.get('hzruler')==='1');
@@ -15203,6 +15273,7 @@ function updateSky(dt){
   const fo=Math.min(0.985, wf*1.25); fogShell.material.opacity=fo; fogShell.visible=fo>0.01;
   updateHorizon();
   updateWaypoint();   // the axis is redrawn from the player's live position, so it belongs on the frame clock
+  _pinPlace();        // the backdrop holds its bearing as the player walks, so it tracks the camera  frame
   // THE OCEAN MAY NOT BE ABLE TO KILL THE SKY. This call sits INSIDE updateSky, so anything it throws aborts every
   // line of sky work after it — the dome stops being moved to the camera and stops being given the hour, which reads
   // as a sky that is correct on load and then goes fog-grey by day and black at night, exactly what Ben reports. The
@@ -25808,6 +25879,31 @@ const CMDS={
 `
            + `  ${mass?'mean coast radius':'largest circle that fits'} ${P.r} blocks`
            + `${mass?'':'  — grid '+C.grid+' at '+C.step+' blocks/cell, '+C.landCells+' land cells'}`; } },
+  // The pines are PLACED, not derived: Ben reads a bearing off /waypoint radius and names it here.
+  pines:{ usage:'/pines at <deg> [deg...] | /pines clear | /pines size <blocks> | /pines dist <blocks> | /pines crop <0..1> | /pines list', run:(a)=>{
+      const w=a.map(t=>String(t).toLowerCase());
+      if(!w.length||w[0]==='list'){ _pinEnsure();
+        return _pinAt.length?`pines at ${_pinAt.join(', ')} deg   size ${_pinH} blocks tall, ${_pinDist} out`
+                            :'no pines placed — /pines at <deg> [deg...]'; }
+      if(w[0]==='clear'||w[0]==='off'){ _pinAt=[]; _pinRebuild(); return 'pines cleared'; }
+      if(w[0]==='size'){ const v=+w[1]; if(!isFinite(v)||v<=0) return 'size in blocks, e.g. /pines size 70';
+        _pinH=v; _pinRebuild(); return `pines are ${_pinH} blocks tall (${(_pinH*_PIN_ASPECT).toFixed(0)} wide) at ${_pinDist} out`; }
+      if(w[0]==='crop'){ const v=+w[1];
+        if(!isFinite(v)||v<=0||v>1) return 'crop is the fraction of the image that is trees, 0..1, e.g. /pines crop 0.45';
+        _pinCrop=v; _pinRebuild(); return `pines use the top ${(100*_pinCrop).toFixed(0)}% of the image`; }
+      if(w[0]==='dist'){ const v=+w[1]; if(!isFinite(v)||v<=0) return 'distance in blocks, e.g. /pines dist 280';
+        // Past camera.far the quad is clipped and draws nothing at all, which is a silent failure worth refusing.
+        if(v>=camera.far) return `too far — camera.far is ${camera.far.toFixed(0)}, past it they are clipped away`;
+        _pinDist=v; _pinRebuild(); return `pines are ${_pinDist} out (${_pinH} blocks tall)`; }
+      if(w[0]==='at'){
+        const degs=w.slice(1).map(Number).filter(v=>isFinite(v));
+        if(!degs.length) return 'give bearings in degrees, e.g. /pines at 105 -165';
+        _pinAt=degs.map(d=>((d+180)%360+360)%360-180);
+        _pinRebuild();
+        return `pines placed at ${_pinAt.join(', ')} deg — atan2(z,x), same degrees as /navigator and the dial
+`
+             + `  ${_pinH} blocks tall, ${(_pinH*_PIN_ASPECT).toFixed(0)} wide, ${_pinDist} out, foot on the waterline`; }
+      return CMDS.pines.usage; } },
   navigator:{ usage:'/navigator [on|off]', run:(a)=>{ const w=String(a[0]||'').toLowerCase();
       const want = w==='on'?true : w==='off'?false : !__hc.hzRuler().on;
       const r=__hc.hzRuler(want);
@@ -44197,6 +44293,19 @@ window.__hc={
   // QA/bench: the shoreline's three shape dials. Changing any of them drops the cached trace.
   // QA/bench: what the waypoint layer currently has on screen. The last attempt at the circle silently took the
   // shoreline off the map, so "is the coast still drawn" is a number now rather than something to notice later.
+  pinesState(){ try{ return { at:_pinAt.slice(), n:_pinGroup?_pinGroup.children.length:0, dist:_pinDist, h:_pinH,
+      texLoaded:!!(_pinTex&&_pinTex.image&&_pinTex.image.width>0), camFar:+camera.far.toFixed(1) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: the placed pines, and — the thing that cannot be seen in a screenshot — whether each quad is
+  // actually facing the player. dotToPlayer is the quad's own normal against the direction back to the camera;
+  // +1 is facing him, -1 is facing away, and the first cut of this scored -1 on every one.
+  pinesState(){ try{ const out={ at:_pinAt.slice(), n:_pinGroup?_pinGroup.children.length:0, dist:_pinDist, h:_pinH,
+      texLoaded:!!(_pinTex&&_pinTex.image&&_pinTex.image.width>0), camFar:+camera.far.toFixed(1), facing:[] };
+    if(_pinGroup) for(const m of _pinGroup.children){
+      const n=new THREE.Vector3(0,0,1).applyQuaternion(m.quaternion);
+      const toCam=m.position.clone().negate().normalize();          // group origin IS the camera
+      out.facing.push({ deg:+(m.userData.az*180/Math.PI).toFixed(1), dotToPlayer:+n.dot(toCam).toFixed(3) }); }
+    return out; } catch(e){ return {err:String(e.message||e)}; } },
   wpState(){ try{ return { shoreVisible:!!(_wpCircle&&_wpCircle.visible),
       shorePoints:_wpCircle?_wpCircle.geometry.attributes.position.count:0,
       ringVisible:!!(_wpRing&&_wpRing.visible), ringLabels:_wpRingLabels.length,
