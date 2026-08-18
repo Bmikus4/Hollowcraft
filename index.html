@@ -1320,7 +1320,15 @@ const _hcAux = new Float32Array([0.10, 0, 0.012, 0.14]);
 // so the moon still picks out silhouettes and the sea. That split is the one Ben asked for -- black ground, a moon
 // you can still see by.
 // __hc.night(v), and 1 is the build before this.
-const _hcNight = new Float32Array([0.15, 0, 1.5, 0.06]);
+const _hcNight = new Float32Array([0.15, 6.5, 1.5, 0.06]);
+// ---- WHAT THE PLAYER IS LOOKING AT, IN WORLD SPACE, SO THE NEAR-FIELD FLOOR HAS SOMETHING TO BE NEAR ----
+// xyz is the point the crosshair lands on and w is the near floor's strength with the touching-distance gate already
+// folded in, so a fragment does not re-decide per pixel what the CPU already knew once. w is 0 whenever there is no
+// target at all -- no pointer lock, nothing within reach, the amount dialled off -- which is the term's off switch.
+// WHY THE POINT AND NOT THE CELL: a cube-shaped pool has a hard edge at a block boundary and reads as a painted
+// square. A soft ball around the point the ray actually struck reads as the surface coming out of the dark where you
+// put your face, which is the sentence Ben wrote.
+const _hcAim = new Float32Array([0, 0, 0, 0]);
 // The night level with the hour already folded in: 1 by day, _hcNight[3] at midnight, written once per frame by the
 // sky update and read wherever a light that has no source in the world is set. Module scope because the viewmodel's
 // rig fill is written by the gun code and the two have to agree.
@@ -1580,7 +1588,7 @@ const HC_LIGHT_GLSL = [
   // difference against a 4/255 noise floor, the world drawn by whatever survived. Appended first, so the
   // definitions precede every use of them.
   THREE.ShaderChunk.lights_pars_begin += '\n' + HC_LIGHT_GLSL;
-  THREE.ShaderChunk.lights_pars_begin += '\nuniform vec4 uScotG;\nuniform vec4 uScotH;\nuniform vec4 uScotK;\nuniform vec4 uPropFill;\nuniform vec4 uHcAux;\nuniform vec4 uHcObj;\nuniform vec4 uHcLamp;\nuniform vec4 uHcNight;\n';
+  THREE.ShaderChunk.lights_pars_begin += '\nuniform vec4 uScotG;\nuniform vec4 uScotH;\nuniform vec4 uScotK;\nuniform vec4 uPropFill;\nuniform vec4 uHcAux;\nuniform vec4 uHcObj;\nuniform vec4 uHcLamp;\nuniform vec4 uHcNight;\nuniform vec4 uHcAim;\n';
   // ---- A LAMP HAS A BODY: THE NEAR-FIELD CLAMP (Ben 08-06: "flashlights light up thier entire model") ----
   // three's point and spot attenuation is 1/max(pow(d,decay),0.01) — a POINT source, so as d goes to zero the light
   // goes to a hundred times its value at one block. Every lamp in this game is mounted on, or held next to, the very
@@ -1990,17 +1998,30 @@ const HC_LIGHT_GLSL = [
     // exactly zero of it and Ben's black night is untouched.
     '  if(uHcAux.x > 0.0) gl_FragColor.rgb += diffuseColor.rgb * (uHcAux.x * _lk * mix(uHcNight.x*uHcNight.w, 1.0, uScotG.w));\n'+
     // THE NEAR-FIELD FLOOR. Not gated on _lk, and that is the point: it has to work where NO light is delivered,
-    // because the case it exists for is standing against a wall at midnight with empty hands. What bounds it instead
-    // is DISTANCE — it is gone by uHcNight.z blocks — so it can never lift the night as a whole, only the surface the
-    // player is close enough to touch. vViewPosition is view-space, so its length is the camera distance, and it is
-    // declared by all four lit shaders this block runs in.
-    '  if(uHcNight.y > 0.0 && uScotG.w < 1.0){\n'+
-    // A BAND, NOT A RAMP TO ZERO DISTANCE: the VIEWMODEL sits about a third of a block from the camera and would
-    // otherwise take the largest share of a term meant for the wall behind it. It fades in over the first 0.55 of a
-    // block, which is inside the player's own body and outside nothing else.
+    // because the case it exists for is standing against a wall at midnight with empty hands.
+    // ---- AND IT IS A POOL AROUND WHAT YOU ARE LOOKING AT, NOT A RADIUS AROUND YOUR HEAD (Ben's ask, second attempt) ----
+    // 7cee4ca measured the radius form dead and wrote down why: "a radius around the CAMERA cannot tell the wall in
+    // front of your face from the floor under your feet; both are one to two blocks away", so every setting that made
+    // the wall read also made the whole night read (wall 0.8 -> 19.77 with open ground at 20.14 in the same run) and
+    // the term shipped at zero with the ask unmet. That is not a number problem and no sweep was going to find it.
+    // WHAT SEPARATES THE TWO SURFACES IS AIM. The wall you have your face against is what the crosshair is on; the
+    // floor you are standing on is not, unless you look at it -- and then it is a pool a block wide on the floor,
+    // which is the same sentence Ben wrote and not a lit night. The cue already exists and costs nothing: the block
+    // outline raycasts every frame, so the aim point is a uniform (uHcAim) rather than new work.
+    // uHcNight.z is now the POOL RADIUS in blocks rather than a reach from the camera. Same dial, same slot, new
+    // meaning -- there is no reach left to tune because the CPU folded it into uHcAim.w.
+    '  if(uHcAim.w > 0.0 && uScotG.w < 1.0){\n'+
+    '    vec3 _ap = (viewMatrix*vec4(uHcAim.xyz,1.0)).xyz;\n'+
+    // vViewPosition IS THE NEGATED view position (three's default_vertex writes -mvPosition.xyz), so the fragment sits
+    // at -vViewPosition and the distance to the aim point is length(_ap + vViewPosition). Getting this sign wrong
+    // measures a pool on the far side of the camera, which is a term that is inert and looks plausible.
+    '    float _ad = length(_ap + vViewPosition);\n'+
+    // THE VIEWMODEL BAND IS KEPT, and it is the one part of the radius form that was right: the held item sits about a
+    // third of a block from the eye, and with the pool centred a block ahead it is well inside the radius. It fades in
+    // over the first 0.55 of a block, which is inside the player's own body and outside nothing else.
     '    float _nd = length(vViewPosition);\n'+
-    '    float _nf = (1.0 - smoothstep(0.0, max(uHcNight.z,1e-3), _nd)) * smoothstep(0.0, 0.55, _nd);\n'+
-    '    gl_FragColor.rgb += diffuseColor.rgb * (uHcNight.y * _nf * (1.0 - uScotG.w));\n'+
+    '    float _nf = (1.0 - smoothstep(max(uHcNight.z,1e-3)*0.35, max(uHcNight.z,1e-3), _ad)) * smoothstep(0.0, 0.55, _nd);\n'+
+    '    gl_FragColor.rgb += diffuseColor.rgb * (uHcAim.w * _nf * (1.0 - uScotG.w));\n'+
     '  }\n'+
     // ---- AND THE TERM THAT DOES NOT VANISH WITH THE ALBEDO (Ben 08-16: "real, pure daytime darkness should be
     // built without the black textel regression. Black texteks are seen wben holding light at day or night in a
@@ -2083,6 +2104,7 @@ for(const k of ['lambert','phong','standard','physical','toon','dashed','basic',
   S.uniforms.uHcObj={ value:_hcObj };
   S.uniforms.uHcLamp={ value:_hcLamp };
   S.uniforms.uHcNight={ value:_hcNight };
+  S.uniforms.uHcAim={ value:_hcAim };
 }
 
 // =====================================================================
@@ -20213,7 +20235,27 @@ function _tpsSetOff(P,id){
   else { m.scale.setScalar(0.55); w.rotation.z=-0.2; w.position.set(0,0.04,-0.02); }
   w.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
   P.handOff.add(w); P.offMesh=w; }
-function updateHighlight(){ const h=locked?raycastVoxel():null; if(h){ hlMesh.visible=true; hlMesh.position.set(h.x+0.5,h.y+0.5,h.z+0.5); } else hlMesh.visible=false; }
+// TOUCHING DISTANCE, and the two numbers that define it: full strength inside AIM_NEAR blocks of the eye, gone by
+// AIM_FAR. They are here rather than in the shader because the CPU already knows the distance once per frame and a
+// fragment would be re-deriving it a million times over.
+const AIM_NEAR=1.05, AIM_FAR=2.30;
+function updateHighlight(){ const h=locked?raycastVoxel():null; if(h){ hlMesh.visible=true; hlMesh.position.set(h.x+0.5,h.y+0.5,h.z+0.5); } else hlMesh.visible=false;
+  // THE NEAR-FIELD FLOOR'S POOL FOLLOWS THE CROSSHAIR. Same raycast, same frame, no second ray.
+  if(!h || _hcNight[1]<=0){ _hcAim[3]=0; return; }
+  const ox=player.pos.x, oy=player.pos.y+EYE, oz=player.pos.z, d=lookDir();
+  let px,py,pz;
+  // THE POINT ON THE FACE, not the cell centre: the DDA hands back the cell and the face it entered through, and the
+  // face fixes one coordinate exactly -- plane = cell + 1 on the far side, cell on the near one. face is null only
+  // when the eye is already inside a solid block, where the centre is the only sensible answer.
+  if(h.face){ const ax=h.face[0]?0:(h.face[1]?1:2);
+    const pl=(ax===0?h.x:ax===1?h.y:h.z) + (h.face[ax]>0?1:0);
+    const o=(ax===0?ox:ax===1?oy:oz), dd=(ax===0?d.x:ax===1?d.y:d.z);
+    const t=Math.abs(dd)>1e-6?(pl-o)/dd:0;
+    px=ox+d.x*t; py=oy+d.y*t; pz=oz+d.z*t; }
+  else { px=h.x+0.5; py=h.y+0.5; pz=h.z+0.5; }
+  const _dist=Math.hypot(px-ox,py-oy,pz-oz);
+  _hcAim[0]=px; _hcAim[1]=py; _hcAim[2]=pz;
+  _hcAim[3]=_hcNight[1]*(1-smooth(AIM_NEAR,AIM_FAR,_dist)); }
 // SUBMERGED view: when the eye is in water, murky overlay + heavy fog so you can barely see around you
 let _submerged=false; const _waterOverlay=document.getElementById('water');
 function updateSubmerge(){
@@ -27851,6 +27893,7 @@ function handClampToWorld(){
     for(const q of pts){ q[0]+=_hcD.x; q[1]+=_hcD.y; q[2]+=_hcD.z; } }
   return st; }
 const _hcTmpQ=new THREE.Quaternion(); const _hcM=new THREE.Matrix4();
+const _hcM2=new THREE.Matrix4();   // scratch for pulling a box back into the held mesh's own space (see attProbe)
 const _hcB=new THREE.Box3(), _hcB2=new THREE.Box3();
 function nearPlaneClear(v, band){
   const m=v.mesh; if(!m) return 0;
@@ -40043,10 +40086,15 @@ function buildAnimalMesh(type,corrupt){ const spec=ANIMALS[type], g=new THREE.Gr
     // long hair — crown + back + side locks, its FRONT pulled BEHIND the face (was reaching z=+0.12*s, coplanar with the face → z-fighting hair through the front) (Ben 07-21)
     const hairB=new THREE.Mesh(new THREE.BoxGeometry(0.29*s,0.20*s,0.24*s),hair); hairB.position.set(0,1.20*s,-0.055*s); g.add(hairB);   // front now at z≈+0.065*s, clear of the face
     for(const hx of [-1,1]){ const lock=new THREE.Mesh(new THREE.BoxGeometry(0.045*s,0.22*s,0.20*s),hair); lock.position.set(hx*0.135*s,1.06*s,-0.02*s); g.add(lock); }   // side locks framing the cheeks (behind the face plane)
-    // THE ANCHOR IS THE BOX'S TOP, because beardGeo hangs downward from y=0 instead of being centred: the box's centre
-    // was 1.0*s with a 0.16*s height, so its top was 1.08*s. Same envelope, same front at 0.16*s, a shorter young man's
-    // beard with four locks.
-    const beard=new THREE.Mesh(beardGeo(0.10*s,0.05*s,0.16*s,4,0.55),hair); beard.position.set(0,1.08*s,0.11*s); g.add(beard);      // beard
+    // THE ANCHOR IS THE BOX'S TOP, because beardGeo hangs downward from y=0 instead of being centred: the old box's centre
+    // was 1.0*s with a 0.16*s height, so its top was 1.08*s.
+    // AND IT IS PUSHED FORWARD AND LENGTHENED, because at the old z the robe was eating it. Arithmetic, since this is the
+    // same fault the monk's beard notes record twice: robeB is rTop 0.20*s at y=1.00 widening to 0.34*s at the hem, so a
+    // beard whose front sat at 0.16*s was INSIDE the cloth from y=1.00 down. Only 0.08*s of it was ever visible, which is
+    // why it photographed as a brown block under the face while the monk's read as locks -- there was no length for a lock
+    // to run down. Front at 0.175+0.055 = 0.230*s clears the robe surface to y=0.75, so all 0.24*s of it shows, and it
+    // stands 0.055*s proud of the face front at 0.12*s, which is what a beard does.
+    const beard=new THREE.Mesh(beardGeo(0.105*s,0.055*s,0.24*s,5,0.52),hair); beard.position.set(0,1.08*s,0.175*s); g.add(beard);      // beard
     // EYES — the seraphim's photoreal eye photo mapped onto two small planes on the face front (Ben 07-21)
     for(const ex of [-1,1]){ const eye=new THREE.Mesh(new THREE.PlaneGeometry(0.072*s,0.052*s), new THREE.MeshBasicMaterial({map:jesusEyeTex(ex>0),transparent:false}));
       eye.position.set(ex*0.055*s,1.15*s,0.1215*s); g.add(eye); }   // fully lit (MeshBasic) so the eyes read even in the dark
@@ -45143,10 +45191,31 @@ window.__hc={
       // which is what a clamped mount looks like; positive is daylight.
       // The gun's own geometry is everything NOT under an attachment node, gathered first — measuring against the whole
       // held mesh would measure the attachment against itself.
+      // ---- IN THE GUN'S OWN SPACE, NOT THE WORLD'S ----
+      // Every box here used to come from setFromObject, which is WORLD space, and then be compared on world y. The
+      // viewmodel hangs off the camera through a group that carries the carry cant, the aim blend, the swing and the
+      // recoil buck, so world y is the gun's up only when the gun happens to be level and unrolled -- and the hip
+      // carry never is. Measured that way the same red dot read -0.040 on the AR, -0.048 on the marksman rifle and
+      // -0.001 on the shotgun, a 47 mm spread that is the three guns' carry angles and not their mounts.
+      // Pulling every box back through the held mesh's own inverse makes y the GUN's up and z its length, which is the
+      // space the mounts are authored in and the only space in which 'is this clamped to the rail' has one answer.
+      const _inv=new THREE.Matrix4(); if(m){ m.updateWorldMatrix(true,false); _inv.copy(m.matrixWorld).invert(); }
+      const _lbox=(o)=>{ const b=new THREE.Box3(); if(!o) return b;
+        o.updateWorldMatrix(true,true);
+        o.traverse(q=>{ if(!q.isMesh||!q.geometry) return; if(q.visible===false) return;
+          if(!q.geometry.boundingBox) q.geometry.computeBoundingBox();
+          b.union(new THREE.Box3().copy(q.geometry.boundingBox).applyMatrix4(_hcM2.multiplyMatrices(_inv, q.matrixWorld))); });
+        return b; };
       const _body=[];
       if(m) m.traverse(o=>{ if(!o.isMesh) return;
         for(let q=o; q; q=q.parent) if(q.userData&&q.userData.att) return;   // it belongs to an attachment, not the gun
-        const bb=new THREE.Box3().setFromObject(o); if(!bb.isEmpty()) _body.push(bb); });
+        // AND AN INVISIBLE MESH IS NOT A RAIL. A scoped rifle wearing an optic keeps its own scope in the model with
+        // visible=false, and it is the tallest thing over the mount point by a mile: counted, the four scoped rifles
+        // reported the clamp biting 53 to 67 mm into 'the gun', which was the hidden scope tube and not the receiver.
+        for(let q=o; q && q!==m.parent; q=q.parent) if(q.visible===false) return;
+        if(!o.geometry) return; if(!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+        const bb=new THREE.Box3().copy(o.geometry.boundingBox).applyMatrix4(_hcM2.multiplyMatrices(_inv, o.matrixWorld));
+        if(!bb.isEmpty()) _body.push(bb); });
       const _bodyTopOver=(z0,z1)=>{ let top=-1e9;
         for(const b of _body){ if(b.max.z<z0 || b.min.z>z1) continue; if(b.max.y>top) top=b.max.y; }
         return top>-1e8?top:null; };
@@ -45160,7 +45229,7 @@ window.__hc={
       // fault Ben means by "not fitted properly". Anything past a couple of millimetres either way is worth looking at.
       const _MW=0.02;
       const _bodyTopAt=(z)=>_bodyTopOver(z-_MW, z+_MW);
-      if(m) m.traverse(o=>{ if(o.userData&&o.userData.att){ const bb=new THREE.Box3().setFromObject(o), sz=bb.getSize(new THREE.Vector3());
+      if(m) m.traverse(o=>{ if(o.userData&&o.userData.att){ const bb=_lbox(o), sz=bb.getSize(new THREE.Vector3());
         let meshes=0, mapped=0, matte=0; o.traverse(q=>{ if(q.isMesh){ meshes++; if(q.material&&q.material.map) mapped++;
           if(q.material && q.material.shininess===undefined) matte++; } });
         const bt=_bodyTopOver(bb.min.z, bb.max.z);
@@ -45175,7 +45244,16 @@ window.__hc={
                    // read null on all nine guns, which is the shape of a window that never overlaps anything. The piece
                    // is centred on its mount, so its own world z centre IS the mount point.
                    railAt:(()=>{ const t=_bodyTopAt((bb.min.z+bb.max.z)*0.5); return t!=null?+t.toFixed(4):null; })(),
-                   railGap:(()=>{ const t=_bodyTopAt((bb.min.z+bb.max.z)*0.5); return t!=null?+(bb.min.y-t).toFixed(4):null; })() }); } });
+                   railGap:(()=>{ const t=_bodyTopAt((bb.min.z+bb.max.z)*0.5); return t!=null?+(bb.min.y-t).toFixed(4):null; })(),
+                   // ---- AND WHETHER IT IS SITTING ON THE MOUNT IT WAS GIVEN ----
+                   // railGap answers "is there metal under it", and on a gun with a carry handle the tallest metal
+                   // over the mount point is the handle: the AR reads -45 mm against a red dot that is properly
+                   // clamped to the flat top beneath it. The mount is a DECLARED plane -- buildGlbGun records it in
+                   // attAnchor, in this same space, as the height it sat the piece at -- so the question that has one
+                   // answer per gun is how far the piece's underside is from THAT. Anything but zero is a piece not
+                   // standing where its own mount says, and the spread across guns is the standardisation number.
+                   sitErr:(()=>{ const A=(m.userData.attAnchor||{})[o.userData.attSlot];
+                     return A?+(bb.min.y-A[1]).toFixed(4):null; })() }); } });
       const mt=spec?attMount(spec):null;
       // The OFFHAND is a second instance with its own fits, and nothing reported it.
       const _off=armor[EQ_OFF], offW=(_off&&typeof attOf==='function')?(attOf(_off)||{}):null, offF=[];
@@ -50367,8 +50445,12 @@ window.__hc={
   // THE WHOLE NIGHT AS ONE NUMBER (_hcNight's w): how much of the sky's light reaches a surface after dark. 0 is a
   // night with nothing in it but flames and the sky; 1 is the build before this. It cannot touch a lamp or the day.
   night(v){ try{ if(v!=null) _hcNight[3]=Math.max(0,Math.min(1,+v)); return +_hcNight[3].toFixed(3); }catch(e){ return String(e.message||e); } },
+  // reach is the POOL RADIUS in blocks now, not a distance from the camera -- see the term in lights_fragment_end.
+  // The readout is what says the term is FIRING: aim is the point the crosshair is on and w is the strength that
+  // reached the shader this frame, so a zero there is an off switch and not a tuning problem.
   nearFloor(o){ try{ if(o&&o.amt!=null) _hcNight[1]=Math.max(0,+o.amt); if(o&&o.reach!=null) _hcNight[2]=Math.max(0.01,+o.reach);
-      return { amt:+_hcNight[1].toFixed(4), reach:+_hcNight[2].toFixed(2) }; }catch(e){ return {err:String(e.message||e)}; } },
+      return { amt:+_hcNight[1].toFixed(4), radius:+_hcNight[2].toFixed(2), near:AIM_NEAR, far:AIM_FAR,
+               aim:[+_hcAim[0].toFixed(2),+_hcAim[1].toFixed(2),+_hcAim[2].toFixed(2)], w:+_hcAim[3].toFixed(4) }; }catch(e){ return {err:String(e.message||e)}; } },
   // THE ALBEDO-INDEPENDENT SHEEN: k is how much of the delivered light a black texel returns, knee is the albedo it
   // has faded out by. Both live in the spare halves of the same vec4, so the dial costs no new uniform.
   sheen(o){ try{ if(o&&o.k!=null) _hcAux[2]=+o.k; if(o&&o.knee!=null) _hcAux[3]=+o.knee;
