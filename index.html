@@ -5009,7 +5009,7 @@ function _naturalTopIsGrass(wx,wz){
   return true; }
 // How many dirt tops have grown back since boot, for __hc.grassEdges. The demotion has _buriedGrass for the
 // same reason: a zero here and a zero from a rule that never runs look identical from inside the game.
-let _grownGrass=0;
+let _grownGrass=0, _promoteScans=0;   // _promoteScans: how many FULL column walks the promotion has paid for (see the note in setBlockWorld)
 // THE SURFACE IS FOUND BY WALKING THE COLUMN, NOT BY READING c.htop. htop is written by the column pass and
 // then decorate, enrichTerrain, beachLog and applyEdits write c.blocks straight past it, so between generation
 // and the next endBulk it names a block with two more on top of it -- and promoting THAT would manufacture the
@@ -5018,7 +5018,7 @@ let _grownGrass=0;
 // under a roof is not. Water is not an occluder, so it is asked separately, or a lake bed turns green.
 function _promoteTopDirt(c,lx,lz,topY){
   let y=topY;
-  if(y==null){ y=-1; for(let yy=WH-2; yy>=1; yy--){ const v=c.blocks[idx(lx,yy,lz)]; if(v!==AIR && occludesSky[v]){ y=yy; break; } } }
+  if(y==null){ _promoteScans++; y=-1; for(let yy=WH-2; yy>=1; yy--){ const v=c.blocks[idx(lx,yy,lz)]; if(v!==AIR && occludesSky[v]){ y=yy; break; } } }
   if(y<1 || y>=WH-1) return 0;
   const j=idx(lx,y,lz); if(c.blocks[j]!==BID.dirt) return 0;
   if(c.blocks[idx(lx,y+1,lz)]===WATER) return 0;
@@ -11570,7 +11570,13 @@ function setBlockWorld(wx,wy,wz,b,record){
   // way this fault is made, and that write is a placement, not a break. THE COST, stated because it is a real
   // one: a player who places a dirt block in open ground watches it turn to turf. That is the same rule Ben
   // asked for twice -- a surface open to the sky is grass -- applied to his own hands as well as the world's.
-  _promoteTopDirt(c,lx,lz);
+  // BUT NOT FOR A WATER WRITE, and this one is a regression caught in its own diff rather than a design choice.
+  // The promotion walks the column to find the surface, and the water SIMULATION writes one block per moved cell
+  // per tick: a single twelve-block pour onto dry land bought 3,307 column walks in six seconds -- about 550 a
+  // second, each up to 128 block reads -- for a rule that cannot fire on any of them, since a dirt top with water
+  // over it is refused three lines later. Nothing is lost by skipping it: every write marks a remesh, and
+  // _surfaceGrassSweep runs on that remesh and promotes whatever a drained pond has just uncovered.
+  if(b!==WATER && _old!==WATER) _promoteTopDirt(c,lx,lz);
   // CHOKEPOINT 2 of 3 for the decoration invariant (see _decoSeatColumn). Single writes only — a player placing a block
   // on a flower, or breaking the block under one. One column, so it costs a single top-down walk. Skipped when the write
   // IS a cross block, because that is a legitimate placement and the invariant would only re-check what was just set.
@@ -12654,9 +12660,18 @@ function modelBlockMat(m, bd, colOverride){
 // 0 / 0.5 / 1.0 the fence read 0.76 / 0.74 / 0.74 (no response at all), then 2.61 at 1.6, while the SAND control —
 // which cannot be touched by this uniform — jumped from 24 to 92.55 at gain 2.4. A control that moves means the frame
 // moved for another reason, so none of those numbers can choose a default.
-// TO FINISH IT: fresh boot per gain, lantern placed and given time to relight before the first shot, and a fence crop
-// large enough to be robust (the one used was 45x84 px). Target: a fence beside a lantern reading in the same order
-// as the sand beside it rather than 33x darker.
+// RE-MEASURED ON A CLEAN INSTRUMENT AND THE TERM IS INERT, which is a different problem from an unchosen gain.
+// Fresh boot per gain, a fence box built around the player, lantern at the centre with four seconds to relight, a
+// crop half the frame wide, and a sky control that this uniform cannot touch:
+//     gain 0    fence 19.98    sky control 67.02
+//     gain 1.0  fence 19.70    sky control 66.82
+//     gain 2.0  fence 20.01    sky control 67.11
+// The control is stable to 0.3 across three separate boots, so the instrument is sound this time — and the gain moves
+// nothing. So the add is not reaching the fragment, and the gain is not what to look at.
+// WHERE TO LOOK, in order: whether aMLit is non-zero at all (log it, or read c._lvData directly at a known lit cell);
+// whether `a[0..2]` in addIM are world or chunk-local coordinates, since the local conversion here assumes world and
+// the sky sample beside it is the only evidence for that; and whether the instanced attribute survives the
+// geo.clone() the sky attribute also depends on. Do not sweep the gain again until aMLit is proven non-zero.
 const _uMBLit={ value:new THREE.Vector4(0.55,0.42,0.22,0.0) };
 function _modelLit(m){
   const prev=m.onBeforeCompile;
@@ -44360,9 +44375,13 @@ window.__hc={
       // AND THE GUN'S OWN METAL, because "dark gunmetal" has a reference in the same frame: the rifle the piece is
       // bolted to. An optic judged against a number is judged against an opinion; judged against the receiver beside
       // it, it is either darker, the same, or the pale thing in the photograph.
+      // THE HAND IS NOT THE GUN. attachGunHand parents a whole forearm under the weapon's own mesh, so the first
+      // version of this reported a median of #9c7a5a — the skin tone — identically for every gun in the game.
+      const _gh=(m.userData&&m.userData._gunHand)||null;
       const gun=[]; m.traverse(o=>{ if(!o.isMesh||!o.material||Array.isArray(o.material)) return;
-        let att=null; for(let q=o; q; q=q.parent) if(q.userData&&q.userData.att){ att=q.userData.att; break; }
-        if(att||!o.material.color||!o.material.color.getHexString) return;
+        let att=null, hand=false;
+        for(let q=o; q; q=q.parent){ if(q===_gh) hand=true; if(q.userData&&q.userData.att){ att=q.userData.att; break; } }
+        if(att||hand||!o.material.color||!o.material.color.getHexString) return;
         gun.push({ lum:+lum(o.material.color).toFixed(4), col:'#'+o.material.color.getHexString() }); });
       gun.sort((a,b)=>a.lum-b.lum);
       const byAtt={}; for(const r of rows){ if(r.lum==null) continue; (byAtt[r.att]=byAtt[r.att]||[]).push(r.lum); }
@@ -45225,7 +45244,7 @@ window.__hc={
             if(v===BID.dirt && bl[idx(lx,y+1,lz)]!==WATER && !isSolid[bl[idx(lx,y+1,lz)]] && _naturalTopIsGrass(c.cx*CK+lx, c.cz*CK+lz)){
               bare++; if(_btWhere.length<8) _btWhere.push({x:c.cx*CK+lx, z:c.cz*CK+lz, y}); }
             break; } } }
-      return { demoted:_buriedGrass, grown:_grownGrass, bareTops:bare, bareWhere:_btWhere,
+      return { demoted:_buriedGrass, grown:_grownGrass, scans:_promoteScans, bareTops:bare, bareWhere:_btWhere,
                stillBuried:live, grassBlocks:scanned, coveredBy:by, samples:_bgWhere }; }
     catch(e){ return {err:String(e.message||e)}; } },
   // EVERY DRAWN FACE OF EVERY GRASS BLOCK, by orientation and by whether it is sky-exposed, with the tile it will
