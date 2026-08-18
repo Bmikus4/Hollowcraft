@@ -8966,8 +8966,27 @@ hzRuler.frustumCulled=false; hzRuler.renderOrder=9999;
 // Both draw with depthTest off, like /navigator: they are instruments, and one you cannot see through a hill is
 // no use for deciding which way to walk.
 const _WP_FAR=6000;                                  // half-length of the axis, well past any terrain
-const _WP_TICK=25, _WP_TICKN=240, _WP_LABEL_EVERY=5;  // a tick every 25 blocks, 240 of them = +/-3000, labelled every 125
+const _WP_TICK=25, _WP_TICKN=240, _WP_LABEL_EVERY=5, _WP_CIRCN=256;  // a tick every 25 blocks, 240 of them = +/-3000, labelled every 125
 let _wpGroup=null, _wpBeam=null, _wpLine=null, _wpTicks=null, _wpAt=null, _wpKind='', _wpLabelsOn=[];
+let _wpCircle=null;
+// HOW FAR THE SHORELINE IS FROM A POINT, on 128 bearings. A coastline is not a circle, so a single r is a choice
+// and the spread has to be reported alongside it or the circle is a claim nobody can check: on this island the
+// centroid sits 44 blocks from the nearest water and 400-odd from the furthest, and a mean of those two is a
+// different object from either. Ray-marched to the first water cell, coarse then refined, so the edge is the
+// waterline and not a grid cell.
+function shoreRadii(cx,cz){
+  const sea=CFG.SEA, N=128, per=new Float64Array(N), all=[]; let sum=0, mn=1e9, mx=0;
+  for(let a=0;a<N;a++){ const th=a/N*6.2831853, dx=Math.cos(th), dz=Math.sin(th);
+    let r=0;
+    for(let s=8; s<=1600; s+=8){ if(surfaceH(Math.round(cx+dx*s), Math.round(cz+dz*s))<=sea){ r=s; break; } r=s; }
+    for(let s=Math.max(0,r-8); s<=r; s+=1){ if(surfaceH(Math.round(cx+dx*s), Math.round(cz+dz*s))<=sea){ r=s; break; } }
+    per[a]=r; all.push(r); sum+=r; if(r<mn)mn=r; if(r>mx)mx=r; }
+  all.sort((a,b)=>a-b);
+  // The trimmed mean drops the closest and furthest eighth before averaging, which is the bays and the spits, and
+  // it is the number to reach for if the median ever reads short on a long thin island.
+  let ts=0; const lo=N>>3, hi=N-(N>>3);
+  for(let i=lo;i<hi;i++) ts+=all[i];
+  return { min:mn, max:mx, mean:+(sum/N).toFixed(1), median:all[N>>1], trimmed:+(ts/(hi-lo)).toFixed(1), n:N, per }; }
 function _wpEnsure(){ if(_wpGroup) return _wpGroup;
   _wpGroup=new THREE.Group(); _wpGroup.frustumCulled=false; _wpGroup.renderOrder=9998;
   const beamMat=new THREE.MeshBasicMaterial({ color:0x38e0ff, transparent:true, opacity:0.55,
@@ -8991,7 +9010,33 @@ function _wpEnsure(){ if(_wpGroup) return _wpGroup;
   _wpTicks=new THREE.LineSegments(tg, new THREE.LineBasicMaterial({ color:0xffc83a, transparent:true,
     opacity:0.75, depthTest:false, depthWrite:false, fog:false }));
   _wpTicks.frustumCulled=false; _wpTicks.renderOrder=9998; _wpGroup.add(_wpTicks);
+  // ---- THE SHORELINE CIRCLE ----
+  // Ben 08-18: "the shorelines edge to center mass is r, draw a circle." It DRAPES over the terrain rather than
+  // sitting on one flat plane -- a ring at a single y is buried by every rise it crosses and floats over every
+  // dip, which makes it useless for reading against the ground it is measuring.
+  const cg=new THREE.BufferGeometry();
+  cg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(_WP_CIRCN*3),3));
+  _wpCircle=new THREE.LineLoop(cg, new THREE.LineBasicMaterial({ color:0x7cff9b, transparent:true,
+    opacity:0.9, depthTest:false, depthWrite:false, fog:false }));
+  _wpCircle.frustumCulled=false; _wpCircle.renderOrder=9998; _wpCircle.visible=false; _wpGroup.add(_wpCircle);
   scene.add(_wpGroup); return _wpGroup; }
+// r IS PER BEARING, NOT ONE NUMBER (Ben: "it should be variable based on the marked shoreline"). Handed the array
+// from shoreRadii the ring becomes the coastline itself rather than a circle approximating it; handed a number it
+// is still a plain circle, which is what an explicit /waypoint circle 300 asks for. The 128 measured bearings are
+// resampled to _WP_CIRCN points with a linear blend so the loop is smooth instead of a 128-gon, and it drapes over
+// the terrain because a ring at one y is buried by every rise it crosses.
+function _wpDrawCircle(cx,cz,r){
+  _wpEnsure(); const a=_wpCircle.geometry.attributes.position;
+  const arr=(r&&r.length)?r:null, M=arr?arr.length:0;
+  for(let i=0;i<_WP_CIRCN;i++){ const f=i/_WP_CIRCN, th=f*6.2831853;
+    let rr;
+    if(arr){ const t=f*M, k=Math.floor(t), fr=t-k;
+             rr=arr[k%M]*(1-fr)+arr[(k+1)%M]*fr; }
+    else rr=r;
+    const x=cx+Math.cos(th)*rr, z=cz+Math.sin(th)*rr;
+    const g=(typeof surfaceH==='function')?surfaceH(Math.round(x),Math.round(z)):CFG.SEA;
+    a.setXYZ(i, x, Math.max(g,CFG.SEA)+0.6, z); }
+  a.needsUpdate=true; _wpCircle.geometry.computeBoundingSphere(); _wpCircle.visible=true; }
 // ONE CANVAS PER NUMBER, CACHED. The labels are only ever a few dozen distinct strings and they recur as the
 // player walks back and forth, so building the texture once per string costs nothing after the first pass.
 const _wpLabCache=new Map();
@@ -25522,9 +25567,30 @@ const CMDS={
   //   /waypoint island center mass  the CENTROID: the mean position of the land, which is pulled by every spit and
   //                                 headland and on a hooked island can sit in open water.
   // The axis line is drawn from the INSCRIBED one, per his instruction that it is the non-mass point.
-  waypoint:{ usage:'/waypoint island center [mass] | /waypoint off', run:(a)=>{
+  waypoint:{ usage:'/waypoint island center [mass] | /waypoint circle [mass|inscribed] [min|mean|median|trimmed|max|<r>] | /waypoint off', run:(a)=>{
       const w=a.map(t=>String(t).toLowerCase());
-      if(w[0]==='off'||w[0]==='clear'){ _wpAt=null; if(_wpGroup) _wpGroup.visible=false; return 'waypoint cleared'; }
+      if(w[0]==='off'||w[0]==='clear'){ _wpAt=null; if(_wpGroup){ _wpGroup.visible=false; if(_wpCircle) _wpCircle.visible=false; } return 'waypoint cleared'; }
+      // /waypoint circle [mass|inscribed] [min|mean|median|max|<blocks>]
+      // r is the shoreline distance from the chosen centre. A coastline is not a circle, so the command reports
+      // the whole spread and says which one it drew -- on this island the centroid is 44 blocks from the nearest
+      // water and 400-odd from the furthest, and a circle at either is a different statement about the island.
+      if(w[0]==='circle'){
+        const C=islandCentres(), onMass=(w[1]!=='inscribed');
+        const P=onMass?C.mass:C.inscribed;
+        const S=shoreRadii(P.x,P.z);
+        // MEDIAN BY DEFAULT, not mean. A coastline has bays, and one narrow inlet reaching in near the centre
+        // drags the mean down hard: from the centroid of this island the nearest water is 44 blocks and the
+        // furthest 391, and the mean of the 128 bearings is 216 while the median is 267. Ben's eye put the
+        // circle at 275-300, which is the median's neighbourhood and nowhere near the mean's -- the mean is
+        // measuring the inlets as much as the coast.
+        const pick=w[2]||'';
+        const vari=(pick===''||pick==='shore'||pick==='var');
+        const r=vari?S.per:(isFinite(+pick)?+pick:(S[pick]!=null?S[pick]:S.median));
+        _wpEnsure(); _wpGroup.visible=true; _wpDrawCircle(P.x,P.z,r);
+        return `${vari?'SHORELINE ring':'circle'} on the ${onMass?'centre of MASS':'INSCRIBED centre'} ${P.x}, ${P.z}`
+             + `   r = ${vari?'per bearing, '+S.min+'..'+S.max:r+' ('+(isFinite(+pick)?'given':pick)+')'}
+`
+             + `  shoreline from there: min ${S.min}  mean ${S.mean}  median ${S.median}  trimmed ${S.trimmed}  max ${S.max}  over ${S.n} bearings`; }
       if(w[0]!=='island'||w[1]!=='center'&&w[1]!=='centre') return CMDS.waypoint.usage;
       const mass=(w[2]==='mass');
       const C=islandCentres(), P=mass?C.mass:C.inscribed;
