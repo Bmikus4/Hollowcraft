@@ -4908,11 +4908,16 @@ function _naturalTopIsGrass(wx,wz){
 // How many dirt tops have grown back since boot, for __hc.grassEdges. The demotion has _buriedGrass for the
 // same reason: a zero here and a zero from a rule that never runs look identical from inside the game.
 let _grownGrass=0;
-// c.htop IS THE SURFACE and it is the right surface: it is built from occludesSky, so a dirt block under a
-// CANOPY is still promoted (grass grows under trees) while one under a roof is not. Water above it is the one
-// case htop cannot answer -- water is not an occluder -- so it is asked separately, or a lake bed turns green.
-function _promoteTopDirt(c,lx,lz){
-  const y=c.htop[lx+lz*CK]; if(y<1 || y>=WH-1) return 0;
+// THE SURFACE IS FOUND BY WALKING THE COLUMN, NOT BY READING c.htop. htop is written by the column pass and
+// then decorate, enrichTerrain, beachLog and applyEdits write c.blocks straight past it, so between generation
+// and the next endBulk it names a block with two more on top of it -- and promoting THAT would manufacture the
+// buried grass the demotion rule exists to remove. The caller passes topY only where it has just recomputed it.
+// occludesSky IS THE TEST, so a dirt block under a CANOPY is still promoted (grass grows under trees) while one
+// under a roof is not. Water is not an occluder, so it is asked separately, or a lake bed turns green.
+function _promoteTopDirt(c,lx,lz,topY){
+  let y=topY;
+  if(y==null){ y=-1; for(let yy=WH-2; yy>=1; yy--){ const v=c.blocks[idx(lx,yy,lz)]; if(v!==AIR && occludesSky[v]){ y=yy; break; } } }
+  if(y<1 || y>=WH-1) return 0;
   const j=idx(lx,y,lz); if(c.blocks[j]!==BID.dirt) return 0;
   if(c.blocks[idx(lx,y+1,lz)]===WATER) return 0;
   if(!_naturalTopIsGrass(c.cx*CK+lx, c.cz*CK+lz)) return 0;
@@ -11371,7 +11376,7 @@ function endBulk(){ const t=_bulk; _bulk=null; if(!t||!t.touched.size) return;
     // and tree fall lands in a bulk, and the top it leaves is the dirt apron Ben photographed at the base of
     // the buildings. htop has just been rebuilt on the line above, so the surface it names is current.
     for(let lz=0;lz<CK;lz++)for(let lx=0;lx<CK;lx++){ let top=-1; for(let y=WH-1;y>=0;y--){ if(occludesSky[c.blocks[idx(lx,y,lz)]]){ top=y; break; } } c.htop[lx+lz*CK]=top;   // occludesSky (not isOpaque): canopy must not fold into htop — matches worldgen (Ben 07-23)
-      _promoteTopDirt(c,lx,lz); }
+      _promoteTopDirt(c,lx,lz,top); }
     c._emit=null; markRemesh(c.cx,c.cz);
     for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++){ if(!dx&&!dz)continue; const nc=getChunk(c.cx+dx,c.cz+dz);
       if(nc && !t.touched.has(key(nc.cx,nc.cz))){ nc._emit=null; markRelight(nc.cx,nc.cz); } }   // any lantern the build placed lights across borders
@@ -44776,13 +44781,18 @@ window.__hc={
       // AND THE OTHER HALF OF THE RULE. bareTops is the number this instrument exists to drive to zero: a column
       // whose sky-exposed surface is dirt where the generator's own gate says grass grows. That is the dirt apron
       // at a structure's base and the dirt left behind by breaking a block, in one number.
+      // IT SCANS THE COLUMN AND DOES NOT ASK c.htop. The first cut of this read htop and reported 5,362 bare
+      // tops that were not bare at all: htop is written by the column pass and then decorate, enrichTerrain,
+      // beachLog and applyEdits write c.blocks straight past it, so between generation and the next endBulk it
+      // names a block with two more on top of it. Every sample it produced was buried dirt under grass.
       let bare=0; const _btWhere=[];
       for(const [,c] of world){ if(!c||!c.generated) continue; const bl=c.blocks;
-        for(let lz=0;lz<CK;lz++) for(let lx=0;lx<CK;lx++){ const y=c.htop?c.htop[lx+lz*CK]:-1;
-          if(y<1||y>=WH-1) continue;
-          if(bl[idx(lx,y,lz)]!==BID.dirt || bl[idx(lx,y+1,lz)]===WATER) continue;
-          if(!_naturalTopIsGrass(c.cx*CK+lx, c.cz*CK+lz)) continue;
-          bare++; if(_btWhere.length<8) _btWhere.push({x:c.cx*CK+lx, z:c.cz*CK+lz, y}); } }
+        for(let lz=0;lz<CK;lz++) for(let lx=0;lx<CK;lx++){
+          for(let y=WH-2;y>=1;y--){ const v=bl[idx(lx,y,lz)];
+            if(v===AIR || !occludesSky[v]) continue;
+            if(v===BID.dirt && bl[idx(lx,y+1,lz)]!==WATER && _naturalTopIsGrass(c.cx*CK+lx, c.cz*CK+lz)){
+              bare++; if(_btWhere.length<8) _btWhere.push({x:c.cx*CK+lx, z:c.cz*CK+lz, y}); }
+            break; } } }
       return { demoted:_buriedGrass, grown:_grownGrass, bareTops:bare, bareWhere:_btWhere,
                stillBuried:live, grassBlocks:scanned, coveredBy:by, samples:_bgWhere }; }
     catch(e){ return {err:String(e.message||e)}; } },
@@ -47121,6 +47131,21 @@ window.__hc={
     for(let i=0;i<N_BLOCKS;i++){ const bd=B[i]; if(!bd) continue; add(bd.drop||bd.name,'block'); }
     for(const a in ANIMALS){ const d=ANIMALS[a].drops||[]; for(const row of d) add(row[0],'mob:'+a); }
     if(typeof GUN_POOLS!=='undefined') for(const pool in GUN_POOLS) for(const g of GUN_POOLS[pool]) add(g,'chest:'+pool);
+    // THE THREE SOURCES ADDED WITH THE POOLS THEMSELVES. A pool only reaches _chestSeen once a chest of that kind has
+    // GENERATED, so near spawn the audit reported half a dozen rations as sourceless and the number moved with where
+    // the player was standing. Read the tables instead, the way this hook reads every other one.
+    if(typeof FOOD_POOLS!=='undefined') for(const pool in FOOD_POOLS) for(const f of FOOD_POOLS[pool]) add(f,'chest:'+pool);
+    if(typeof ATT_POOLS!=='undefined') for(const pool in ATT_POOLS) for(const a of ATT_POOLS[pool]) add(a,'chest:'+pool);
+    if(typeof FORAGE!=='undefined') for(const f of FORAGE) add(f,'forage');
+    // AND THE THREE FIELDS THAT TURN ONE ITEM INTO ANOTHER: a container filled from water, a tin opened, and what is
+    // left in your hand after a meal or a drink. Every one of them is a real way to obtain a thing and none of them
+    // is a table this hook could enumerate before.
+    for(const id in ITEMS){ const it=ITEMS[id];
+      if(it.fillable) add(it.fillable,'fill:'+id);
+      if(it.opens) add(it.opens,'open:'+id);
+      if(it.food&&it.food.empty) add(it.food.empty,'eaten:'+id);
+      if(it.drink&&it.drink.empty) add(it.drink.empty,'drunk:'+id);
+      if(it.consume&&it.consume.empty) add(it.consume.empty,'used:'+id); }
     for(const id in ITEMS){ const L=ITEMS[id].loot; if(L) for(const row of L) add(row[0],'lootbag:'+id); }
     if(typeof STARTER_ITEMS!=='undefined') for(const row of STARTER_ITEMS) add(Array.isArray(row)?row[0]:row,'starter');
     for(const id of _chestSeen) add(id,'chest');
