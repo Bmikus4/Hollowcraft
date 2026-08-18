@@ -8717,6 +8717,109 @@ function islandCentres(){ if(_ISLE_C) return _ISLE_C;
             mass:{ x:+(n?sx/n:S.x).toFixed(1), z:+(n?sz/n:S.z).toFixed(1), r:+S.R.toFixed(1) },
             grid:N, step:+STEP.toFixed(2), landCells:n };
   return _ISLE_C; }
+// =====================================================================
+//  THE SHORELINE, TRACED — the outline that wraps the island
+// =====================================================================
+// Ben 08-18: "completely reassess what counts as shoreline, just wrap the entire island."
+//
+// THE RADIAL MEASURE WAS THE WRONG QUESTION. Casting a ray from a centre and taking the first water cell
+// answers "how far is the nearest water on this bearing", which on any coastline with a bay in it is the
+// bay, not the coast: from this island's centroid that reads 44 blocks on one bearing and 391 on another,
+// and no single r drawn from those is the shoreline. A coast is not a function of angle at all -- it doubles
+// back, and a radial sweep cannot represent a headland with water behind it.
+//
+// SO THE BOUNDARY IS TRACED INSTEAD. Land is sampled to a grid; the ocean is flood-filled inward from the
+// grid border so that INLAND water is not ocean -- a lake is not a coast, and without this every pond
+// punches a hole in the outline. What is left is the island as one solid region, and its edge is walked
+// once by Moore-neighbour tracing, which follows a boundary round every inlet and spit and closes on itself.
+// The result wraps the island whatever shape it is.
+const _OUT_G=256;                                   // trace grid: finer than the centre grid, since this is the SHAPE
+// The three shape dials, all on __hc.shoreShape(): how wide a channel counts as an inlet and gets closed, how
+// hard the traced line is smoothed, and how far in from the water the finished loop sits.
+let _OUT_CLOSE=3, _OUT_SMOOTH=6, _OUT_SMOOTH_PASSES=2, _OUT_INSET=15;
+let _ISLE_OUT=null;
+function islandOutline(){ if(_ISLE_OUT) return _ISLE_OUT;
+  const S=islandStats(), HALF=Math.max(760, S.R*2.1), N=_OUT_G, STEP=(HALF*2)/N;
+  const x0=S.x-HALF, z0=S.z-HALF, sea=CFG.SEA;
+  const solid=new Uint8Array(N*N);
+  for(let j=0;j<N;j++){ const wz=z0+(j+0.5)*STEP;
+    for(let i=0;i<N;i++) if(surfaceH(Math.round(x0+(i+0.5)*STEP), Math.round(wz))>sea) solid[j*N+i]=1; }
+  // OCEAN IS THE WATER YOU CAN REACH FROM OUTSIDE. Flood from the border over non-land; anything not reached
+  // is an inland lake and counts as part of the island for the purpose of its outline.
+  const oc=new Uint8Array(N*N), st=[];
+  for(let i=0;i<N;i++){ st.push(i, (N-1)*N+i, i*N, i*N+N-1); }
+  while(st.length){ const k=st.pop(); if(k<0||k>=N*N||oc[k]||solid[k]) continue; oc[k]=1;
+    const i=k%N, j=(k/N)|0;
+    if(i>0)st.push(k-1); if(i<N-1)st.push(k+1); if(j>0)st.push(k-N); if(j<N-1)st.push(k+N); }
+  for(let k=0;k<N*N;k++) if(!oc[k]) solid[k]=1;      // lakes filled in
+  // ---- CLOSE THE INLETS BEFORE TRACING (Ben: "inlets and jagged edges are negated") ----
+  // A morphological CLOSE -- dilate by r, then erode by the same r -- swallows any channel narrower than 2r
+  // while leaving the island's outer shape where it was. Doing it on the MASK rather than smoothing the traced
+  // line afterwards matters: a low-pass on the polyline shortens an inlet but still has to travel down it and
+  // back, so the loop keeps a crease. Closing removes it from the thing being traced, so there is no crease to
+  // smooth. Erosion treats off-grid as solid, or the close would eat the border.
+  { const R=_OUT_CLOSE, tmp=new Uint8Array(N*N);
+    const g=(a,i,j)=>(i<0||j<0||i>=N||j>=N)?0:a[j*N+i];
+    for(let j=0;j<N;j++) for(let i=0;i<N;i++){ let v=0;
+      for(let b=-R;b<=R && !v;b++) for(let a2=-R;a2<=R;a2++) if(a2*a2+b*b<=R*R && g(solid,i+a2,j+b)){ v=1; break; }
+      tmp[j*N+i]=v; }
+    for(let j=0;j<N;j++) for(let i=0;i<N;i++){ let v=1;
+      for(let b=-R;b<=R && v;b++) for(let a2=-R;a2<=R;a2++){ if(a2*a2+b*b>R*R) continue;
+        const ii=i+a2, jj=j+b;
+        if(ii<0||jj<0||ii>=N||jj>=N) continue;      // off-grid counts as solid: do not erode the border
+        if(!tmp[jj*N+ii]){ v=0; break; } }
+      solid[j*N+i]=v; } }
+  // START ON THE MAIN ISLAND, not on an offshore rock: walk WEST from the inscribed centre to the last solid
+  // cell. Scanning the grid for the first solid cell would happily trace a two-cell islet instead.
+  const C=islandCentres().inscribed;
+  let si=Math.round((C.x-x0)/STEP-0.5), sj=Math.round((C.z-z0)/STEP-0.5);
+  si=Math.max(0,Math.min(N-1,si)); sj=Math.max(0,Math.min(N-1,sj));
+  while(si>0 && solid[sj*N+(si-1)]) si--;
+  const at=(i,j)=>(i<0||j<0||i>=N||j>=N)?0:solid[j*N+i];
+  // MOORE-NEIGHBOUR TRACING. From the start cell, look around the 8-neighbourhood beginning from where the
+  // previous step came, take the first solid cell, and repeat. It terminates on returning to the start.
+  const DX=[1,1,0,-1,-1,-1,0,1], DZ=[0,1,1,1,0,-1,-1,-1];
+  const pts=[]; let ci=si, cj=sj, dir=6, guard=N*N*4;
+  do{
+    pts.push([x0+(ci+0.5)*STEP, z0+(cj+0.5)*STEP]);
+    let found=false;
+    for(let k=0;k<8;k++){ const d=(dir+6+k)%8, ni=ci+DX[d], nj=cj+DZ[d];
+      if(at(ni,nj)){ ci=ni; cj=nj; dir=d; found=true; break; } }
+    if(!found) break;
+  } while(!(ci===si && cj===sj) && --guard>0);
+  // ---- SMOOTH ----
+  // The trace is a staircase of grid cells. A windowed mean round the loop takes the steps out; the window is
+  // in POINTS and the points are about one cell apart, so it is a fixed distance on the ground.
+  let cur=pts;
+  for(let pass=0; pass<_OUT_SMOOTH_PASSES; pass++){
+    const M=cur.length, out=[];
+    for(let i=0;i<M;i++){ let sx2=0, sz2=0, n2=0;
+      for(let k=-_OUT_SMOOTH;k<=_OUT_SMOOTH;k++){ const q=cur[((i+k)%M+M)%M]; sx2+=q[0]; sz2+=q[1]; n2++; }
+      out.push([sx2/n2, sz2/n2]); }
+    cur=out; }
+  // ---- AND PULL IT IN 15 BLOCKS (Ben: "shrink it by 15 blocks around on all sides") ----
+  // Along the local NORMAL, not toward a centre: a radial shrink pulls a long island in at its ends far more
+  // than at its flanks, and does the wrong thing entirely on a concave stretch. The normal comes from the
+  // tangent through each point's neighbours, and which of the two normals points INWARD is settled once, by
+  // testing a single offset point against the polygon itself rather than by assuming a winding direction.
+  const M2=cur.length;
+  const norm=i=>{ const a=cur[(i-1+M2)%M2], b=cur[(i+1)%M2];
+    let tx=b[0]-a[0], tz=b[1]-a[1]; const L=Math.hypot(tx,tz)||1; tx/=L; tz/=L;
+    return [-tz, tx]; };
+  const inPoly=(x,z,P)=>{ let inside=false;
+    for(let i=0,j=P.length-1;i<P.length;j=i++){ const a=P[i], b=P[j];
+      if(((a[1]>z)!==(b[1]>z)) && (x < (b[0]-a[0])*(z-a[1])/(b[1]-a[1])+a[0])) inside=!inside; }
+    return inside; };
+  let sign=1;
+  { const n0=norm(0), t=0.5*_OUT_INSET;
+    if(!inPoly(cur[0][0]+n0[0]*t, cur[0][1]+n0[1]*t, cur)) sign=-1; }
+  const inset=[];
+  for(let i=0;i<M2;i++){ const n0=norm(i);
+    inset.push([cur[i][0]+sign*n0[0]*_OUT_INSET, cur[i][1]+sign*n0[1]*_OUT_INSET]); }
+  _ISLE_OUT={ pts:inset, raw:pts.length, n:M2, step:+STEP.toFixed(2), grid:N,
+              closeR:_OUT_CLOSE, smooth:_OUT_SMOOTH, passes:_OUT_SMOOTH_PASSES, inset:_OUT_INSET,
+              closed:(ci===si&&cj===sj), guardLeft:guard };
+  return _ISLE_OUT; }
 const _horizGeo=new THREE.CylinderGeometry(FAR*1.1, FAR*1.1, FAR*2.2, 120, 1, true);   // tall enough that a treeline anchored on high terrain at a LOW render distance (steep elevation angle) never clips at the rim
 const _uWater={value:new THREE.Color(0.08,0.2,0.28)}, _uSky={value:new THREE.Color(0.6,0.68,0.76)};
 const _horizVert='varying vec3 vPos; void main(){ vPos=position; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }';
@@ -9025,18 +9128,21 @@ function _wpEnsure(){ if(_wpGroup) return _wpGroup;
 // is still a plain circle, which is what an explicit /waypoint circle 300 asks for. The 128 measured bearings are
 // resampled to _WP_CIRCN points with a linear blend so the loop is smooth instead of a 128-gon, and it drapes over
 // the terrain because a ring at one y is buried by every rise it crosses.
-function _wpDrawCircle(cx,cz,r){
-  _wpEnsure(); const a=_wpCircle.geometry.attributes.position;
-  const arr=(r&&r.length)?r:null, M=arr?arr.length:0;
-  for(let i=0;i<_WP_CIRCN;i++){ const f=i/_WP_CIRCN, th=f*6.2831853;
-    let rr;
-    if(arr){ const t=f*M, k=Math.floor(t), fr=t-k;
-             rr=arr[k%M]*(1-fr)+arr[(k+1)%M]*fr; }
-    else rr=r;
-    const x=cx+Math.cos(th)*rr, z=cz+Math.sin(th)*rr;
+// A POLYGON, NOT A RADIAL FUNCTION. The traced shoreline doubles back round headlands, so it cannot be stored
+// as r(theta) at all; the loop is fed in as world points and the buffer is sized to whatever the trace produced.
+// Still draped on the terrain, because a line at one y is buried by every rise it crosses.
+function _wpDrawLoop(pts){
+  _wpEnsure(); const n=pts.length;
+  let a=_wpCircle.geometry.attributes.position;
+  if(!a || a.count!==n){ _wpCircle.geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n*3),3)); a=_wpCircle.geometry.attributes.position; }
+  for(let i=0;i<n;i++){ const x=pts[i][0], z=pts[i][1];
     const g=(typeof surfaceH==='function')?surfaceH(Math.round(x),Math.round(z)):CFG.SEA;
     a.setXYZ(i, x, Math.max(g,CFG.SEA)+0.6, z); }
   a.needsUpdate=true; _wpCircle.geometry.computeBoundingSphere(); _wpCircle.visible=true; }
+function _wpDrawCircle(cx,cz,r){
+  const pts=[]; for(let i=0;i<_WP_CIRCN;i++){ const th=i/_WP_CIRCN*6.2831853;
+    pts.push([cx+Math.cos(th)*r, cz+Math.sin(th)*r]); }
+  _wpDrawLoop(pts); }
 // ONE CANVAS PER NUMBER, CACHED. The labels are only ever a few dozen distinct strings and they recur as the
 // player walks back and forth, so building the texture once per string costs nothing after the first pass.
 const _wpLabCache=new Map();
@@ -25567,14 +25673,15 @@ const CMDS={
   //   /waypoint island center mass  the CENTROID: the mean position of the land, which is pulled by every spit and
   //                                 headland and on a hooked island can sit in open water.
   // The axis line is drawn from the INSCRIBED one, per his instruction that it is the non-mass point.
-  waypoint:{ usage:'/waypoint island center [mass] | /waypoint circle [mass|inscribed] [min|mean|median|trimmed|max|<r>] | /waypoint off', run:(a)=>{
+  waypoint:{ usage:'/waypoint island center [mass] | /waypoint shore | /waypoint circle [mass|inscribed] [min|mean|median|trimmed|max|<r>] | /waypoint off', run:(a)=>{
       const w=a.map(t=>String(t).toLowerCase());
       if(w[0]==='off'||w[0]==='clear'){ _wpAt=null; if(_wpGroup){ _wpGroup.visible=false; if(_wpCircle) _wpCircle.visible=false; } return 'waypoint cleared'; }
       // /waypoint circle [mass|inscribed] [min|mean|median|max|<blocks>]
       // r is the shoreline distance from the chosen centre. A coastline is not a circle, so the command reports
       // the whole spread and says which one it drew -- on this island the centroid is 44 blocks from the nearest
       // water and 400-odd from the furthest, and a circle at either is a different statement about the island.
-      if(w[0]==='circle'){
+      if(w[0]==='circle'||w[0]==='shore'){
+        if(w[0]==='shore'){ w[2]=''; w[1]=w[1]||'mass'; }
         const C=islandCentres(), onMass=(w[1]!=='inscribed');
         const P=onMass?C.mass:C.inscribed;
         const S=shoreRadii(P.x,P.z);
@@ -25584,13 +25691,24 @@ const CMDS={
         // circle at 275-300, which is the median's neighbourhood and nowhere near the mean's -- the mean is
         // measuring the inlets as much as the coast.
         const pick=w[2]||'';
-        const vari=(pick===''||pick==='shore'||pick==='var');
-        const r=vari?S.per:(isFinite(+pick)?+pick:(S[pick]!=null?S[pick]:S.median));
-        _wpEnsure(); _wpGroup.visible=true; _wpDrawCircle(P.x,P.z,r);
-        return `${vari?'SHORELINE ring':'circle'} on the ${onMass?'centre of MASS':'INSCRIBED centre'} ${P.x}, ${P.z}`
-             + `   r = ${vari?'per bearing, '+S.min+'..'+S.max:r+' ('+(isFinite(+pick)?'given':pick)+')'}
+        // NO ARGUMENT = THE TRACED SHORELINE, which wraps the island whatever shape it is. A statistic or a
+        // number still draws a true circle from the chosen centre, which is what you want to COMPARE against it.
+        if(pick===''||pick==='shore'){
+          const O=islandOutline();
+          _wpEnsure(); _wpGroup.visible=true; _wpDrawLoop(O.pts);
+          let per=1e9, pex=0;
+          for(const q of O.pts){ const d=Math.hypot(q[0]-P.x, q[1]-P.z); if(d<per)per=d; if(d>pex)pex=d; }
+          return `SHORELINE traced: ${O.pts.length} points wrapping the island, ${O.closed?'closed':'OPEN — trace did not return to start'}
 `
-             + `  shoreline from there: min ${S.min}  mean ${S.mean}  median ${S.median}  trimmed ${S.trimmed}  max ${S.max}  over ${S.n} bearings`; }
+               + `  grid ${O.grid} at ${O.step} blocks/cell, inland water filled so lakes are not coast
+`
+               + `  from the ${onMass?'centre of MASS':'INSCRIBED centre'} ${P.x}, ${P.z} it runs ${per.toFixed(0)}..${pex.toFixed(0)} blocks out`; }
+        const r=isFinite(+pick)?+pick:(S[pick]!=null?S[pick]:S.median);
+        _wpEnsure(); _wpGroup.visible=true; _wpDrawCircle(P.x,P.z,r);
+        return `circle on the ${onMass?'centre of MASS':'INSCRIBED centre'} ${P.x}, ${P.z}   r = ${r} (${isFinite(+pick)?'given':pick})
+`
+             + `  radial shoreline from there: min ${S.min}  mean ${S.mean}  median ${S.median}  trimmed ${S.trimmed}  max ${S.max}`
+             + `  — a radial measure stops at the first inlet, which is why it is not the outline`; }
       if(w[0]!=='island'||w[1]!=='center'&&w[1]!=='centre') return CMDS.waypoint.usage;
       const mass=(w[2]==='mass');
       const C=islandCentres(), P=mass?C.mass:C.inscribed;
@@ -43987,6 +44105,15 @@ window.__hc={
   // QA/bench: the horizon protractor. Same az the pine shader reads, so a console bearing is findable in a frame.
   // QA/bench: the island's two centres, and where the axis is pointing.
   islandCentres(){ try{ return islandCentres(); }catch(e){ return {err:String(e.message||e)}; } },
+  islandOutline(){ try{ const O=islandOutline(); return { pts:O.pts, n:O.pts.length, grid:O.grid, step:O.step, closed:O.closed,
+      closeR:O.closeR, smooth:O.smooth, passes:O.passes, inset:O.inset, raw:O.raw }; }catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: the shoreline's three shape dials. Changing any of them drops the cached trace.
+  shoreShape(o){ try{ if(o){ if(o.close!=null) _OUT_CLOSE=Math.max(0,o.close|0);
+        if(o.smooth!=null) _OUT_SMOOTH=Math.max(0,o.smooth|0);
+        if(o.passes!=null) _OUT_SMOOTH_PASSES=Math.max(0,o.passes|0);
+        if(o.inset!=null) _OUT_INSET=+o.inset; _ISLE_OUT=null; }
+      return { close:_OUT_CLOSE, smooth:_OUT_SMOOTH, passes:_OUT_SMOOTH_PASSES, inset:_OUT_INSET }; }
+    catch(e){ return String(e.message||e); } },
   wpAxis(){ try{ if(!_wpAt) return null;
       const dx=camera.position.x-_wpAt.x, dz=camera.position.z-_wpAt.z;
       return { at:{x:_wpAt.x,z:_wpAt.z}, kind:_wpKind, visible:!!(_wpGroup&&_wpGroup.visible),
