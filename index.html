@@ -1271,6 +1271,21 @@ const _hcLamp = new Float32Array([1.0, 0.35, 18.7, 0.85]);
 // distinction is the whole of "doors chests guns fences have all lost their textures".
 // 0.03 is the atlas path's own measured knee for the same job (the note at _scotK[2]), so the two paths rescue a black
 // texel at the same albedo instead of by two unrelated numbers. __hc.propFill({texk}) is the dial.
+// ---- MEASURED 2026-08-17: THE DAY GATE IS WHY MODEL BLOCKS VANISH AT NIGHT ----
+// This fill is multiplied by uScotG.w, the day factor, so at midnight it is exactly zero and a cat:'model' block has
+// no fill at all. That was deliberate — "extremely black nights, with the light in them coming from lamps" — but the
+// size of it had never been measured. A fence and the sand it stands in, SAME FRAME, same distance, same orientation
+// (which is what makes this a fair comparison and the viewmodel-versus-ground one not), pinned camera, adaptation
+// off, median of three:
+//     fence (model block)   noon 15.39   night 0.23    ratio 0.0149
+//     sand  (atlas block)   noon 133.41  night 10.65   ratio 0.0798
+// So a model block falls five times further than the terrain it stands on, and in absolute terms it lands at 0.23 of
+// 255 against the ground's 10.65 — 46x darker than what it is standing in. That is not "dark", it is gone, and it is
+// the same shape as Ben's sulfur-renders-black report.
+// NOT CHANGED HERE. Whether props keep a night fill is the one-material-interface stage's call, and the point of that
+// stage is that it must be answered once for every surface class rather than by nudging this array. Ben's original
+// complaint was the OPPOSITE — "fences and doors unchanged at night" — so this path has already swung past the target
+// once, and the next move on it should be made with both numbers in view.
 const _propFill = new Float32Array([0.237, 0.267, 0.30, 0.03]);
 // THE REBUILD'S SET-ASIDE SWITCH lives here rather than beside __hc.oldLight because these are the arrays it moves,
 // and the snapshot has to be taken from their SHIPPED values — captured on first use, so a dial swept before the
@@ -23399,6 +23414,9 @@ const WDFX=[ {amp:1.00,ph: 0.00,rest: 0.00,duty:0.00},
 // world target and nothing puts a foot on the surface. Both are rig work and neither is a post-pass.
 // THE INSTRUMENT STAYS. Whatever is tried next has to beat 89%, and it has to beat it against a control pair.
 // hoisted constant spring tables — these are read-only tuning arrays; keeping them at module scope avoids re-allocating ~7 small arrays every animation frame (GC pressure while the Wretch is on-screen)
+// FOOT IK: the most the pelvis may be lifted to keep a foot out of the ground (see L2 - FOOT IK). 0 is off and is
+// the control side of its A/B; __hc.footIK(v) is the dial.
+let W_FOOTIK=0.9; const _ikV=new THREE.Vector3();
 const _wSag=[0.10,0.16,0.13,0.05,0.03], _wHump=[0.62,0.40,0.18,0,0], _wLeanW=[0.42,0.36,0.30,0,0], _wLegOm=[26,20,16], _wLegZe=[0.7,0.55,0.45], _wArmOm=[32,24,18,14,10], _wArmZe=[0.75,0.6,0.5,0.4,0.28];
 function animateWretch(dt, moving){
   const P=wretch.P; if(!P) return;
@@ -23608,6 +23626,40 @@ function animateWretch(dt, moving){
     L.shin.rotation.set(revKnee? -Math.abs(sh) : sh, 0,0);
     L.foot.rotation.set(ft,0,0);
   }
+
+  // ============================== L2 — FOOT IK ==============================
+  // 873d919's second named fix: "then foot IK, because the legs are FK with no world target and nothing puts a
+  // foot on the surface." Everything above this line is FK -- every thigh, shin and foot angle is a function of
+  // the gait phase and nothing else -- so the pose is identical whether the creature is on a lawn, on a stair or
+  // straddling a one-block step. The body's own y comes from groundYAt at the body's COLUMN, and a foot stands
+  // half a block to the side, so on any break in the ground one foot is through the floor. rigSpan reads the
+  // rig's lowest point at 0.98 to 1.07 blocks BELOW wretch.pos on a stalk: that is a whole block of leg in the dirt.
+  // IT IS A PELVIS LIFT, NOT A TWO-BONE SOLVE, and the choice is the point. The feet hang off the pelvis, so
+  // raising the pelvis raises both feet together and no bone angle the gait computed is overwritten -- the
+  // animation is untouched and only its height above the world changes. A per-leg solve would have to re-derive
+  // knee angles every frame against a gait that is already sprung, and would fight the springs it is inside.
+  // THE MEASUREMENT IS THE FOOT'S OWN LOWEST WORLD CORNER, not the ankle joint's origin. 873d919 paid for that
+  // distinction once already, on the arms: a joint ORIGIN is not the limb, and with the whole foot in the ground
+  // the ankle can sit in open air above it.
+  // CLAMPED AND SPRUNG. A foot inside a wall would otherwise launch the body a metre; 0.9 is the highest lift
+  // that can be a step rather than a throw, and the spring keeps a stair from popping the whole creature.
+  // NOT WHILE CLINGING: on a wall or a ceiling the surface under a foot is not the thing it is standing on.
+  if(W_FOOTIK>0 && !clinging && P.legs && P.legs.length){
+    let pen=0;
+    for(let li=0; li<P.legs.length; li++){ const F=P.legs[li] && P.legs[li].foot; if(!F) continue;
+      F.updateWorldMatrix(true,false);
+      let lo=1e9, lx=0, lz=0;
+      F.traverse(o=>{ if(!o.isMesh) return; const g=o.geometry; if(!g) return;
+        if(!g.boundingBox) g.computeBoundingBox(); const bb=g.boundingBox; if(!bb) return;
+        o.updateWorldMatrix(true,false);
+        for(let i=0;i<8;i++){ _ikV.set(i&1?bb.max.x:bb.min.x, i&2?bb.max.y:bb.min.y, i&4?bb.max.z:bb.min.z).applyMatrix4(o.matrixWorld);
+          if(_ikV.y<lo){ lo=_ikV.y; lx=_ikV.x; lz=_ikV.z; } } });
+      if(lo>1e8) continue;
+      const gy=groundYAt(lx,lz,wretch.pos.y+1.5);
+      if(gy-lo>pen) pen=gy-lo; }
+    wretch._ikLift = Math.min(pen, W_FOOTIK);
+    pelvis.position.y += spr(SS('ik'), wretch._ikLift, 14, 0.75, dt);
+  } else { wretch._ikLift=0; pelvis.position.y += spr(SS('ik'), 0, 14, 0.75, dt); }
 
   // ============================== L1/L3 — ARMS AS FORELIMBS ==================
   const armOm=_wArmOm, armZe=_wArmZe;
@@ -47069,6 +47121,10 @@ window.__hc={
   // measured against, because a fix with no off switch cannot be shown to be one.
   wretchEnv(v){ try{ if(v!=null) W_ENV = (v===true?0.45 : (v===false?0 : Math.max(0,+v||0)));
       return { r:W_ENV }; } catch(e){ return {err:String(e.message||e)}; } },
+  // THE FOOT-IK LIFT CAP AND ITS OFF SWITCH (see L2 - FOOT IK). 0 is the pure-FK legs the rig has always had.
+  // lift is what the pelvis is actually being raised by this frame, which is the number the A/B reads.
+  footIK(v){ try{ if(v!=null) W_FOOTIK = (v===true?0.9 : (v===false?0 : Math.max(0,+v||0)));
+      return { cap:W_FOOTIK, lift:+(wretch._ikLift||0).toFixed(3) }; } catch(e){ return {err:String(e.message||e)}; } },
   rigSpan(){ try{ const g=wretch.group; if(!g||!wretch.active) return {err:'not active'};
       g.updateMatrixWorld(true);
       const P=wretch.P, tag=new Map();
