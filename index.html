@@ -8670,6 +8670,53 @@ function islandStats(){ if(ISLAND_CENTER) return ISLAND_CENTER;   // one-time: c
   const cx=n?sx/n:spawnX, cz=n?sz/n:spawnZ; let rs=0;
   for(let a=0;a<32;a++){ const th=a/32*6.2831853; let rr=140; for(let s=40;s<=720;s+=12){ if(surfaceH(Math.round(cx+Math.cos(th)*s),Math.round(cz+Math.sin(th)*s))>CFG.SEA) rr=s; } rs+=rr; }
   ISLAND_CENTER={x:cx,z:cz,R:Math.max(140,rs/32)}; return ISLAND_CENTER; }
+// =====================================================================
+//  THE ISLAND'S TWO CENTRES — and they are not the same point
+// =====================================================================
+// Ben 08-18: "if you were looking at the map from the top down, and had to fit a circle within its terrain,
+// negating height, just pure coverage against the ocean, where is the largest circle you could fit in the
+// landmass of the island? the center of THAT circle, is our center marking point."
+//
+// That is the INSCRIBED CENTRE, and it is a different question from the one islandStats already answers.
+// islandStats returns the CENTROID -- the mean position of the land -- which is a centre of mass and is pulled
+// by every spit, headland and offshore rock, and on a hooked or crescent island can land in open water. The
+// largest inscribed circle instead asks how far you can get from the sea in any direction at all, so it is
+// always ON land, and its radius is a real fact about the island: the widest part of it.
+//
+// HOW IT IS FOUND. Land or not-land is sampled onto a grid, then a two-pass chamfer distance transform gives
+// every land cell its distance to the nearest water in ONE sweep out and one back -- not a search per cell,
+// which at this grid size would be 4.3 billion comparisons. The largest value is the answer and the cell
+// holding it is its centre. 3-4-5 chamfer weights, integer arithmetic, error under 2% against true Euclidean,
+// which is a fraction of a cell here.
+const _ISLE_G=192;                                  // grid cells across the sampled square: 6.9 blocks per cell over a 1320-block window
+let _ISLE_C=null;
+function islandCentres(){ if(_ISLE_C) return _ISLE_C;
+  const S=islandStats(), HALF=Math.max(700, S.R*2.0), STEP=(HALF*2)/_ISLE_G, N=_ISLE_G;
+  const x0=S.x-HALF, z0=S.z-HALF;
+  // 1. THE MASK, and the centroid falls out of the same pass for free.
+  const land=new Uint8Array(N*N); let sx=0,sz=0,n=0;
+  for(let j=0;j<N;j++){ const wz=z0+(j+0.5)*STEP;
+    for(let i=0;i<N;i++){ const wx=x0+(i+0.5)*STEP;
+      if(surfaceH(Math.round(wx),Math.round(wz))>CFG.SEA){ land[j*N+i]=1; sx+=wx; sz+=wz; n++; } } }
+  // 2. THE DISTANCE TRANSFORM. Water is 0 and land starts at infinity; the forward pass carries distance in from
+  //    the top-left neighbours and the backward pass from the bottom-right, and after both every cell holds its
+  //    distance to the nearest water. THE BORDER COUNTS AS WATER -- off the sampled square is open sea, and
+  //    without that an island running past the window would report a centre out at the edge of the grid.
+  const INF=1e9, D=new Float64Array(N*N);
+  for(let k=0;k<N*N;k++) D[k]=land[k]?INF:0;
+  const A=3, B=4;                                    // orthogonal and diagonal chamfer weights, in thirds of a cell
+  const at=(i,j)=>(i<0||j<0||i>=N||j>=N)?0:D[j*N+i];
+  for(let j=0;j<N;j++) for(let i=0;i<N;i++){ const k=j*N+i; if(!D[k]) continue;
+    D[k]=Math.min(D[k], at(i-1,j)+A, at(i,j-1)+A, at(i-1,j-1)+B, at(i+1,j-1)+B); }
+  for(let j=N-1;j>=0;j--) for(let i=N-1;i>=0;i--){ const k=j*N+i; if(!D[k]) continue;
+    D[k]=Math.min(D[k], at(i+1,j)+A, at(i,j+1)+A, at(i+1,j+1)+B, at(i-1,j+1)+B); }
+  let best=-1,bi=0,bj=0;
+  for(let j=0;j<N;j++) for(let i=0;i<N;i++){ const v=D[j*N+i]; if(v>best && v<INF){ best=v; bi=i; bj=j; } }
+  const rBlocks=(best/A)*STEP;                       // chamfer units back into blocks
+  _ISLE_C={ inscribed:{ x:+(x0+(bi+0.5)*STEP).toFixed(1), z:+(z0+(bj+0.5)*STEP).toFixed(1), r:+rBlocks.toFixed(1) },
+            mass:{ x:+(n?sx/n:S.x).toFixed(1), z:+(n?sz/n:S.z).toFixed(1), r:+S.R.toFixed(1) },
+            grid:N, step:+STEP.toFixed(2), landCells:n };
+  return _ISLE_C; }
 const _horizGeo=new THREE.CylinderGeometry(FAR*1.1, FAR*1.1, FAR*2.2, 120, 1, true);   // tall enough that a treeline anchored on high terrain at a LOW render distance (steep elevation angle) never clips at the rim
 const _uWater={value:new THREE.Color(0.08,0.2,0.28)}, _uSky={value:new THREE.Color(0.6,0.68,0.76)};
 const _horizVert='varying vec3 vPos; void main(){ vPos=position; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }';
@@ -8905,6 +8952,100 @@ const _hzRulerMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false,
   '}'].join('\n') });
 const hzRuler=new THREE.Mesh(new THREE.CylinderGeometry(_HZR,_HZR,_HZH*2,240,1,true), _hzRulerMat);
 hzRuler.frustumCulled=false; hzRuler.renderOrder=9999;
+// =====================================================================
+//  THE ISLAND WAYPOINT, AND THE AXIS THROUGH THE PLAYER
+// =====================================================================
+// Ben 08-18: "draw a line between the non-mass induced waypoint, and the players body, out to infinity in both
+// directions. as the player moves it should move with them."
+//
+// So the line is defined by TWO points and redrawn every frame: the inscribed centre, which never moves, and the
+// player, who does. Extended far past the world in both directions, it reads as a fixed bearing through the
+// island rather than as a segment joining two dots -- which is what "out to infinity in both directions" is for.
+// The waypoint itself is a beam, because a marker on the ground is invisible from anywhere that matters.
+//
+// Both draw with depthTest off, like /navigator: they are instruments, and one you cannot see through a hill is
+// no use for deciding which way to walk.
+const _WP_FAR=6000;                                  // half-length of the axis, well past any terrain
+const _WP_TICK=25, _WP_TICKN=240, _WP_LABEL_EVERY=5;  // a tick every 25 blocks, 240 of them = +/-3000, labelled every 125
+let _wpGroup=null, _wpBeam=null, _wpLine=null, _wpTicks=null, _wpAt=null, _wpKind='', _wpLabelsOn=[];
+function _wpEnsure(){ if(_wpGroup) return _wpGroup;
+  _wpGroup=new THREE.Group(); _wpGroup.frustumCulled=false; _wpGroup.renderOrder=9998;
+  const beamMat=new THREE.MeshBasicMaterial({ color:0x38e0ff, transparent:true, opacity:0.55,
+    depthTest:false, depthWrite:false, side:THREE.DoubleSide, fog:false });
+  _wpBeam=new THREE.Mesh(new THREE.CylinderGeometry(0.7,0.7,WH*2.2,10,1,true), beamMat);
+  _wpBeam.frustumCulled=false; _wpBeam.renderOrder=9998; _wpGroup.add(_wpBeam);
+  const lineMat=new THREE.LineBasicMaterial({ color:0xffc83a, transparent:true, opacity:0.9,
+    depthTest:false, depthWrite:false, fog:false });
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6),3));
+  _wpLine=new THREE.Line(g, lineMat); _wpLine.frustumCulled=false; _wpLine.renderOrder=9998;
+  _wpGroup.add(_wpLine);
+  // ---- MEASURING TICKS (Ben 08-18: "usable measuring ticks along the drawn line") ----
+  // Perpendicular marks at a fixed spacing in BLOCKS, so the line stops being a bearing and becomes a ruler you
+  // can read a distance off. Minor every _WP_TICK, major every fifth one and twice the length. Signed from the
+  // waypoint: positive toward the player, negative behind it, so a reading says which side of the island you are.
+  // Rebuilt into a preallocated buffer each frame rather than reallocated -- it moves with the player, so this
+  // runs on the frame clock.
+  const tg=new THREE.BufferGeometry();
+  tg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(_WP_TICKN*2*3),3));
+  _wpTicks=new THREE.LineSegments(tg, new THREE.LineBasicMaterial({ color:0xffc83a, transparent:true,
+    opacity:0.75, depthTest:false, depthWrite:false, fog:false }));
+  _wpTicks.frustumCulled=false; _wpTicks.renderOrder=9998; _wpGroup.add(_wpTicks);
+  scene.add(_wpGroup); return _wpGroup; }
+// ONE CANVAS PER NUMBER, CACHED. The labels are only ever a few dozen distinct strings and they recur as the
+// player walks back and forth, so building the texture once per string costs nothing after the first pass.
+const _wpLabCache=new Map();
+function _wpLabel(txt){ let sp=_wpLabCache.get(txt); if(sp) return sp;
+  const c=document.createElement('canvas'); c.width=256; c.height=64; const g=c.getContext('2d');
+  g.font='bold 44px monospace'; g.textAlign='center'; g.textBaseline='middle';
+  g.lineJoin='round'; g.strokeStyle='#000'; g.lineWidth=9; g.strokeText(txt,128,32);
+  g.fillStyle='#ffc83a'; g.fillText(txt,128,32);
+  const t=new THREE.CanvasTexture(c); t.minFilter=THREE.LinearFilter;
+  sp=new THREE.Sprite(new THREE.SpriteMaterial({ map:t, transparent:true, depthTest:false, depthWrite:false, fog:false }));
+  sp.renderOrder=9999; sp.frustumCulled=false;
+  _wpLabCache.set(txt,sp); return sp; }
+function updateWaypoint(){
+  if(!_wpAt || !_wpGroup) return;
+  _wpBeam.position.set(_wpAt.x, WH*0.5, _wpAt.z);
+  // THE AXIS. Direction is waypoint -> player, so it swings as he walks and is undefined only when he is standing
+  // exactly on the marker -- in which case the last direction is kept rather than the line collapsing to a point.
+  const px=camera.position.x, pz=camera.position.z;
+  let dx=px-_wpAt.x, dz=pz-_wpAt.z; const L=Math.hypot(dx,dz);
+  if(L>0.05){ dx/=L; dz/=L; _wpAt._dx=dx; _wpAt._dz=dz; }
+  else { dx=_wpAt._dx||1; dz=_wpAt._dz||0; }
+  // Drawn at the player's own eye height so it stays in view on a hill instead of being buried at sea level.
+  const y=camera.position.y-1.2;
+  const a=_wpLine.geometry.attributes.position;
+  a.setXYZ(0, _wpAt.x-dx*_WP_FAR, y, _wpAt.z-dz*_WP_FAR);
+  a.setXYZ(1, _wpAt.x+dx*_WP_FAR, y, _wpAt.z+dz*_WP_FAR);
+  a.needsUpdate=true; _wpLine.geometry.computeBoundingSphere();
+  // ---- THE TICKS, CENTRED ON THE PLAYER, NOT ON THE WAYPOINT ----
+  // The marks are laid out on the WORLD grid (every _WP_TICK blocks from the waypoint, so a given mark is always
+  // the same place on the ground) but only the window around the player is emitted, because 6000 blocks of ticks
+  // at 25-block spacing is 480 of them and all but a few are behind the camera or a pixel wide.
+  const nx=-dz, nz=dx;                                   // the perpendicular, for the tick marks themselves
+  const sPlayer=(px-_wpAt.x)*dx + (pz-_wpAt.z)*dz;       // where the player is along the axis, in blocks
+  const k0=Math.round(sPlayer/_WP_TICK) - (_WP_TICKN>>1);
+  const tp=_wpTicks.geometry.attributes.position;
+  for(const sp of _wpLabelsOn) sp.visible=false;
+  _wpLabelsOn.length=0;
+  for(let n=0;n<_WP_TICKN;n++){
+    const k=k0+n, sdist=k*_WP_TICK;
+    const cx=_wpAt.x+dx*sdist, cz=_wpAt.z+dz*sdist;
+    const major=(k%_WP_LABEL_EVERY===0);
+    const half=(k===0? 9.0 : major? 4.5 : 2.0);          // the waypoint's own mark is the longest
+    tp.setXYZ(n*2,   cx-nx*half, y, cz-nz*half);
+    tp.setXYZ(n*2+1, cx+nx*half, y, cz+nz*half);
+    // A label on every major tick that is near enough to read. Distance is SIGNED from the waypoint.
+    if(major && Math.abs(sdist-sPlayer)<520){
+      const sp=_wpLabel(sdist===0?'0':(sdist>0?'+':'')+sdist);
+      if(!sp.parent) _wpGroup.add(sp);
+      sp.visible=true; sp.position.set(cx, y+3.2, cz); sp.scale.set(14,3.5,1);
+      _wpLabelsOn.push(sp);
+    }
+  }
+  tp.needsUpdate=true; _wpTicks.geometry.computeBoundingSphere();
+}
 // OFF BY DEFAULT, behind /navigator (Ben 08-18: "gate the bands visibility behind a command"). It is an
 // instrument, and one that deliberately draws over the world; ?hzruler=1 turns it on at load for a bench.
 let _hzRulerWant=(Q.get('hzruler')==='1');
@@ -14843,6 +14984,7 @@ function updateSky(dt){
   fogShell.position.copy(camera.position); fogShell.material.color.copy(fc);
   const fo=Math.min(0.985, wf*1.25); fogShell.material.opacity=fo; fogShell.visible=fo>0.01;
   updateHorizon();
+  updateWaypoint();   // the axis is redrawn from the player's live position, so it belongs on the frame clock
   // THE OCEAN MAY NOT BE ABLE TO KILL THE SKY. This call sits INSIDE updateSky, so anything it throws aborts every
   // line of sky work after it — the dome stops being moved to the camera and stops being given the hour, which reads
   // as a sky that is correct on load and then goes fog-grey by day and black at night, exactly what Ben reports. The
@@ -25373,6 +25515,28 @@ const CMDS={
   // toggle. Degrees are the world azimuth atan2(z,x) -- the SAME number every pine probe reports -- and the yellow
   // figure under each label is the cardinal, so a bearing named in the console can be found in the picture and a
   // bearing seen in the picture can be named to the console.
+  // TWO CENTRES, AND THEY ARE DIFFERENT QUESTIONS (Ben 08-18).
+  //   /waypoint island center       the INSCRIBED centre: the middle of the largest circle that fits inside the
+  //                                 landmass seen from above, ocean as the only boundary and height ignored. It is
+  //                                 always on land, and its radius is the widest part of the island.
+  //   /waypoint island center mass  the CENTROID: the mean position of the land, which is pulled by every spit and
+  //                                 headland and on a hooked island can sit in open water.
+  // The axis line is drawn from the INSCRIBED one, per his instruction that it is the non-mass point.
+  waypoint:{ usage:'/waypoint island center [mass] | /waypoint off', run:(a)=>{
+      const w=a.map(t=>String(t).toLowerCase());
+      if(w[0]==='off'||w[0]==='clear'){ _wpAt=null; if(_wpGroup) _wpGroup.visible=false; return 'waypoint cleared'; }
+      if(w[0]!=='island'||w[1]!=='center'&&w[1]!=='centre') return CMDS.waypoint.usage;
+      const mass=(w[2]==='mass');
+      const C=islandCentres(), P=mass?C.mass:C.inscribed;
+      _wpEnsure(); _wpGroup.visible=true;
+      _wpAt={x:P.x, z:P.z}; _wpKind=mass?'mass':'inscribed';
+      updateWaypoint();
+      const gy=(typeof surfaceH==='function')?surfaceH(Math.round(P.x),Math.round(P.z)):CFG.SEA;
+      const wet=gy<=CFG.SEA?'  (this one is in the water)':'';
+      return `waypoint: island ${mass?'centre of MASS':'INSCRIBED centre'} at ${P.x}, ${P.z}  ground y ${gy.toFixed(1)}${wet}
+`
+           + `  ${mass?'mean coast radius':'largest circle that fits'} ${P.r} blocks`
+           + `${mass?'':'  — grid '+C.grid+' at '+C.step+' blocks/cell, '+C.landCells+' land cells'}`; } },
   navigator:{ usage:'/navigator [on|off]', run:(a)=>{ const w=String(a[0]||'').toLowerCase();
       const want = w==='on'?true : w==='off'?false : !__hc.hzRuler().on;
       const r=__hc.hzRuler(want);
@@ -43755,6 +43919,14 @@ window.__hc={
   blockAt(x,y,z){ try{ return getBlock(x,y,z); }catch(e){ return e.message; } },
   bid(name){ try{ return BID[name]; }catch(e){ return null; } },   // QA: block ids are module scope, so a bench comparing blockAt() to a named block has no way to name it
   // QA/bench: the horizon protractor. Same az the pine shader reads, so a console bearing is findable in a frame.
+  // QA/bench: the island's two centres, and where the axis is pointing.
+  islandCentres(){ try{ return islandCentres(); }catch(e){ return {err:String(e.message||e)}; } },
+  wpAxis(){ try{ if(!_wpAt) return null;
+      const dx=camera.position.x-_wpAt.x, dz=camera.position.z-_wpAt.z;
+      return { at:{x:_wpAt.x,z:_wpAt.z}, kind:_wpKind, visible:!!(_wpGroup&&_wpGroup.visible),
+               bearingDeg:+(Math.atan2(dz,dx)*180/Math.PI).toFixed(2),
+               playerDist:+Math.hypot(dx,dz).toFixed(1) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   hzRuler(v){ try{ if(v!=null){ _hzRulerWant=!!v;
         if(_hzRulerWant && !hzRuler.parent) oceanLayer.add(hzRuler);
         if(!_hzRulerWant && hzRuler.parent) hzRuler.parent.remove(hzRuler); }
