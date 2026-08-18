@@ -17,6 +17,7 @@ const fb=()=>['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Progra
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Microsoft/Edge/Application/msedge.exe'].find(p=>fs.existsSync(p));
 const ENV = process.env.HC_ENV==null ? null : (process.env.HC_ENV!=='0');
 const IK  = process.env.HC_IK==null ? null : (process.env.HC_IK!=='0');
+const ARM = process.env.HC_ARM==null ? null : (process.env.HC_ARM!=='0');
 (async()=>{
   const port=await freePort();
   const srv=spawn(process.execPath,[path.join(ROOT,'server.js')],{cwd:ROOT,env:{...process.env,PORT:String(port),NO_OPEN:'1'},stdio:'ignore'});
@@ -36,6 +37,7 @@ const IK  = process.env.HC_IK==null ? null : (process.env.HC_IK!=='0');
     await ev('__hc.wretchArm(true,true)');
     if(ENV!==null) console.log('  envelope forced '+JSON.stringify(await ev('__hc.wretchEnv('+ENV+')').catch(()=>'(no dial)')));
     if(IK !==null) console.log('  foot IK  forced '+JSON.stringify(await ev('__hc.footIK('+IK+')').catch(()=>'(no dial)')));
+    if(ARM!==null) console.log('  arm fold forced '+JSON.stringify(await ev('__hc.armFold('+ARM+')').catch(()=>'(no dial)')));
 
     // A STALK THROUGH THE TREES, not a creature parked against one wall: 873d919's own noise finding was that a
     // single parked condition scores 285 and 357 on repeats. Three rounds, dropped 22 blocks out each time, gaze
@@ -51,6 +53,7 @@ const IK  = process.env.HC_IK==null ? null : (process.env.HC_IK!=='0');
         const r=await ev('__hc.rigBuried()');
         if(r && !r.err){ const c=await ev('__hc.bodyClear()'); r.clear=(c&&!c.err)?c.clear:null;
           const ik=await ev('__hc.footIK()'); r.ik=ik&&!ik.err?ik:null;
+          const ds=await ev('__hc.limbInSolid()'); r.deep=ds&&!ds.err?ds:null;
           const sp=await ev('__hc.rigSpan()'); if(sp && !sp.err){ r.yLo=sp.yLo; r.pose=sp.state; r.crawl=sp.crawl; r.yLoBy=sp.yLoBy; r.low=sp.low; if(!span) span=sp; }
           samples.push(r); }
         await sleep(60); } }
@@ -83,12 +86,21 @@ const IK  = process.env.HC_IK==null ? null : (process.env.HC_IK!=='0');
     // a stand are different claims and the fix for one is not the fix for the other.
     const deep=samples.filter(s=>s.yLo!=null).sort((a,b)=>a.yLo-b.yLo).slice(0,8)
       .map(s=>({yLo:s.yLo, by:s.yLoBy, pose:s.pose, crawl:s.crawl, low:s.low}));
+    // THE NUMBER FOR "WAVES HIS ARMS THROUGH TREES": sample points inside a solid that has solid above it, so a
+    // planted hand on the ground is excluded and only a limb in a trunk, a wall or a bank counts.
+    const dp=samples.map(s=>s.deep).filter(Boolean);
+    if(dp.length){ const sum=k=>dp.reduce((a,b)=>a+(b[k]||0),0);
+      console.log('  in a trunk    arms '+sum('arms')+'  legs '+sum('legs')+'  head '+sum('head')
+        +'   frames with any arm in one: '+dp.filter(d=>d.arms>0).length+' of '+dp.length); }
     console.log('  worst poses   '+JSON.stringify(deep));
     // DOES THE INTEGRATOR EVER ENGAGE. An offset that stays at zero means the limb was never through the floor
     // and the correction is a no-op whatever its sign.
     const iks=samples.map(s=>s.ik).filter(Boolean);
     const mx=a=>a.length?Math.max(...a):0;
     console.log('  ik engaged    legs max '+mx(iks.map(k=>mx(k.legs||[]))).toFixed(3)
+      +'  arms max '+mx(iks.map(k=>mx(k.arms||[]))).toFixed(3)
+      +'  frames with an arm fold '+iks.filter(k=>mx(k.arms||[])>0.01).length+' of '+iks.length
+      +'  gate open '+iks.filter(k=>k.armGate).length+'  frames the rule SAW an arm in solid '+iks.filter(k=>(k.armSeen||0)>0).length
       +'  frames with a leg offset '+iks.filter(k=>mx(k.legs||[])>0.01).length+' of '+iks.length);
     // AND HOW HARD IT PULLS. The same column-height probe that defeated the forelimb version lets a leg beside a
     // trunk read as deeply underground, so the distribution matters: a median near the cap would be a creature

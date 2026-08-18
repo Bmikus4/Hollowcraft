@@ -23838,16 +23838,24 @@ function animateWretch(dt, moving){
   // ROTATION CANNOT SHORTEN A LIMB, which was 873d919's other finding, but FOLDING THE ELBOW CAN: it draws the
   // hand back toward the shoulder along the only axis that shortens reach. So the offset folds the elbow while
   // anything below it is inside the world and unwinds when nothing is.
-  // NOT WHILE REACHING. The lunge and the grab are animations Ben has judged; an arm that retracts as it reaches
-  // for him would break the one pose that is supposed to end inside his face.
-  if(W_FOOTIK>0 && !reaching && P.arms && P.arms.length){
+  // AND IT IS NOT SWITCHED OFF WHILE REACHING, which the first cut did to protect the lunge. Measured: the gate
+  // was open on 72 of 110 frames and the rule saw an arm inside something on 4, while the instrument -- the same
+  // test on the same joint -- found arms in a trunk on 21. The missing frames are the closed ones, and that makes
+  // sense of itself: reaching is when it THROWS its arms forward, into whatever stands between it and the player,
+  // which is Ben's "waves his arms through trees" almost word for word. Excluding it excluded the case.
+  // THE REACH KEEPS A SMALLER CAP instead of none, so an arm bends around a trunk rather than passing through it
+  // while the lunge still lands: at contact range there is nothing between them and the offset is zero anyway.
+  const armCap = reaching ? W_ARMFOLD*0.45 : W_ARMFOLD;
+  wretch._ikArmGate = (W_FOOTIK>0) ? (reaching?2:1) : 0;   // QA: 1 = free, 2 = reaching (reduced cap), 0 = off
+  if(W_FOOTIK>0 && P.arms && P.arms.length){
     if(!wretch._ikArm || wretch._ikArm.length!==P.arms.length) wretch._ikArm=P.arms.map(()=>0);
+    wretch._ikArmSeen = 0;
     for(let ai=0; ai<P.arms.length; ai++){ const chain=P.arms[ai]; const seg=chain && (chain[2]||chain[chain.length-1]); if(!seg) continue;
-      const inside=_deepPoints(seg);
+      const inside=_deepPoints(seg); wretch._ikArmSeen += inside;
       // 3.0 per second in, 2.0 out: it retracts inside half a second, which is faster than the arm can swing back
       // into the same trunk, and lets go a little more slowly so it does not chatter at the edge of a hit.
       const r=inside? 3.0*Math.min(dt,0.05) : -2.0*Math.min(dt,0.05);
-      wretch._ikArm[ai]=Math.max(0, Math.min(wretch._ikArm[ai]+r, W_ARMFOLD)); }
+      wretch._ikArm[ai]=Math.max(0, Math.min(wretch._ikArm[ai]+r, armCap)); }
   } else if(wretch._ikArm){ for(let ai=0;ai<wretch._ikArm.length;ai++) wretch._ikArm[ai]*=Math.max(0,1-dt*6); }
 
   // ============================== L5 — GAZE (delay→snap, VOR) ================
@@ -29293,6 +29301,7 @@ camera.add(offView.group);
 // The offhand ITEM keeps its low rest (OFF_VIEW_Y): "the left hand down by default" was about the thing you carry, not about
 // the limb. Guns are exempt by construction, not by a test here — updateMainArm/updateOffArm hide these groups for a gun,
 // because a gun carries its own hand (attachGunHand) and that hand rides the weapon.
+const _SWING_RATE={tool:2.6, blade:7};   // how fast the one-shot click swing decays, per second — see the note in updateView
 let _GUNARM_ADS=0.5, _GUNARM_NEAR=0.42;   // aiming past this adsT, any part of the gun hand nearer than this many metres to the eye stops drawing — see the note in updateView
 const _gunArmV=new THREE.Vector3();   // one scratch vector: this runs per hand part per aimed frame
 const FIST_REST_Y=-0.22, ARM_REST_Z=0.12;   // ARM_REST_Z is also the base the block-out's arm-follow rebases off — see the end of updateView
@@ -30152,7 +30161,16 @@ function updateView(dt){ updateRecoil(dt);                                      
   // now authors occupied 31 ms — two frames — and none of the four beats could be seen at all. 6/s is 0.167s, which
   // gives the gather 47 ms and the recovery 79 ms. The BLADE keeps 16: a knife is fast on purpose, and the held
   // MINING LOOP keeps its rate, which is Ben's own "fast + frequent".
-  view.swing=Math.max(0,view.swing-dt*(_bl?16:6));                                               // one-shot click swing
+  // ---- A SWING YOU CANNOT SEE HAS NO WEIGHT, WHATEVER SHAPE IT IS (measured, 08-18) ----
+  // The wind-up, committed arc, follow-through and settle are all authored below and all correct, and the arc still
+  // reads as a snap: sampled live through __hc.viewDbg, a pickaxe's swing ran 0.904 -> 0.629 -> 0.067 -> 0 in about
+  // 150 ms, and screenshots at 55 ms intervals caught only the tail. At 16/s a blade's was over in a sixteenth of a
+  // second — four frames — which the note on the cut already says out loud.
+  // Nothing gates on view.swing: the damage lands on the click (see _doSwing / actWithSlot), so this is the animation's
+  // duration and nothing else. 2.6/s gives a tool 0.38 s, which is what a heavy head takes to go out and come home,
+  // and 7/s leaves a blade at 0.14 s — still the fastest strike in the game and now visible.
+  // __hc.swingRate({tool,blade}) is the dial; {tool:6,blade:16} is the behaviour before this.
+  view.swing=Math.max(0,view.swing-dt*(_bl?_SWING_RATE.blade:_SWING_RATE.tool));                  // one-shot click swing
   view.stab=Math.max(0,(view.stab||0)-dt*11);                                                    // the thrust recovers SLOWER than the cut: it is the committed move of the two
   const sp=Math.hypot(player.vel.x,player.vel.z); view.bob+=dt*sp*1.2;
   const HM=handMotion(dt), b=HM.y;
@@ -43063,7 +43081,11 @@ window.__hc={
         topCutBy:+(bb.max.y-topAt(bb.max.z)).toFixed(3),                            // > 0 means the top of the model is off screen
         nearClipped:bb.max.z > -camera.near,
         dotY:(m.userData&&m.userData.dotY)||null, adsZ:(m.userData&&m.userData.adsZ)!=null?m.userData.adsZ:null }; }catch(e){ return {err:String(e.message||e)}; } },
-  viewDbg(){ try{ const vm=view.mesh; return { id:view.id, locked:!!locked, vis:!!view.group.visible, hasMesh:!!vm, meshVis:vm?!!vm.visible:null, children:view.group.children.length, rot:[+view.group.rotation.x.toFixed(3),+view.group.rotation.y.toFixed(3),+view.group.rotation.z.toFixed(3)], pos:[+view.group.position.x.toFixed(3),+view.group.position.y.toFixed(3),+view.group.position.z.toFixed(3)] }; }catch(e){ return e.message; } },
+  // READ-ONLY, AND THAT IS THE POINT. __hc.swingAt is the only other way to see the arc and it ASSIGNS view.swing from
+  // its own argument, so calling it to sample zeroed the very thing being sampled — ten frames of a live swing all
+  // read 0.000. A measurement that destroys its subject is worse than none.
+  viewDbg(){ try{ const vm=view.mesh; return { id:view.id, swing:+((view.swing||0)).toFixed(3), kick:+((view.gunKick||0)).toFixed(3),
+      locked:!!locked, vis:!!view.group.visible, hasMesh:!!vm, meshVis:vm?!!vm.visible:null, children:view.group.children.length, rot:[+view.group.rotation.x.toFixed(3),+view.group.rotation.y.toFixed(3),+view.group.rotation.z.toFixed(3)], pos:[+view.group.position.x.toFixed(3),+view.group.position.y.toFixed(3),+view.group.position.z.toFixed(3)] }; }catch(e){ return e.message; } },
   // QA: EVERY MESH IN THE HELD MODEL, with its size, its material and whether it is drawn. "A big black square
   // appears in the viewport" is a question about one object among thirty, and the frame cannot answer which —
   // especially not a frame that will not render. Size is in the viewmodel's own space, where the whole gun is
@@ -44491,6 +44513,11 @@ window.__hc={
   //   The subtree is found by the mark buildAttachment leaves (userData.att), not by name or by position.
   // QA/dial: the per-finish albedo scale. Pass {blued:1,steel:1} for the behaviour before the darkening, or any pair
   // to sweep it; the held gun is rebuilt so the change is on screen in the same call.
+  // QA/dial: how long a one-shot swing takes to play. Lower is slower. {tool:6,blade:16} restores the snap.
+  swingRate(o){ try{ if(o){ if(o.tool!=null)_SWING_RATE.tool=+o.tool; if(o.blade!=null)_SWING_RATE.blade=+o.blade; }
+      return { rate:Object.assign({},_SWING_RATE), secs:{ tool:+(1/_SWING_RATE.tool).toFixed(3), blade:+(1/_SWING_RATE.blade).toFixed(3) },
+               swing:+((view.swing||0)).toFixed(3) }; }
+    catch(e){ return {err:String(e&&e.message||e)}; } },
   gunAlb(o){ try{ if(o){ for(const k in o) if(_ALB_BY_TEX[k]!=null) _ALB_BY_TEX[k]=+o[k];
         const id=view.id; view.id=null; setViewItem(id); }   // glbBuild makes fresh materials every call, so re-holding IS the rebuild
       return { alb:Object.assign({},_ALB_BY_TEX), held:view.id }; }
@@ -47381,11 +47408,13 @@ window.__hc={
   limbInSolid(){ try{ const g=wretch.group; if(!g||!wretch.active) return {err:'not active'};
       g.updateMatrixWorld(true);
       const P=wretch.P; if(!P) return {err:'no rig'};
-      const out={arms:0, legs:0, head:0, body:0};
+      const out={arms:0, legs:0, head:0};
       if(P.arms) for(const ch of P.arms){ const seg=ch&&(ch[2]||ch[ch.length-1]); if(seg) out.arms+=_deepPoints(seg); }
       if(P.legs) for(const L of P.legs){ if(L&&L.thigh) out.legs+=_deepPoints(L.thigh); }
       if(P.head) out.head+=_deepPoints(P.head);
-      if(P.spine&&P.spine[0]) out.body+=_deepPoints(P.spine[0]);
+      // NO BODY FIGURE. The arms and the legs hang off spine[0], so traversing it counts them a second time -- the
+      // first cut of this printed a body number identical to the arms one, which is what gave it away. Isolating
+      // the torso would mean walking the spine and skipping two subtrees, and no question here needs it.
       return out; }
     catch(e){ return {err:String(e.message||e)}; } },
   // THE FORELIMB RETRACTION'S CAP AND ITS OFF SWITCH (see L3b - FORELIMB RETRACTION). 0 is no retraction, which
@@ -47394,6 +47423,7 @@ window.__hc={
       return { cap:W_ARMFOLD, arms:(wretch._ikArm||[]).map(x=>+x.toFixed(3)) }; } catch(e){ return {err:String(e.message||e)}; } },
   footIK(v){ try{ if(v!=null) W_FOOTIK = (v===true?0.9 : (v===false?0 : Math.max(0,+v||0)));
       return { cap:W_FOOTIK, armCap:W_ARMFOLD, lift:+(wretch._ikLift||0).toFixed(3),
+               armGate:wretch._ikArmGate, armSeen:wretch._ikArmSeen||0,
                legs:(wretch._ikOff||[]).map(v=>+v.toFixed(3)), arms:(wretch._ikArm||[]).map(v=>+v.toFixed(3)) }; }
     catch(e){ return {err:String(e.message||e)}; } },
   rigSpan(){ try{ const g=wretch.group; if(!g||!wretch.active) return {err:'not active'};
