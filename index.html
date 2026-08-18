@@ -9168,7 +9168,7 @@ function _wpDrawCircle(cx,cz,r){
 // The numbers are world azimuth atan2(z,x), exactly what the horizon protractor prints, so a bearing read off
 // this ring on the ground means the same thing as a bearing read off the sky. That is the point of it -- it is
 // a shared coordinate between what Ben sees and what he can tell me.
-let _wpRing=null, _wpRingTicks=null, _wpRingLabels=[];
+let _wpRing=null, _wpRingTicks=null, _wpRingLabels=[], _wpDialOn=false, _wpMarkA=null, _wpDialRef=0, _wpElastic=true;
 function _wpRingEnsure(){ if(_wpRing) return;
   _wpEnsure();
   const rg=new THREE.BufferGeometry();
@@ -9180,29 +9180,64 @@ function _wpRingEnsure(){ if(_wpRing) return;
   tg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(72*2*3),3));
   _wpRingTicks=new THREE.LineSegments(tg, new THREE.LineBasicMaterial({ color:0xff5ad4, transparent:true,
     opacity:0.85, depthTest:false, depthWrite:false, fog:false }));
-  _wpRingTicks.frustumCulled=false; _wpRingTicks.renderOrder=9998; _wpGroup.add(_wpRingTicks); }
-function _wpDrawDial(cx,cz,r){
+  _wpRingTicks.frustumCulled=false; _wpRingTicks.renderOrder=9998; _wpGroup.add(_wpRingTicks);
+  // A ITSELF, marked. Without it the dial's motion is only a change of radius, and "it rotates with the line"
+  // is invisible: this is the point on the rim that travels as the player walks round.
+  const mg=new THREE.BufferGeometry();
+  mg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(2*3),3));
+  _wpMarkA=new THREE.LineSegments(mg, new THREE.LineBasicMaterial({ color:0xffffff, transparent:true,
+    opacity:1.0, depthTest:false, depthWrite:false, fog:false }));
+  _wpMarkA.frustumCulled=false; _wpMarkA.renderOrder=9999; _wpGroup.add(_wpMarkA); }
+// refDeg is the WORLD bearing of A. The dial is drawn so that A always reads 180 (Ben 08-18: "180 should
+// always remain at the intersection (point A)"), which makes it a bearing dial centred on the player's own
+// line rather than on the world's axes: it rotates under him as he walks, and the number under A never moves.
+// A dial reading d therefore sits at world bearing refDeg + (d - 180).
+function _dialToWorldDeg(d, refDeg){ return refDeg + (d - 180); }
+function _worldToDialDeg(w, refDeg){ let d=w - refDeg + 180; return ((d+180)%360+360)%360-180; }
+// ---- ELASTIC ALONG THE A-B AXIS ----
+// Ben 08-18: "on the axis of A to B, the circle itself should be elasticized, stretching beyond or behind its
+// centerpoint, dependent on player position. If the player was standing ON the shoreline ring, it would line up
+// perfectly, but if the player moved inland, the /radius ring would spring back as well."
+// So the ring is an ELLIPSE centred on B, not a circle: its semi-axis ALONG the A direction is the player's own
+// distance from B, and across that direction it stays |AB|. Standing on the shoreline the two are equal and it
+// is a circle passing exactly through A -- "it would line up perfectly". Walking inland shortens only the axis,
+// so the ring springs back toward B on that side while its flanks hold. Walking out past A stretches it beyond.
+// The dial angle is measured FROM A, which is what pins A to 180 and makes the stretch land on the right axis.
+//   point(d) = B + axis*(along * cos(d-180)) + perp*(across * sin(d-180))
+function _dialPoint(cx,cz,dialDeg,refDeg,along,across){
+  const ax=Math.cos(refDeg*Math.PI/180), az=Math.sin(refDeg*Math.PI/180);
+  const phi=(dialDeg-180)*Math.PI/180, c=Math.cos(phi), sn=Math.sin(phi);
+  return [ cx + ax*along*c + (-az)*across*sn,
+           cz + az*along*c + ( ax)*across*sn ]; }
+function _wpDrawDial(cx,cz,r,refDeg,along){
   _wpRingEnsure();
+  if(along==null) along=r;
   const gy=(x,z)=>Math.max((typeof surfaceH==='function')?surfaceH(Math.round(x),Math.round(z)):CFG.SEA, CFG.SEA)+0.6;
   const a=_wpRing.geometry.attributes.position;
-  for(let i=0;i<_WP_CIRCN;i++){ const th=i/_WP_CIRCN*6.2831853;
-    const x=cx+Math.cos(th)*r, z=cz+Math.sin(th)*r;
-    a.setXYZ(i, x, gy(x,z), z); }
+  for(let i=0;i<_WP_CIRCN;i++){ const dd=-180+(i/_WP_CIRCN)*360;
+    const q=_dialPoint(cx,cz,dd,refDeg,along,r);
+    a.setXYZ(i, q[0], gy(q[0],q[1]), q[1]); }
   a.needsUpdate=true; _wpRing.geometry.computeBoundingSphere();
   // A tick every 5 degrees, long every 15 where the number goes. They point OUTWARD from the rim, so the
   // labels have somewhere to sit that the circle is not already drawing over.
   const tp=_wpRingTicks.geometry.attributes.position;
   for(let k=0;k<72;k++){
-    const deg=-180+k*5, th=deg*Math.PI/180, cs=Math.cos(th), sn=Math.sin(th);
-    const L=(deg%15===0)?14:6;
-    const x0=cx+cs*r, z0=cz+sn*r, x1=cx+cs*(r+L), z1=cz+sn*(r+L);
-    tp.setXYZ(k*2,   x0, gy(x0,z0), z0);
-    tp.setXYZ(k*2+1, x1, gy(x1,z1), z1); }
+    const deg=-180+k*5;
+    const L=(deg===-180)?26:(deg%15===0)?14:6;   // A's own mark is the longest
+    // The tick sits on the ellipse and points outward along the local radial, so it stays perpendicular-ish to
+    // the ring however far the axis is stretched.
+    const q0=_dialPoint(cx,cz,deg,refDeg,along,r);
+    let ox=q0[0]-cx, oz=q0[1]-cz; const OL=Math.hypot(ox,oz)||1; ox/=OL; oz/=OL;
+    const x1=q0[0]+ox*L, z1=q0[1]+oz*L;
+    tp.setXYZ(k*2,   q0[0], gy(q0[0],q0[1]), q0[1]);
+    tp.setXYZ(k*2+1, x1,    gy(x1,z1),       z1); }
   tp.needsUpdate=true; _wpRingTicks.geometry.computeBoundingSphere();
   for(const sp of _wpRingLabels) sp.visible=false;
   _wpRingLabels.length=0;
   for(let deg=-180; deg<180; deg+=15){
-    const th=deg*Math.PI/180, x=cx+Math.cos(th)*(r+30), z=cz+Math.sin(th)*(r+30);
+    const q=_dialPoint(cx,cz,deg,refDeg,along,r);
+    let ox=q[0]-cx, oz=q[1]-cz; const OL=Math.hypot(ox,oz)||1; ox/=OL; oz/=OL;
+    const x=q[0]+ox*30, z=q[1]+oz*30;
     // 'deg:' PREFIXES THE CACHE KEY. The axis ruler's labels come from the same cache and its "0" is a distance
     // while this "0" is a bearing -- one sprite cannot be in two places, so they must not share a key.
     const sp=_wpLabel(String(deg), 'deg:'+deg);
@@ -9210,6 +9245,28 @@ function _wpDrawDial(cx,cz,r){
     sp.visible=true; sp.position.set(x, gy(x,z)+5.4, z); sp.scale.set(26,6.5,1);
     _wpRingLabels.push(sp); }
   _wpRing.visible=true; _wpRingTicks.visible=true; }
+// ONE FRAME OF THE DIAL. Ben 08-18: "the circle that we drew with /waypoint radius should rotate with the mass
+// line/two points, and it should actually show itself updating and moving with the points."
+// So it is on the frame clock, not on the command: as the player walks, the line through B swings, A slides
+// along the shoreline to the new crossing, r = |AB| changes with it and the circle resizes under him. The tick
+// NUMBERS stay world bearings on purpose -- they are the shared coordinate with /navigator and /pines, and a
+// dial whose numbers moved could not name a direction.
+function _wpDialFrame(){
+  if(!_wpDialOn || !_wpAt) return;
+  const px=camera.position.x, pz=camera.position.z;
+  let dx=px-_wpAt.x, dz=pz-_wpAt.z; const L=Math.hypot(dx,dz);
+  if(L<0.05) return;                                   // standing on B: the line has no direction, hold the last
+  dx/=L; dz/=L;
+  const A=shoreHit(_wpAt.x,_wpAt.z,dx,dz);
+  if(!A) return;
+  _wpDialRef=Math.atan2(dz,dx)*180/Math.PI;      // A's world bearing: the dial's 180
+  // L is how far the PLAYER is from B. On the shoreline it equals r and the ring is a circle through A.
+  _wpDrawDial(_wpAt.x,_wpAt.z,A.r,_wpDialRef, _wpElastic?L:A.r);
+  const gy=(x,z)=>Math.max((typeof surfaceH==='function')?surfaceH(Math.round(x),Math.round(z)):CFG.SEA, CFG.SEA)+0.6;
+  const mp=_wpMarkA.geometry.attributes.position;
+  mp.setXYZ(0, A.x, gy(A.x,A.z), A.z);
+  mp.setXYZ(1, A.x, gy(A.x,A.z)+26, A.z);
+  mp.needsUpdate=true; _wpMarkA.geometry.computeBoundingSphere(); _wpMarkA.visible=true; }
 // ONE CANVAS PER NUMBER, CACHED. The labels are only ever a few dozen distinct strings and they recur as the
 // player walks back and forth, so building the texture once per string costs nothing after the first pass.
 const _wpLabCache=new Map();
@@ -9281,16 +9338,20 @@ function updateWaypoint(){
 // occludes them because they are ordinary depth-tested geometry out past the render wall.
 // The distance is inside camera.far (326.4) on purpose -- beyond it the quads would be clipped away entirely,
 // which is the failure the old band spent a session on.
-const _PIN_ASPECT=772/694;
-// HOW MUCH OF THE STRIP IS TREES. treeline.png is 772x694 and its alpha was measured row by row: everything
-// below v 0.6 is 100% opaque understory -- a solid dark slab the cut script grew on purpose so no sky could show
-// under the old wrapped band. On a flat quad standing on the waterline that slab is just a dark rectangle with
-// hard edges, which is the "sticker on the sky" this asset has been rejected for before. So only the top of the
-// image is used, and the quad is sized to the part that is actually trees.
-let _pinCrop=0.45;
+// BEN'S OWN IMAGE, not the cut one (08-18: "it needs to use the original pines image").
+// assets/horizon/treeline.png was a processed crop with its understory GROWN into a solid slab so no sky could
+// show under the old wrapped band; on a flat quad that slab is a dark rectangle. pines-original.png is his
+// source strip with nothing changed but its background, which was fully opaque white and had to be keyed out
+// or it draws as a white panel -- see scripts/make-pines-original.py, which does it from the border inward so
+// the bright water and the sky between the trunks survive.
+const _PIN_ASPECT=1964/801;
+// The original is used WHOLE by default: it is a composed picture -- trees, shore and water -- and cropping it
+// is what turned the previous asset into a floating band. The dial stays for the case where only part is wanted.
+let _pinCrop=1.0;
 let _pinGroup=null, _pinTex=null, _pinMat=null, _pinAt=[], _pinDist=280, _pinH=70;
+let _pinFlipH=false, _pinFlipV=false;
 function _pinEnsure(){ if(_pinGroup) return _pinGroup;
-  _pinTex=new THREE.TextureLoader().load('assets/horizon/treeline.png');
+  _pinTex=new THREE.TextureLoader().load('assets/horizon/pines-original.png');
   _pinTex.colorSpace=THREE.SRGBColorSpace; _pinTex.anisotropy=8;
   _pinMat=new THREE.MeshBasicMaterial({ map:_pinTex, transparent:true, alphaTest:0.35,
     depthWrite:false, side:THREE.DoubleSide, fog:false });
@@ -9307,8 +9368,15 @@ function _pinRebuild(){
     const th=deg*Math.PI/180;
     const geo=new THREE.PlaneGeometry(w,h);
     // UVs to the TOP _pinCrop of the texture. v runs 0 at the bottom, so the trees are 1-crop .. 1.
+    // FLIP THEN CROP, in that order: the crop selects a band of the ORIGINAL image, so flipping after it would
+    // pick a different band. Done on the UVs rather than by scaling the mesh negative, which would invert the
+    // face winding and put the quad's normal the wrong way round -- the mirroring bug this feature already had.
     { const uv=geo.attributes.uv;
-      for(let i=0;i<uv.count;i++) uv.setY(i, 1-_pinCrop + uv.getY(i)*_pinCrop);
+      for(let i=0;i<uv.count;i++){
+        let u=uv.getX(i), v=uv.getY(i);
+        if(_pinFlipH) u=1-u;
+        if(_pinFlipV) v=1-v;
+        uv.setXY(i, u, 1-_pinCrop + v*_pinCrop); }
       uv.needsUpdate=true; }
     const m=new THREE.Mesh(geo, _pinMat);
     m.frustumCulled=false; m.renderOrder=-4;
@@ -15273,6 +15341,7 @@ function updateSky(dt){
   const fo=Math.min(0.985, wf*1.25); fogShell.material.opacity=fo; fogShell.visible=fo>0.01;
   updateHorizon();
   updateWaypoint();   // the axis is redrawn from the player's live position, so it belongs on the frame clock
+  _wpDialFrame();     // and so does the A-to-B circle: A slides along the shore and r changes as he walks
   _pinPlace();        // the backdrop holds its bearing as the player walks, so it tracks the camera  frame
   // THE OCEAN MAY NOT BE ABLE TO KILL THE SKY. This call sits INSIDE updateSky, so anything it throws aborts every
   // line of sky work after it — the dome stops being moved to the camera and stops being given the hour, which reads
@@ -25813,7 +25882,7 @@ const CMDS={
   // The axis line is drawn from the INSCRIBED one, per his instruction that it is the non-mass point.
   waypoint:{ usage:'/waypoint island center [mass] | /waypoint shore | /waypoint radius | /waypoint circle [mass|inscribed] [min|mean|median|trimmed|max|<r>] | /waypoint off', run:(a)=>{
       const w=a.map(t=>String(t).toLowerCase());
-      if(w[0]==='off'||w[0]==='clear'){ _wpAt=null; if(_wpGroup){ _wpGroup.visible=false; if(_wpCircle) _wpCircle.visible=false; if(_wpRing){ _wpRing.visible=false; _wpRingTicks.visible=false; for(const sp of _wpRingLabels) sp.visible=false; } } return 'waypoint cleared'; }
+      if(w[0]==='off'||w[0]==='clear'){ _wpAt=null; if(_wpGroup){ _wpGroup.visible=false; if(_wpCircle) _wpCircle.visible=false; _wpDialOn=false; if(_wpRing){ _wpRing.visible=false; _wpRingTicks.visible=false; if(_wpMarkA) _wpMarkA.visible=false; for(const sp of _wpRingLabels) sp.visible=false; } } return 'waypoint cleared'; }
       // /waypoint circle [mass|inscribed] [min|mean|median|max|<blocks>]
       // r is the shoreline distance from the chosen centre. A coastline is not a circle, so the command reports
       // the whole spread and says which one it drew -- on this island the centroid is 44 blocks from the nearest
@@ -25821,6 +25890,9 @@ const CMDS={
       // /waypoint radius — Ben's A-to-B construction. It does NOT touch the shoreline: both stay on screen,
       // because the circle is only meaningful against the coast it was measured from.
       if(w[0]==='radius'||w[0]==='r'){
+        if(w[1]==='elastic'){ _wpElastic=!_wpElastic; return `radius ring elastic ${_wpElastic?'ON — the A axis follows you':'off — a plain circle at r'}`; }
+        if(w[1]==='off'){ _wpDialOn=false; if(_wpRing){ _wpRing.visible=false; _wpRingTicks.visible=false; _wpMarkA.visible=false;
+            for(const sp of _wpRingLabels) sp.visible=false; } return 'radius dial off'; }
         if(!_wpAt) return 'no waypoint yet — /waypoint island center mass first';
         const px=camera.position.x, pz=camera.position.z;
         let dx=px-_wpAt.x, dz=pz-_wpAt.z; const L=Math.hypot(dx,dz);
@@ -25828,16 +25900,20 @@ const CMDS={
         dx/=L; dz/=L;
         const A=shoreHit(_wpAt.x,_wpAt.z,dx,dz);
         if(!A) return 'the line does not reach the shoreline — is the waypoint outside the island?';
-        _wpEnsure(); _wpGroup.visible=true; _wpDrawDial(_wpAt.x,_wpAt.z,A.r);
+        _wpEnsure(); _wpGroup.visible=true; _wpDialOn=true; _wpDialFrame();
         const bear=Math.atan2(dz,dx)*180/Math.PI;
         return `A = ${A.x.toFixed(1)}, ${A.z.toFixed(1)}   (the line meets the shoreline here`
              + `${A.crossings>1?', '+A.crossings+' crossings, first one out':''})
 `
              + `  B = ${_wpAt.x}, ${_wpAt.z}   (the ${_wpKind==='mass'?'centre of MASS':'INSCRIBED centre'})
 `
-             + `  r = |AB| = ${A.r.toFixed(1)}   circle centred on B, so A sits on its rim at bearing ${bear.toFixed(1)}
+             + `  r = |AB| = ${A.r.toFixed(1)}   circle centred on B, so A sits on its rim — and A reads 180 on the dial
 `
-             + `  ticks every 5 deg, numbered every 15, same atan2(z,x) degrees /navigator prints — read one off and name it to me`; }
+             + `  the dial rotates with the line: A's world bearing is ${bear.toFixed(1)}, so dial 180 = world ${bear.toFixed(1)}
+`
+             + `  ticks every 5 deg, numbered every 15. LIVE: A slides along the shore and r follows as you walk.
+`
+             + `  read a number off it and give it to /pines at <deg> — that command takes DIAL degrees and converts.`; }
       if(w[0]==='circle'||w[0]==='shore'){
         if(w[0]==='shore'){ w[2]=''; w[1]=w[1]||'mass'; }
         const C=islandCentres(), onMass=(w[1]!=='inscribed');
@@ -25880,14 +25956,22 @@ const CMDS={
            + `  ${mass?'mean coast radius':'largest circle that fits'} ${P.r} blocks`
            + `${mass?'':'  — grid '+C.grid+' at '+C.step+' blocks/cell, '+C.landCells+' land cells'}`; } },
   // The pines are PLACED, not derived: Ben reads a bearing off /waypoint radius and names it here.
-  pines:{ usage:'/pines at <deg> [deg...] | /pines clear | /pines size <blocks> | /pines dist <blocks> | /pines crop <0..1> | /pines list', run:(a)=>{
+  pines:{ usage:'/pines at <dial deg...> | /pines at world <deg...> | /pines clear | /pines size <blocks> | /pines dist <blocks> | /pines crop <0..1> | /pines flip h|v|none | /pines list', run:(a)=>{
       const w=a.map(t=>String(t).toLowerCase());
       if(!w.length||w[0]==='list'){ _pinEnsure();
-        return _pinAt.length?`pines at ${_pinAt.join(', ')} deg   size ${_pinH} blocks tall, ${_pinDist} out`
+        return _pinAt.length?`pines at ${_pinAt.join(', ')} deg   size ${_pinH} tall, ${_pinDist} out   flip h:${_pinFlipH?'on':'off'} v:${_pinFlipV?'on':'off'}`
                             :'no pines placed — /pines at <deg> [deg...]'; }
       if(w[0]==='clear'||w[0]==='off'){ _pinAt=[]; _pinRebuild(); return 'pines cleared'; }
       if(w[0]==='size'){ const v=+w[1]; if(!isFinite(v)||v<=0) return 'size in blocks, e.g. /pines size 70';
         _pinH=v; _pinRebuild(); return `pines are ${_pinH} blocks tall (${(_pinH*_PIN_ASPECT).toFixed(0)} wide) at ${_pinDist} out`; }
+      if(w[0]==='flip'){
+        const k=w[1]||'';
+        if(k==='h') _pinFlipH=!_pinFlipH;
+        else if(k==='v') _pinFlipV=!_pinFlipV;
+        else if(k==='none'||k==='off'){ _pinFlipH=false; _pinFlipV=false; }
+        else return 'flip h, flip v, or flip none';
+        _pinRebuild();
+        return `pines flip — horizontal ${_pinFlipH?'ON':'off'}, vertical ${_pinFlipV?'ON':'off'}`; }
       if(w[0]==='crop'){ const v=+w[1];
         if(!isFinite(v)||v<=0||v>1) return 'crop is the fraction of the image that is trees, 0..1, e.g. /pines crop 0.45';
         _pinCrop=v; _pinRebuild(); return `pines use the top ${(100*_pinCrop).toFixed(0)}% of the image`; }
@@ -25896,12 +25980,23 @@ const CMDS={
         if(v>=camera.far) return `too far — camera.far is ${camera.far.toFixed(0)}, past it they are clipped away`;
         _pinDist=v; _pinRebuild(); return `pines are ${_pinDist} out (${_pinH} blocks tall)`; }
       if(w[0]==='at'){
-        const degs=w.slice(1).map(Number).filter(v=>isFinite(v));
-        if(!degs.length) return 'give bearings in degrees, e.g. /pines at 105 -165';
-        _pinAt=degs.map(d=>((d+180)%360+360)%360-180);
+        // DIAL DEGREES BY DEFAULT, because that is what Ben reads off /waypoint radius, whose 180 is pinned to
+        // A and which therefore ROTATES as he walks. The pines do not rotate -- they are coast -- so the reading
+        // is converted to a world bearing at the moment it is given and stored that way. Both are printed, so a
+        // number that landed somewhere unexpected can be seen immediately instead of argued about.
+        const world=(w[1]==='world');
+        const degs=w.slice(world?2:1).map(Number).filter(v=>isFinite(v));
+        if(!degs.length) return 'give bearings in degrees, e.g. /pines at 105 -165  (dial degrees; /pines at world 12 for world)';
+        if(!world && !_wpDialOn) return 'the dial is not up — /waypoint radius first, or /pines at world <deg>';
+        const norm=d=>((d+180)%360+360)%360-180;
+        const src=degs.map(norm);
+        _pinAt=world?src:src.map(d=>norm(_dialToWorldDeg(d,_wpDialRef)));
         _pinRebuild();
-        return `pines placed at ${_pinAt.join(', ')} deg — atan2(z,x), same degrees as /navigator and the dial
+        return (world?`pines placed at world ${_pinAt.join(', ')} deg
 `
+                     :`pines placed: dial ${src.join(', ')} -> world ${_pinAt.map(v=>v.toFixed(1)).join(', ')} deg`
+                      +`   (dial 180 = world ${_wpDialRef.toFixed(1)})
+`)
              + `  ${_pinH} blocks tall, ${(_pinH*_PIN_ASPECT).toFixed(0)} wide, ${_pinDist} out, foot on the waterline`; }
       return CMDS.pines.usage; } },
   navigator:{ usage:'/navigator [on|off]', run:(a)=>{ const w=String(a[0]||'').toLowerCase();
@@ -44293,6 +44388,27 @@ window.__hc={
   // QA/bench: the shoreline's three shape dials. Changing any of them drops the cached trace.
   // QA/bench: what the waypoint layer currently has on screen. The last attempt at the circle silently took the
   // shoreline off the map, so "is the coast still drawn" is a number now rather than something to notice later.
+  // QA/bench: the first quad's four UV corners, so a flip is confirmed from the geometry rather than from the
+  // command's own reply. A flip that only changed a flag would still print "ON".
+  // QA/bench: the dial's reference and where A lands ON the dial. Ben's rule is that A reads 180 always, so
+  // this reports the reading rather than the intent.
+  dialState(){ try{ if(!_wpDialOn||!_wpAt) return {off:true};
+      const dx=camera.position.x-_wpAt.x, dz=camera.position.z-_wpAt.z, L=Math.hypot(dx,dz)||1;
+      const A=shoreHit(_wpAt.x,_wpAt.z,dx/L,dz/L); if(!A) return {noHit:true};
+      const aWorld=Math.atan2(A.z-_wpAt.z, A.x-_wpAt.x)*180/Math.PI;
+      return { refDeg:+_wpDialRef.toFixed(2), aWorldDeg:+aWorld.toFixed(2),
+               dialOfA:(v=>v<=-179.99?180:+v.toFixed(2))(_worldToDialDeg(aWorld,_wpDialRef)),
+               r:+A.r.toFixed(1), playerDist:+L.toFixed(1), elastic:_wpElastic,
+               // what the ring actually reaches, measured off the drawn geometry rather than from the inputs
+               reachAtA:+Math.hypot(..._dialPoint(_wpAt.x,_wpAt.z,180,_wpDialRef,_wpElastic?L:A.r,A.r)
+                                      .map((v,i)=>v-(i?_wpAt.z:_wpAt.x))).toFixed(1),
+               reachAcross:+Math.hypot(..._dialPoint(_wpAt.x,_wpAt.z,90,_wpDialRef,_wpElastic?L:A.r,A.r)
+                                      .map((v,i)=>v-(i?_wpAt.z:_wpAt.x))).toFixed(1) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  pinesUV(){ try{ const m=_pinGroup&&_pinGroup.children[0]; if(!m) return null;
+      const uv=m.geometry.attributes.uv, o=[];
+      for(let i=0;i<uv.count;i++) o.push([+uv.getX(i).toFixed(2), +uv.getY(i).toFixed(2)]);
+      return o; } catch(e){ return {err:String(e.message||e)}; } },
   pinesState(){ try{ return { at:_pinAt.slice(), n:_pinGroup?_pinGroup.children.length:0, dist:_pinDist, h:_pinH,
       texLoaded:!!(_pinTex&&_pinTex.image&&_pinTex.image.width>0), camFar:+camera.far.toFixed(1) }; }
     catch(e){ return {err:String(e.message||e)}; } },
@@ -44300,7 +44416,7 @@ window.__hc={
   // actually facing the player. dotToPlayer is the quad's own normal against the direction back to the camera;
   // +1 is facing him, -1 is facing away, and the first cut of this scored -1 on every one.
   pinesState(){ try{ const out={ at:_pinAt.slice(), n:_pinGroup?_pinGroup.children.length:0, dist:_pinDist, h:_pinH,
-      texLoaded:!!(_pinTex&&_pinTex.image&&_pinTex.image.width>0), camFar:+camera.far.toFixed(1), facing:[] };
+      texLoaded:!!(_pinTex&&_pinTex.image&&_pinTex.image.width>0), tex:_pinTex&&_pinTex.image?String(_pinTex.image.src||'').split('/').pop():null, flipH:_pinFlipH, flipV:_pinFlipV, camFar:+camera.far.toFixed(1), facing:[] };
     if(_pinGroup) for(const m of _pinGroup.children){
       const n=new THREE.Vector3(0,0,1).applyQuaternion(m.quaternion);
       const toCam=m.position.clone().negate().normalize();          // group origin IS the camera
