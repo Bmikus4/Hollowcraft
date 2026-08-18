@@ -9388,6 +9388,15 @@ let _pinFlipH=false, _pinFlipV=false, _pinEyeX=0, _pinEyeZ=0;
 // Ben 08-18: "move pines down by 8 blocks." Sunk below the waterline, so the foot of the stand is buried
 // rather than sitting on the surface with a visible bottom edge -- the same reason the old band sank its own.
 let _pinDrop=8;
+// ---- CURVED, NOT FLAT (Ben 08-18: "the images should [be] curved planes, curved with the center away from
+// the player, so the outer curve is away and the edges are closer, just slightly") ----
+// The bow is baked into the GEOMETRY in the quad's own local space, which is what makes it survive everything
+// else this feature does to the image: lookAt only turns the object, and the flips only rewrite UVs, so
+// neither can undo it. The plane's +Z is the face that ends up pointing at the player, so bowing the middle
+// AWAY means pushing it to -Z, with the edges left at 0 and therefore nearer him.
+// Parabolic rather than a true arc: over a bow this shallow the two are within a pixel of each other, and a
+// parabola needs no trig per vertex.
+let _pinCurve=0.10, _PIN_SEG=24;
 function _pinEnsure(){ if(_pinGroup) return _pinGroup;
   _pinTex=new THREE.TextureLoader().load('assets/horizon/pines-original.png');
   _pinTex.colorSpace=THREE.SRGBColorSpace; _pinTex.anisotropy=8;
@@ -9403,8 +9412,12 @@ function _pinRebuild(){
   // is stretched: the crop takes _pinCrop of the height, so the width follows from the full-image aspect.
   const h=_pinH, w=h*_PIN_ASPECT/_pinCrop;
   for(const deg of _pinAt){
-    const th=deg*Math.PI/180;
-    const geo=new THREE.PlaneGeometry(w,h);
+    const geo=new THREE.PlaneGeometry(w,h,_PIN_SEG,1);
+    { const pos=geo.attributes.position, bow=_pinCurve*w;
+      for(let i=0;i<pos.count;i++){
+        const t=pos.getX(i)/(w*0.5);                 // -1 at one edge, +1 at the other
+        pos.setZ(i, -bow*(1-t*t)); }
+      pos.needsUpdate=true; geo.computeVertexNormals(); }
     // UVs to the TOP _pinCrop of the texture. v runs 0 at the bottom, so the trees are 1-crop .. 1.
     // FLIP THEN CROP, in that order: the crop selects a band of the ORIGINAL image, so flipping after it would
     // pick a different band. Done on the UVs rather than by scaling the mesh negative, which would invert the
@@ -9418,7 +9431,7 @@ function _pinRebuild(){
       uv.needsUpdate=true; }
     const m=new THREE.Mesh(geo, _pinMat);
     m.frustumCulled=false; m.renderOrder=-4;
-    m.userData.az=th;
+    m.userData.dial=deg;                 // DIAL degrees, not world — see _pinPlace
     _pinGroup.add(m); }
   _pinPlace(); }
 function _pinPlace(){
@@ -9438,19 +9451,42 @@ function _pinPlace(){
   _pinEyeX += (camera.position.x-_pinEyeX)*0.12;
   _pinEyeZ += (camera.position.z-_pinEyeZ)*0.12;
   for(const m of _pinGroup.children){
-    const th=m.userData.az;
+    // ---- THE DEGREE IS A DIAL DEGREE, AND IT IS WHAT IS STORED ----
+    // This was the bug behind "the pine images still arent staying locked on thier degree". Each pine held a
+    // WORLD bearing and its dial degree was re-derived every frame -- but the dial ROTATES with the player, so
+    // a fixed world bearing walks across the dial's numbers and the image slid off its mark. The degree is the
+    // number Ben reads and names, so the degree is the thing that has to be constant: the dial degree is stored
+    // and the world position is recomputed from the CURRENT dial each frame. The pine now sits on its tick for
+    // good, and it is the world that moves under it.
+    const dd=m.userData.dial;
     let x, z;
-    if(D){ const q=_dialPoint(D.x,D.z,_worldToDialDeg(th*180/Math.PI, D.ref), D.ref, D.along, D.across);
-           x=q[0]; z=q[1]; }
-    else { x=camera.position.x+Math.cos(th)*_pinDist; z=camera.position.z+Math.sin(th)*_pinDist; }
+    if(D){ const q=_dialPoint(D.x,D.z,dd,D.ref,D.along,D.across); x=q[0]; z=q[1]; }
+    else { const th=(dd-180+ (_wpDialRef||0))*Math.PI/180;
+           x=camera.position.x+Math.cos(th)*_pinDist; z=camera.position.z+Math.sin(th)*_pinDist; }
     // A POINT ON THE RING CAN BE BEYOND THE FAR PLANE, and past it the quad is clipped and draws NOTHING --
     // silently, which is how this feature lost a whole session once. From the near side of the island a far-side
     // ring point measures 350-plus against a camera.far of 326. So the bearing is kept exact and the distance is
     // pulled in to just inside the plane when it has to be: the image stays where its degree says it is and
     // still travels as the ring breathes, instead of blinking out.
-    { const dx0=x-_pinEyeX, dz0=z-_pinEyeZ, L0=Math.hypot(dx0,dz0), lim=camera.far*0.9;
-      m.userData.clamped = L0>lim;
-      if(m.userData.clamped && L0>1){ x=_pinEyeX+dx0/L0*lim; z=_pinEyeZ+dz0/L0*lim; } }
+    // ---- BRINGING IT INSIDE THE FAR PLANE WITHOUT KNOCKING IT OFF ITS DEGREE ----
+    // The first cut pulled the quad along the line from the EYE. That keeps it visible and destroys the whole
+    // point of it: moving along the eye's line changes its bearing FROM B, so its dial degree drifted -- pine A
+    // read 105 but was standing on 126.9, then 112.2, then 140.4 as the player walked. Measured, not noticed.
+    // It is pulled in along B's OWN RADIAL instead, so the dial degree is exactly preserved and only the radius
+    // shrinks. Solving |B + dir*s - E| = lim for the largest s that fits is one quadratic:
+    //   s^2 + 2s(d.dir) + |d|^2 - lim^2 = 0,  d = B - E
+    if(D){ const lim=camera.far*0.9;
+      const dirx=(x-D.x), dirz=(z-D.z), s0=Math.hypot(dirx,dirz)||1;
+      const ux=dirx/s0, uz=dirz/s0;
+      const dxE=D.x-_pinEyeX, dzE=D.z-_pinEyeZ;
+      const b=dxE*ux+dzE*uz, c0=dxE*dxE+dzE*dzE-lim*lim;
+      const disc=b*b-c0;
+      let s=s0;
+      if(Math.hypot(x-_pinEyeX, z-_pinEyeZ)>lim){
+        s = disc>=0 ? Math.min(s0, -b+Math.sqrt(disc)) : Math.max(0, -b);
+        m.userData.clamped=true; }
+      else m.userData.clamped=false;
+      if(s!==s0){ x=D.x+ux*s; z=D.z+uz*s; } }
     // Foot on the waterline, less the drop: a centred plane's bottom edge is half its height below its origin.
     m.position.set(x, CFG.SEA-_pinDrop+_pinH*0.5, z);
     // FACE THE PLAYER with lookAt at the quad's OWN height, which is a horizontal turn only -- a lookAt at the
@@ -26019,10 +26055,10 @@ const CMDS={
            + `  ${mass?'mean coast radius':'largest circle that fits'} ${P.r} blocks`
            + `${mass?'':'  — grid '+C.grid+' at '+C.step+' blocks/cell, '+C.landCells+' land cells'}`; } },
   // The pines are PLACED, not derived: Ben reads a bearing off /waypoint radius and names it here.
-  pines:{ usage:'/pines at <dial deg...> | /pines at world <deg...> | /pines clear | /pines size <blocks> | /pines dist <blocks> | /pines crop <0..1> | /pines flip h|v|none | /pines drop <blocks> | /pines list', run:(a)=>{
+  pines:{ usage:'/pines at <dial deg...> | /pines at world <deg...> | /pines clear | /pines size <blocks> | /pines dist <blocks> | /pines crop <0..1> | /pines flip h|v|none | /pines drop <blocks> | /pines curve <frac> | /pines list', run:(a)=>{
       const w=a.map(t=>String(t).toLowerCase());
       if(!w.length||w[0]==='list'){ _pinEnsure();
-        return _pinAt.length?`pines at ${_pinAt.join(', ')} deg   size ${_pinH} tall, ${_pinDist} out   flip h:${_pinFlipH?'on':'off'} v:${_pinFlipV?'on':'off'}`
+        return _pinAt.length?`pines at dial ${_pinAt.join(', ')} deg   size ${_pinH} tall, ${_pinDist} out   flip h:${_pinFlipH?'on':'off'} v:${_pinFlipV?'on':'off'}`
                             :'no pines placed — /pines at <deg> [deg...]'; }
       if(w[0]==='clear'||w[0]==='off'){ _pinAt=[]; _pinRebuild(); return 'pines cleared'; }
       if(w[0]==='size'){ const v=+w[1]; if(!isFinite(v)||v<=0) return 'size in blocks, e.g. /pines size 70';
@@ -26035,6 +26071,9 @@ const CMDS={
         else return 'flip h, flip v, or flip none';
         _pinRebuild();
         return `pines flip — horizontal ${_pinFlipH?'ON':'off'}, vertical ${_pinFlipV?'ON':'off'}`; }
+      if(w[0]==='curve'){ const v=+w[1];
+        if(!isFinite(v)||v<0) return `curve is the bow depth as a fraction of the image width; now ${_pinCurve}`;
+        _pinCurve=v; _pinRebuild(); return `pines bow ${(_pinCurve*100).toFixed(0)}% of their width away from you at the centre`; }
       if(w[0]==='drop'){ const v=+w[1];
         if(!isFinite(v)) return `drop is how far below the waterline the foot sits; now ${_pinDrop} blocks`;
         _pinDrop=v; _pinPlace(); return `pines dropped ${_pinDrop} blocks below the waterline`; }
@@ -26056,12 +26095,13 @@ const CMDS={
         if(!world && !_wpDialOn) return 'the dial is not up — /waypoint radius first, or /pines at world <deg>';
         const norm=d=>((d+180)%360+360)%360-180;
         const src=degs.map(norm);
-        _pinAt=world?src:src.map(d=>norm(_dialToWorldDeg(d,_wpDialRef)));
+        // Stored as DIAL degrees either way: that is the number that must stay put. A world bearing given with
+        // "world" is converted once, using the dial as it stands now.
+        _pinAt=world?src.map(d=>norm(_worldToDialDeg(d,_wpDialRef))):src;
         _pinRebuild();
-        return (world?`pines placed at world ${_pinAt.join(', ')} deg
+        return (world?`pines placed: world ${src.join(', ')} -> dial ${_pinAt.map(v=>v.toFixed(1)).join(', ')} deg
 `
-                     :`pines placed: dial ${src.join(', ')} -> world ${_pinAt.map(v=>v.toFixed(1)).join(', ')} deg`
-                      +`   (dial 180 = world ${_wpDialRef.toFixed(1)})
+                     :`pines placed at dial ${_pinAt.join(', ')} deg — they stay on those ticks as the dial turns
 `)
              + `  ${_pinH} blocks tall, ${(_pinH*_PIN_ASPECT).toFixed(0)} wide, foot ${_pinDrop} below the waterline`; }
       return CMDS.pines.usage; } },
@@ -44487,8 +44527,24 @@ window.__hc={
     if(_pinGroup) for(const m of _pinGroup.children){
       const n=new THREE.Vector3(0,0,1).applyQuaternion(m.quaternion);
       const toCam=new THREE.Vector3(camera.position.x-m.position.x, 0, camera.position.z-m.position.z).normalize();
-      out.facing.push({ deg:+(m.userData.az*180/Math.PI).toFixed(1), dotToPlayer:+n.dot(toCam).toFixed(3),
+      out.facing.push({ dial:m.userData.dial, dotToPlayer:+n.dot(toCam).toFixed(3),
                         at:[+m.position.x.toFixed(1), +m.position.z.toFixed(1)],
+                        // WHERE IT IS ACTUALLY STANDING, worked back from its world position through the live
+                        // dial. If this drifts from `dial`, the image has come off its mark — which is the bug
+                        // Ben reported twice and which the intent alone could never have shown.
+                        dialNow:(_wpDialLast?+_worldToDialDeg(
+                          Math.atan2(m.position.z-_wpDialLast.z, m.position.x-_wpDialLast.x)*180/Math.PI,
+                          _wpDialLast.ref).toFixed(1):null),
+                        // The bow, measured off the geometry in WORLD space after every rotation and flip:
+                        // how much further from the player the quad's centre is than its edge. Positive means
+                        // the middle is bowed away, which is the shape asked for.
+                        // THE BOW, off the geometry's own vertices. Measuring it as "is the centre further from
+                        // the camera than the edge" was wrong and said so: a 219-block-wide billboard seen from
+                        // 127 blocks has its edges naturally 47 blocks further than its middle, which swamps a
+                        // 22-block bow and reported the correct shape as negative. Local z is the bow itself,
+                        // and being local it is exactly what must survive rotation and flips.
+                        bow:(()=>{ try{ const pos=m.geometry.attributes.position;
+                            return +(pos.getZ(0)-pos.getZ(Math.floor(_PIN_SEG/2))).toFixed(2); }catch(_){ return null; } })(),
                         distToPlayer:+(m.userData.dist||0).toFixed(1), clamped:!!m.userData.clamped }); }
     return out; } catch(e){ return {err:String(e.message||e)}; } },
   wpState(){ try{ return { shoreVisible:!!(_wpCircle&&_wpCircle.visible),

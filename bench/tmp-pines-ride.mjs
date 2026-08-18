@@ -19,19 +19,27 @@ await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===tr
 await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:420000});
 await page.evaluate("__hc.lock(true); __hc.cmdRun('/gamemode creative'); __hc.cmdRun('/fly on');");
 await page.evaluate("__hc.cmdRun('/waypoint island center mass'); __hc.cmdRun('/waypoint shore'); __hc.cmdRun('/waypoint radius');");
-await page.evaluate("__hc.cmdRun('/pines at world 105 -165')");
+await page.evaluate("__hc.cmdRun('/pines at 105 -165')");
 const B=await page.evaluate('__hc.islandCentres().mass');
-console.log('   walking out along bearing 150. Each pine must MOVE as the ring breathes, and keep facing you.');
-console.log('   playerD   reachAtA   pine@105 world      dist   dot      pine@-165 world     dist   dot');
+console.log('   THE TEST: each pine is placed at a DIAL degree and must still be standing on it from every');
+console.log('   position. dialNow is worked back from the world position through the live dial.');
+console.log('   playerD  reachAtA   pineA: set/now      world           pineB: set/now      world');
 let prev=null;
 for(const d of [60,140,220,300,380,460]){
   await page.evaluate(`__hc.tpAt(${B.x}+Math.cos(150*Math.PI/180)*${d}, 130, ${B.z}+Math.sin(150*Math.PI/180)*${d});`);
   await sleep(700);
   const D=await page.evaluate('__hc.dialState()'); const S=await page.evaluate('__hc.pinesState()');
   const f=S.facing;
-  console.log(`   ${String(d).padStart(7)} ${String(D.reachAtA).padStart(10)}   ${String(JSON.stringify(f[0].at)).padEnd(18)} ${String(f[0].distToPlayer).padStart(6)} ${String(f[0].dotToPlayer).padStart(6)}   ${String(JSON.stringify(f[1].at)).padEnd(18)} ${String(f[1].distToPlayer).padStart(6)} ${String(f[1].dotToPlayer).padStart(6)}`);
-  if(prev) { const mv=Math.hypot(f[0].at[0]-prev[0], f[0].at[1]-prev[1]); if(mv<0.01) console.log('      ^ pine@105 DID NOT MOVE'); }
+  const bad=f.filter(q=>q.dialNow!=null && Math.abs(((q.dialNow-q.dial+540)%360)-180)>1.0);
+  console.log(`   ${String(d).padStart(7)} ${String(D.reachAtA).padStart(9)}   ${String(f[0].dial+'/'+f[0].dialNow).padEnd(14)} ${String(JSON.stringify(f[0].at)).padEnd(16)} ${String(f[1].dial+'/'+f[1].dialNow).padEnd(14)} ${String(JSON.stringify(f[1].at)).padEnd(16)}${bad.length?'   <-- OFF ITS MARK':''}`);
+  if(prev) { const mv=Math.hypot(f[0].at[0]-prev[0], f[0].at[1]-prev[1]); if(mv<0.01) console.log('      ^ pineA did not move at all'); }
   prev=f[0].at;
+}
+// AND THE BOW MUST SURVIVE THE FLIPS, which is the part of the request a screenshot would not settle.
+for(const fl of ['flip h','flip v','flip none']){
+  await page.evaluate(`__hc.cmdRun('/pines ${fl}')`); await sleep(500);
+  const S=await page.evaluate('__hc.pinesState()');
+  console.log(`   after /pines ${fl.padEnd(9)} bow ${S.facing.map(q=>q.bow).join(', ')}   facing ${S.facing.map(q=>q.dotToPlayer).join(', ')}`);
 }
 console.log(errs.length?('  ERRORS: '+errs.slice(0,3).join(' | ')):'  no page errors');
 await browser.close(); server.kill();
