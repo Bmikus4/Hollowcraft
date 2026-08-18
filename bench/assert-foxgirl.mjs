@@ -26,7 +26,7 @@ import { openWorld, sleep } from './lib/rig.mjs';
     console.log('foxgirl  '+JSON.stringify(g));
     ok(!g.err && g.present && g.alive, 'she is in the world alive ('+(g.err||'')+')');
     ok(g.meshes>1, 'she has a real body rather than the fallback box ('+g.meshes+' meshes)');
-    ok(g.rig && g.mapped>=14, 'the giantess retarget took: '+g.mapped+' of her bones answer giantess names, '+g.bones+' bones in the skeleton');
+    ok(g.rig && g.mapped>=11, 'the giantess retarget took (spine, neck, head, legs; the arms are deliberately out, see FOX_BONE_MAP): '+g.mapped+' of her bones answer giantess names, '+g.bones+' bones in the skeleton');
     ok(Math.abs(g.footGap||0) < 0.2, 'her feet are on the ground (footGap '+g.footGap+')');
 
     // /spawn must not know her, by all three routes
