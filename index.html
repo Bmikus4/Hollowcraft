@@ -21055,6 +21055,32 @@ function surfaceUp(x,y,z){ // desired up = normal of the surface the crawler cli
   if(solidAt(x,y+3.2,z)) return _wu.set(0,-1,0);
   return _wu.set(0,1,0);
 }
+// ---- THE COLLISION ENVELOPE (Ben: "make it so that the wretch cant clip his body through blocks") ----
+// 873d919 measured 89% of stalk samples with some part of the rig inside the world and named the fix rather than
+// shipping one: "a collision envelope that fits the creature rather than a capsule about its feet". This is that
+// envelope, and the thing worth writing down is what the mover had before it: NOTHING. The step test asked
+// solidAt(floor(tx), .., floor(tz)) -- one column, the one the body's own centre lands in -- so a creature whose
+// chest is most of a block wide could stand with its centre a centimetre from a face and half of itself inside
+// the trunk. The radius was zero. Every "it clips through blocks" report since is that one line.
+// THE RADIUS IS THE BODY'S, NOT THE ARMS'. __hc.rigSpan on a posed rig reads 1.88 blocks of arm reach, and an
+// envelope that size needs a four-block corridor: in a wood where the trunks stand about a block apart it would
+// simply never move. It is also the wrong lever -- 873d919 established that at the range where an arm reaches a
+// trunk the arm's REST POSE is already inside it, so no body radius short of absurd empties the arms out. What a
+// body radius does do is hold the whole creature, arms included, that much further off every face it passes.
+// FOUR SIDES AND FOUR DIAGONALS. A disc of radius 0.45 spills into at most the neighbouring columns, so eight
+// samples on its rim cover it exactly; testing the full bounding square would refuse doorways the creature fits.
+// IT LETS GO WHEN WEDGED. tall already drops to crawl clearance after _mvStuck passes 0.4, and the radius follows
+// it to zero on the same signal -- an envelope with no release is a creature stuck in a doorway for ever, which
+// is a worse bug than the one it fixes.
+let W_ENV=0.45;   // __hc.wretchEnv(r) is the A/B; 0 is the old zero-radius capsule exactly
+function _envBlocked(tx,tz,fy,tall,r){
+  const test=(x,z)=>{ const bx=Math.floor(x), bz=Math.floor(z);
+    for(let h=0;h<=tall;h++) if(solidAt(bx,fy+h,bz)) return true; return false; };
+  if(test(tx,tz)) return true;
+  if(!(r>0)) return false;
+  const d=r*0.7071;
+  return test(tx+r,tz) || test(tx-r,tz) || test(tx,tz+r) || test(tx,tz-r)
+      || test(tx+d,tz+d) || test(tx+d,tz-d) || test(tx-d,tz+d) || test(tx-d,tz-d); }
 // obstacle-aware step: never phase through solids — steer around trunks/walls, step over 1-block rises
 function moveEntity(nx,nz,speed,dt){
   const step=Math.min(speed*dt,0.75), base=Math.atan2(nx,nz);
@@ -21072,8 +21098,9 @@ function moveEntity(nx,nz,speed,dt){
     // did not move a single inch in thirty seconds, mvStuck cycling 0.03 to 0.79 while it flipped its follow side. Anything
     // standing on a lantern, chest, barrel, bed, trapdoor or font was frozen there. ceil is exact for whole heights too.
     const fy=Math.ceil(gy-1e-4);
-    let block=false; for(let h=0;h<=tall;h++) if(solidAt(Math.floor(tx),fy+h,Math.floor(tz))){ block=true; break; }
-    if(block) continue;
+    // THE ENVELOPE, not the centre column (see _envBlocked). It releases to zero on the same wedge signal that
+    // drops the clearance to a crawl, so nothing this refuses can trap the creature permanently.
+    if(_envBlocked(tx,tz,fy,tall, ms>0.4?0:W_ENV)) continue;
     if(off!==0) wretch._steer = off>0?1:-1;                                              // remember the turn direction
     wretch.pos.x=tx; wretch.pos.z=tz; wretch.pos.y=gy; wretch.yaw=Math.atan2(-mx,-mz); wretch._mvStuck=0; return true;
   }
@@ -28825,7 +28852,7 @@ function buildFist(){ const g=new THREE.Group();                                
   //   THE FIST AND THE WRIST JOIN ARE KEPT, as asked. The fist stays 0.100 x 0.108 against the arm's 0.092 x 0.100, and
   // that 8 mm is deliberate and is the one place a step belongs: a hand IS wider than the wrist it turns on, and it is
   // what makes a fist read as a fist rather than as the end of a stick.
-  box(0.092,0.100,0.455,-0.240,skin);            // THE ARM: one prism, shoulder end to wrist, no steps in it
+  box(0.092,0.100,0.455,-0.240,skin).userData._limb=1;   // THE ARM: one prism, shoulder end to wrist, no steps in it. _limb: it is the part that reaches the eye — see the ADS rule in updateView
   //   AND THE SLEEVE IS LONG ENOUGH TO SEE. At 0.26 centred on -0.148 its front edge landed at -0.278, which with the
   // group 0.12 behind the eye is camera -0.158 — so between the near plane and that edge there were four centimetres of
   // visible cloth and the limb read as bare. It was the deleted CUFF, out at -0.340, that used to be the cloth you could
@@ -28842,7 +28869,7 @@ function buildFist(){ const g=new THREE.Group();                                
   // behind the near plane and never counts, and perspective then spends most of what is left on the huge foreshortened
   // near end. The front edge is what has to move: 0.40 centred on -0.220 runs the cloth to -0.420, a cuff 36 mm short
   // of the wrist, which is where a sleeve ends on an arm.
-  box(0.106,0.114,0.40,-0.220,cloth);            // the sleeve, rear end cut by the near plane, cuff line just short of the wrist
+  box(0.106,0.114,0.40,-0.220,cloth).userData._limb=1;   // the sleeve, rear end cut by the near plane, cuff line just short of the wrist
   // ---- IT HAD TO READ AS A HAND IN A REAL FRAME, AND IT DID NOT (looked at, 08-17: gun, tool and empty, at 1280x720) ----
   // Every part of the limb was already in front of the near plane and every dimension was the authored one, and what
   // filled the corner of the frame was still a tan BEAM: end-on down the view axis, a fist 8 mm wider than the wrist it
@@ -29003,6 +29030,7 @@ camera.add(offView.group);
 // The offhand ITEM keeps its low rest (OFF_VIEW_Y): "the left hand down by default" was about the thing you carry, not about
 // the limb. Guns are exempt by construction, not by a test here — updateMainArm/updateOffArm hide these groups for a gun,
 // because a gun carries its own hand (attachGunHand) and that hand rides the weapon.
+let _GUNARM_ADS=0.5;   // above this adsT the gun hand's forearm stops drawing — see the note in updateView
 const FIST_REST_Y=-0.22, ARM_REST_Z=0.12;   // ARM_REST_Z is also the base the block-out's arm-follow rebases off — see the end of updateView
 // THE FOREARM COMES IN FROM THE SHOULDER, AND A SHOULDER IS NOT WHERE YOUR EYE IS. Every one of the three groups that
 // carries the fist was yawed 0, so the limb ran dead parallel to the view axis out of the corner of the frame: seen
@@ -29999,6 +30027,24 @@ function updateView(dt){ updateRecoil(dt);                                      
     view.adsVel = (view.adsT-prevAdsT)/Math.max(dt,1e-4);                        // signed raise(+)/lower(-) speed, per second → feeds transition sway
     if(prevAdsT<0.85 && view.adsT>=0.85) view.settleT=0.28;                      // crossing into the cheek-weld kicks a brief settle oscillation
     view.settleT=Math.max(0,(view.settleT||0)-dt);
+    // ---- THE FIRING FOREARM STANDS DOWN AT ADS (looked at, 08-17: an AR-15 at adsT 1, 1280x720) ----
+    // Painting the skin material magenta settles what it is: at full ADS a wall of FOREARM stands above the receiver
+    // and fills the sight picture on both sides of it. It is not a placement error — attachGunHand solves the palm onto
+    // the grip and the arm runs back from there toward the shoulder, which is correct — it is that the shoulder end is
+    // a hand's breadth from the eye, and anything that close projects across the whole frame however thin it is. Hip
+    // fire never showed it because the gun is low and the elbow leaves the frame at the bottom.
+    //   HIDING THE FOREARM ALONE IS NOT ENOUGH, and that was tried first: with the arm and sleeve gone the FIST still
+    // stood beside the receiver as a slab of skin a third of the frame wide, because it is 35 cm from the eye and its
+    // own knuckles are the widest thing on it. So the whole gun hand stands down at ADS. Down a sight the firing hand
+    // is behind the receiver in life as well, and the A/B says so: the same frame with the hand shown has a wall of
+    // skin above the sights, and without it the rifle, the front post and the world are all that is left.
+    //   The parts stay marked (`_limb` in buildFist) and are toggled with the group, so hip fire comes back with the
+    // arm attached rather than with a hand floating on the grip.
+    //   The threshold is a DIAL (__hc.gunArmADS): 0.5 by default, 1.1 restores the old behaviour, 0 hides it always.
+    { const gh=view.mesh&&view.mesh.userData&&view.mesh.userData._gunHand;
+      if(gh){ const show=(view.adsT||0) < _GUNARM_ADS;
+        if(gh.userData._limbShown!==show){ gh.userData._limbShown=show; gh.visible=show;
+          for(const c of gh.children) if(c.userData&&c.userData._limb) c.visible=show; } } }
     const adsT=view.adsT, et=clock.elapsedTime, mv=Math.min(1,sp/5);
     // ---- FOUR-SOURCE SCOPE SWAY (radians of gun drift); converges to (a) alone when fully aimed + still ----
     // NOTE for anyone reading the offhand penalty below: this sway moves the GUN, and fireGun sends its bullet down
@@ -46976,6 +47022,36 @@ window.__hc={
         if(_meshBuried(o)){ buried++; const k=label(o); by[k]=(by[k]|0)+1; } });
       return { parts, buried, by, pos:[+wretch.pos.x.toFixed(2),+wretch.pos.y.toFixed(2),+wretch.pos.z.toFixed(2)], state:wretch.state }; }
     catch(e){ return {err:String(e.message||e)}; } },
+  // HOW WIDE THE CREATURE ACTUALLY IS, FROM ITS POSED MESHES. The mover tests one column under the body, so the
+  // only number it has ever had for the creature's size is zero. This is the number an envelope needs, and it has
+  // to come from the POSED rig: a Box3 over a SkinnedMesh is its bind box and does not move when the body does.
+  // Every mesh's eight world corners, horizontal distance from wretch.pos, kept per limb -- the body radius and the
+  // arm reach are two different numbers and an envelope that uses one for the other is either fat or useless.
+  // THE ENVELOPE'S RADIUS, AND ITS OFF SWITCH (see _envBlocked). true restores the shipped 0.45, false/0 restores
+  // the zero-radius centre-column capsule the mover had for its whole life -- which is the control this has to be
+  // measured against, because a fix with no off switch cannot be shown to be one.
+  wretchEnv(v){ try{ if(v!=null) W_ENV = (v===true?0.45 : (v===false?0 : Math.max(0,+v||0)));
+      return { r:W_ENV }; } catch(e){ return {err:String(e.message||e)}; } },
+  rigSpan(){ try{ const g=wretch.group; if(!g||!wretch.active) return {err:'not active'};
+      g.updateMatrixWorld(true);
+      const P=wretch.P, tag=new Map();
+      if(P){ if(P.arms) P.arms.forEach((c,ai)=>c.forEach(j=>j&&tag.set(j, 'arm')));
+        if(P.legs) P.legs.forEach((L)=>{ for(const k of ['hip','thigh','shin','foot']) if(L&&L[k]) tag.set(L[k], k==='foot'||k==='shin'?'leg':'body'); });
+        if(P.spine) P.spine.forEach(j=>j&&tag.set(j,'body'));
+        if(P.neck) tag.set(P.neck,'head'); if(P.head) tag.set(P.head,'head'); }
+      const label=o=>{ let n=o; for(let i=0;i<12 && n;i++){ const t=tag.get(n); if(t) return t; n=n.parent; } return 'other'; };
+      const px=wretch.pos.x, pz=wretch.pos.z, py=wretch.pos.y;
+      const by={}, v=new THREE.Vector3(); let rMax=0, yLo=1e9, yHi=-1e9;
+      g.traverse(o=>{ if(!o.isMesh || !o.visible) return; const gg=o.geometry; if(!gg) return;
+        if(!gg.boundingBox) gg.computeBoundingBox(); const bb=gg.boundingBox; if(!bb) return;
+        o.updateWorldMatrix(true,false); const k=label(o); let r=by[k]||0;
+        for(let i=0;i<8;i++){ v.set(i&1?bb.max.x:bb.min.x, i&2?bb.max.y:bb.min.y, i&4?bb.max.z:bb.min.z).applyMatrix4(o.matrixWorld);
+          const d=Math.hypot(v.x-px, v.z-pz); if(d>r) r=d; if(d>rMax) rMax=d;
+          if(v.y-py<yLo) yLo=v.y-py; if(v.y-py>yHi) yHi=v.y-py; }
+        by[k]=r; });
+      for(const k in by) by[k]=+by[k].toFixed(2);
+      return { rMax:+rMax.toFixed(2), by, yLo:+yLo.toFixed(2), yHi:+yHi.toFixed(2), state:wretch.state, crawl:+(wretch.crawl||0).toFixed(2) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   // QA: record a fork's bones AT FRAME RATE, with the animation clock, so a tempo can be measured rather than estimated.
   // Pass a kind to start, null to stop and drain. Rows are [phase, thigh0, arm0, groupY].
   rigTrace(kind){ try{
@@ -47338,6 +47414,13 @@ window.__hc={
     return { held:view.id, near:camera.near, group:[+view.group.position.x.toFixed(3),+view.group.position.y.toFixed(3),+view.group.position.z.toFixed(3)],
              drawn:out.filter(r=>!r.clipped).length, of:out.length, parts:out };
   }catch(e){ return {err:String(e&&e.message||e)}; } },
+  // QA/dial: the adsT above which the gun hand's forearm stops drawing. 1.1 restores the old behaviour (never hidden),
+  // 0 hides it always; the report says which parts the live hand actually has hidden, so the A/B is one call.
+  gunArmADS(v){ try{ if(v!=null) _GUNARM_ADS=+v;
+      const gh=view.mesh&&view.mesh.userData&&view.mesh.userData._gunHand;
+      const parts=gh?gh.children.filter(c=>c.userData&&c.userData._limb).map(c=>c.visible):null;
+      return { at:_GUNARM_ADS, adsT:+(view.adsT||0).toFixed(3), hasGunHand:!!gh, limbVisible:parts }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   nudgeActive(){ return !!_lookNudge; },                                                    // QA: is the one-shot look-up nudge still running?
   cineKill(){ if(typeof endBossCutscene==='function')endBossCutscene(); _lookNudge=null; return {cine:!!_cine}; },   // QA: end an arrival early
   summon(){ HORROR._firstNight=true; wretch.debug=false; if(!wretch.active){ wretch.spawnT=0; if(!spawnWretch(Math.random()*360,26)) wretch.spawnT=0.5; } return wretch.active; },
