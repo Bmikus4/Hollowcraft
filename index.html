@@ -9251,6 +9251,25 @@ function _wpDrawDial(cx,cz,r,refDeg,along){
 // along the shoreline to the new crossing, r = |AB| changes with it and the circle resizes under him. The tick
 // NUMBERS stay world bearings on purpose -- they are the shared coordinate with /navigator and /pines, and a
 // dial whose numbers moved could not name a direction.
+// ---- THE SPRING (Ben 08-18: "it's not springy around point A, it should slow down to a stop past a certain
+// point in either direction") ----
+// The first cut tied the ring's reach to the player's distance one for one, which is not a spring, it is a
+// rigid rod: it tracked him all the way to the centre and all the way out to sea with no sense of resistance.
+// A spring is stiff near its rest length and stops giving at its travel limit, in BOTH directions.
+//
+// Rest length is r = |AB|, so on the shoreline the ring still lines up through A exactly. The deviation from
+// rest is passed through tanh, which is linear near zero and saturates: near A the ring follows the player one
+// for one, and as he goes further the movement slows and comes to a stop at r +/- GIVE.
+// GIVE IS 20 BLOCKS, Ben's number, and it is an absolute distance rather than a fraction of r on purpose: it is
+// a threshold he can see on the ground and check against the axis ruler's own 25-block ticks, and it must not
+// change because he walked to a wider part of the island.
+//   reach = r + GIVE * tanh((playerDist - r) / GIVE)
+// tanh and not a clamp, because a clamp stops DEAD at the limit and the ring would visibly stick; this eases
+// into it, which is what "slow down to a stop" asks for.
+let _wpGive=20, _wpDialLast=null;
+function _wpGiveReach(playerDist, r){
+  const K=Math.max(0.5, _wpGive);
+  return r + K*Math.tanh((playerDist-r)/K); }
 function _wpDialFrame(){
   if(!_wpDialOn || !_wpAt) return;
   const px=camera.position.x, pz=camera.position.z;
@@ -9260,8 +9279,9 @@ function _wpDialFrame(){
   const A=shoreHit(_wpAt.x,_wpAt.z,dx,dz);
   if(!A) return;
   _wpDialRef=Math.atan2(dz,dx)*180/Math.PI;      // A's world bearing: the dial's 180
-  // L is how far the PLAYER is from B. On the shoreline it equals r and the ring is a circle through A.
-  _wpDrawDial(_wpAt.x,_wpAt.z,A.r,_wpDialRef, _wpElastic?L:A.r);
+  // Kept for the pines: they are locked ON the dial, so they need the same ellipse the ring is drawn from.
+  _wpDialLast={ x:_wpAt.x, z:_wpAt.z, ref:_wpDialRef, along:(_wpElastic?_wpGiveReach(L,A.r):A.r), across:A.r };
+  _wpDrawDial(_wpAt.x,_wpAt.z,A.r,_wpDialRef, _wpElastic?_wpGiveReach(L,A.r):A.r);
   const gy=(x,z)=>Math.max((typeof surfaceH==='function')?surfaceH(Math.round(x),Math.round(z)):CFG.SEA, CFG.SEA)+0.6;
   const mp=_wpMarkA.geometry.attributes.position;
   mp.setXYZ(0, A.x, gy(A.x,A.z), A.z);
@@ -9389,9 +9409,26 @@ function _pinPlace(){
   // The foot sits on the WATERLINE: at the group's origin the camera is local zero, so sea level is at
   // (SEA - eye), and the quad is raised half its height so its bottom edge lands there rather than its middle.
   const footY=(CFG.SEA-camera.position.y);
+  // ---- LOCKED ON THEIR DEGREE (Ben 08-18: "pines are not just placed there, they are locked on top of their
+  // degree") ----
+  // A bearing on the dial is measured from B, the waypoint -- not from the player. Hanging the quads at a fixed
+  // angle around the CAMERA made their bearing the player's own, so they slid off their degree mark the moment
+  // he walked. Each one is aimed at the point on the dial ring carrying its degree instead, so it sits on that
+  // tick from wherever he stands.
+  // The DIRECTION is exact and the DISTANCE is clamped: a point on the far side of the ring can be 600 blocks
+  // away, past camera.far, where the quad is clipped and draws nothing at all. Pulling it in along the same
+  // line keeps the bearing perfect and the image visible, which is the half that matters.
+  const D=_wpDialLast, maxD=camera.far*0.82;
   for(const m of _pinGroup.children){
     const th=m.userData.az;
-    m.position.set(Math.cos(th)*_pinDist, footY+_pinH*0.5, Math.sin(th)*_pinDist);
+    let dirx=Math.cos(th), dirz=Math.sin(th), dist=_pinDist;
+    if(D){
+      const q=_dialPoint(D.x,D.z,_worldToDialDeg(th*180/Math.PI, D.ref), D.ref, D.along, D.across);
+      let vx=q[0]-camera.position.x, vz=q[1]-camera.position.z;
+      const L=Math.hypot(vx,vz);
+      if(L>1){ dirx=vx/L; dirz=vz/L; dist=Math.min(L, maxD); } }
+    m.position.set(dirx*dist, footY+_pinH*0.5, dirz*dist);
+    m.userData.worldTh=Math.atan2(dirz,dirx);
     // ---- ALWAYS FACING THE PLAYER (Ben 08-18) ----
     // Turned about Y only. A full lookAt would tip the image back as the player looks up, and a treeline that
     // leans is worse than one that is slightly off-normal.
@@ -9401,7 +9438,8 @@ function _pinPlace(){
     // The first cut wrote -th + PI/2, which is that direction turned by half a circle -- the quad faced AWAY,
     // and only survived being seen at all because the material is DoubleSide. What it drew was the treeline
     // MIRRORED, which is the fault this asset has already been rejected for once.
-    m.rotation.set(0, Math.atan2(-Math.cos(th), -Math.sin(th)), 0); } }
+    { const t=m.userData.worldTh;
+      m.rotation.set(0, Math.atan2(-Math.cos(t), -Math.sin(t)), 0); } } }
 // OFF BY DEFAULT, behind /navigator (Ben 08-18: "gate the bands visibility behind a command"). It is an
 // instrument, and one that deliberately draws over the world; ?hzruler=1 turns it on at load for a bench.
 let _hzRulerWant=(Q.get('hzruler')==='1');
@@ -25890,6 +25928,9 @@ const CMDS={
       // /waypoint radius — Ben's A-to-B construction. It does NOT touch the shoreline: both stay on screen,
       // because the circle is only meaningful against the coast it was measured from.
       if(w[0]==='radius'||w[0]==='r'){
+        if(w[1]==='give'){ const v=+w[2];
+          if(!isFinite(v)||v<=0) return `give is the spring's travel in BLOCKS; now ${_wpGive}. e.g. /waypoint radius give 20`;
+          _wpGive=v; return `spring give ${_wpGive} blocks — the ring comes to a stop about that far either side of A`; }
         if(w[1]==='elastic'){ _wpElastic=!_wpElastic; return `radius ring elastic ${_wpElastic?'ON — the A axis follows you':'off — a plain circle at r'}`; }
         if(w[1]==='off'){ _wpDialOn=false; if(_wpRing){ _wpRing.visible=false; _wpRingTicks.visible=false; _wpMarkA.visible=false;
             for(const sp of _wpRingLabels) sp.visible=false; } return 'radius dial off'; }
@@ -44400,9 +44441,10 @@ window.__hc={
                dialOfA:(v=>v<=-179.99?180:+v.toFixed(2))(_worldToDialDeg(aWorld,_wpDialRef)),
                r:+A.r.toFixed(1), playerDist:+L.toFixed(1), elastic:_wpElastic,
                // what the ring actually reaches, measured off the drawn geometry rather than from the inputs
-               reachAtA:+Math.hypot(..._dialPoint(_wpAt.x,_wpAt.z,180,_wpDialRef,_wpElastic?L:A.r,A.r)
+               give:_wpGive,
+               reachAtA:+Math.hypot(..._dialPoint(_wpAt.x,_wpAt.z,180,_wpDialRef,_wpElastic?_wpGiveReach(L,A.r):A.r,A.r)
                                       .map((v,i)=>v-(i?_wpAt.z:_wpAt.x))).toFixed(1),
-               reachAcross:+Math.hypot(..._dialPoint(_wpAt.x,_wpAt.z,90,_wpDialRef,_wpElastic?L:A.r,A.r)
+               reachAcross:+Math.hypot(..._dialPoint(_wpAt.x,_wpAt.z,90,_wpDialRef,_wpElastic?_wpGiveReach(L,A.r):A.r,A.r)
                                       .map((v,i)=>v-(i?_wpAt.z:_wpAt.x))).toFixed(1) }; }
     catch(e){ return {err:String(e.message||e)}; } },
   pinesUV(){ try{ const m=_pinGroup&&_pinGroup.children[0]; if(!m) return null;

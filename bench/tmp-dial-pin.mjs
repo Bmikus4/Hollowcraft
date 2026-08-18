@@ -20,14 +20,18 @@ await page.evaluate("__hc.lock(true); __hc.cmdRun('/gamemode creative'); __hc.cm
 await page.evaluate("__hc.cmdRun('/waypoint island center mass'); __hc.cmdRun('/waypoint shore'); __hc.cmdRun('/waypoint radius');");
 const B=await page.evaluate('__hc.islandCentres().mass');
 console.log('  walking round B; A must read 180 on the dial every time');
-console.log('   the ring is elastic on the A axis: reachAtA should follow the PLAYER, reachAcross should stay r');
-console.log('   player offset     dialOfA        r   playerDist   reachAtA   reachAcross');
-for(const [ox,oz] of [[120,60],[-200,140],[40,-260],[260,-40],[-90,-90],[60,30]]){
+console.log('   walking straight out along one bearing. The spring is 1:1 near A (dev ~ move) and must SLOW');
+console.log('   TO A STOP either side: |move| has to level off well below |dev| at both ends.');
+console.log('   playerD        r       dev      move   reachAtA  across');
+const SW=[];
+for(let f=0.06; f<=1.9; f+=0.12) SW.push([Math.cos(0.5)*f*300, Math.sin(0.5)*f*300]);
+for(const [ox,oz] of SW){
   await page.evaluate(`__hc.tpAt(${B.x}+${ox}, 140, ${B.z}+${oz});`);
   await sleep(700);
   const D=await page.evaluate('__hc.dialState()');
   if(!D||D.err){ console.log('   ',[ox,oz],'no dial', JSON.stringify(D)); continue; }
-  console.log(`   ${String(JSON.stringify([ox,oz])).padEnd(14)} ${String(D.dialOfA).padStart(7)} ${String(D.r).padStart(8)} ${String(D.playerDist).padStart(12)} ${String(D.reachAtA).padStart(10)} ${String(D.reachAcross).padStart(13)}`);
+  const dev=(D.playerDist-D.r), mv=(D.reachAtA-D.r);
+  console.log(`   ${String(D.playerDist).padStart(7)} ${String(D.r).padStart(8)} ${String(dev.toFixed(1)).padStart(9)} ${String(mv.toFixed(1)).padStart(9)} ${String(D.reachAtA).padStart(9)} ${String(D.reachAcross).padStart(9)}  ${'#'.repeat(Math.max(0,Math.round(D.reachAtA/12)))}`);
 }
 console.log(bad.length?('  HTTP failures: '+[...new Set(bad)].join(' , ')):'  no failed requests');
 console.log(errs.length?('  ERRORS: '+errs.slice(0,3).join(' | ')):'  no page errors');

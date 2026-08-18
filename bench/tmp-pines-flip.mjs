@@ -11,7 +11,8 @@ const server=spawn(process.execPath,[path.join(ROOT,'server.js')],{cwd:ROOT,env:
 const base='http://127.0.0.1:'+port; await waitHttp(base+'/index.html');
 const browser=await chromium.launch({executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',headless:true,args:['--enable-gpu','--use-angle=d3d11','--mute-audio']});
 const page=await (await browser.newContext({viewport:{width:1280,height:720}})).newPage();
-const errs=[]; page.on('pageerror',e=>errs.push(String(e.message||e).slice(0,200)));
+const errs=[]; const bad=[]; page.on('response',r=>{ if(r.status()>=400) bad.push(r.status()+' '+r.url().split('/').slice(3).join('/')); });
+page.on('pageerror',e=>errs.push(String(e.message||e).slice(0,200)));
 page.on('console',m=>{const t=m.text(); if(/\[loop\] exception|not defined|not a function|404/i.test(t)) errs.push(t.slice(0,200));});
 await page.goto(base+'/index.html?debug=1&rd=10',{waitUntil:'load',timeout:120000});
 await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()`,null,{timeout:300000});
@@ -40,5 +41,6 @@ console.log('  uv corners, none    :', JSON.stringify(await uv()));
 const az=105*Math.PI/180;
 await page.evaluate('__hc.cam({yaw:'+Math.atan2(-Math.cos(az),-Math.sin(az))+', pitch:0.02});'); await sleep(1200);
 await page.screenshot({path:path.join(ROOT,'bench','results','pines-original-105.png')});
+console.log(bad.length?('  failed requests: '+[...new Set(bad)].join(' , ')):'  no failed requests');
 console.log(errs.length?('ERRORS: '+errs.slice(0,4).join(' | ')):'no errors');
 await browser.close(); server.kill();
