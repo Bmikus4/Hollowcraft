@@ -12668,10 +12668,15 @@ function modelBlockMat(m, bd, colOverride){
 //     gain 2.0  fence 20.01    sky control 67.11
 // The control is stable to 0.3 across three separate boots, so the instrument is sound this time — and the gain moves
 // nothing. So the add is not reaching the fragment, and the gain is not what to look at.
-// WHERE TO LOOK, in order: whether aMLit is non-zero at all (log it, or read c._lvData directly at a known lit cell);
-// whether `a[0..2]` in addIM are world or chunk-local coordinates, since the local conversion here assumes world and
-// the sky sample beside it is the only evidence for that; and whether the instanced attribute survives the
-// geo.clone() the sky attribute also depends on. Do not sweep the gain again until aMLit is proven non-zero.
+// ONE FAULT FOUND AND FIXED, AND IT WAS NOT ENOUGH. a[0..2] are chunk-LOCAL (list.push([lx,ly,lz,id])), so the
+// original `a[0]-cx0` drove the index negative and the bounds test rejected every instance. That is corrected above.
+// Re-swept on the same clean instrument afterwards and it is STILL inert:
+//     gain 0 / 0.6 / 1.2 / 2.0  ->  fence 20.14 / 20.09 / 19.85 / 20.16, sky control 67.00 / 66.99 / 66.94 / 67.13
+// SUSPECT THE CROP BEFORE THE SHADER. That crop reads 20.14 at night where a fence measured 0.23 in the same
+// conditions earlier, so it is almost certainly not looking at fence at all — the fence box may be below the frame at
+// pitch -0.35. Photograph the frame and confirm fence fills the crop BEFORE drawing any conclusion about the term.
+// Then, if it is genuinely inert: read aMLit directly rather than through pixels, and check the attribute survives
+// the geo.clone(). Do not sweep the gain again until one of those is proven.
 const _uMBLit={ value:new THREE.Vector4(0.55,0.42,0.22,0.0) };
 function _modelLit(m){
   const prev=m.onBeforeCompile;
@@ -23767,7 +23772,36 @@ function animateWretch(dt, moving){
       chain[i].rotation.x=spr(SS('a'+ai+'x'+i),axT,armOm[k],ze,dt) + vnoise(mph*(gallop?17:11)*(ai?1.07:1)+i*2.3)*0.03;
       chain[i].rotation.z=spr(SS('a'+ai+'z'+i),azT,28,0.8,dt);                        // splay stiff (no floppy sideways arms)
     }
+    // ON ALL FOURS A FORELIMB IS A FOOT (see L2 - FOOT IK). The same offset, on the same integrator, applied to
+    // the shoulder and the elbow: the elbow is what presses the hand down, so unfolding it is what lifts the hand.
+    // Only while the arms are actually carrying weight -- crawlFore is the animator's own gate for that -- so a
+    // creature standing, reaching or waving its arms is untouched.
+    if(W_FOOTIK>0 && crawlFore && wretch._ikArm){ const ia=wretch._ikArm[ai]||0;
+      if(ia){ chain[1].rotation.x += ia*0.35; if(chain[2]) chain[2].rotation.x -= ia; } }
   }
+
+  // ============================== L3b — FORELIMB IK =========================
+  // 9ebb6eb shipped foot IK for the hind legs and left its own residual unexplained: "the worst remaining -1.01
+  // is unattributed: it is one of the gallop or the cling poses, unmeasured." It is measured now, and it is
+  // neither ambiguous nor a leg: all eight of the deepest samples are CHASE at crawl 0.75 to 1.0 -- the all-fours
+  // gallop, where the FORELIMBS carry the front of the body and nothing was putting a hand on the ground. Foot IK
+  // for a quadruped that is only fitted to the hind legs is half a rule.
+  // Same integrator, same reason it is an integrator: the error settles at zero with the offset held, which is
+  // what keeps a hand on a step instead of chasing it every frame.
+  if(W_FOOTIK>0 && !clinging && claw>0.4 && !reaching && P.arms && P.arms.length){
+    if(!wretch._ikArm || wretch._ikArm.length!==P.arms.length) wretch._ikArm=P.arms.map(()=>0);
+    for(let ai=0; ai<P.arms.length; ai++){ const chain=P.arms[ai]; const seg=chain && (chain[2]||chain[chain.length-1]); if(!seg) continue;
+      seg.updateWorldMatrix(true,false);
+      let lo=1e9, lx=0, lz=0;
+      seg.traverse(o=>{ if(!o.isMesh) return; const g=o.geometry; if(!g) return;
+        if(!g.boundingBox) g.computeBoundingBox(); const bb=g.boundingBox; if(!bb) return;
+        o.updateWorldMatrix(true,false);
+        for(let i=0;i<8;i++){ _ikV.set(i&1?bb.max.x:bb.min.x, i&2?bb.max.y:bb.min.y, i&4?bb.max.z:bb.min.z).applyMatrix4(o.matrixWorld);
+          if(_ikV.y<lo){ lo=_ikV.y; lx=_ikV.x; lz=_ikV.z; } } });
+      if(lo>1e8) continue;
+      const err=groundYAt(lx,lz,wretch.pos.y+1.5)-lo;
+      wretch._ikArm[ai] = Math.max(0, Math.min(wretch._ikArm[ai] + err*1.6*Math.min(dt,0.05)*20, W_FOOTIK)); }
+  } else if(wretch._ikArm){ for(let ai=0;ai<wretch._ikArm.length;ai++) wretch._ikArm[ai]*=Math.max(0,1-dt*6); }
 
   // ============================== L5 — GAZE (delay→snap, VOR) ================
   const cam=(typeof huntCam!=='undefined'&&huntCam)?huntCam:camera.position;
@@ -47263,7 +47297,9 @@ window.__hc={
   // THE FOOT-IK LIFT CAP AND ITS OFF SWITCH (see L2 - FOOT IK). 0 is the pure-FK legs the rig has always had.
   // lift is what the pelvis is actually being raised by this frame, which is the number the A/B reads.
   footIK(v){ try{ if(v!=null) W_FOOTIK = (v===true?0.9 : (v===false?0 : Math.max(0,+v||0)));
-      return { cap:W_FOOTIK, lift:+(wretch._ikLift||0).toFixed(3) }; } catch(e){ return {err:String(e.message||e)}; } },
+      return { cap:W_FOOTIK, lift:+(wretch._ikLift||0).toFixed(3),
+               legs:(wretch._ikOff||[]).map(v=>+v.toFixed(3)), arms:(wretch._ikArm||[]).map(v=>+v.toFixed(3)) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   rigSpan(){ try{ const g=wretch.group; if(!g||!wretch.active) return {err:'not active'};
       g.updateMatrixWorld(true);
       const P=wretch.P, tag=new Map();
@@ -47273,16 +47309,22 @@ window.__hc={
         if(P.neck) tag.set(P.neck,'head'); if(P.head) tag.set(P.head,'head'); }
       const label=o=>{ let n=o; for(let i=0;i<12 && n;i++){ const t=tag.get(n); if(t) return t; n=n.parent; } return 'other'; };
       const px=wretch.pos.x, pz=wretch.pos.z, py=wretch.pos.y;
-      const by={}, v=new THREE.Vector3(); let rMax=0, yLo=1e9, yHi=-1e9;
+      // WHICH LIMB OWNS THE LOWEST POINT, because "the rig's lowest point is a block under the ground" is not a
+      // claim you can fix until you know whether it is a foot or a hand. Guessing it was a forelimb once already
+      // produced a correction that moved nothing.
+      const by={}, low={}, v=new THREE.Vector3(); let rMax=0, yLo=1e9, yHi=-1e9, yLoBy=null;
       g.traverse(o=>{ if(!o.isMesh || !o.visible) return; const gg=o.geometry; if(!gg) return;
         if(!gg.boundingBox) gg.computeBoundingBox(); const bb=gg.boundingBox; if(!bb) return;
         o.updateWorldMatrix(true,false); const k=label(o); let r=by[k]||0;
         for(let i=0;i<8;i++){ v.set(i&1?bb.max.x:bb.min.x, i&2?bb.max.y:bb.min.y, i&4?bb.max.z:bb.min.z).applyMatrix4(o.matrixWorld);
           const d=Math.hypot(v.x-px, v.z-pz); if(d>r) r=d; if(d>rMax) rMax=d;
-          if(v.y-py<yLo) yLo=v.y-py; if(v.y-py>yHi) yHi=v.y-py; }
+          const dy=v.y-py;
+          if(low[k]==null || dy<low[k]) low[k]=dy;
+          if(dy<yLo){ yLo=dy; yLoBy=k; } if(dy>yHi) yHi=dy; }
         by[k]=r; });
+      for(const k in low) low[k]=+low[k].toFixed(2);
       for(const k in by) by[k]=+by[k].toFixed(2);
-      return { rMax:+rMax.toFixed(2), by, yLo:+yLo.toFixed(2), yHi:+yHi.toFixed(2), state:wretch.state, crawl:+(wretch.crawl||0).toFixed(2) }; }
+      return { rMax:+rMax.toFixed(2), by, low, yLo:+yLo.toFixed(2), yLoBy, yHi:+yHi.toFixed(2), state:wretch.state, crawl:+(wretch.crawl||0).toFixed(2) }; }
     catch(e){ return {err:String(e.message||e)}; } },
   // QA: record a fork's bones AT FRAME RATE, with the animation clock, so a tempo can be measured rather than estimated.
   // Pass a kind to start, null to stop and drain. Rows are [phase, thigh0, arm0, groupY].
