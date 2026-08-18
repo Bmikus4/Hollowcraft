@@ -50,7 +50,8 @@ const IK  = process.env.HC_IK==null ? null : (process.env.HC_IK!=='0');
         await ev('__hc.wretchCommit()');
         const r=await ev('__hc.rigBuried()');
         if(r && !r.err){ const c=await ev('__hc.bodyClear()'); r.clear=(c&&!c.err)?c.clear:null;
-          const sp=await ev('__hc.rigSpan()'); if(sp && !sp.err){ r.yLo=sp.yLo; if(!span) span=sp; }
+          const ik=await ev('__hc.footIK()'); r.ik=ik&&!ik.err?ik:null;
+          const sp=await ev('__hc.rigSpan()'); if(sp && !sp.err){ r.yLo=sp.yLo; r.pose=sp.state; r.crawl=sp.crawl; r.yLoBy=sp.yLoBy; r.low=sp.low; if(!span) span=sp; }
           samples.push(r); }
         await sleep(60); } }
 
@@ -78,6 +79,23 @@ const IK  = process.env.HC_IK==null ? null : (process.env.HC_IK!=='0');
     const yl=samples.map(s=>s.yLo).filter(v=>v!=null).sort((a,b)=>a-b);
     if(yl.length) console.log('  lowest point below the body   worst '+yl[0].toFixed(2)
       +'  p10 '+yl[Math.floor(yl.length*0.1)].toFixed(2)+'  median '+yl[Math.floor(yl.length/2)].toFixed(2));
+    // WHICH POSE THE WORST ONES ARE IN. "worst -1.01, unattributed" was left in 9ebb6eb; a deep-crawl gallop and
+    // a stand are different claims and the fix for one is not the fix for the other.
+    const deep=samples.filter(s=>s.yLo!=null).sort((a,b)=>a.yLo-b.yLo).slice(0,8)
+      .map(s=>({yLo:s.yLo, by:s.yLoBy, pose:s.pose, crawl:s.crawl, low:s.low}));
+    console.log('  worst poses   '+JSON.stringify(deep));
+    // DOES THE INTEGRATOR EVER ENGAGE. An offset that stays at zero means the limb was never through the floor
+    // and the correction is a no-op whatever its sign.
+    const iks=samples.map(s=>s.ik).filter(Boolean);
+    const mx=a=>a.length?Math.max(...a):0;
+    console.log('  ik engaged    legs max '+mx(iks.map(k=>mx(k.legs||[]))).toFixed(3)
+      +'  frames with a leg offset '+iks.filter(k=>mx(k.legs||[])>0.01).length+' of '+iks.length);
+    // AND HOW HARD IT PULLS. The same column-height probe that defeated the forelimb version lets a leg beside a
+    // trunk read as deeply underground, so the distribution matters: a median near the cap would be a creature
+    // permanently folded, which is a look regression the burial numbers would never show.
+    const legv=iks.map(k=>mx(k.legs||[])).sort((a,b)=>a-b);
+    if(legv.length) console.log('  leg offset    median '+legv[Math.floor(legv.length/2)].toFixed(3)
+      +'  p90 '+legv[Math.floor(legv.length*0.9)].toFixed(3)+'  at cap '+legv.filter(v=>v>=0.899).length+' of '+legv.length);
     console.log('  worst   '+JSON.stringify(samples.slice().sort((a,b)=>b.buried-a.buried)[0]).slice(0,180));
     say(pct < 89, 'burial rate '+pct.toFixed(1)+'% beats the 89% control of 873d919');
     console.log('\n  '+(bad?bad+' failed':'all ok'));

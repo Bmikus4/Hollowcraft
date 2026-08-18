@@ -23731,7 +23731,15 @@ function animateWretch(dt, moving){
         for(let i=0;i<8;i++){ _ikV.set(i&1?bb.max.x:bb.min.x, i&2?bb.max.y:bb.min.y, i&4?bb.max.z:bb.min.z).applyMatrix4(o.matrixWorld);
           if(_ikV.y<lo){ lo=_ikV.y; lx=_ikV.x; lz=_ikV.z; } } });
       if(lo>1e8) continue;
-      const err=groundYAt(lx,lz,wretch.pos.y+1.5)-lo;                 // + = the foot is under the surface
+      // THE PROBE SCANS DOWN FROM THE FOOT, NOT FROM THE BODY, and that distinction is the whole rule. groundYAt
+      // walks down from whatever height it is given and returns the first solid it meets, so starting the walk at
+      // the body's own height finds a TRUNK standing beside the foot and calls its top "the ground" -- a foot next
+      // to a tree then reads as most of a block underground, for ever, and the offset pegs at its cap. Measured
+      // before this line: the leg offset sat at the 0.9 cap on 75 of 111 frames of a stalk, median 0.900, which is
+      // a creature walking through a wood permanently folded to its knees. Starting at the foot's own lowest point
+      // finds the floor the foot is actually over, and a foot genuinely INSIDE a block still reads a real
+      // penetration, because the block it is in is the first solid the walk meets.
+      const err=groundYAt(lx,lz,lo+0.5)-lo;                            // + = the foot is under the surface
       if(err>worst) worst=err;
       // 1.6 radians per block of error is a step small enough that the gait springs absorb it and large enough to
       // clear a one-block riser inside half a second. The cap is W_FOOTIK, in radians of knee fold.
@@ -23772,36 +23780,25 @@ function animateWretch(dt, moving){
       chain[i].rotation.x=spr(SS('a'+ai+'x'+i),axT,armOm[k],ze,dt) + vnoise(mph*(gallop?17:11)*(ai?1.07:1)+i*2.3)*0.03;
       chain[i].rotation.z=spr(SS('a'+ai+'z'+i),azT,28,0.8,dt);                        // splay stiff (no floppy sideways arms)
     }
-    // ON ALL FOURS A FORELIMB IS A FOOT (see L2 - FOOT IK). The same offset, on the same integrator, applied to
-    // the shoulder and the elbow: the elbow is what presses the hand down, so unfolding it is what lifts the hand.
-    // Only while the arms are actually carrying weight -- crawlFore is the animator's own gate for that -- so a
-    // creature standing, reaching or waving its arms is untouched.
-    if(W_FOOTIK>0 && crawlFore && wretch._ikArm){ const ia=wretch._ikArm[ai]||0;
-      if(ia){ chain[1].rotation.x += ia*0.35; if(chain[2]) chain[2].rotation.x -= ia; } }
   }
 
-  // ============================== L3b — FORELIMB IK =========================
-  // 9ebb6eb shipped foot IK for the hind legs and left its own residual unexplained: "the worst remaining -1.01
-  // is unattributed: it is one of the gallop or the cling poses, unmeasured." It is measured now, and it is
-  // neither ambiguous nor a leg: all eight of the deepest samples are CHASE at crawl 0.75 to 1.0 -- the all-fours
-  // gallop, where the FORELIMBS carry the front of the body and nothing was putting a hand on the ground. Foot IK
-  // for a quadruped that is only fitted to the hind legs is half a rule.
-  // Same integrator, same reason it is an integrator: the error settles at zero with the offset held, which is
-  // what keeps a hand on a step instead of chasing it every frame.
-  if(W_FOOTIK>0 && !clinging && claw>0.4 && !reaching && P.arms && P.arms.length){
-    if(!wretch._ikArm || wretch._ikArm.length!==P.arms.length) wretch._ikArm=P.arms.map(()=>0);
-    for(let ai=0; ai<P.arms.length; ai++){ const chain=P.arms[ai]; const seg=chain && (chain[2]||chain[chain.length-1]); if(!seg) continue;
-      seg.updateWorldMatrix(true,false);
-      let lo=1e9, lx=0, lz=0;
-      seg.traverse(o=>{ if(!o.isMesh) return; const g=o.geometry; if(!g) return;
-        if(!g.boundingBox) g.computeBoundingBox(); const bb=g.boundingBox; if(!bb) return;
-        o.updateWorldMatrix(true,false);
-        for(let i=0;i<8;i++){ _ikV.set(i&1?bb.max.x:bb.min.x, i&2?bb.max.y:bb.min.y, i&4?bb.max.z:bb.min.z).applyMatrix4(o.matrixWorld);
-          if(_ikV.y<lo){ lo=_ikV.y; lx=_ikV.x; lz=_ikV.z; } } });
-      if(lo>1e8) continue;
-      const err=groundYAt(lx,lz,wretch.pos.y+1.5)-lo;
-      wretch._ikArm[ai] = Math.max(0, Math.min(wretch._ikArm[ai] + err*1.6*Math.min(dt,0.05)*20, W_FOOTIK)); }
-  } else if(wretch._ikArm){ for(let ai=0;ai<wretch._ikArm.length;ai++) wretch._ikArm[ai]*=Math.max(0,1-dt*6); }
+  // ============================== L3b — FORELIMB IK: BUILT, MEASURED, BACKED OUT ====
+  // 9ebb6eb left its residual unattributed. It is attributed now, and the attribution is the useful part: with
+  // rigSpan reporting WHICH limb owns the rig's lowest point, six of the eight deepest samples of a stalk are the
+  // ARM at crawl 1.0 -- the all-fours gallop, where the forelimbs carry the front of the body. On a quadruped a
+  // forelimb is a foot, so the same integrator was fitted to the shoulder and elbow.
+  // IT DOES NOT WORK AND THE REASON IS THE PROBE, NOT THE SIGN. The offset pegged at its 0.9 cap on 62 of 111
+  // frames -- an error that never resolves, which is what saturation means -- and it did so with the elbow folding
+  // BOTH WAYS: arms 248 buried one way, 262 the other, against 251 with no correction at all. The cause is that
+  // groundYAt(x,z) returns the surface of whatever stands in that COLUMN, and in a wood that is the top of a tree.
+  // A hand beside a trunk is therefore reported as a metre underground for ever, no arm pose can satisfy it, and
+  // the correction runs at full strength every frame of the gallop for nothing. Ben's own words for this fault
+  // were "it likes to wave his arms through trees": the arms are buried HORIZONTALLY, in trunks, and a vertical
+  // ground probe cannot see that at all -- which is also why 873d919's arm-retraction attempt failed.
+  // WHAT WOULD ACTUALLY WORK: a solid test at the hand's own cell (solidAt on the block it is in) rather than a
+  // column height, so the question becomes "is this hand inside something" instead of "how far is the ground
+  // below it". That is a different rule from foot IK and it is not built here.
+  // The leg integrator above is untouched by this and keeps its numbers; only the forelimb half is gone.
 
   // ============================== L5 — GAZE (delay→snap, VOR) ================
   const cam=(typeof huntCam!=='undefined'&&huntCam)?huntCam:camera.position;
@@ -28656,6 +28653,22 @@ function buildGlbGun(key,dot,suppressed,att){
   if(sub.mag){ const _mb=new THREE.Box3().setFromObject(sub.mag), _ms=_mb.getSize(new THREE.Vector3());
     if(_ms.y/Math.max(0.001,_ms.z) >= 0.6){ UD.mag=sub.mag; UD.magY=sub.mag.position.y; UD.magRx=sub.mag.rotation.x; } }
   if(sub.cyl){ UD.cyl=sub.cyl; UD.cylX=sub.cyl.position.x; }
+  // ---- A PISTOL'S MAGAZINE IS INSIDE ITS GRIP, AND THE RULE THAT FINDS MAGAZINES LOOKS FORWARD OF THE GRIP ----
+  // Measured, three ways. __hc.reload() moves nothing at all on guns/pistol and guns/pistol-heavy; __hc.magAudit
+  // reports mag:false for both; and placement-data has magRange null for guns/pistol and, for pistol-heavy, a 25 mm
+  // by 65 mm slab that the shape gate above correctly refuses because it is the trigger guard. The deriver's own note
+  // says what it looks for -- "the low run FORWARD of the hand, which is the magazine" -- and that is a rifle's
+  // magazine. A handgun's is in the butt, behind that line, so no handgun in the pack can ever produce one.
+  //   SO IT IS BUILT, NOT CARVED, and this is the one case where building a part does not add anything to the gun:
+  // the magazine sits INSIDE the grip and is invisible until the reload pulls it out of the bottom. That is the
+  // distinction the removed bolt handles failed -- those stood proud of the receiver at rest, on a model that already
+  // had its own. Sized off the grip the model itself declares (UD.gripAt) rather than a number per pistol.
+  if(!UD.mag && spec.hand && !spec.nomag && !spec.pump && UD.gripAt){
+    const gp=UD.gripAt, mw=0.030, md=0.042, mh=0.115;
+    const mm=new THREE.Mesh(new THREE.BoxGeometry(mw,mh,md), blk);
+    mm.position.set(gp[0], gp[1]-mh*0.18, gp[2]);   // top of the magazine at the frame line, body down inside the butt
+    mm.castShadow=true; g.add(mm);
+    UD.mag=mm; UD.magY=mm.position.y; UD.magRx=0; }
   // ---- AND THE BIPOD FOLDS, WHICH MEANS IT NEEDS A HINGE (Ben: "animated not snapped") ----
   // Every other carved part is animated by TRANSLATION — the pump racks along z, the magazine drops in y — and a raw
   // carved part can only be translated, because its origin is the model's origin and rotating it would swing the legs
@@ -47298,7 +47311,7 @@ window.__hc={
   // lift is what the pelvis is actually being raised by this frame, which is the number the A/B reads.
   footIK(v){ try{ if(v!=null) W_FOOTIK = (v===true?0.9 : (v===false?0 : Math.max(0,+v||0)));
       return { cap:W_FOOTIK, lift:+(wretch._ikLift||0).toFixed(3),
-               legs:(wretch._ikOff||[]).map(v=>+v.toFixed(3)), arms:(wretch._ikArm||[]).map(v=>+v.toFixed(3)) }; }
+               legs:(wretch._ikOff||[]).map(v=>+v.toFixed(3)) }; }
     catch(e){ return {err:String(e.message||e)}; } },
   rigSpan(){ try{ const g=wretch.group; if(!g||!wretch.active) return {err:'not active'};
       g.updateMatrixWorld(true);
@@ -47536,17 +47549,27 @@ window.__hc={
       magSet(key,0,s);                                  // something to reload
       if(invCount(am)<=0) invAdd(am, cap);              // and something to reload it with
       const UD=(view.mesh&&view.mesh.userData)||{};
-      const rest={ mag:UD.mag?UD.mag.position.y:null, pump:UD.pump?UD.pump.position.z:null, cyl:UD.cyl?UD.cyl.position.x:null };
+      // THE BOLT IS A PART TOO, AND THIS HOOK COULD NOT SEE IT. The reload animation has driven M.bolt for the bolt
+      // rifles since it was written, and the three samples here were mag, pump and cylinder — so every bolt gun in the
+      // game reported "parts:[], moved:[]" whatever its handle did, which is most of "reload returns 0 on every gun".
+      // Sampled on ROTATION, because that is what the bolt animation drives (rotation.z, then a lift in z).
+      // AND THE WHOLE GUN IS SAMPLED AS WELL, for the guns that have no drivable part at all: a break-action and a
+      // pistol whose magazine was never carved still play the reload POSE, and "nothing moved" is a false report of a
+      // reload you can watch. gunY is the viewmodel group's own drop.
+      const rest={ mag:UD.mag?UD.mag.position.y:null, pump:UD.pump?UD.pump.position.z:null, cyl:UD.cyl?UD.cyl.position.x:null,
+                   bolt:UD.bolt?UD.bolt.rotation.z:null, gunY:view.group.position.y };
       startReload(s);
       const armed=+(view.reloadT||0).toFixed(2);
       if(!armed) return { id:s.id, armed:0, why:'startReload refused: mag '+magGet(key,it,s)+'/'+cap+', spare '+invCount(am) };
       // ACROSS THE WHOLE RELOAD, not one frame of it. A magazine does not start moving on the first tick -- it drops
       // partway through -- so sampling at 0.1s reports "nothing moved" for every gun that works.
-      const peak={mag:0,pump:0,cyl:0};
+      const peak={mag:0,pump:0,cyl:0,bolt:0,gunY:0};
       for(let t=0;t<armed+0.1;t+=0.05){ updateView(0.05);
         if(UD.mag)  peak.mag =Math.max(peak.mag,  Math.abs(UD.mag.position.y - rest.mag));
         if(UD.pump) peak.pump=Math.max(peak.pump, Math.abs(UD.pump.position.z - rest.pump));
-        if(UD.cyl)  peak.cyl =Math.max(peak.cyl,  Math.abs(UD.cyl.position.x - rest.cyl)); }
+        if(UD.cyl)  peak.cyl =Math.max(peak.cyl,  Math.abs(UD.cyl.position.x - rest.cyl));
+        if(UD.bolt) peak.bolt=Math.max(peak.bolt, Math.abs(UD.bolt.rotation.z - rest.bolt));
+        peak.gunY=Math.max(peak.gunY, Math.abs(view.group.position.y - rest.gunY)); }
       const moved=Object.keys(peak).filter(k=>rest[k]!=null && peak[k]>1e-3);
       return { id:s.id, armed, parts:Object.keys(rest).filter(k=>rest[k]!=null), moved,
                peak:Object.fromEntries(Object.keys(peak).filter(k=>rest[k]!=null).map(k=>[k,+peak[k].toFixed(4)])) }; }
