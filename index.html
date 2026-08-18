@@ -1356,7 +1356,26 @@ const _hcLamp = new Float32Array([1.0, 0.35, 18.7, 0.85]);
 // job — answer it once for every surface class rather than by nudging this array. Ben's original complaint was the
 // OPPOSITE ("fences and doors unchanged at night"), so this path has already crossed the target once; the next move
 // wants all three numbers in view.
-const _propFill = new Float32Array([0.237, 0.267, 0.30, 0.03]);
+// ---- RE-SIZED 2026-08-18: 0.30 OF THE SKY WAS NOT A SKY FILL, IT WAS A ROUNDING ERROR ----
+// Ben: "everything is fullbright generally during the day" was the canopy; this is its other half, the one he has
+// reported as "doors, chests, guns and fences have lost their textures". Measured on a fence in full noon sun on an
+// open, leafless, unshadowed column (276,8 -- confirmed by __hc.canopyAt), the ground it stands in as the same-frame
+// control, adaptation off, exposure 1.05:
+//     k        0.30      0.70      0.85      1.00
+//     fence   23.23     29.30     34.59     39.72
+//     black%   32.9       0.3       0.2       0.0     <- a THIRD of the fence was pure black texels at the old value
+//     ground  74.37     74.44     75.37     74.37     <- flat: this fill cannot reach an atlas surface
+// THE BLACK IS THE HEADLINE, not the level. At 0.30 a third of a sunlit fence rendered as holes; by 0.70 that is
+// 0.3%, because the texels were not black in the texture, they were under the 8-bit floor of a fill three times too
+// small. That is "lost their textures" and it was never a texture at all.
+// 0.85 rather than 1.00: a bark fence should read darker than lit grass -- 34.59 against 74.37 is 2.15x, which is
+// about the albedo ratio -- and 1.00 is the full sky with no margin left to raise it if a creature needs more.
+// THE VIEWMODEL TAKES THIS FILL TOO, being a non-atlas lit material, and that is the regression to watch: it moves
+// 81.02 -> 93.87, a sixth brighter in daylight. That is the direction Ben asked for in the same breath ("the hand
+// must darken and light with the same light everything else gets"), so it is allowed rather than merely tolerated.
+// NIGHT IS UNTOUCHED and it is gated, not tuned: the fill is multiplied by uScotG.w, so at midnight the same fence
+// reads 1.00 of 255 at k 0.30 and at k 0.85 alike.
+const _propFill = new Float32Array([0.6715, 0.7565, 0.85, 0.03]);
 // THE REBUILD'S SET-ASIDE SWITCH lives here rather than beside __hc.oldLight because these are the arrays it moves,
 // and the snapshot has to be taken from their SHIPPED values — captured on first use, so a dial swept before the
 // switch is thrown still restores to what the sweep chose rather than to a literal written twice.
@@ -27692,10 +27711,13 @@ function blockOutHand(v, bend, tilt, pull, cant){
 //   THE CAP IS 0.75 AND IT IS REPORTED, not silent. The Wretch's arm retraction (8b8061f, 32a3535, 1b1766f) is the
 // standing lesson here: a clamp that quietly swallows an impossible correction reads as the feature working, and the
 // pegged-at-the-cap case is the one worth seeing. __hc.handClamp reports the push and whether it hit the cap.
-const HAND_CLAMP={ on:true, cap:0.75, skin:0.045, passes:3 };
+// lower*: what happens when the push CANNOT solve it — see the wall-lower below the pose. A doorway has a wall on both
+// sides, so no translation of the model gets it out of the jamb: measured standing in a one-block opening with a
+// pickaxe, the correction wanted 1.76 m against this 0.75 cap and the ON and OFF frames were the same buried picture.
+const HAND_CLAMP={ on:true, cap:0.75, skin:0.045, passes:3, lowerFull:0.6, lowerY:0.30, lowerPitch:0.9, lowerRate:9 };
 const _hcP=new THREE.Vector3(), _hcQ=new THREE.Vector3(), _hcD=new THREE.Vector3();
 function handClampToWorld(){
-  const st={ pushed:0, capped:false, points:0, hits:0, at:null };
+  const st={ pushed:0, want:0, capped:false, points:0, hits:0, at:null };
   // OFF STILL MEASURES. `on:false` must be the A/B control, not a blind spot: it samples and reports the hits and
   // leaves the model where the pose put it, so "with the constraint off the corners are in the block, with it on they
   // are not" is one pair of readings rather than a claim.
@@ -27759,7 +27781,8 @@ function handClampToWorld(){
     // WORLD PUSH INTO THE GROUP'S OWN SPACE. view.group hangs off the camera, so a world vector becomes a local one by
     // the camera's inverse rotation and nothing else — there is no scale on this chain.
     _hcD.set(bx,by,bz);
-    const len=_hcD.length(); if(len>HAND_CLAMP.cap){ _hcD.multiplyScalar(HAND_CLAMP.cap/len); st.capped=true; }
+    const len=_hcD.length(); st.want+=len;                                     // what it ASKED for, before the cap — the wall-lower is driven by the shortfall, and a swallowed demand cannot drive anything
+    if(len>HAND_CLAMP.cap){ _hcD.multiplyScalar(HAND_CLAMP.cap/len); st.capped=true; }
     _hcQ.copy(_hcD).applyQuaternion(camera.getWorldQuaternion(_hcTmpQ).invert());
     view.group.position.add(_hcQ);
     st.pushed+=_hcD.length();
@@ -32009,8 +32032,29 @@ function updateView(dt){ updateRecoil(dt);                                      
   // Last, after the pose, the block-out, the near-plane guard and every layer: this is a constraint on the result, and
   // a constraint that runs before something that can move the model is not a constraint. Witnessed in the ledger as a
   // note rather than an add, for the reason POSE.note exists — handClampToWorld has already moved the group.
+  // ---- AND WHEN THERE IS NOWHERE TO PUSH IT, THE ARM COMES IN ----
+  // The push is a translation and a doorway has a wall on BOTH sides, so there is no direction that helps: measured in
+  // a one-block opening with a pickaxe, the clamp wanted 1.76 m against a 0.75 cap and saturated, and under a low
+  // ceiling it wanted 2.03 — the tool stayed in the stone and the constraint's own A/B frames were identical.
+  // What a person does with a wall against their shoulder is bring the tool in to their chest, so the SHORTFALL — how
+  // much the clamp asked for beyond what it is allowed to take — drives a blend onto that carry: the model comes to
+  // the eye's own centre line, drops, and pitches over, which turns its forward reach into downward reach and puts it
+  // inside the half-metre column a doorway always leaves clear.
+  //   It reads LAST FRAME's shortfall, deliberately. The clamp cannot report until the pose is finished and this has
+  // to move the model before the clamp measures it, so the two swap frames; at lowerRate 9 the blend takes 110 ms and
+  // one frame of lag is invisible inside it.
+  //   Multiply, not subtract, on x: the carry is a blend TOWARD the centre line, so it lands in the same place from
+  // the hip anchor, the ADS pose and the two-handed hold, which a fixed offset would not.
+  { const over=Math.max(0, (view._handClampWant||0) - HAND_CLAMP.cap);
+    const want=HAND_CLAMP.on ? Math.min(1, over/HAND_CLAMP.lowerFull) : 0;
+    view._wallLow=(view._wallLow||0)+(want-(view._wallLow||0))*Math.min(1, dt*HAND_CLAMP.lowerRate);
+    if(view._wallLow<0.002) view._wallLow=0;
+    else { const L=view._wallLow;
+      view.group.position.x*=(1-L); view.group.position.y-=HAND_CLAMP.lowerY*L;
+      view.group.rotation.x+=HAND_CLAMP.lowerPitch*L; } }
   { const _hc=handClampToWorld();
     view._handClamp=_hc.pushed; view._handClampCap=!!_hc.capped; view._handClampAt=_hc.at; view._handClampHits=_hc.hits;
+    view._handClampWant=_hc.want;
     if(_hc.pushed>0) POSE.note('handclamp', 0,0,0); }
   POSE.end(); }        // close the ledger: everything the group moved since mark(), minus what the layers declared
 
@@ -45477,6 +45521,7 @@ window.__hc={
     catch(e){ return {err:String(e&&e.message||e)}; } },
   handClamp(o){ try{ if(o) for(const k in o) if(k in HAND_CLAMP) HAND_CLAMP[k]=(k==='on')?!!o[k]:+o[k];
       return { dial:Object.assign({},HAND_CLAMP), pushed:+((view._handClamp||0)).toFixed(4), capped:!!view._handClampCap,
+               want:+((view._handClampWant||0)).toFixed(4), low:+((view._wallLow||0)).toFixed(3),
                at:view._handClampAt||null, hits:view._handClampHits|0,
                held:view.id||null, groupPos:[+view.group.position.x.toFixed(3),+view.group.position.y.toFixed(3),+view.group.position.z.toFixed(3)] }; }
     catch(e){ return {err:String(e&&e.message||e)}; } },
