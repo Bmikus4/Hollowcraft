@@ -46665,6 +46665,141 @@ window.__hc={
           parts.push({ t:mt.type, col:mt.color?'#'+mt.color.getHexString():null, map:!!mt.map,
                        transparent:!!mt.transparent, opacity:+(mt.opacity!=null?mt.opacity:1).toFixed(2), depthWrite:mt.depthWrite!==false }); } });
       return { id:(which==='off')?offView.id:view.id, parts }; }catch(e){ return {err:String(e.message||e)}; } },
+  // WHICH MESH AM I LOOKING AT. heldMats says what the surfaces ARE; it cannot say which one is the shape in the frame,
+  // and that is the question every "this part is wrong" report actually poses. Ben has reported empty chambers on the
+  // revolver four times, and the last session answered it by changing the CARRY POSE — on the reasoning that he was
+  // looking down the back of his own gun — without ever establishing which mesh made the holes he photographed. That is
+  // the band-aid he has now refused. These two hooks make it answerable instead of arguable: list the parts, hide one,
+  // photograph, and the shape that vanished is the shape that was there.
+  //
+  // THE TWO SHARE ONE TRAVERSAL, and they must. An index from one order used against another hides the wrong mesh and
+  // then the photograph lies with total confidence -- so the walk is written once, here, and both callers use it.
+  _heldList(which){ const m=(which==='off')?offView.mesh:view.mesh; if(!m) return null;
+    const out=[]; m.traverse(o=>{ if(o.isMesh) out.push(o); }); return out; },
+  heldParts(which){ try{ const L=this._heldList(which); if(!L) return {mesh:false};
+      return { id:(which==='off')?offView.id:view.id, n:L.length, parts:L.map((o,i)=>{
+        const g=o.geometry||{}, pr=g.parameters||{}, mt=Array.isArray(o.material)?o.material[0]:o.material;
+        // The geometry's OWN declared parameters, not a bounding box: "radius 0.037, 18 sides" names the part in the
+        // builder's own words, so a part in a photograph can be matched to the line of code that made it.
+        const dim={}; for(const k of ['width','height','depth','radiusTop','radiusBottom','radius','tube','arc','radialSegments','height'])
+          if(pr[k]!=null) dim[k]=+(+pr[k]).toFixed(4);
+        return { i, geo:(g.type||'?'), dim, vis:o.visible!==false,
+                 pos:[+o.position.x.toFixed(4),+o.position.y.toFixed(4),+o.position.z.toFixed(4)],
+                 rot:[+o.rotation.x.toFixed(3),+o.rotation.y.toFixed(3),+o.rotation.z.toFixed(3)],
+                 col:(mt&&mt.color)?'#'+mt.color.getHexString():null, mat:(mt&&mt.type)||null }; }) };
+    }catch(e){ return {err:String(e.message||e)}; } },
+  // heldHide(i)        -> hide part i          heldHide(i,false) -> show part i again
+  // heldHide()         -> show EVERY part, the way out of any isolation this leaves behind
+  // The flag is named `hide` and defaults to true, so the call reads as what it does. It is spelled out because the
+  // first cut of this hook had it inverted against its own comment, which would have hidden the part it claimed to be
+  // showing and produced a photograph that lied -- the precise failure this hook exists to stop.
+  heldHide(i,hide,which){ try{ const L=this._heldList(which); if(!L) return {mesh:false};
+      if(i==null){ for(const o of L) o.visible=true; return { restored:L.length }; }
+      const o=L[i|0]; if(!o) return {err:'no part '+i+' (n='+L.length+')'};
+      o.visible = (hide===false);
+      return { i:i|0, vis:o.visible, geo:(o.geometry&&o.geometry.type)||null }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // WHERE THE HELD MODEL IS ON SCREEN, IN PIXELS, so a crop cannot miss it. A gun in the hand is a couple of hundred
+  // pixels in the corner of a 1280x720 frame; the first crop written for the revolver spent 98% of its image on the
+  // background and every part in it measured the same, which is a crop failing rather than a model passing. Projecting
+  // the model's own bounds through the live camera gives the rectangle to spend the image on. Top-left origin, CSS
+  // pixels, clamped to the viewport -- `off` says the model projected wholly outside the frame, which is the honest
+  // answer for a viewmodel swung out of view and must not be confused with a rectangle of zero size.
+  heldRect(which){ try{ const m=(which==='off')?offView.mesh:view.mesh; if(!m) return {mesh:false};
+      const w=innerWidth, h=innerHeight, _v=new THREE.Vector3();
+      let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9, n=0;
+      m.updateWorldMatrix(true,true);
+      m.traverse(o=>{ if(!o.isMesh||!o.geometry||o.visible===false) return;
+        if(!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+        const bb=o.geometry.boundingBox; if(!bb) return;
+        for(let i=0;i<8;i++){ _v.set(i&1?bb.max.x:bb.min.x, i&2?bb.max.y:bb.min.y, i&4?bb.max.z:bb.min.z);
+          o.localToWorld(_v); _v.project(camera);
+          const px=(_v.x*0.5+0.5)*w, py=(-_v.y*0.5+0.5)*h;
+          if(px<x0)x0=px; if(px>x1)x1=px; if(py<y0)y0=py; if(py>y1)y1=py; n++; } });
+      if(!n) return {mesh:true,parts:0};
+      const cx=Math.max(0,Math.min(w,x0)), cy=Math.max(0,Math.min(h,y0));
+      return { id:(which==='off')?offView.id:view.id, w, h,
+               raw:[+x0.toFixed(1),+y0.toFixed(1),+x1.toFixed(1),+y1.toFixed(1)],
+               x:Math.round(cx), y:Math.round(cy),
+               width:Math.round(Math.max(0,Math.min(w,x1)-cx)), height:Math.round(Math.max(0,Math.min(h,y1)-cy)),
+               off:(x1<0||y1<0||x0>w||y0>h) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // PAINT A PART, OPTIONALLY THROUGH THE GUN. sightHi does this for the sight elements and it is the reason a 6-pixel
+  // front post stopped being arguable; the same trick answers "is this brass IN the chamber or in the metal beside it",
+  // which is the question four attempts at the revolver have each answered differently. `through` sets depthTest false,
+  // so the part draws over whatever is in front of it and its position is visible even when it is correctly buried.
+  // heldPaint() with no index restores every material this changed.
+  heldPaint(i,hex,through,which){ try{ const L=this._heldList(which); if(!L) return {mesh:false};
+      if(i==null){ let n=0; for(const o of L) if(o.userData._paint0){ o.material=o.userData._paint0; o.userData._paint0=null; o.renderOrder=0; n++; }
+        return { restored:n }; }
+      const o=L[i|0]; if(!o) return {err:'no part '+i+' (n='+L.length+')'};
+      if(!o.userData._paint0) o.userData._paint0=o.material;
+      o.material=new THREE.MeshBasicMaterial({ color:(hex!=null?hex:0xff00ff), depthTest:!through });
+      if(through) o.renderOrder=9;
+      return { i:i|0, col:'#'+o.material.color.getHexString(), through:!!through }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // THE REVOLVER'S CHAMBER GEOMETRY AS A DIAL, so the bolt circle can be judged by eye instead of argued from a mesh fit.
+  // Ben has reported empty chambers four times. The cases exist, but photographed with depth testing off they are a tight
+  // rosette around the bore, and with it on they vanish entirely -- buried inside the drum's metal, which is exactly
+  // "the chambers are still empty". The declared bolt:0.057 is the suspect, and the code comment beside it claims
+  // tools/gun-cylinder.py measured it when that script has no bolt-circle code at all.
+  //   THREE FITS OF THE MESH DISAGREED (6-fold symmetry axis -> 0.090; an outer-wall circle fit -> 0.124; per-chamber
+  // centroids -> 0.069, on 8-12 vertices each), because the drum cannot be cleanly separated from the frame and grip by
+  // an x range alone. Rather than pick a winner and ship it, this exposes the number: sweep it, photograph the drum
+  // against sky, and keep the value where the brass sits in the holes and no sky comes through. Ship a default and
+  // expose a dial -- and the dial is what makes the next report answerable in one run instead of four.
+  // Values are in the model's own placement units, the same ones GLB_GUNS.<gun>.cyl is written in.
+  revCyl(o,gun){ try{ const id=gun||(view&&view.id); const spec=(typeof GLB_GUNS!=='undefined')?GLB_GUNS[id]:null;
+      if(!spec) return {err:'no GLB spec for '+id};
+      if(!spec.cyl) return {err:id+' declares no cyl block'};
+      if(o) for(const k of ['bolt','chamber','rear','front','wall']) if(o[k]!=null) spec.cyl[k]=+o[k];
+      // Rebuilt through the same path the game uses, so what is photographed is what a player would hold.
+      //   AND THE REBUILD HAS TO BE FORCED. setViewItem opens with `if(view.id===id) return`, so re-holding the gun you
+      // are already holding does nothing at all -- the first cut of this dial swept the bolt circle across seven values
+      // and photographed the same unchanged rosette seven times, with the painted area constant to three decimals.
+      // Clearing the held item first makes the next call miss that guard and build the model again.
+      if(o && view && view.id===id){ setViewItem(null); setViewItem(id); }
+      return { gun:id, cyl:{...spec.cyl} }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // WHERE THE CHAMBER HOLES ACTUALLY ARE, BY RAYCAST, in the held gun's own space.
+  //
+  // Three separate fits of the GLB's vertices disagreed about the bolt circle (0.069, 0.090, 0.124) because the drum
+  // cannot be isolated from the frame and grip by an x range, and a photograph cannot settle it either: on a closed
+  // revolver the recoil shield covers the rear of the drum, so the brass is invisible from the one angle a first-person
+  // camera can reach whether it is seated correctly or not. Rays do not care about either problem. Cast a grid of them
+  // down the bore axis and the holes are the cells that do NOT hit the drum's front face -- which is the hole map
+  // itself, measured off the shipped mesh, in the units the cartridges are placed in.
+  //
+  // The brass is hidden first, or it fills the very holes being looked for.
+  revBoreMap(o){ try{ const m=view&&view.mesh; if(!m) return {err:'nothing held'};
+      const n=Math.max(9,Math.min(81,(o&&o.n)|0||41)), half=(o&&o.half!=null)?+o.half:0.06, z0=(o&&o.z0!=null)?+o.z0:-0.35;
+      // WHAT THE RAYS ARE ALLOWED TO HIT, AS AN EXPLICIT LIST. THREE's raycaster does not skip meshes with
+      // visible===false, and the gun carries a 0.4 x 0.4 muzzle-flash plane that is invisible until it fires: the first
+      // run of this map hit that plane in all 2601 cells at one flat depth and reported the drum as solid metal
+      // everywhere. So the candidates are gathered by hand -- visible meshes only, brass excluded because it fills the
+      // very holes being looked for -- and intersected non-recursively.
+      const L=this._heldList(); const cand=[]; let hid=0;
+      for(const o of L){ if(o.visible===false) continue;
+        const mt=Array.isArray(o.material)?o.material[0]:o.material;
+        if(mt&&mt.color&&mt.color.getHexString().toLowerCase()==='c9a24a'){ hid++; continue; }
+        cand.push(o); }
+      const rc=new THREE.Raycaster(); rc.far=2.0;
+      const org=new THREE.Vector3(), dir=new THREE.Vector3();
+      const cells=[];
+      m.updateWorldMatrix(true,true);
+      for(let iy=0;iy<n;iy++) for(let ix=0;ix<n;ix++){
+        const lx=-half+2*half*ix/(n-1), ly=-half+2*half*iy/(n-1);
+        org.set(lx,ly,z0); m.localToWorld(org);
+        dir.set(lx,ly,z0+1); m.localToWorld(dir); dir.sub(org).normalize();
+        rc.set(org,dir);
+        const hits=rc.intersectObjects(cand,false);
+        // Hit depths back in the model's own z, so the numbers can be compared with spec.cyl.front/rear directly.
+        const zs=[]; const p=new THREE.Vector3();
+        for(const h of hits){ p.copy(h.point); m.worldToLocal(p); zs.push(+p.z.toFixed(4)); }
+        cells.push({ x:+lx.toFixed(4), y:+ly.toFixed(4), n:zs.length, z:zs.slice(0,16) });
+      }
+      return { id:view.id, n, half, z0, hidBrass:hid, meshes:cand.length, cells }; }
+    catch(e){ return {err:String(e.message||e)}; } },
   // …and the same question for a block that has been PLACED, which is drawn by a different builder entirely (buildModelBlocks).
   // A held torch and a placed torch wearing different finishes is the failure this is here to catch.
   // `mapName` is the answer to "is this prop textured, and WITH WHAT" — tileTex stamps its cache key onto texture.name for
