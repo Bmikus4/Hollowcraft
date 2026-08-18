@@ -9118,14 +9118,22 @@ const coastPineMat=new THREE.ShaderMaterial({ transparent:true, depthWrite:false
   // the black smear in his frame. The asset was never the problem: it has colour and it is the right way up.
   // ---- AND THE PHOTOGRAPH KEEPS ITS OWN COLOUR (Ben 08-18: "they read FLAT DARK GREEN, near-black, trunk and gap
   // detail lost - they must be COLOURED") ----
-  // This is why, and it is not the asset being drab: the strip's opaque mean is (36,43,30), a real if dark forest green
-  // with browns in it, and the line below threw all of that away. It reduced the photograph to LUMINANCE and re-tinted
-  // the result with uPine, a single colour -- so every crown, every trunk and every autumn patch came out the same hue
-  // at different brightnesses, which is a flat green mass by construction.
-  // uColour MIXES BETWEEN THE TWO and ships at 1: the texture's own rgb, lifted by the same 0.0225 linear divisor
-  // 5aa8968 established. 0 restores the single-tint behaviour exactly, which is the control.
+  // The old line reduced the strip to LUMINANCE and re-tinted it with uPine, one colour, so every crown, trunk and
+  // autumn patch came out the same hue at different brightnesses. That is a flat green mass by construction, and it is
+  // his fault exactly.
+  // WHY THE FIRST CURE FOR IT LOOKED WORSE, WHICH IS WHY IT SHIPPED AT 0. It was mix(uPine*per, tex.rgb/0.0225, uColour):
+  // the second branch normalised the photograph by its own mean and then never re-applied the level the first branch was
+  // at, so uColour=1 multiplied the texture by 18.7 instead of 1.4. The band came out roughly fourteen times too bright,
+  // pinned itself against the min(col, uAir*0.85) clamp, and rendered as the pale grey ridge that got called "thinner and
+  // greyer". The diagnosis was right and the arithmetic was wrong.
+  // SO SPLIT HUE FROM LEVEL. `per` is the photograph's own relative brightness, mean 1, and it carries the crowns, the
+  // trunks and the internal shadow. The HUE is what uColour mixes: the approved pine green at one end, the photograph's
+  // own chroma at the other, both normalised to unit luminance so the mix cannot change how bright the band is. The level
+  // stays the approved green's, which is the one thing about this band nobody has ever complained about.
   '  float per=dot(tex.rgb, vec3(0.2126,0.7152,0.0722))/0.0225;',
-  '  vec3 col=mix(uPine*per, tex.rgb/0.0225, uColour)*uGain;',
+  '  float texL=max(dot(tex.rgb, vec3(0.2126,0.7152,0.0722)), 1e-4);',
+  '  float pineL=max(dot(uPine, vec3(0.2126,0.7152,0.0722)), 1e-4);',
+  '  vec3 col=mix(uPine/pineL, tex.rgb/texL, uColour)*pineL*per*uGain;',
   '  col*=mix(0.72, 1.18, lit);',
   '  col+=uSunCol*0.05*pow(clamp(-face,0.0,1.0),3.0)*uSunUp*smoothstep(0.55,1.0,t);',
   '  col*=mix(1.0,0.34,1.0-smoothstep(0.0,0.14,t));',
@@ -27017,8 +27025,14 @@ function updateFlares(dt){
         // is undefined on every animal in the game, so the guard skipped all of them and a flare dropped half a block
         // from a deer left it on 8 of 8 hit points (measured, three samples over six seconds).
         if(!f._hit && typeof animals!=='undefined'){
+          // A CREATURE IS A STANDING BODY, NOT A POINT 0.6 ABOVE ITS FEET. A 0.9 m sphere about that point covers a
+          // monk's shins and nothing else, so a flare through the chest of a 1.9 m figure passed straight through:
+          // measured, a flare dropped on a monk read hit:false and took 2.25 off him, which is one burn tick and no
+          // impact at all. The test is the creature's own cylinder now — ANIMALS[].h is the height every other part of
+          // the game sizes it by — with a hand's width of tolerance so a round that grazes the shoulder still counts.
           for(const a of animals){ if(!a||a.dead||a.x==null) continue;
-            if(Math.hypot(a.x-f.x, (a.y+0.6)-f.y, a.z-f.z) < 0.9){
+            const H=(ANIMALS[a.type]&&ANIMALS[a.type].h)||1.0, R=0.45+H*0.16;
+            if(Math.hypot(a.x-f.x, a.z-f.z) < R && f.y > a.y-0.3 && f.y < a.y+H+0.3){
               f._hit=true; if(typeof hurtAnimal==='function') hurtAnimal(a,_FLARE_DIAL.impact);
               spawnParticles(f.x,f.y,f.z,0xff6a20,14,2.0,0.6); break; } } }
         if((b!==AIR && isSolid[b]) || f.y<0.05){
@@ -52065,6 +52079,20 @@ window.__hc={
     let minx=1e9,maxx=-1e9; for(const L of g.userData.legs){ const t=L.tibG.localToWorld(new THREE.Vector3(0,2.0,0)); minx=Math.min(minx,t.x); maxx=Math.max(maxx,t.x); }
     const up=new THREE.Vector3(0,1,0).applyQuaternion(g.quaternion); scene.remove(g);
     return { off, footMinX:+minx.toFixed(3), footMaxX:+maxx.toFixed(3), dorsalX:+up.x.toFixed(2) }; },
+  // QA: ONE NAMED ANIMAL ON THE GROUND BESIDE YOU, and the hit points of everything near you. A throwaway probe cannot
+  // reach `animals`, and every damage question needs the same pair — put a known target down, then watch a number.
+  spawnAt(type,dx,dz){ try{ type=type||'deer'; if(!ANIMALS[type]) return {err:'no such animal: '+type};
+      const x=player.pos.x+(+dx||0), z=player.pos.z+(+dz||0), y=groundYAt(x,z,player.pos.y);
+      const mesh=buildAnimalMesh(type); mesh.position.set(x,y,z); animalGroup.add(mesh);
+      const a={type,mesh,x,y,z,yaw:0,hp:ANIMALS[type].hp,timer:0,flee:0,dead:false}; animals.push(a);
+      return { type, x:+x.toFixed(2), y:+y.toFixed(2), z:+z.toFixed(2), hp:a.hp, n:animals.length }; }
+    catch(e){ return {err:String(e&&e.message||e)}; } },
+  animalsNear(r){ try{ r=+r||24; const out=[];
+      for(const a of animals){ if(!a||a.x==null) continue; const d=Math.hypot(a.x-player.pos.x, a.z-player.pos.z);
+        if(d<=r) out.push({ type:a.type, hp:+(+a.hp).toFixed(2), dead:!!a.dead, d:+d.toFixed(2),
+                            at:[+a.x.toFixed(2),+a.y.toFixed(2),+a.z.toFixed(2)] }); }
+      out.sort((p,q)=>p.d-q.d); return out; }
+    catch(e){ return {err:String(e&&e.message||e)}; } },
   ragKill(type){ type=type||'deer'; const x=player.pos.x+3+Math.random()*3, z=player.pos.z+2+Math.random()*2, y=groundYAt(x,z,player.pos.y);   // QA: spawn + kill an animal → ragdoll
     const mesh=buildAnimalMesh(type); mesh.position.set(x,y,z); animalGroup.add(mesh);
     const a={type,mesh,x,y,z,yaw:0,hp:1,timer:0,flee:0,dead:false}; animals.push(a); killAnimal(a);
