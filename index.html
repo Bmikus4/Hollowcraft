@@ -7007,6 +7007,17 @@ const ADAPT={ on:true, cur:1.05, want:1.05, lo:1.05, hi:1.30, inT:2.2, outT:0.45
 // (0.2625 -> 4.0) moved a noon ground crop by 0.2 of 255 and a midnight crop not at all.
 // null means "adaptation owns it". A number is an explicit override that survives, which is what makes it a dial.
 let _expoOverride = null;
+// AND THE CEILING IS ONE NUMBER, because it was two and they disagreed. The dial clamped an override to 4 and the
+// frame clamped what it wrote to 2.75, so __hc.exposure(4) returned 4, reported owner "override", and rendered 2.75
+// for every frame after the first: a dial reporting a value the frame never shows, which is the §1.6 fault the
+// rebuild exists to stop. The sweep recorded as "exposure 4.0 -> noon lum 126.0" was taken at 2.75.
+// The ceiling stays where the frame's is because that is the one that has a reason: nothing downstream can tell a
+// blown frame from a bright one. The LIGHTNING FLASH still adds on top and is clamped with the base, so a strike can
+// still take the frame to the ceiling from an override below it.
+const EXPO_MAX = 2.75, EXPO_MIN = 0.2;
+// The exposure the frame will actually render for a given base, so the dial's immediate write and the per-frame write
+// cannot differ. Without it the first frame after a call was the raw override and every later one was clamped.
+function expoFor(base){ return Math.min(EXPO_MAX, Math.max(EXPO_MIN, base + ((typeof weather!=='undefined'&&weather.flash)||0)*1.7)) || 1.05; }
 // ---- THE TIME-OF-DAY GRADE (the other half of Ben's "eye adaptation plus a time-of-day grade") ----
 // Adaptation moves the EXPOSURE; this moves the LOOK. Three graded anchors instead of one curve stretched across all
 // twenty-four hours, which is what the build had: uDark scaled the lift, the grain and the vignette and nothing else,
@@ -20603,7 +20614,7 @@ function loop(){ try{
   // written, because nothing downstream can tell a blown frame from a bright one.
   { const _eb = (_expoOverride!=null) ? _expoOverride
               : ((typeof ADAPT!=='undefined' && ADAPT.on) ? ADAPT.cur : 1.05);
-    renderer.toneMappingExposure = Math.min(2.75, Math.max(0.2, _eb + (weather.flash||0)*1.7)) || 1.05; }
+    renderer.toneMappingExposure = expoFor(_eb); }
   // ---- THE TIME-OF-DAY GRADE (see TOD, above) ----
   // Three weights that sum to one by construction: `d` rises as the sun clears the horizon, `n` rises as it sinks
   // below, and golden is whatever neither of them claims — which puts the golden anchor at full strength exactly in
@@ -37884,6 +37895,31 @@ function _leafRespawn(i,aroundY){ let a=Math.random()*6.283, r=Math.random()*LEA
   // its branch draws the quad and respawns on expiry, and a zero-scale quad is nothing on screen.
   _leafSz[i]=(cy>=0? 0.6+Math.random()*0.9 : 0); _leafFall[i]=0.5+Math.random()*0.7; _leafPh[i]=Math.random()*6.283; _leafLand[i]=(cy>=0?0:0.33);
   const c=_leafPalette[(Math.random()*_leafPalette.length)|0]; _leafCol[i*3]=c.r; _leafCol[i*3+1]=c.g; _leafCol[i*3+2]=c.b; _leafIM.setColorAt(i,c); }
+// ---- A LEAF PAST SPECK RANGE SHRINKS OUT (Ben, five reports of orange dots) ----
+// The dots are these leaves, and that is tag-proven twice over: with __hc.leafTag painting the batch magenta,
+// every warm speck in a noon sky turns magenta with it, while the fireflies and the lamp halos do not even exist
+// at that hour (live 0, not built). 559fb75 stopped them spawning where no tree stands, which was a real fault,
+// and did not answer this one: a leaf 30 blocks off is three pixels of warm colour against sky, and three pixels
+// is a dot however correctly it was spawned.
+// d835d35 DESATURATED THEM AND THAT WAS THE WRONG LEVER -- it makes a grey speck out of an orange one. Ben has
+// reported the dots five times since. A dot has to stop being drawn.
+// IT IS SIZE, NOT ALPHA, and that is the whole design choice. The batch is one InstancedMesh with an alpha-tested
+// cutout material: there is no per-instance opacity to fade, and adding one means a second material or a custom
+// shader for a swarm of 110 quads. Scale is per-instance already. A leaf that shrinks below a pixel is gone with
+// no pop, no sorting, no material change -- and the shrink is invisible while it happens, because it happens at
+// the range where the leaf is already sub-pixel.
+// THE NEAR FIELD IS UNTOUCHED, which is the feature Ben likes in the same frame he complains about: full size
+// inside LEAF_NEAR, so the canopy overhead still visibly sheds. Zero at LEAF_GONE, which is inside LEAF_R, so a
+// leaf is out of sight before it is out of range and the recycle is never seen.
+const LEAF_NEAR=14, LEAF_GONE=26;
+function _leafScale(i){
+  const dx=_leafPos[i*3]-camera.position.x, dy=_leafPos[i*3+1]-camera.position.y, dz=_leafPos[i*3+2]-camera.position.z;
+  const d=Math.sqrt(dx*dx+dy*dy+dz*dz);
+  if(d<=LEAF_NEAR) return _leafSz[i];
+  if(d>=LEAF_GONE) return 0;
+  const k=1-(d-LEAF_NEAR)/(LEAF_GONE-LEAF_NEAR);
+  return _leafSz[i]*k*k;                    // squared, so the last few blocks do most of the vanishing
+}
 function updateLeaves(dt){ if(!_leafIM.instanceColor)return;
   // NOT INSIDE THE BACKROOMS (Ben 07-28). Drifting leaves are an outdoor-forest effect and they were rendering in the halls
   // — the same isolation rule the audio already follows. Hide the batch outright rather than just stopping the sim, or the
@@ -37948,10 +37984,10 @@ function updateLeaves(dt){ if(!_leafIM.instanceColor)return;
     // only under the switch.
     if(_leafFreeze){ _leafDummy.position.set(_leafPos[b],_leafPos[b+1],_leafPos[b+2]);
       _leafDummy.rotation.set(_leafRot[b],_leafRot[b+1],_leafRot[b+2]);
-      _leafDummy.scale.setScalar(_leafSz[i]); _leafDummy.updateMatrix(); _leafIM.setMatrixAt(i,_leafDummy.matrix); continue; }
+      _leafDummy.scale.setScalar(_leafScale(i)); _leafDummy.updateMatrix(); _leafIM.setMatrixAt(i,_leafDummy.matrix); continue; }
     if(_leafLand[i]>0){                                                        // LANDED — rest flat on the surface, then vanish forever (a fresh leaf spawns up top)
       _leafLand[i]-=dt; if(_leafLand[i]<=0){ _leafRespawn(i, eye.y+LEAF_TOP); }
-      else { _leafDummy.position.set(_leafPos[b],_leafPos[b+1],_leafPos[b+2]); _leafDummy.rotation.set(-1.5708, _leafRot[b+1], 0); _leafDummy.scale.setScalar(_leafSz[i]); _leafDummy.updateMatrix(); _leafIM.setMatrixAt(i,_leafDummy.matrix); }
+      else { _leafDummy.position.set(_leafPos[b],_leafPos[b+1],_leafPos[b+2]); _leafDummy.rotation.set(-1.5708, _leafRot[b+1], 0); _leafDummy.scale.setScalar(_leafScale(i)); _leafDummy.updateMatrix(); _leafIM.setMatrixAt(i,_leafDummy.matrix); }
       continue; }
     const flut=Math.sin(t*2.3+_leafPh[i]);                                     // per-leaf flutter across the wind
     _leafPos[b]   += (wx + flut*0.9)*dt;
@@ -37966,7 +38002,7 @@ function updateLeaves(dt){ if(!_leafIM.instanceColor)return;
     else if(_leafPos[b+1] < eye.y-LEAF_BOT || dx*dx+dz*dz > (LEAF_R+4)*(LEAF_R+4)) _leafRespawn(i, eye.y+LEAF_TOP);   // drifted far out of range → recycle from the top
     _leafDummy.position.set(_leafPos[b],_leafPos[b+1],_leafPos[b+2]);
     _leafDummy.rotation.set(_leafRot[b],_leafRot[b+1],_leafRot[b+2]);
-    _leafDummy.scale.setScalar(_leafSz[i]); _leafDummy.updateMatrix(); _leafIM.setMatrixAt(i,_leafDummy.matrix); }
+    _leafDummy.scale.setScalar(_leafScale(i)); _leafDummy.updateMatrix(); _leafIM.setMatrixAt(i,_leafDummy.matrix); }
   _leafIM.instanceMatrix.needsUpdate=true; if(_leafIM.instanceColor)_leafIM.instanceColor.needsUpdate=true; }
 // =====================================================================
 //  LEAF PILES (Ben 08-04) — "if more than 3 leaves fall on a single block within the span of 1m then a leaf pile should be
@@ -38635,6 +38671,9 @@ function _ffSeat(i){
 // on the next frame, so two hunts ran an A/B that compared the leaves against the leaves and read 159 against 161.
 // Ben asked for the firefly system to be turned "fully off"; this is what makes that request answerable.
 let _ffHidden=false;
+// _emitTag: paint every WORLD-SIDE emitter sprite magenta -- the fireflies and the lamp halos -- so one frame says
+// which system a dot belongs to instead of a count saying whether one moved. __hc.emitTag(1).
+let _emitTag=false;
 function updateFireflies(dt){
   if(_ffHidden){ if(_ffPts && _ffPts.visible) _ffPts.visible=false; return; }
   // Sealed indoors, exactly like the leaves and the birds: a firefly inside the Backrooms would be a light in a place that has none.
@@ -38682,7 +38721,11 @@ function updateFireflies(dt){
     const w=k*fade*night;
     const o=n*3;
     _ffPos[o]=s.x; _ffPos[o+1]=s.y; _ffPos[o+2]=s.z;
-    _ffCol[o]=w*0.85*s.hue; _ffCol[o+1]=w; _ffCol[o+2]=w*0.30*s.hue;    // green-gold: the g channel leads, the blue is nearly absent
+    // THE TAG (see _emitTag). Magenta is a hue nothing in this game emits, so a speck that is still warm with the
+    // tags on belongs to none of the tagged systems. This is the only technique in the orange-dot hunt that has
+    // ever produced a positive identification -- it replaces the question instead of sharpening it.
+    if(_emitTag){ _ffCol[o]=w; _ffCol[o+1]=0; _ffCol[o+2]=w; }
+    else { _ffCol[o]=w*0.85*s.hue; _ffCol[o+1]=w; _ffCol[o+2]=w*0.30*s.hue; }    // green-gold: the g channel leads, the blue is nearly absent
     // A REAL LIGHT, SMALL (Ben 08-05: "fireflies should be a real glowing light source at night, albeit small"). Additive sprites
     // are a glow ON the screen and light nothing: the leaf a firefly is sitting on stayed as black as the rest of the wood.
     // NOT a light per insect — the pool comment above this file's LIGHT_POOL says it plainly, and 128 lights would be 128 shader
@@ -38798,7 +38841,8 @@ function updateLampHalos(dt){
       // depth test correctly keeps it hidden.
       { const ox=cx-e[0], oy=cy-e[1], oz=cz-e[2], ol=Math.hypot(ox,oy,oz)||1, os=0.62/ol;
         _lampPos[n*3]=e[0]+ox*os; _lampPos[n*3+1]=e[1]+oy*os; _lampPos[n*3+2]=e[2]+oz*os; }
-      _lampCol[n*3]=k*1.00; _lampCol[n*3+1]=k*0.62; _lampCol[n*3+2]=k*0.26;   // the same warm the point-light pool uses
+      if(_emitTag){ _lampCol[n*3]=k; _lampCol[n*3+1]=0; _lampCol[n*3+2]=k; }   // see _emitTag
+      else { _lampCol[n*3]=k*1.00; _lampCol[n*3+1]=k*0.62; _lampCol[n*3+2]=k*0.26; }   // the same warm the point-light pool uses
       n++; }
   }
   _lampLive=n;
@@ -43604,6 +43648,9 @@ window.__hc={
                  c:'#'+L.color.getHexString(), at:[+L.position.x.toFixed(2),+L.position.y.toFixed(2),+L.position.z.toFixed(2)]})):null;
       return { light:_ffLight, solo:_ffSolo, pin:_ffPin, litLights:_ffLitN, max:FF_LIGHTS, live:_ffLive, glowPool:g }; }
     catch(e){ return {err:String(e.message||e)}; } },
+  // PAINT THE WORLD-SIDE EMITTERS MAGENTA (see _emitTag). The leaf batch has its own __hc.leafTag; turn both on and
+  // any dot still warm in the frame is neither a leaf, a firefly nor a lamp halo.
+  emitTag(v){ try{ if(v!=null) _emitTag=!!v; return { emitTag:_emitTag }; }catch(e){ return {err:String(e.message||e)}; } },
   fireflies(on){ try{ if(on!=null){ _ffHidden=!on; if(_ffPts) _ffPts.visible=!!on; }
       if(!_ffPts) return { built:false, hidden:_ffHidden, live:0, day:+globalU.uDay.value.toFixed(4) };
       let mx=0, lit=0; for(let i=0;i<_ffLive;i++){ const g=_ffCol[i*3+1]; if(g>mx)mx=g; if(g>0.25)lit++; }
@@ -44599,9 +44646,12 @@ window.__hc={
   // next frame. Writing renderer.toneMappingExposure directly could not hold: adaptation and the weather term both
   // rewrote it every frame, so a set of 4.0 read back 1.05 fifty milliseconds later and every sweep taken through
   // this hook measured nothing. No argument hands the frame back to adaptation.
-  exposure(n){ try{ _expoOverride = (n!=null) ? Math.max(0.05,Math.min(4,+n)) : null;
-      if(_expoOverride!=null) renderer.toneMappingExposure=_expoOverride;   // take effect this frame, not next
-      return { exposure:+renderer.toneMappingExposure.toFixed(3), override:_expoOverride,
+  exposure(n){ try{ _expoOverride = (n!=null) ? Math.max(0.05,Math.min(EXPO_MAX,+n)) : null;
+      // through expoFor, not the raw override: the frame clamps and adds the flash, and a dial whose first frame
+      // differs from its next one is an instrument that lies. Calling this with NO argument RELEASES the override —
+      // read it without touching it through __hc.adapt({}), which reports override and the rendered exposure.
+      if(_expoOverride!=null) renderer.toneMappingExposure=expoFor(_expoOverride);   // take effect this frame, not next
+      return { exposure:+renderer.toneMappingExposure.toFixed(3), override:_expoOverride, max:EXPO_MAX,
                owner:_expoOverride!=null?'override':(ADAPT.on?'adaptation':'base 1.05') }; }
     catch(e){ return {err:String(e.message||e)}; } },
   // QA: the giantess's side of the wire. Who owns her, whether this client is sending or receiving her, and how
