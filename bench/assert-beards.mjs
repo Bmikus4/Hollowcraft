@@ -21,13 +21,31 @@ const fb=()=>['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Progra
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Microsoft/Edge/Application/msedge.exe'].find(p=>fs.existsSync(p));
 // monk beard: near-white warm grey 0xd8d4c8.  jesus hair/beard: mid brown 0x5a3a22.
 const MASK={
-  monk:  (r,g,b)=> r>140 && g>135 && b>125 && Math.abs(r-g)<20 && r-b>4 && r-b<60,
-  jesus: (r,g,b)=> r>50 && r<160 && g>25 && g<110 && b>10 && b<80 && r-g>14 && g-b>4 && r-b>28,
+  // MONK: a DESATURATED pixel, and nothing about its level. The old test was r>140 && r-b>4, and both halves broke. The
+  // level floor found zero pixels in every night frame, so the hour Ben says a flat beard reads worst at was the one this
+  // assert never measured. The r-b floor broke in daylight too: the ambient here is blue enough to lift b to r, so a
+  // near-white beard reads NEUTRAL rather than warm and the mask rejected the whole beard - 1365 pixels one run, 0 the
+  // next, on a beard a photograph shows plainly. Saturation is what separates it from everything else in the crop: the
+  // skin at 0xd9b48c is 35% saturated and the kalimavkion is blue.
+  monk:  (r,g,b)=>{ const M=Math.max(r,g,b), m=Math.min(r,g,b); return M>30 && (M-m)<0.14*M; },
+  // JESUS: a brown ORDERING plus a saturation floor, again with no absolute level in it. Brown is the one thing in the
+  // strip under his face that runs r>g>b with real chroma; his linen robe is near-neutral and his skin is lighter and
+  // less saturated than his hair.
+  jesus: (r,g,b)=> r>16 && r>g && g>=b && (r-b)>0.22*r,
 };
 // THE CROP IS THE BEARD, NOT THE FIGURE. Measuring his whole projected box read 8,441 "beard" pixels off the intro
 // Jesus's cream linen robe standing behind him -- the mask cannot tell near-white hair from near-white cloth, and
 // there is a Jesus in this world from the start whether or not the harness spawns one. So the window is the strip
 // just under the face and only a fifth of his width: the beard hangs there and nothing else of his does.
+// THE CROP IS THE BEARD, NOT THE FIGURE. Measuring his whole projected box read 8,441 "beard" pixels off the intro
+// Jesus's cream linen robe standing behind him -- the mask cannot tell near-white hair from near-white cloth, and
+// there is a Jesus in this world from the start whether or not the harness spawns one. So the window is the strip
+// just under the face and only a fifth of his width: the beard hangs there and nothing else of his does.
+//
+// A HEAD-SIZED WINDOW WAS TRIED INSTEAD AND IT IS WORSE. Sizing the strip from two points 0.4 blocks apart at head
+// height, and then searching under the head for the band with the most target pixels, found ONE pixel where this finds
+// 1365 - so it is recorded here rather than left as an option: the head-to-feet span is the right ruler even when the
+// feet are off frame, because screenOf still returns usable coordinates for them.
 function stats(file, kind, box){
   const img=decodePNG(fs.readFileSync(file));
   const hy=Math.min(box.head.py,box.feet.py), fy=Math.max(box.head.py,box.feet.py);
