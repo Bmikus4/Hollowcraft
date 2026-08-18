@@ -25,9 +25,12 @@ const AT = (() => { const i = process.argv.indexOf('--at'); return i < 0 ? null 
     const t0 = Date.now();
     while (Date.now() - t0 < 240000) { const f = await p.evaluate(`__hc.fill()`); if (f && f.want > 0 && f.meshed / f.want >= 0.92) break; await sleep(1500); }
     const P = await p.evaluate(`__hc.probe()`);
-    const BID = await p.evaluate(`__hc.bid()`);
+    // __hc.bid(name) already existed (twice, in fact); a third copy I added was silently overridden, which is the
+    // duplicate-key trap f3518b1 records. Names are fetched once and inverted here so the map can print 'dirt'.
+    const NAMES = await p.evaluate(`__hc.bid()`);
+    const BID = NAMES;
     const TN = await p.evaluate(`__hc.trailNodes()`);
-    console.log(`  spawn ${P.spawnX},${P.spawnZ}  sea ${P.sea}  dirt=${BID.indexOf('dirt')} grass=${BID.indexOf('grass')}`);
+    console.log(`  spawn ${P.spawnX},${P.spawnZ}  sea ${P.sea}  dirt=${await p.evaluate("__hc.bid('dirt')")} grass=${await p.evaluate("__hc.bid('grass')")}`);
     console.log('  trail nodes: ' + TN.nodes.map(n => `${n.k}(${n.x},${n.z})d${n.deg}`).join(' '));
     console.log('  edges: ' + TN.edges.map(e => e.join('-')).join(' '));
 
@@ -57,7 +60,7 @@ const AT = (() => { const i = process.argv.indexOf('--at'); return i < 0 ? null 
         out.push(row); }
       const names={}; for(const r of out) for(const c of r) names[c[2]]=1;
       return { out, ids:Object.keys(names) }; })()`);
-    const D = BID.indexOf('dirt'), Gr = BID.indexOf('grass');
+    const D = await p.evaluate(`__hc.bid('dirt')`), Gr = await p.evaluate(`__hc.bid('grass')`);
     console.log('  block ids present: ' + G.ids.join(','));
 
 
@@ -87,7 +90,7 @@ const AT = (() => { const i = process.argv.indexOf('--at'); return i < 0 ? null 
                  n:[[1,0],[-1,0],[0,1],[0,-1]].map(dd=>__hc.groundY(m.x+dd[0],m.z+dd[1])) }; }); })()`);
       // Neighbour heights matter: 4.2 is about a path meeting a step, so a mismatch sitting ON a riser is a different
       // fault from one sitting on flat ground, and the number says which without another run.
-      for (const q of N) console.log(`    (${q.x},${q.z}) h${q.h} surf ${BID[q.blk]}  first solid ${q.drop} below = ${BID[q.solid]}  above ${q.up.map(b=>BID[b]).join('/')}  step ${Math.max(...q.n.map(v => Math.abs(v - q.h)))}`);
+      for (const q of N) console.log(`    (${q.x},${q.z}) h${q.h} surf ${NAMES[q.blk]}  first solid ${q.drop} below = ${NAMES[q.solid]}  above ${q.up.map(b=>NAMES[b]).join('/')}  step ${Math.max(...q.n.map(v => Math.abs(v - q.h)))}`);
     }
     // And the height profile down the middle, so a step is visible as a number.
     const mid = G.out[(G.out.length >> 1)];
