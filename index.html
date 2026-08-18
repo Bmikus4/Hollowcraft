@@ -1339,7 +1339,7 @@ let _nightK=1;
 // dropped item and the viewmodel are not chunk geometry and carried nothing, so they all took the same FLAT sky fill
 // whether they stood in open ground or a sealed cave. This is the value they were missing, written per draw by
 // hcSkyBind and read by the non-atlas fill in lights_fragment_end.
-const _hcObj = new Float32Array([1, 0.85, 0, 0]);   // [per-draw sky&canopy (hcSkyBind writes this one), how much the NON-ATLAS path follows the day factor at night, the mid-grey luminance the night celestial term flattens toward, spare]
+const _hcObj = new Float32Array([1, 0.85, 0, 0.06]);   // [per-draw sky&canopy (hcSkyBind writes this one), how much the NON-ATLAS path follows the day factor at night, the mid-grey luminance the night celestial term flattens toward, what a fully sky-occluded object keeps of the sun and the sky]
 // x = how much of the torch's directional shaping to apply (0 restores the flat level exactly, for the A/B).
 // y = what a face pointing away from the flame keeps.
 // [directional amount, back-face floor, REACH in blocks, smooth-radial blend]. The last two are the smooth falloff that
@@ -1716,8 +1716,26 @@ const HC_LIGHT_GLSL = [
     '      if(_pal > 1e-5){ float _flat=mix(1.0, uHcObj.z/_pal, _nt);\n'+
     '        _cel *= _flat; _ind *= _flat; }\n'+
     '    }\n'+
-    '    reflectedLight.directDiffuse = hcPointLit + _cel*_pn;\n'+
-    '    reflectedLight.indirectDiffuse = _ind*_pn; }\n'+
+    // ---- AND A THING IN A SEALED ROOM IS NOT IN THE SUN (Ben: the hand "must darken and light with the same light
+    // everything else gets: dark in the dark, taking a torch under a torch, taking the sun at noon") ----
+    // MEASURED at noon, one held stone block, a room carved sixteen blocks under the surface with the same block in
+    // hand and the same crop: the WALL of that room reads 0 of 255 and the hand reads 81, against 98 in the open field.
+    // Seventeen percent is the whole of what solid rock took off it. The prop sky fill was already occluded by this
+    // exact term (uHcObj.x, written per draw by hcSkyBind), but the three.js LIGHTS were not, so the sun and the sky
+    // reached the viewmodel through the rock -- and through a closed canopy, and through a roof.
+    // THE ATLAS PATH ALREADY DOES THIS AND THE SHAPE IS COPIED FROM IT rather than invented: a block scales its direct
+    // light by its own sky access (`directDiffuse *= pow(vSky, uSkyCurve.y)`) and its ambient by a floored version of
+    // the same number. This is that, on the path that never got it, from the sky term the object already carries.
+    // ONE FACTOR ON BOTH HALVES, computed once, for the reason written above: a term that treats the direct and the
+    // indirect differently is how this went round twice already.
+    // uHcObj.w IS A FLOOR AND NOT A ZERO, and the file has been bitten twice by the alternative -- a prop at exactly
+    // zero beside ground that is merely very dark reads as a punched hole rather than as a thing in the dark. At 0.06
+    // a hand in a sealed room is a shape you can just make out and a torch is what makes it a hand.
+    // A LAMP IS NOT IN THIS. hcPointLit is added back outside the factor, so a torch, a lantern, a fire, the held
+    // light, a flare and a muzzle flash light a prop in a cave exactly as they did.
+    '    float _occ = mix(clamp(uHcObj.w,0.0,1.0), 1.0, clamp(uHcObj.x,0.0,1.0));\n'+
+    '    reflectedLight.directDiffuse = hcPointLit + _cel*_pn*_occ;\n'+
+    '    reflectedLight.indirectDiffuse = _ind*_pn*_occ; }\n'+
     '  { float _pfd=clamp(dot(reflectedLight.directDiffuse,'+L+'),0.0,1.0);\n'+
     // AND IT IS OCCLUDED LIKE EVERYTHING ELSE. uHcObj.x is the object's own sky-and-canopy term, written per draw
     // (hcSkyBind) and 1 for anything that has not been bound - so an unbound object behaves exactly as it did.
@@ -29140,6 +29158,14 @@ function buildAttachment(attId,spec,P,s,gy,gz,boreG){
   // underside is about a barrel's radius below the bore on these models, so 0.018 puts the grip's top INTO it rather
   // than under it — a mount that overlaps what it clamps reads as clamped, and one that hovers reads as broken.
   else if(d.sit==='under') g.position.set(0, boreG-0.018-H, spec.muzzleZ+0.22);
+  // A HANDGUN HAS ONE RAIL AND IT IS UNDER THE DUST COVER. The side-rail rule is a rifle's: 200 mm behind the muzzle
+  // is a handguard on a carbine and the middle of the SLIDE on a pistol, and 12 mm under the bore is inside it. Seen
+  // for the first time through __hc.gunSide -- every earlier judgement of these two pieces was a number, because no
+  // camera in the game shows the underside of a held gun -- the light and the laser were a jumble of blocks buried in
+  // the slide of every pistol and revolver. A pistol's accessory rail is under the dust cover with the light's nose
+  // just behind the muzzle, which is what the z here says: the piece is centred, so half its own length plus a
+  // hair puts its front end 10 mm short of the crown.
+  else if(typeof attHandgun==='function' && attHandgun(spec)) g.position.set(W*0.5+0.010, boreG-0.014-H, spec.muzzleZ+zlen*0.5+0.010);
   else { g.position.set(W*0.5+0.028, boreG-0.012, spec.muzzleZ+0.20); }                                 // side rail, on the shooter's right
   // A FITTED SCOPE IS A REAL SCOPE. The magnified pass renders into scopeRT and is shown by ONE disc wearing
   // scopeLensMat — the bolt rifle's carved eyepiece. An attachment has no such carve, so it gets its own disc at
@@ -29276,8 +29302,8 @@ function buildGlbGun(key,dot,suppressed,att){
   { const _mt=attMount(spec);
     UD.attAnchor={ optic:_mt?[0,gy(_mt.base),gz(_mt.x)]:null,
                    muzzle:(spec.muzzleZ!=null)?[0,boreG,spec.muzzleZ]:null,
-                   light:[0.055,boreG-0.012,spec.muzzleZ+0.20],
-                   laser:[-0.055,boreG-0.012,spec.muzzleZ+0.20],
+                   light:[0.055,attHandgun(spec)?boreG-0.014:boreG-0.012,attHandgun(spec)?spec.muzzleZ+0.06:spec.muzzleZ+0.20],   /* a handgun's one rail is under the dust cover — see buildAttachment */
+                   laser:[-0.055,attHandgun(spec)?boreG-0.014:boreG-0.012,attHandgun(spec)?spec.muzzleZ+0.06:spec.muzzleZ+0.20],
                    grip:attHandgun(spec)?null:[0,boreG-0.075,spec.muzzleZ+0.22] }; }
   if(att) for(const sl of ATT_SLOTS){ const id=att[sl]; if(!id||!attFits(key,id)) continue;
     const a=buildAttachment(id,spec,P,s,gy,gz,boreG); if(!a) continue;
@@ -50254,6 +50280,7 @@ window.__hc={
       if(o&&o.texk!=null) _propFill[3]=Math.max(0,+o.texk);
       if(o&&o.night!=null) _hcObj[1]=Math.max(0,Math.min(1,+o.night));   // how much this path follows the day factor after dark
       if(o&&o.grey!=null) _hcObj[2]=Math.max(0,+o.grey);                  // the mid-grey luminance the night celestial term flattens toward (0 = off)
+      if(o&&o.occ!=null) _hcObj[3]=Math.max(0,Math.min(1,+o.occ));        // what a fully sky-occluded object keeps of the sun and the sky. 1 is the build where the hand was daylit inside solid rock
       return { r:+_propFill[0].toFixed(4), g:+_propFill[1].toFixed(4), b:+_propFill[2].toFixed(4),
                texk:+_propFill[3].toFixed(4), night:+_hcObj[1].toFixed(3), grey:+_hcObj[2].toFixed(4), day:+_scotG[3].toFixed(3) };
     }catch(e){ return {err:String(e.message||e)}; } },
