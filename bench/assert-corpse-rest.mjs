@@ -58,8 +58,41 @@ import path from 'node:path';
         say(Math.abs(r.gy-(expect+1))<1.2 || Math.abs(r.gy-expect)<1.2,
           name+': it rested on the surface it died on, y~'+expect+' (found '+r.gy+')');
       }
+      // AIM AT THE BODY BEFORE THE SHUTTER. Every frame this saved was of whatever the camera happened to face when the
+      // scenario was built, and corpse-realmonk.png was a photograph of the sea from under the roof -- a measurement with
+      // a frame that does not contain its subject is the failure mode this project has paid for five times.
+      if(r){ await ev(`__hc.look(${r.x}, ${r.y}, ${r.z})`); await sleep(500); }
       await W.page.screenshot({path:path.join(OUT,'corpse-'+name+'.png')});
     }
+    // ---- AND A REAL MONK, KILLED THE WAY THE GAME KILLS ONE ----
+    // 55c3fa8 listed this as the case it had not tested: every scenario above uses __hc.ragKill, which SPAWNS an animal
+    // and kills it in the same call, and Ben's report is about a monk that was walking around. __hc.monkSpawn puts a
+    // real one in the world and __hc.monkKill runs killAnimal on it, which is the path a monk dies down in play. Indoors,
+    // because that is the only scenario where the two probes disagree and therefore the only one that can fail.
+    { await ev(clear); await sleep(300); await ev(scen.indoors); await sleep(500);
+      await ev(`__hc.tpExact(${bx-3}, ${bz}, ${pad+1.2})`); await sleep(400);
+      // THE ROOF GETS A HOLE FOR THE SPAWN AND THEN THE HOLE IS CLOSED. spawnMonkAt block-scans down from above like
+      // ragKill does, so under a solid roof it puts the monk ON the roof: the first run of this case spawned him at 51,
+      // the roof, and his corpse then rested there correctly at 51 -- the test was measuring its own spawn, exactly the
+      // trap the note above records for ragKill. One column of the roof opened, the monk spawned through it, the column
+      // closed again, and he is standing on the floor with a roof over him.
+      await ev(`__hc.setBlk(${bx-1},${pad}+5,${bz},'air')`); await sleep(200);
+      const sp=await ev('__hc.monkSpawn(2,0)'); await sleep(1600);
+      await ev(`__hc.setBlk(${bx-1},${pad}+5,${bz},'stone')`); await sleep(400);
+      const k=await ev('__hc.monkKill()'); await sleep(5000);
+      const st=await ev('__hc.ragState()');
+      const r=st && st.length ? st[st.length-1] : null;
+      console.log('  realmonk kill '+JSON.stringify(k).slice(0,60)+'  spawn '+JSON.stringify(sp)
+        +'  corpse y '+(r?r.y:'-')+'  surface '+(r?r.gy:'-')+'  old probe said '+(r?r.gyOld:'-')
+        +'  aboveGround '+(r?r.aboveGround:'-')+'  underGround '+(r?r.underGround:'-')+'  settled '+(r?r.settled:'-'));
+      say(!!r, 'realmonk: killAnimal left a ragdoll to measure');
+      if(r){
+        say(Math.abs(r.underGround)<0.35, 'realmonk: the body is not sunk into the surface ('+r.underGround+')');
+        say(Math.abs(r.gy-(pad+1))<1.2 || Math.abs(r.gy-pad)<1.2, 'realmonk: it rested on the floor it died on, y~'+pad+' (found '+r.gy+')');
+        say(r.gyOld>r.gy+1, 'realmonk: the old probe would have rested him at '+r.gyOld+' (the roof) where the fixed one finds '+r.gy);
+      }
+      if(r){ await ev(`__hc.look(${r.x}, ${r.y}, ${r.z})`); await sleep(500); }
+      await W.page.screenshot({path:path.join(OUT,'corpse-realmonk.png')}); }
     console.log('');
     console.log('  '+(bad?bad+' failed':'all ok'));
   } finally { await W.close(); process.exit(bad?1:0); } })();
