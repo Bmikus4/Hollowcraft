@@ -3202,6 +3202,47 @@ const TILEIDX = {};   // name -> tile index
 
 // tiny per-tile deterministic rng
 function tileRng(seed){ let s = seed*2654435761>>>0; return ()=>{ s=(Math.imul(s,1664525)+1013904223)>>>0; return s/4294967296; }; }
+// ---- ALPHA DILATION, and it is why thin cutouts go black at distance ----
+// A transparent texel is usually written [0,0,0,0] -- transparent AND black -- by our painters and by every texture
+// pack. That is invisible at mip 0, where the alpha test discards it, and it is a disaster in every mip below:
+// generateMipmaps averages RGB and alpha together, so a two-texel stalk in a sixteen-texel tile averages one part
+// olive to seven parts BLACK while its alpha stays above the cutoff. The fragment survives the test wearing a colour
+// that is mostly the transparent background. The thinner and the brighter the sprite the worse it reads, which is why
+// it shows on poppies, a sunflower and grass tufts and not on a dark leaf: dragging a saturated red halfway to black
+// is a huge step and dragging a dark green one is not. That is the whole of "one source colour comes out black".
+// The fix is to bleed the nearest opaque COLOUR outward into the transparent texels while leaving every alpha byte
+// exactly as it was. Mip 0 is therefore bit-identical and the alpha test cannot notice; only what the mips average to
+// changes, and now it averages colour with colour.
+// IT LIVES HERE, NOT INSIDE paintTile, BECAUSE THE PAINTER IS NO LONGER THE ONLY WAY A TILE IS MADE. It was written
+// inside paintTile on 08-12 for the kelp, and the ground foliage was stamped from the texture pack on 08-17 -- so
+// every flower, fern and tuft in the game went back to raw pack pixels with black under their alpha and the bug
+// reappeared on exactly the tiles that had been fixed. One function, three callers, no tile that can miss it.
+// ?nodilate is the A/B and it covers all three.
+function dilateAlpha(d, size){
+  if(typeof Q!=='undefined' && Q.get('nodilate')) return;
+  const n=size*size;
+  let filled=new Uint8Array(n);
+  for(let i=0;i<n;i++) filled[i]= d[i*4+3]>0 ?1:0;
+  let any=false, all=true;
+  for(let i=0;i<n;i++){ if(filled[i]) any=true; else all=false; }
+  if(!any || all) return;                                            // fully clear or fully opaque: nothing to bleed
+  for(let pass=0; pass<size && !all; pass++){
+    const next=filled.slice(); all=true;
+    for(let y=0;y<size;y++) for(let x=0;x<size;x++){
+      const i=y*size+x; if(filled[i]) continue;
+      let r=0,g=0,b=0,m=0;
+      for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){
+        if(!dx&&!dy) continue; const xx=x+dx, yy=y+dy;
+        if(xx<0||xx>=size||yy<0||yy>=size) continue;
+        const j=yy*size+xx; if(!filled[j]) continue;
+        const o=j*4; r+=d[o]; g+=d[o+1]; b+=d[o+2]; m++;
+      }
+      if(m){ const o=i*4; d[o]=(r/m)|0; d[o+1]=(g/m)|0; d[o+2]=(b/m)|0; next[i]=1; }   // alpha untouched: still transparent, now coloured
+      else all=false;
+    }
+    filled=next;
+  }
+}
 function paintTile(name, fn){
   const idx = _tileCursor++;
   TILEIDX[name] = idx;
@@ -3222,42 +3263,8 @@ function paintTile(name, fn){
       for(let sx=0;sx<K;sx++){ const o=(yy*TILE+lx*K+sx)*4;
         d[o]=r0; d[o+1]=g0; d[o+2]=b0; d[o+3]=a0; } }
   }
-  // ---- ALPHA DILATION, and it is why thin cutouts go black at distance ----
-  // A transparent texel in these tiles is written [0,0,0,0] — transparent AND black. That is invisible at mip 0, where
-  // the alpha test discards it, and it is a disaster in every mip below: generateMipmaps averages RGB and alpha
-  // together, so a two-texel kelp stalk in a sixteen-texel tile averages one part olive to seven parts BLACK while its
-  // alpha stays above the cutoff. The fragment survives the test wearing a colour that is mostly the transparent
-  // background. The thinner the geometry the darker it goes, which is exactly Ben 08-12: "kelp is still showing black
-  // through the water", "its just the top tips" — a tip is the thinnest part of the strand. Item 9 on the backlog
-  // (canopy black seen through the leaves) is the same bug wearing leaves.
-  // The fix is to bleed the nearest opaque COLOUR outward into the transparent texels while leaving every alpha byte
-  // exactly as it was. Mip 0 is therefore bit-identical and the alpha test cannot notice; only what the mips average
-  // to changes, and now it averages colour with colour.
-  if(!(typeof Q!=='undefined' && Q.get('nodilate'))){
-    const A=(o)=>d[o+3];
-    let filled=new Uint8Array(TILE*TILE);
-    for(let i=0;i<TILE*TILE;i++) filled[i]= A(i*4)>0 ?1:0;
-    let any=filled.some(v=>v), all=filled.every(v=>v);
-    if(any && !all){
-      for(let pass=0; pass<TILE && !all; pass++){
-        const next=filled.slice(); all=true;
-        for(let y=0;y<TILE;y++) for(let x=0;x<TILE;x++){
-          const i=y*TILE+x; if(filled[i]) continue;
-          let r=0,g=0,b=0,n=0;
-          for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){
-            if(!dx&&!dy) continue; const xx=x+dx, yy=y+dy;
-            if(xx<0||xx>=TILE||yy<0||yy>=TILE) continue;
-            const j=yy*TILE+xx; if(!filled[j]) continue;
-            const o=j*4; r+=d[o]; g+=d[o+1]; b+=d[o+2]; n++;
-          }
-          if(n){ const o=i*4; d[o]=(r/n)|0; d[o+1]=(g/n)|0; d[o+2]=(b/n)|0; next[i]=1; }   // alpha untouched: still transparent, now coloured
-          else all=false;
-        }
-        filled=next;
-      }
-    }
-  }
-  actx.putImageData(img, tx, ty);
+  actx.putImageData(img, tx, ty);   // NOT dilated here: a 2D canvas stores premultiplied alpha, so colour under alpha 0 does not survive the round trip. See the arrData build.
+
   return idx;
 }
 const jit=(r,base,amt)=>base+(r()-0.5)*amt;
@@ -3921,6 +3928,14 @@ const arrData = new Uint8Array(LAYER_TEXELS*4*ATLAS_COUNT);
 for(let i=0;i<ATLAS_COUNT;i++){
   const tx=(i%ATLAS_TILES)*TILE, ty=((i/ATLAS_TILES)|0)*TILE;
   const src=actx.getImageData(tx,ty,TILE,TILE).data;
+  // ---- THE DILATION HAPPENS HERE, AND IT DID NOT BEFORE ----
+  // It was written inside paintTile on 08-12 for the kelp and it has been INERT ever since: a 2D canvas stores
+  // premultiplied alpha, so putImageData followed by getImageData returns (0,0,0,0) for every texel whose alpha is 0
+  // however it was coloured going in. Measured: every cutout tile in the atlas read clearRGB [0,0,0] with the pass
+  // enabled and with ?nodilate alike. That is why black texels on thin bright sprites survived two weeks of fixes.
+  // arrData is the buffer the GPU reads (see the note at stampTile), it is a plain Uint8Array, and nothing
+  // premultiplies it -- so this is the one place the bleed can survive.
+  dilateAlpha(src, TILE);
   arrData.set(src, i*LAYER_TEXELS*4);
 }
 const arrayTex = new THREE.DataArrayTexture(arrData, TILE, TILE, ATLAS_COUNT);
@@ -3955,7 +3970,12 @@ function stampTile(name, file){
       actx.clearRect(tx,ty,TILE,TILE);
       actx.imageSmoothingEnabled=false;
       actx.drawImage(im, tx, ty, TILE, TILE);
-      arrData.set(actx.getImageData(tx,ty,TILE,TILE).data, i*LAYER_TEXELS*4);
+      // A pack's cutout carries black under its alpha exactly as our painters do, and a stamp replaces the whole cell,
+      // so without this every stamped flower, fern and tuft loses the bleed. Dilated into arrData only -- writing it
+      // back to the canvas would premultiply it straight back to black (see the arrData build).
+      const st=actx.getImageData(tx,ty,TILE,TILE);
+      dilateAlpha(st.data, TILE);
+      arrData.set(st.data, i*LAYER_TEXELS*4);
       arrayTex.needsUpdate=true;
       _stampedTiles.push(name);
     }catch(e){}
@@ -3993,6 +4013,7 @@ function stampInto(name, file){
       let n=0;
       for(let p=0;p<d.length;p+=4){ if(d[p+3]!==254) continue;
         d[p]=src[p]; d[p+1]=src[p+1]; d[p+2]=src[p+2]; d[p+3]=255; n++; }
+      dilateAlpha(d, TILE);                                          // a no-op on these three (litter over opaque grass), here so no path that writes a tile can miss it
       actx.putImageData(cur,tx,ty);
       arrData.set(d, i*LAYER_TEXELS*4);
       arrayTex.needsUpdate=true;
@@ -26780,9 +26801,12 @@ function updateFlares(dt){
         // per-frame test steps 0.7 of a block and a deer is 0.6 wide, so a hit is a coin flip. One animal per flare —
         // it is a projectile, not a beam — and the flare goes on burning where it struck rather than vanishing, which
         // is what a magnesium round does and what makes the burn below the larger half.
+        // AN ANIMAL IS FLAT x/y/z, NOT a.pos — which is how the first version of this damaged nothing at all: `a.pos`
+        // is undefined on every animal in the game, so the guard skipped all of them and a flare dropped half a block
+        // from a deer left it on 8 of 8 hit points (measured, three samples over six seconds).
         if(!f._hit && typeof animals!=='undefined'){
-          for(const a of animals){ if(!a||a.dead||!a.pos) continue;
-            if(Math.hypot(a.pos.x-f.x, (a.pos.y+0.6)-f.y, a.pos.z-f.z) < 0.9){
+          for(const a of animals){ if(!a||a.dead||a.x==null) continue;
+            if(Math.hypot(a.x-f.x, (a.y+0.6)-f.y, a.z-f.z) < 0.9){
               f._hit=true; if(typeof hurtAnimal==='function') hurtAnimal(a,_FLARE_DIAL.impact);
               spawnParticles(f.x,f.y,f.z,0xff6a20,14,2.0,0.6); break; } } }
         if((b!==AIR && isSolid[b]) || f.y<0.05){
@@ -26805,8 +26829,8 @@ function updateFlares(dt){
     // read off the same age the light and the fade are.
     if(!f.dead && (f.age-(f._burnT||-9))>=0.5){ f._burnT=f.age;
       const R=_FLARE_DIAL.burnR, tick=_FLARE_DIAL.burn*0.5;
-      if(typeof animals!=='undefined') for(const a of animals){ if(!a||a.dead||!a.pos) continue;
-        if(Math.hypot(a.pos.x-f.x, (a.pos.y+0.6)-f.y, a.pos.z-f.z) < R && typeof hurtAnimal==='function') hurtAnimal(a,tick); }
+      if(typeof animals!=='undefined') for(const a of animals){ if(!a||a.dead||a.x==null) continue;
+        if(Math.hypot(a.x-f.x, (a.y+0.6)-f.y, a.z-f.z) < R && typeof hurtAnimal==='function') hurtAnimal(a,tick); }
       // THE PLAYER IS NOT EXEMPT. `damage` carries the cause so a death by your own flare says so, and it already
       // refuses in creative and while dead, so there is nothing to guard here.
       if(typeof damage==='function' && Math.hypot(player.pos.x-f.x, (player.pos.y+0.9)-f.y, player.pos.z-f.z) < R)
@@ -37911,11 +37935,17 @@ function _leafRespawn(i,aroundY){ let a=Math.random()*6.283, r=Math.random()*LEA
 // THE NEAR FIELD IS UNTOUCHED, which is the feature Ben likes in the same frame he complains about: full size
 // inside LEAF_NEAR, so the canopy overhead still visibly sheds. Zero at LEAF_GONE, which is inside LEAF_R, so a
 // leaf is out of sight before it is out of range and the recycle is never seen.
-const LEAF_NEAR=14, LEAF_GONE=26;
+// Dialable, because "how far is too far to see a leaf" is a look decision and Ben should be able to move it in one
+// call. __hc.leafFar({near,gone}); gone<=0 disables the shrink entirely, which is the control side of its A/B.
+// 8 and 16, swept: with the tag on and only SMALL magenta blobs counted -- so a big near leaf, which is the effect
+// Ben likes, is not counted as the speck he complains about -- the dots go 24 -> 3. At 14/26 they only go 18 -> 11,
+// because a leaf at twenty blocks is still a speck; at 6/12 they go back up to 11, because the shrink ramp itself
+// leaves mid-size blobs inside the near field. 8/16 is the floor of that curve.
+let LEAF_NEAR=8, LEAF_GONE=16;
 function _leafScale(i){
   const dx=_leafPos[i*3]-camera.position.x, dy=_leafPos[i*3+1]-camera.position.y, dz=_leafPos[i*3+2]-camera.position.z;
   const d=Math.sqrt(dx*dx+dy*dy+dz*dz);
-  if(d<=LEAF_NEAR) return _leafSz[i];
+  if(LEAF_GONE<=0 || d<=LEAF_NEAR) return _leafSz[i];
   if(d>=LEAF_GONE) return 0;
   const k=1-(d-LEAF_NEAR)/(LEAF_GONE-LEAF_NEAR);
   return _leafSz[i]*k*k;                    // squared, so the last few blocks do most of the vanishing
@@ -43172,18 +43202,23 @@ window.__hc={
   // the question "which tiles are blank" is answered once for doors, fences, chests, guns and props together instead
   // of once per object. sd below ~2 is a solid fill; the painter's own tiles all read well above 10.
   tileStats(names){ try{
-    const cv=document.createElement('canvas'); cv.width=cv.height=TILE; const cx=cv.getContext('2d'); cx.imageSmoothingEnabled=false;
     const list = names && names.length ? names : Object.keys(TILEIDX);
     const rows=[];
     for(const name of list){ const i=TILEIDX[name]; if(i==null||i>=ATLAS_COUNT) { rows.push({name, err:'no layer'}); continue; }
-      cx.clearRect(0,0,TILE,TILE);
-      cx.drawImage(atlasCanvas,(i%ATLAS_TILES)*TILE,((i/ATLAS_TILES)|0)*TILE,TILE,TILE,0,0,TILE,TILE);
-      const d=cx.getImageData(0,0,TILE,TILE).data, n=TILE*TILE;
+      // arrData, NOT the canvas. The canvas is premultiplied, so it reports [0,0,0] for every transparent texel
+      // whatever colour is under it -- which made clearRGB below blind to the one thing it exists to measure.
+      const d=arrData.subarray(i*LAYER_TEXELS*4,(i+1)*LAYER_TEXELS*4), n=TILE*TILE;
       let s=[0,0,0], q=[0,0,0], a=0;
-      for(let p=0;p<d.length;p+=4){ for(let c=0;c<3;c++){ s[c]+=d[p+c]; q[c]+=d[p+c]*d[p+c]; } a+=d[p+3]; }
+      // AND WHAT COLOUR THE TRANSPARENT TEXELS CARRY, which is invisible in every other statistic here and is the one
+      // that decides whether a thin cutout goes black at distance: generateMipmaps averages RGB across the alpha
+      // boundary, so black under alpha 0 is dragged into the sprite's own colour two mips down. See dilateAlpha.
+      let cr=0,cg=0,cb=0,cn=0;
+      for(let p=0;p<d.length;p+=4){ for(let c=0;c<3;c++){ s[c]+=d[p+c]; q[c]+=d[p+c]*d[p+c]; } a+=d[p+3];
+        if(d[p+3]===0){ cr+=d[p]; cg+=d[p+1]; cb+=d[p+2]; cn++; } }
       const mean=s.map(v=>v/n), sd=q.map((v,c)=>Math.sqrt(Math.max(0,v/n-mean[c]*mean[c])));
       rows.push({ name, idx:i, mean:mean.map(v=>+v.toFixed(1)), sd:+Math.max(...sd).toFixed(2),
-                  alpha:+(a/n).toFixed(1), stamped:_stampedTiles.indexOf(name)>=0 }); }
+                  alpha:+(a/n).toFixed(1), clear:cn, clearRGB:cn?[Math.round(cr/cn),Math.round(cg/cn),Math.round(cb/cn)]:null,
+                  stamped:_stampedTiles.indexOf(name)>=0 }); }
     rows.sort((x,y)=>(x.sd==null?-1:x.sd)-(y.sd==null?-1:y.sd));
     return { n:rows.length, flat:rows.filter(r=>r.sd!=null&&r.sd<2).length, rows };
   }catch(e){ return {err:String(e&&e.message||e)}; } },
@@ -43722,7 +43757,7 @@ window.__hc={
   // introT is the intro Jesus's own countdown in SIMULATED seconds, and it is reported because wall-clock cannot stand in for it: a
   // headless page runs its frame loop well under 60 Hz, so his 20-second wait took 46 seconds of real time in the bench. The game means
   // simulated seconds, and this is the only number that says so.
-  fauna(){ try{ return animals.map(a=>({t:a.type,x:+a.x.toFixed(1),y:+a.y.toFixed(1),z:+a.z.toFixed(1),intro:!!a.introJesus,leaving:!!a._leaving,introT:a._introT==null?null:+a._introT.toFixed(2),pd:+Math.hypot(a.x-player.pos.x,a.z-player.pos.z).toFixed(1),overWater:surfaceH(Math.floor(a.x),Math.floor(a.z))<=CFG.SEA})); }catch(e){ return {err:e.message}; } },   // QA: live animal roster (intro-Jesus departure + spawner checks)
+  fauna(){ try{ return animals.map(a=>({t:a.type,hp:+((a.hp!=null?a.hp:0)).toFixed(2),dead:!!a.dead,x:+a.x.toFixed(1),y:+a.y.toFixed(1),z:+a.z.toFixed(1),intro:!!a.introJesus,leaving:!!a._leaving,introT:a._introT==null?null:+a._introT.toFixed(2),pd:+Math.hypot(a.x-player.pos.x,a.z-player.pos.z).toFixed(1),overWater:surfaceH(Math.floor(a.x),Math.floor(a.z))<=CFG.SEA})); }catch(e){ return {err:e.message}; } },   // QA: live animal roster (intro-Jesus departure + spawner checks)
   // QA: THE GIANTESS. `girl(d)` puts her d blocks ahead of the eye and reports the rig's own measurements —
   // her height, her bones, whether the three PNG maps actually bound, and where each foot is in the world.
   // A 13-block model is exactly the case a screenshot cannot answer: the frame is full of thigh.
@@ -44963,6 +44998,12 @@ window.__hc={
   // THE FLARE, WHOLE: reach, brightness, sink, shimmer and both halves of its damage, plus what is alight right now.
   // `blocked` is the line-of-sight test the beacon rides, so "I can see it through a tree" and "it is hidden behind a
   // tree" are the same field read twice.
+  // DROP ONE WHERE YOU SAY, at rest. Ben's own acceptance test for the damage is "drop one at its feet", and a flare
+  // gun cannot do that: the round leaves at 44 m/s and arcs, so aiming at something ten blocks away lands the flare
+  // forty blocks past it. This is the launcher without the launch.
+  flareDrop(x,y,z){ try{ const f=spawnFlare(+x,+y,+z,0,0,0);
+      return { at:[+f.x.toFixed(1),+f.y.toFixed(1),+f.z.toFixed(1)], live:flares.filter(q=>!q.dead).length }; }
+    catch(e){ return {err:String(e&&e.message||e)}; } },
   flareDial(o){ try{ if(o) for(const k in o) if(_FLARE_DIAL[k]!=null) _FLARE_DIAL[k]=+o[k];
       return { dial:Object.assign({},_FLARE_DIAL), live:flares.filter(f=>!f.dead).length,
                flares:flares.filter(f=>!f.dead).map(f=>({ at:[+f.x.toFixed(1),+f.y.toFixed(1),+f.z.toFixed(1)],
@@ -47259,6 +47300,10 @@ window.__hc={
   // frame, where the honest answer is a zero and a zero means nothing without it.
   leafFade(v){ try{ if(v!=null) _leafFade=!!v; return { fade:_leafFade, from:12, to:LEAF_R }; }
     catch(e){ return {err:String(e.message||e)}; } },
+  // WHERE A LEAF STOPS BEING DRAWN (see _leafScale). gone<=0 restores the pre-fade batch exactly, which is the
+  // control this was measured against.
+  leafFar(o){ try{ if(o){ if(o.near!=null) LEAF_NEAR=Math.max(0,+o.near); if(o.gone!=null) LEAF_GONE=+o.gone; }
+      return { near:LEAF_NEAR, gone:LEAF_GONE, radius:LEAF_R }; }catch(e){ return {err:String(e.message||e)}; } },
   leafTag(v){ try{ if(v!=null) _leafTag=!!v; return { tag:_leafTag }; }
     catch(e){ return {err:String(e.message||e)}; } },
   leafFreeze(v){ try{ if(v!=null) _leafFreeze=!!v; return { freeze:_leafFreeze }; }
