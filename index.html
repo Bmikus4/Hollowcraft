@@ -1248,6 +1248,23 @@ const _scotK = new Float32Array([0.45, 0, 0, 0]);
 // A NOTE ON THE FOG TEST, so nobody repeats it: __hc.fog(1) took the crop to 94.22, which measures forcing a fog
 // EVENT ON, not fog's baseline contribution. It attributes nothing.
 const _hcAux = new Float32Array([0.10, 0, 0.012, 0.14]);
+// ---- NIGHT IS PITCH BLACK, AND THE ONLY THING THAT SURVIVES IT IS WHAT YOU CAN TOUCH (Ben 2026-08-18 03:10) ----
+// "night time is not dark enough, it should be pitch black. im not even joking." Taken literally: with no light
+// source the player cannot navigate. Measured before this, adaptation ON as he plays it, midnight, ground crop, one
+// frame per vantage: open ground 1.00 (67.5% pure black) and straight down 1.00 (79.7%) were already right; a WOOD
+// read 28.64 and a BEACH 54.93 with not one black pixel in it. Switching the base level off took the wood 28.64 ->
+// 14.84, which is where half of it was.
+// x = WHAT FRACTION OF THE BASE LEVEL SURVIVES THE NIGHT. The base level (_hcAux[0]) was asked for as a DAYTIME term
+// -- "in dark areas textures still dont show up at all" is a complaint about shade, not about midnight -- and it was
+// applied at every hour, so it was lighting the night it had nothing to do with. It is full strength by day and this
+// fraction by night: one term with an hour on it, rather than a second term invented for the dark.
+// y, z = THE NEAR-FIELD FLOOR, which Ben asked to KEEP in the same breath: "when you are close to a block at night
+// you should be able to see it if you are right up against it". y is how much and z is how far in blocks, falling to
+// nothing by z so a wall two blocks off is as black as the rest of the night. Albedo-proportional like the base
+// level, so it shows the surface's own grain instead of laying a grey card over it.
+// IF THE FLOOR AND PITCH BLACK EVER CONFLICT, PITCH BLACK WINS: dial y down, never x up.
+// __hc.nightAmb(v) and __hc.nearFloor({amt,reach}).
+const _hcNight = new Float32Array([0.15, 0.05, 2.5, 0]);
 // ---- WHAT THE SKY CAN SEE OF THIS OBJECT (per-draw) ----
 // x is the sky-and-canopy multiplier for the object about to be drawn, and it DEFAULTS TO 1 so nothing changes until
 // something sets it. The world's blocks carry this per vertex (vSky/vCan, baked by the mesher); a creature, a prop, a
@@ -1484,7 +1501,7 @@ const HC_LIGHT_GLSL = [
   // difference against a 4/255 noise floor, the world drawn by whatever survived. Appended first, so the
   // definitions precede every use of them.
   THREE.ShaderChunk.lights_pars_begin += '\n' + HC_LIGHT_GLSL;
-  THREE.ShaderChunk.lights_pars_begin += '\nuniform vec4 uScotG;\nuniform vec4 uScotH;\nuniform vec4 uScotK;\nuniform vec4 uPropFill;\nuniform vec4 uHcAux;\nuniform vec4 uHcObj;\nuniform vec4 uHcLamp;\n';
+  THREE.ShaderChunk.lights_pars_begin += '\nuniform vec4 uScotG;\nuniform vec4 uScotH;\nuniform vec4 uScotK;\nuniform vec4 uPropFill;\nuniform vec4 uHcAux;\nuniform vec4 uHcObj;\nuniform vec4 uHcLamp;\nuniform vec4 uHcNight;\n';
   // ---- A LAMP HAS A BODY: THE NEAR-FIELD CLAMP (Ben 08-06: "flashlights light up thier entire model") ----
   // three's point and spot attenuation is 1/max(pow(d,decay),0.01) — a POINT source, so as d goes to zero the light
   // goes to a hundred times its value at one block. Every lamp in this game is mounted on, or held next to, the very
@@ -1892,7 +1909,16 @@ const HC_LIGHT_GLSL = [
     // both of the ones below normalise a pixel to a constant and therefore erase grain rather than restore it.
     // Gated by _lk, the same delivered-light ramp the descent and the floor use, so an unlit sealed room takes
     // exactly zero of it and Ben's black night is untouched.
-    '  if(uHcAux.x > 0.0) gl_FragColor.rgb += diffuseColor.rgb * (uHcAux.x * _lk);\n'+
+    '  if(uHcAux.x > 0.0) gl_FragColor.rgb += diffuseColor.rgb * (uHcAux.x * _lk * mix(uHcNight.x, 1.0, uScotG.w));\n'+
+    // THE NEAR-FIELD FLOOR. Not gated on _lk, and that is the point: it has to work where NO light is delivered,
+    // because the case it exists for is standing against a wall at midnight with empty hands. What bounds it instead
+    // is DISTANCE — it is gone by uHcNight.z blocks — so it can never lift the night as a whole, only the surface the
+    // player is close enough to touch. vViewPosition is view-space, so its length is the camera distance, and it is
+    // declared by all four lit shaders this block runs in.
+    '  if(uHcNight.y > 0.0 && uScotG.w < 1.0){\n'+
+    '    float _nf = 1.0 - smoothstep(0.0, max(uHcNight.z,1e-3), length(vViewPosition));\n'+
+    '    gl_FragColor.rgb += diffuseColor.rgb * (uHcNight.y * _nf * (1.0 - uScotG.w));\n'+
+    '  }\n'+
     // ---- AND THE TERM THAT DOES NOT VANISH WITH THE ALBEDO (Ben 08-16: "real, pure daytime darkness should be
     // built without the black textel regression. Black texteks are seen wben holding light at day or night in a
     // darker area") ----
@@ -1973,6 +1999,7 @@ for(const k of ['lambert','phong','standard','physical','toon','dashed','basic',
   S.uniforms.uScotG={ value:_scotG }; S.uniforms.uScotH={ value:_scotH }; S.uniforms.uScotK={ value:_scotK }; S.uniforms.uPropFill={ value:_propFill }; S.uniforms.uHcAux={ value:_hcAux };
   S.uniforms.uHcObj={ value:_hcObj };
   S.uniforms.uHcLamp={ value:_hcLamp };
+  S.uniforms.uHcNight={ value:_hcNight };
 }
 
 // =====================================================================
@@ -6966,6 +6993,14 @@ renderer.setClearColor(BG, 1);
 
 const scene = new THREE.Scene();
 scene.background = BG;
+// ---- THE LAYER YOUR OWN EYES DO NOT SEE ----
+// First person draws the player's own body — legs, feet, torso — minus the head and the two arms (see FPB and
+// updateTpsBody), and those two parts are put on a LAYER rather than switched invisible, because the shadow pass reads
+// `visible` too: hidden that way you would cast a headless, armless shadow on the ground in front of you. The main camera
+// never enables this layer, so the eye loses them; every other camera and every shadow-casting light does, so nothing else
+// does.
+const FP_HIDE=1;
+const fpSeeAll=(o)=>{ o.layers.enable(FP_HIDE); return o; };
 const camera = new THREE.PerspectiveCamera(74, innerWidth/innerHeight, 0.08, CFG.RD_MAX*CK*1.7);   // sized to the RD ceiling so climbing the slider (or the horizon at FAR*1.1) never clips against the far plane
 // sniper-scope overlay — a circular clear aperture, black surround, crosshair + center dot; shown while aiming the hunting rifle
 let scopeEl=document.createElement('div'); scopeEl.style.cssText='position:fixed;inset:0;z-index:45;pointer-events:none;display:none;';
@@ -9660,7 +9695,7 @@ const waterMat = new THREE.ShaderMaterial({
     // is almost pure depth colour: you see into the water and onto the seabed. That IS the transparency he is asking for, and the
     // only thing standing between it and eye level is how much of the depth colour this cap lets the grazing reflection erase. At
     // 0.80 a fifth survived; at 0.42 well over half does, so the sea reads as water from a shore as well as from the air.
-    uFresCap:{value:0.42},   // how far the grazing-angle reflection is allowed to replace the depth colour — 1.0 is the old behaviour
+    uFresCap:{value:0.42}, uFresMin:{value:0.12},   // the least sky a steeply-viewed water surface shows (see uFresMin in the shader)   // how far the grazing-angle reflection is allowed to replace the depth colour — 1.0 is the old behaviour
     // THE BLACK BAND DETECTOR (task 3). 1 paints every non-finite or negative water fragment magenta. Ships at 0 and
     // costs one comparison per water pixel when it is 0. Every black pixel in that band is ISOLATED - it has a lit
     // neighbour - which is the signature of a per-pixel NaN, not of an unlit surface. __hc.waterNan(1) turns it on.
@@ -9814,7 +9849,7 @@ const waterMat = new THREE.ShaderMaterial({
     // If the shared model ever gains a term that water then visibly contradicts at the shoreline, that is the case to
     // reopen this - with the symptom, to Ben, rather than quietly.
     uniform vec4 uScotG, uScotH;   // the scotopic vectors, shared by reference with the land — see the night wash at the end of main()
-    uniform vec3 uHorizonC, uZenithC, uSunColU; uniform float uReflAmt, uReflSharp, uStreak, uFine;
+    uniform vec3 uHorizonC, uZenithC, uSunColU; uniform float uReflAmt, uReflSharp, uStreak, uFine, uFresMin;
     uniform vec4 uLampP[4]; uniform vec3 uLampC[4];
     float h2(vec2 p){ return fract(sin(dot(p,vec2(12.9,78.2)))*43758.5); }
     float vn2(vec2 x){ vec2 i=floor(x),f=fract(x); f=f*f*(3.0-2.0*f); return mix(mix(h2(i),h2(i+vec2(1,0)),f.x),mix(h2(i+vec2(0,1)),h2(i+vec2(1,1)),f.x),f.y); }
@@ -10004,7 +10039,20 @@ const waterMat = new THREE.ShaderMaterial({
       // not the fault and must not be credited with fixing anything.
       vec3 Rn = dot(R,R) > 1e-12 ? normalize(R) : vec3(0.0, 1.0, 0.0);
       vec3 skyRefl = uReflAmt > 0.001 ? mix(uRing, skyAt(Rn), uReflAmt) : uRing;
-      vec3 col=mix(base, skyRefl, min(F, uFresCap));
+      // ---- A CONTAINED BODY OF WATER IS SEEN FROM ABOVE, AND F IS 0.02 THERE (Ben 08-18: the well "must be the SAME
+      // water as the ocean ... the reflections are not the ocean reflections") ----
+      // It already IS the same water: the well's cells are chunk water and chunk water is this material, the same
+      // instance the ocean draws with. Measured noon to dusk, the sea's surface falls to x0.33 of its brightness while
+      // the well's RISES to x1.35, and neither number is a second material -- they are the same two terms weighted
+      // differently by where you stand. You look ACROSS the sea, where F reaches the 0.42 cap and the surface is mostly
+      // sky; you look DOWN a shaft, where F is 0.02 and the surface is almost entirely depth colour plus the night
+      // in-scatter floor, which is deliberately view-independent (see NIGHT IN-SCATTER FLOOR -- Fresnel-gating it is
+      // what made close night water black, and Ben reported that).
+      // SO THE FLOOR IS ON F, NOT ON THE FLOOR TERM. uFresMin is the least sky any water surface shows however steeply
+      // it is viewed. A cap would change the sea; a floor cannot -- at grazing incidence F is already far above it, so
+      // every frame of open water is bit-identical, and a well, a pond and a puddle stop being lids. __hc.waterRefl
+      // ({fresMin}) is the dial and 0 restores the old behaviour exactly.
+      vec3 col=mix(base, skyRefl, clamp(max(F, uFresMin), 0.0, uFresCap));
       // Bisect probes for the black band, read by uNanDbg modes 3-5 at the end of main(). They are assignments to
       // two locals and nothing reads them unless the debug branch is on, so the compiler drops them in production.
       vec3 _dbgSkyRefl = skyRefl; vec3 _dbgCol0 = col; float _dbgF = min(F, uFresCap);
@@ -10450,6 +10498,10 @@ function buildFlashlight(){
 // nearest win. Slot count NEVER changes after this line.
 const GLOW_N=3, glowPool=[], _glowCand=[], _glowStatic=[];
 for(let i=0;i<GLOW_N;i++){ const L=new THREE.PointLight(0xff8626,0,9,1.6); L.position.set(0,-999,0); scene.add(L); glowPool.push(L); }
+// EVERY LIGHT SEES THE PARTS THE EYE DOES NOT (see FP_HIDE). The shadow pass tests an object's layers against the LIGHT's,
+// so a caster left off this list would drop your own head and arms out of its shadow map and shorten the shadow you can
+// see on the ground in front of you. A light that gains castShadow later belongs here.
+for(const L of [sunLight, nvLight, flashLight, heldLight, ...pointPool, ...glowPool]) fpSeeAll(L);
 function glowCand(x,y,z,intensity,dist,color){ _glowCand.push({x,y,z,i:intensity,d:dist,c:color,s:0}); }
 function assignGlowPool(){
   const px=player.pos.x, py=player.pos.y+1, pz=player.pos.z;
@@ -17996,7 +18048,7 @@ function monEnsure(){
   if(!MON.rt){ MON.rt=new THREE.WebGLRenderTarget(w,h,{depthBuffer:true}); MON.w=w; MON.h=h;
     if(MON.quad) MON.quad.material.uniforms.uTex.value=MON.rt.texture; }
   if(MON.cam) return;
-  MON.cam=new THREE.PerspectiveCamera(72, w/h, 0.1, 400);
+  MON.cam=fpSeeAll(new THREE.PerspectiveCamera(72, w/h, 0.1, 400));   /* a monitor watches a whole person, not a headless one — see FP_HIDE */
   MON.scene=new THREE.Scene(); MON.ortho=new THREE.OrthographicCamera(-1,1,1,-1,0,1);
   // NORMAL COLOURED NIGHT VISION, which is the thing he asked for and is NOT the green-phosphor cliche: the picture keeps its
   // own hues and is simply amplified, the way a modern digital sensor does it. Gain is applied in a low-light curve — pow(c,
@@ -18117,7 +18169,7 @@ function scrCameras(){ const out=[];
   return out; }
 function scrEnsure(){ if(SCR.rt) return;
   SCR.rt=new THREE.WebGLRenderTarget(SCR_TILES*SCR_TILE, SCR_TILES*SCR_TILE, {depthBuffer:true});
-  SCR.cam=new THREE.PerspectiveCamera(70, 1, 0.1, 220);
+  SCR.cam=fpSeeAll(new THREE.PerspectiveCamera(70, 1, 0.1, 220));
   SCR.group=new THREE.Group(); SCR.group.name='cctvScreens'; scene.add(SCR.group); }
 // The screen quad for one monitor, in its own group so the camera pass can hide every screen at once. One ShaderMaterial per
 // monitor, not one texture clone per monitor: an offset lives on a Texture, so per-monitor offsets would need per-monitor
@@ -19431,6 +19483,7 @@ function updateCamera(dt){
   // upright-looking player in the middle of it reads as the camera falling over. The BODY still leans (updateTpsBody);
   // `_tpsAct` is last frame's value here, which costs one frame on a view change nobody makes mid-peek.
   if(leanF && !_tpsAct) camera.rotateZ(-LEAN_ROLL*p._lean*leanF);   // the tilt follows the offset the wall ALLOWED, not the one the key asked for
+  p._eyeY = p.pos.y+EYE-proneDrop-crouchDrop;                                   // the eye WITHOUT bob or lean — what the first-person body is anchored to (see FPB)
   camera.position.set(p.pos.x+right.x*(bobX+leanX), p.pos.y+EYE-proneDrop-crouchDrop+bobY-leanDip, p.pos.z+right.z*(bobX+leanX));
   // ---- F4 THIRD PERSON (Ben 07-27) — deliberately ROUGH tracking: the boom lags the eye instead of being welded to it,
   //      so the camera swings and settles behind you rather than snapping. Pulled in if a wall is in the way.
@@ -19584,14 +19637,34 @@ function _tpsHideHands(hide){
 // wearable added later arrives for free -- applyWorn drives both from one set of rules. Built on first use, because a player
 // who never presses F3 should not pay for the geometry, and kept forever afterwards (pressing F3 twice a second must not
 // churn the GPU). The death ragdoll owns the body while you are dead, so this hides rather than fighting it for the same space.
+// ---- YOUR OWN BODY IN FIRST PERSON (Ben 08-18: "see your own legs, feet and torso when you look down") ----
+// It is the SAME rig the third-person view uses and not a second model, so the gait, the crouch fold, the prone roll, the
+// swim stroke, the landing dip, every worn garment and the world's own light on all of it arrive already working.
+// Everything here is placement, and it follows from one fact: the camera sits at EYE, 1.62, which on this model is the
+// SHOULDER line and not the eyes — the head box is built from 1.70 to 2.00. Dropped in as it stands, the tunic's top edge
+// would be at exactly eye height and 0.42 wide, i.e. a brown wall across the middle of the screen.
+//   SO THE MODEL IS SCALED to put its own eyes at EYE — 1.62/1.85, which keeps every proportion and lands the shoulders
+// 0.20 below the camera, where shoulders belong — and ANCHORED so that eye point sits where the player's eye is.
+// Anchoring rather than offsetting is what makes crouch, prone and swimming work without a case each: the camera's crouch
+// drops 0.34 where the body's stylised sink is 0.15, and prone lays the head a body-length forward of the feet; both are
+// only a different eye position, and the rig is moved to meet it. Horizontally the anchor is over the FEET, which is what
+// sets the body back by the depth of its own face and keeps the camera outside the chest.
+//   Bob and lean are deliberately not in the anchor: the head bobs and peeks, the legs stay under you.
+const FPB={ on:true, eyeY:1.85, eyeZ:0.13, head:false, arms:false };   // eyeY/eyeZ: where this model's eyes sit in its own space — the head box's centre, just inside the face
+const _fpEye=new THREE.Vector3();
+function _fpLayer(o,hide){ if(o) o.traverse(c=>c.layers.set(hide?FP_HIDE:0)); }
+// Re-applied every frame and not on the transition: a helmet, a swapped rifle or a piece of armour arrives as a fresh mesh
+// on layer 0, and it would be the one thing in your face.
+function _fpMask(P,fp){ _fpLayer(P.head, fp&&!FPB.head); _fpLayer(P.armL, fp&&!FPB.arms); _fpLayer(P.armR, fp&&!FPB.arms); }
 let _tpsBody=null; const _tpsHandW=new THREE.Vector3();
 function tpsBody(){ if(_tpsBody) return _tpsBody;
   try{ const P=buildPlayerModel(); P.group.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
     scene.add(P.group); _tpsBody=P; applyWorn(P); }catch(e){ _tpsBody=null; }
   return _tpsBody; }
 function updateTpsBody(dt){
-  const P=_tpsAct?tpsBody():_tpsBody; if(!P) return;
-  const show=_tpsAct && !player.dead && !player.grabbed;
+  const fp=FPB.on && !_tpsAct;                                                  // the same body, drawn from inside it — see FPB
+  const P=(_tpsAct||fp)?tpsBody():_tpsBody; if(!P) return;
+  const show=(_tpsAct||fp) && !player.dead && !player.grabbed;
   if(P.group.visible!==show){ P.group.visible=show; if(show) applyWorn(P); }   // catch up on anything equipped while it was hidden
   if(!show) return;
   // THE BODY LEANS WITH THE CAMERA. Q and E move the eye 0.55 of a block sideways; in third person the body was
@@ -19902,6 +19975,18 @@ function updateTpsBody(dt){
     P.armL.rotation.x = oc; P.armL.rotation.z = oArc*0.28;
     P.handOff.rotation.x = ((oit.gun ? -okick*0.30 : TPS_GRIP)) - oc; }
   else P.handOff.rotation.x = 0;
+  // ---- AND IN FIRST PERSON IT IS SCALED AND ANCHORED AT ITS OWN EYES (see FPB) ----
+  // Last, below every pose, for the reason the swap reach and the high ready carry: this reads the FINISHED transform, so
+  // a change to the crouch, the prone roll or the swim pitch moves the eye it measures from and needs nothing here.
+  _fpMask(P, fp);
+  if(fp){ const sc=EYE/FPB.eyeY;
+    if(P.group.scale.x!==sc) P.group.scale.setScalar(sc);
+    P.group.updateMatrix();
+    _fpEye.set(0,FPB.eyeY,FPB.eyeZ).applyMatrix4(P.group.matrix);               // where this rig's own eyes ended up, in the world
+    P.group.position.x += player.pos.x - _fpEye.x;
+    P.group.position.z += player.pos.z - _fpEye.z;
+    P.group.position.y += ((player._eyeY!=null)?player._eyeY:(player.pos.y+EYE)) - _fpEye.y; }
+  else if(P.group.scale.x!==1) P.group.scale.setScalar(1);
   P.hand.getWorldPosition(_tpsHandW);                                           // where the held light must come from this frame
 }
 const TPS_GRIP=-0.42;   // how the fist itself is cocked: a shade forward of level, the angle a person carries a tool at
@@ -20447,7 +20532,7 @@ function computeHuntTarget(){
 //      scopeCam renders exactly where the player aims (parallax-free); the lens shader shows a CLEAN, undistorted
 //      zoom (no chromatic/tint/barrel tricks) plus a thin reticle and a tiny red dot. Only live while aiming.
 const scopeRT=new THREE.WebGLRenderTarget(1024,1024,{minFilter:THREE.LinearFilter,magFilter:THREE.LinearFilter});
-const scopeCam=new THREE.PerspectiveCamera(7,1,0.05,FAR*3);                 // narrow FOV = the scope's magnification (lower = more zoom)
+const scopeCam=fpSeeAll(new THREE.PerspectiveCamera(7,1,0.05,FAR*3));                 // narrow FOV = the scope's magnification (lower = more zoom)
 const scopeLensMat=new THREE.ShaderMaterial({ depthTest:true, depthWrite:true,
   uniforms:{ uScope:{value:scopeRT.texture}, uActive:{value:0}, uFov:{value:7.78}, uDay:globalU.uDay, uSway:{value:new THREE.Vector2()} },
   vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
@@ -36700,7 +36785,7 @@ function brRenderPortal(){ if(typeof renderer==='undefined'||!renderer||!BR.door
   renderer.getDrawingBufferSize(_bSize); const sw=Math.max(2,_bSize.x|0), sh=Math.max(2,_bSize.y|0);
   const ps=(BR._portalScale==null?BR_PORTAL_SCALE:BR._portalScale);
   const rw=Math.max(2,(sw*ps)|0), rh=Math.max(2,(sh*ps)|0);
-  if(!_brPortalRT){ _brPortalRT=new THREE.WebGLRenderTarget(rw,rh,{depthBuffer:true}); _brPortalCam=new THREE.PerspectiveCamera(); }
+  if(!_brPortalRT){ _brPortalRT=new THREE.WebGLRenderTarget(rw,rh,{depthBuffer:true}); _brPortalCam=fpSeeAll(new THREE.PerspectiveCamera()); }
   else if(_brPortalRT.width!==rw||_brPortalRT.height!==rh)_brPortalRT.setSize(rw,rh);
   const d=BR.door, dy=d.y+1;                                                                                 // source portal (door) centre
   const dstx=BR_ENTRY.x, dsty=brEntryEyeY(), dstz=BR_ENTRY.z;                                                    // destination = the eye brEnter will actually give you, not a notional portal centre (see brEntryEyeY)
@@ -45240,6 +45325,21 @@ window.__hc={
   // THE HAND'S HARD CONSTRAINT: the dial, and what it did on the last frame. `pushed` is how far the model had to come
   // out of the world, `capped` says the correction was bigger than the cap allows — which is the case worth seeing,
   // and the reason it is reported rather than swallowed.
+  // THE FIRST-PERSON BODY: the dial, and where the anchor actually put it this frame. `on:false` is the control — the
+  // same rig, the same animation, drawn in third person only — and `head:true`/`arms:true` put the masked parts back so
+  // it can be seen that the mask is what removes them and not the placement.
+  fpBody(o){ try{ if(o) for(const k in o) if(k in FPB) FPB[k]=(typeof FPB[k]==='boolean')?!!o[k]:+o[k];
+      const P=(typeof _tpsBody!=='undefined')?_tpsBody:null;
+      const r={ dial:Object.assign({},FPB), tps:!!_tpsAct, built:!!P };
+      if(P){ r.visible=P.group.visible; r.scale=+P.group.scale.x.toFixed(4);
+        P.group.updateMatrix(); _fpEye.set(0,FPB.eyeY,FPB.eyeZ).applyMatrix4(P.group.matrix);
+        r.modelEye=[+_fpEye.x.toFixed(3),+_fpEye.y.toFixed(3),+_fpEye.z.toFixed(3)];
+        r.camera=[+camera.position.x.toFixed(3),+camera.position.y.toFixed(3),+camera.position.z.toFixed(3)];
+        r.eyeErr=+Math.hypot(_fpEye.x-player.pos.x, _fpEye.z-player.pos.z).toFixed(4);
+        r.shoulderBelowEye=+((player._eyeY||0)-(P.group.position.y+1.62*P.group.scale.y)).toFixed(3);   /* upright only: prone and swimming turn this rig on its side */
+        r.headMask=(P.head&&P.head.children[0])?P.head.children[0].layers.mask:null; }
+      return r; }
+    catch(e){ return {err:String(e&&e.message||e)}; } },
   handClamp(o){ try{ if(o) for(const k in o) if(k in HAND_CLAMP) HAND_CLAMP[k]=(k==='on')?!!o[k]:+o[k];
       return { dial:Object.assign({},HAND_CLAMP), pushed:+((view._handClamp||0)).toFixed(4), capped:!!view._handClampCap,
                at:view._handClampAt||null, hits:view._handClampHits|0,
@@ -49872,6 +49972,11 @@ window.__hc={
   lampShape(o){ try{ if(o&&o.amt!=null) _hcLamp[0]=+o.amt; if(o&&o.lo!=null) _hcLamp[1]=+o.lo; if(o&&o.reach!=null) _hcLamp[2]=+o.reach; if(o&&o.smooth!=null) _hcLamp[3]=+o.smooth;
       return { amt:+_hcLamp[0].toFixed(3), lo:+_hcLamp[1].toFixed(3), reach:+_hcLamp[2].toFixed(2), smooth:+_hcLamp[3].toFixed(3), decay:EL_DECAY }; }catch(e){ return {err:String(e.message||e)}; } },
   baseAmb(v){ try{ if(v!=null) _hcAux[0]=+v; return _hcAux[0]; }catch(e){ return String(e.message||e); } },
+  // THE NIGHT LEVEL, as one number. 0 is Ben's literal reading of "pitch black"; 1 is the base level applied at every
+  // hour, which is what shipped before it.
+  nightAmb(v){ try{ if(v!=null) _hcNight[0]=Math.max(0,Math.min(1,+v)); return +_hcNight[0].toFixed(3); }catch(e){ return String(e.message||e); } },
+  nearFloor(o){ try{ if(o&&o.amt!=null) _hcNight[1]=Math.max(0,+o.amt); if(o&&o.reach!=null) _hcNight[2]=Math.max(0.01,+o.reach);
+      return { amt:+_hcNight[1].toFixed(4), reach:+_hcNight[2].toFixed(2) }; }catch(e){ return {err:String(e.message||e)}; } },
   // THE ALBEDO-INDEPENDENT SHEEN: k is how much of the delivered light a black texel returns, knee is the albedo it
   // has faded out by. Both live in the spare halves of the same vec4, so the dial costs no new uniform.
   sheen(o){ try{ if(o&&o.k!=null) _hcAux[2]=+o.k; if(o&&o.knee!=null) _hcAux[3]=+o.knee;
@@ -49894,10 +49999,11 @@ window.__hc={
   dbgT(v){ try{ if(v!=null) waterMat.uniforms.uDbgT.value = +v; return waterMat.uniforms.uDbgT.value; }catch(e){ return String(e.message||e); } },
   waterRefl(o){ try{ const U=waterMat.uniforms;
       if(o&&o.amt!=null) U.uReflAmt.value=+o.amt;
+      if(o&&o.fresMin!=null) U.uFresMin.value=Math.max(0,+o.fresMin);
       if(o&&o.sharp!=null) U.uReflSharp.value=+o.sharp;
       if(o&&o.streak!=null) U.uStreak.value=+o.streak;
       if(o&&o.fine!=null) U.uFine.value=+o.fine;
-      return { amt:U.uReflAmt.value, sharp:U.uReflSharp.value, streak:U.uStreak.value, fine:U.uFine.value, fresCap:U.uFresCap.value,
+      return { amt:U.uReflAmt.value, sharp:U.uReflSharp.value, streak:U.uStreak.value, fine:U.uFine.value, fresCap:U.uFresCap.value, fresMin:U.uFresMin.value,
                lamps:U.uLampP.value.map((p,i)=>({ p:[+p.x.toFixed(1),+p.y.toFixed(1),+p.z.toFixed(1)], r:+p.w.toFixed(1),
                  c:U.uLampC.value[i].getHexString() })).filter(l=>l.r>0) }; }catch(e){ return {err:String(e.message||e)}; } },
   // QA: the flashlight, without a hand or an inventory. `on` flips the switch; the readout is what the shader is
