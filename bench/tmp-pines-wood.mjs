@@ -41,51 +41,60 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     if(SET) await page.evaluate(`__hc.pines(true, ${SET})`);
     console.log('  pines', JSON.stringify(await page.evaluate('__hc.pines()')));
     const IC=await page.evaluate('__hc.isleStats()'); const SEA=await page.evaluate('__hc.island().sea');
-    // A wooded rise, not the summit: the highest column in the elevation window a forest occupies.
-    // surfH, NOT groundY. groundY block-scans a column and a wooded rise's column ends at the top of a BIRCH: the first
-    // cut of this teleported the camera inside a trunk and photographed bark. surfH is the generator's own heightfield,
-    // so the camera stands on the ground the trees are standing on. The spot also has to be CLEAR of trunk and leaf: the
-    // three blocks above the surface are checked for air.
+    // ---- THE VANTAGE IS FOUND FROM THE GENERATOR, NOT FROM THE WORLD ----
+    // Ben's frame is taken from a rise with the wood BELOW and in front of him, so three things have to be true of the
+    // spot and all three are questions the generator can answer before a single chunk is loaded:
+    //   surfH        the heightfield, not groundY - groundY block-scans a column and a wooded rise's column ends at the
+    //                top of a BIRCH, which is how four cuts of this photographed bark.
+    //   treeGates    pineAt is the generator's own "is there a trunk here". blockAt cannot be used for this: an
+    //                ungenerated chunk answers AIR, so every candidate on the island passed a blockAt clearance test
+    //                before the world was loaded and the search returned the same trunk three times.
+    //   the drop     the ground has to fall away, or there is no canopy below the eye to hide the band's foot behind.
+    //                The bearing it falls away along is the yaw the frame is shot on.
+    // THE PAIR IS WHAT IS SCORED, spot AND bearing together. Scoring the spot alone and then taking its steepest fall
+    // put the camera on a slope inside a birch stand: the clearance test passed at five blocks and the trunks stood at
+    // eight, so the frame was bark and a gap of sky. A vantage is only Ben's vantage if the bearing it looks along is
+    // clear of trunks far enough to see the valley, so the LOOK CORRIDOR is part of the test.
     const hill=await page.evaluate(`(()=>{ let best=null;
-      for(let r=60; r<${IC.R}*0.7; r+=7) for(let k=0;k<48;k++){ const th=k/48*6.2831853;
+      for(let r=50; r<${IC.R}*0.75; r+=6) for(let k=0;k<64;k++){ const th=k/64*6.2831853;
         const x=Math.round(${IC.x}+Math.cos(th)*r), z=Math.round(${IC.z}+Math.sin(th)*r), g=__hc.surfH(x,z);
-        if(g<=${SEA}+14 || g>=${SEA}+30) continue;
-        // A CLEARING, NOT A CLEAR COLUMN. One clear column inside a stand still puts a trunk a block from the lens: the
-        // second cut of this passed its own air test and photographed birch bark at every yaw. Eight bearings at three
-        // blocks have to be clear as well, which is an opening a body can stand in and see out of.
-        let clear=true;
-        for(let k2=1;k2<=4 && clear;k2++) if(__hc.blockAt(x,g+k2,z)!==0) clear=false;
-        for(let n=0;n<8 && clear;n++){ const a=n/8*6.2831853, nx=Math.round(x+Math.cos(a)*3), nz=Math.round(z+Math.sin(a)*3);
-          for(let k2=1;k2<=4 && clear;k2++) if(__hc.blockAt(nx,g+k2,nz)!==0) clear=false; }
-        if(clear && (!best || g>best.g)) best={x,z,g}; }
+        if(g<=${SEA}+18 || g>=${SEA}+46) continue;
+        let stand=true;
+        for(let a=0;a<12 && stand;a++){ const an=a/12*6.2831853;
+          for(const rr of [0,2,4]){ if(__hc.treeGates(Math.round(x+Math.cos(an)*rr), Math.round(z+Math.sin(an)*rr)).pineAt){ stand=false; break; } } }
+        if(!stand) continue;
+        // EVERY CELL OF THE CORRIDOR, not a grid over it. Sampling it every two blocks at three offsets stepped straight
+        // past one-block trunks spaced four apart: the test passed and the frame was a birch stand. Only the three
+        // steepest bearings are tested densely, which is what keeps the whole search inside a second.
+        const bear=[];
+        for(let a=0;a<16;a++){ const an=a/16*6.2831853;
+          // THE DROP IS MEASURED AT FORTY BLOCKS, which is where Ben's near canopy stands. His crowns sit about eight
+          // degrees below his eye, so from a 20-block tree at 40 blocks that is roughly 26 blocks of bluff - the number
+          // this is looking for, not a gentle 60-block slope.
+          bear.push({an, drop:g-__hc.surfH(Math.round(x+Math.cos(an)*40), Math.round(z+Math.sin(an)*40))}); }
+        bear.sort((p,q)=>q.drop-p.drop);
+        for(const b of bear.slice(0,3)){
+          if(b.drop<16) break;
+          const cx=Math.cos(b.an), cz=Math.sin(b.an);
+          let open=true;
+          // ONLY THE FIRST EIGHT BLOCKS HAVE TO BE CLEAR. A thirty-four-block tree-free corridor does not exist anywhere
+          // on this island - the search returned null over every candidate - and it should not have to: what ruins the
+          // frame is a trunk against the lens, not a wood in the middle distance, which is the subject.
+          for(let d=2; d<=8 && open; d++){ for(let off=-3; off<=3 && open; off++){
+            const nx=Math.round(x+cx*d-cz*off), nz=Math.round(z+cz*d+cx*off);
+            if(__hc.treeGates(nx,nz).pineAt) open=false; } }
+          if(!open) continue;
+          if(!best || b.drop>best.drop){ best={x,z,g,drop:+b.drop.toFixed(1),yaw:+Math.atan2(-cx,-cz).toFixed(4)}; }
+          break; } }
       return best; })()`);
-    console.log('  island', JSON.stringify(IC), 'sea', SEA, 'hill', JSON.stringify(hill));
+    console.log('  island', JSON.stringify(IC), 'sea', SEA, 'rise', JSON.stringify(hill));
     if(!hill) throw new Error('no rise found');
     await page.evaluate(`__hc.tpAt(${hill.x}+0.5, ${hill.g}+1, ${hill.z}+0.5);`);
     let last=null;
     for(let i=0;i<90;i++){ const f=await page.evaluate('__hc.fill()');
       if(i%5===0) console.log('    fill', JSON.stringify(f));
       if(f && f.meshed>=f.want && JSON.stringify(f)===last) break; last=JSON.stringify(f); await sleep(1000); }
-    // ---- AND NOW THE CLEARING IS FOUND, WITH THE WORLD LOADED ----
-    // blockAt reads the WORLD, and an ungenerated chunk answers air: run over the whole island before anything is loaded
-    // and every candidate passes its own clearance test, which is why two cuts of this picked the same trunk twice. The
-    // search runs a second time now that the chunks around the rise are meshed, over a local window, and it is the same
-    // clearance test - it just has real blocks to answer with this time.
-    const spot=await page.evaluate(`(()=>{ let best=null;
-      for(let dx=-40; dx<=40; dx+=2) for(let dz=-40; dz<=40; dz+=2){
-        const x=${hill.x}+dx, z=${hill.z}+dz, g=__hc.surfH(x,z);
-        if(g<=${SEA}+10 || g>=${SEA}+34) continue;
-        let clear=true;
-        for(let k=1;k<=4 && clear;k++) if(__hc.blockAt(x,g+k,z)!==0) clear=false;
-        for(let n=0;n<8 && clear;n++){ const a=n/8*6.2831853, nx=Math.round(x+Math.cos(a)*3), nz=Math.round(z+Math.sin(a)*3);
-          for(let k=1;k<=4 && clear;k++) if(__hc.blockAt(nx,g+k,nz)!==0) clear=false; }
-        if(clear && (!best || g>best.g)) best={x,z,g}; }
-      return best; })()`);
-    console.log('  clearing', JSON.stringify(spot));
-    if(spot){ await page.evaluate(`__hc.tpAt(${spot.x}+0.5, ${spot.g}+1, ${spot.z}+0.5);`);
-      for(let i=0;i<40;i++){ const f=await page.evaluate('__hc.fill()'); if(f && f.meshed>=f.want) break; await sleep(1000); }
-      await sleep(2000); }
-    for(const [tag,yaw] of [['w0',0],['w90',Math.PI/2],['w180',Math.PI],['w270',-Math.PI/2]]){
+    for(const [tag,yaw] of [['down',hill.yaw],['down90',hill.yaw+Math.PI/2],['down180',hill.yaw+Math.PI],['down270',hill.yaw-Math.PI/2]]){
       await page.evaluate(`__hc.cam({yaw:${yaw}, pitch:0});`); await sleep(1500);
       for(const [when,t] of HOURS){
         await page.evaluate(`__hc.setTime(${t})`); await sleep(900); await page.evaluate(`__hc.setTime(${t})`); await sleep(500);
