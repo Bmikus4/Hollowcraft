@@ -23492,6 +23492,28 @@ const WDFX=[ {amp:1.00,ph: 0.00,rest: 0.00,duty:0.00},
 // FOOT IK: the most the pelvis may be lifted to keep a foot out of the ground (see L2 - FOOT IK). 0 is off and is
 // the control side of its A/B; __hc.footIK(v) is the dial.
 let W_FOOTIK=0.9; const _ikV=new THREE.Vector3();
+// How far the elbow may fold to pull a forelimb out of what it is inside (see L3b - FORELIMB RETRACTION). Separate
+// from W_FOOTIK because it is a different rule with a different failure: too much here is a creature hugging itself.
+let W_ARMFOLD=0.75;
+// ---- IS THIS LIMB IN A TRUNK, OR IS IT JUST TOUCHING THE FLOOR ----
+// The burial count cannot tell those apart and neither could the first retraction: on all fours the forelimbs are
+// PLANTED, so a hand resting on the ground has corners below the surface and reads as buried exactly like a hand
+// inside a tree. Retracting on that signal lifts a planted hand off the floor, which is a worse artefact than the
+// one it is chasing -- measured, 266 buried arm meshes without the retraction and 272 with it.
+// THE DISCRIMINATOR IS THE CELL ABOVE. A point brushing the floor is inside a solid whose neighbour above is AIR;
+// a point inside a trunk, a wall or a bank has solid above it too. One extra lookup per sample separates Ben's
+// "waves his arms through trees" from a creature standing on the ground.
+function _deepPoints(node, hit){
+  let n=0;
+  node.traverse(o=>{ if(!o.isMesh) return; const g=o.geometry; if(!g) return;
+    if(!g.boundingBox) g.computeBoundingBox(); const bb=g.boundingBox; if(!bb) return;
+    o.updateWorldMatrix(true,false);
+    for(let i=0;i<8;i++){ _ikV.set(i&1?bb.max.x:bb.min.x, i&2?bb.max.y:bb.min.y, i&4?bb.max.z:bb.min.z).applyMatrix4(o.matrixWorld);
+      const bx=Math.floor(_ikV.x), by=Math.floor(_ikV.y), bz=Math.floor(_ikV.z);
+      if(!solidAt(bx,by,bz)) continue;
+      if(!solidAt(bx,by+1,bz)) continue;                       // open above: this is the floor, not a trunk
+      n++; if(hit) hit(bx,by,bz); } });
+  return n; }
 const _wSag=[0.10,0.16,0.13,0.05,0.03], _wHump=[0.62,0.40,0.18,0,0], _wLeanW=[0.42,0.36,0.30,0,0], _wLegOm=[26,20,16], _wLegZe=[0.7,0.55,0.45], _wArmOm=[32,24,18,14,10], _wArmZe=[0.75,0.6,0.5,0.4,0.28];
 function animateWretch(dt, moving){
   const P=wretch.P; if(!P) return;
@@ -23791,25 +23813,42 @@ function animateWretch(dt, moving){
       chain[i].rotation.x=spr(SS('a'+ai+'x'+i),axT,armOm[k],ze,dt) + vnoise(mph*(gallop?17:11)*(ai?1.07:1)+i*2.3)*0.03;
       chain[i].rotation.z=spr(SS('a'+ai+'z'+i),azT,28,0.8,dt);                        // splay stiff (no floppy sideways arms)
     }
+    // THE RETRACTION (see L3b below, which integrates it). The elbow carries it because folding the elbow is the
+    // only rotation that shortens the arm's reach; the shoulder takes a third of it to lift the whole limb clear
+    // rather than just curling the hand up into the same trunk.
+    if(W_FOOTIK>0 && wretch._ikArm){ const ia=wretch._ikArm[ai]||0;
+      if(ia>0.001){ if(chain[2]) chain[2].rotation.x += ia; chain[1].rotation.x += ia*0.33; } }
   }
 
-  // ============================== L3b — FORELIMB IK: BUILT, MEASURED, BACKED OUT ====
-  // 9ebb6eb left its residual unattributed. It is attributed now, and the attribution is the useful part: with
-  // rigSpan reporting WHICH limb owns the rig's lowest point, six of the eight deepest samples of a stalk are the
-  // ARM at crawl 1.0 -- the all-fours gallop, where the forelimbs carry the front of the body. On a quadruped a
-  // forelimb is a foot, so the same integrator was fitted to the shoulder and elbow.
-  // IT DOES NOT WORK AND THE REASON IS THE PROBE, NOT THE SIGN. The offset pegged at its 0.9 cap on 62 of 111
-  // frames -- an error that never resolves, which is what saturation means -- and it did so with the elbow folding
-  // BOTH WAYS: arms 248 buried one way, 262 the other, against 251 with no correction at all. The cause is that
-  // groundYAt(x,z) returns the surface of whatever stands in that COLUMN, and in a wood that is the top of a tree.
-  // A hand beside a trunk is therefore reported as a metre underground for ever, no arm pose can satisfy it, and
-  // the correction runs at full strength every frame of the gallop for nothing. Ben's own words for this fault
-  // were "it likes to wave his arms through trees": the arms are buried HORIZONTALLY, in trunks, and a vertical
-  // ground probe cannot see that at all -- which is also why 873d919's arm-retraction attempt failed.
-  // WHAT WOULD ACTUALLY WORK: a solid test at the hand's own cell (solidAt on the block it is in) rather than a
-  // column height, so the question becomes "is this hand inside something" instead of "how far is the ground
-  // below it". That is a different rule from foot IK and it is not built here.
-  // The leg integrator above is untouched by this and keeps its numbers; only the forelimb half is gone.
+  // ============================== L3b — FORELIMB RETRACTION =================
+  // Ben: it "likes to wave his arms through trees". The first attempt at this asked the wrong question and is
+  // worth keeping in the record: it fitted the LEG integrator to the arms, and the leg integrator's error is
+  // "how far below this limb is the ground". groundYAt returns the surface of whatever stands in that COLUMN, so
+  // in a wood it returns the top of a TREE -- a hand beside a trunk read as a metre underground for ever, the
+  // offset pegged at its cap on 62 of 111 frames, and the correction moved nothing with the elbow folding either
+  // way (248 buried arm meshes one way, 262 the other, 251 with no correction at all). 873d919's arm retraction
+  // failed on the same class of mistake, testing a joint ORIGIN rather than the limb.
+  //
+  // AN ARM IN A TRUNK IS BURIED SIDEWAYS, so the question is not how far down the ground is -- it is whether the
+  // limb is inside something. The rig's own _cclip flags were tried for that and they are too blunt: on all fours
+  // the forelimbs are PLANTED, so a hand resting on the ground is "buried" exactly like a hand inside a tree, and
+  // retracting on it lifts a planted hand off the floor. 266 buried arm meshes without that version and 272 with.
+  // _deepPoints is the test that separates them: a point inside a solid whose cell ABOVE is also solid is in a
+  // trunk, a wall or a bank; a point inside a solid with air over it is standing on the ground.
+  // ROTATION CANNOT SHORTEN A LIMB, which was 873d919's other finding, but FOLDING THE ELBOW CAN: it draws the
+  // hand back toward the shoulder along the only axis that shortens reach. So the offset folds the elbow while
+  // anything below it is inside the world and unwinds when nothing is.
+  // NOT WHILE REACHING. The lunge and the grab are animations Ben has judged; an arm that retracts as it reaches
+  // for him would break the one pose that is supposed to end inside his face.
+  if(W_FOOTIK>0 && !reaching && P.arms && P.arms.length){
+    if(!wretch._ikArm || wretch._ikArm.length!==P.arms.length) wretch._ikArm=P.arms.map(()=>0);
+    for(let ai=0; ai<P.arms.length; ai++){ const chain=P.arms[ai]; const seg=chain && (chain[2]||chain[chain.length-1]); if(!seg) continue;
+      const inside=_deepPoints(seg);
+      // 3.0 per second in, 2.0 out: it retracts inside half a second, which is faster than the arm can swing back
+      // into the same trunk, and lets go a little more slowly so it does not chatter at the edge of a hit.
+      const r=inside? 3.0*Math.min(dt,0.05) : -2.0*Math.min(dt,0.05);
+      wretch._ikArm[ai]=Math.max(0, Math.min(wretch._ikArm[ai]+r, W_ARMFOLD)); }
+  } else if(wretch._ikArm){ for(let ai=0;ai<wretch._ikArm.length;ai++) wretch._ikArm[ai]*=Math.max(0,1-dt*6); }
 
   // ============================== L5 — GAZE (delay→snap, VOR) ================
   const cam=(typeof huntCam!=='undefined'&&huntCam)?huntCam:camera.position;
@@ -28176,7 +28215,7 @@ function attHandgun(spec){ return !!(spec && spec.hand); }
 function attWhy(gunId,attId){ const d=ATT_DEFS[attId], spec=GLB_GUNS[gunId];
   if(!d) return 'no such attachment';
   if(!spec) return 'this weapon has no modelled mounting points';
-  if(d.slot==='optic' && !(spec.mount||spec.sights)) return 'no rail or sight base to clamp an optic to';
+  if(d.slot==='optic' && !attMount(spec)) return 'no rail or sight base to clamp an optic to';   // attMount, not the two authored fields: a scoped rifle derives its rail off the plane its own scope stands on
   if(d.slot==='muzzle' && spec.muzzleZ==null) return 'no muzzle to thread';
   if(d.slot==='grip' && attHandgun(spec)) return 'a one-handed weapon has no handguard to clamp it to';
   return null; }
@@ -28186,8 +28225,21 @@ function attFits(gunId,attId){ return attWhy(gunId,attId)===null; }
 // the rail — same plane, same x. That is why this fallback is a measurement rather than a guess, and it is the
 // reason an optic does not need twelve new numbers. railTop is deliberately not used: it is a MEDIAN across the
 // model, so on any gun whose receiver sits lower than its gas block it buries the clamp in metal.
+// ---- AND A SCOPED RIFLE MOUNTS ON THE PLANE ITS OWN SCOPE STANDS ON ----
+// Swept with __hc.attProbe across all 23 guns: five refused every optic with "no rail or sight base to clamp an optic
+// to" — bolt, hunting_rifle, marksman_rifle, forest_rifle and chassis_rifle. They are the precision rifles, they are
+// the guns a player most wants glass on, and the reason they refused is that a scoped rifle has no `sights` block:
+// its aiming device is the scope, so there is no rear-sight root for the fallback above to read.
+// The rifle does declare where its scope is, and the build already uses it: `parts.push({name:'scope', box: from the
+// glass span, floor railTop})` carves everything above the receiver line across that span, and hides it when a dot is
+// fitted. So the plane the model's OWN scope stands on is railTop at the middle of that span — a measurement off the
+// same two numbers the carve uses, which means a fitted optic lands exactly where the scope it replaces was sitting.
+// railTop's own objection (a median across the model, which buries the clamp on a gun whose receiver is lower than
+// its gas block) does not apply to a bolt rifle: the receiver IS the high plane, and it is the plane being carved to.
 function attMount(spec){ if(spec.mount) return spec.mount;
   if(spec.sights) return {x:spec.sights.rx, base:spec.sights.ry};
+  if(spec.scope){ const P=GLB_PLACE[spec.id];
+    if(P && P.glassRange && P.railTop!=null) return {x:(P.glassRange.from+P.glassRange.to)*0.5, base:P.railTop}; }
   return null; }
 // ---- WHAT AN ATTACHMENT IS MADE OF: SHINY DARK GUNMETAL, ONE DESCRIPTION, BOTH DISPATCHES ----
 // Ben: "fully fix/retexture sights, holo, dot, and scope should all be shiny dark gunmetal", of a frame where the
@@ -28543,7 +28595,9 @@ function buildGlbGun(key,dot,suppressed,att){
       }
       sub.lens.traverse(o=>{ if(o.isMesh) o.userData.scopeLens=true; });   // what __hc.sight() and the PiP pass look for
     }
-    if(dot){ if(sub.scope)sub.scope.visible=false; if(sub.lens)sub.lens.visible=false; }
+    // ANY FITTED OPTIC REPLACES THE MODEL'S OWN, not only a collimated one. This asked `dot`, so bolting a scope to a
+    // scoped rifle — which the mount fallback above now allows — would have stood a second scope on top of the first.
+    if(dot || (att && att.optic && attFits(key,att.optic))){ if(sub.scope)sub.scope.visible=false; if(sub.lens)sub.lens.visible=false; }
     else UD.dotY=gy(P.opticAxisY!=null?P.opticAxisY:P.railTop+0.1);                       // the scope's own optical axis, measured off the glass
   }
   if(dot){
@@ -47320,9 +47374,27 @@ window.__hc={
       return { r:W_ENV }; } catch(e){ return {err:String(e.message||e)}; } },
   // THE FOOT-IK LIFT CAP AND ITS OFF SWITCH (see L2 - FOOT IK). 0 is the pure-FK legs the rig has always had.
   // lift is what the pelvis is actually being raised by this frame, which is the number the A/B reads.
+  // HOW MANY SAMPLE POINTS OF EACH LIMB ARE INSIDE A TRUNK, A WALL OR A BANK -- as opposed to resting on the
+  // ground, which the burial count cannot distinguish and which is most of what it counts on a creature walking on
+  // all fours. Same test the retraction acts on (_deepPoints), so the number and the rule cannot disagree. This is
+  // the metric for Ben's "it likes to wave his arms through trees"; rigBuried is not.
+  limbInSolid(){ try{ const g=wretch.group; if(!g||!wretch.active) return {err:'not active'};
+      g.updateMatrixWorld(true);
+      const P=wretch.P; if(!P) return {err:'no rig'};
+      const out={arms:0, legs:0, head:0, body:0};
+      if(P.arms) for(const ch of P.arms){ const seg=ch&&(ch[2]||ch[ch.length-1]); if(seg) out.arms+=_deepPoints(seg); }
+      if(P.legs) for(const L of P.legs){ if(L&&L.thigh) out.legs+=_deepPoints(L.thigh); }
+      if(P.head) out.head+=_deepPoints(P.head);
+      if(P.spine&&P.spine[0]) out.body+=_deepPoints(P.spine[0]);
+      return out; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  // THE FORELIMB RETRACTION'S CAP AND ITS OFF SWITCH (see L3b - FORELIMB RETRACTION). 0 is no retraction, which
+  // is the control side: the arms then wave through trunks exactly as they always have.
+  armFold(v){ try{ if(v!=null) W_ARMFOLD = (v===true?0.75 : (v===false?0 : Math.max(0,+v||0)));
+      return { cap:W_ARMFOLD, arms:(wretch._ikArm||[]).map(x=>+x.toFixed(3)) }; } catch(e){ return {err:String(e.message||e)}; } },
   footIK(v){ try{ if(v!=null) W_FOOTIK = (v===true?0.9 : (v===false?0 : Math.max(0,+v||0)));
-      return { cap:W_FOOTIK, lift:+(wretch._ikLift||0).toFixed(3),
-               legs:(wretch._ikOff||[]).map(v=>+v.toFixed(3)) }; }
+      return { cap:W_FOOTIK, armCap:W_ARMFOLD, lift:+(wretch._ikLift||0).toFixed(3),
+               legs:(wretch._ikOff||[]).map(v=>+v.toFixed(3)), arms:(wretch._ikArm||[]).map(v=>+v.toFixed(3)) }; }
     catch(e){ return {err:String(e.message||e)}; } },
   rigSpan(){ try{ const g=wretch.group; if(!g||!wretch.active) return {err:'not active'};
       g.updateMatrixWorld(true);
