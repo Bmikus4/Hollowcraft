@@ -9139,14 +9139,81 @@ function _wpDrawLoop(pts){
     const g=(typeof surfaceH==='function')?surfaceH(Math.round(x),Math.round(z)):CFG.SEA;
     a.setXYZ(i, x, Math.max(g,CFG.SEA)+0.6, z); }
   a.needsUpdate=true; _wpCircle.geometry.computeBoundingSphere(); _wpCircle.visible=true; }
+// ---- POINT A: WHERE THE PLAYER/WAYPOINT LINE MEETS THE SHORELINE ----
+// Ben 08-18: "when the player/centermass waypoint line intersects, that intersection becomes point A, the
+// center mass waypoint becomes point B. The distance from A to B = r, using the centermass waypoint as the
+// centerpoint of the drawn circle."
+// The ray runs from B through the player and outward; A is the crossing. Every segment of the traced loop is
+// intersected analytically rather than marching along the ray, so a near-tangent crossing cannot be stepped
+// over and r is exact. Where a bay bites past the line and the ray crosses twice, the FIRST crossing going
+// outward is A, because that is where the line actually leaves the land.
+function shoreHit(ox,oz,dx,dz){
+  const P=islandOutline().pts, n=P.length; let bestT=Infinity, hit=null, count=0;
+  for(let i=0,j=n-1;i<n;j=i++){
+    const ax=P[j][0], az=P[j][1], bx=P[i][0], bz=P[i][1];
+    const ex=bx-ax, ez=bz-az;
+    const den=dx*ez-dz*ex; if(Math.abs(den)<1e-9) continue;      // parallel
+    const t=((ax-ox)*ez-(az-oz)*ex)/den;                          // along the ray
+    const u=((ax-ox)*dz-(az-oz)*dx)/den;                          // along the segment, 0..1
+    if(t>0.001 && u>=0 && u<=1){ count++; if(t<bestT){ bestT=t; hit=[ox+dx*t, oz+dz*t]; } } }
+  return hit?{ x:hit[0], z:hit[1], r:bestT, crossings:count }:null; }
 function _wpDrawCircle(cx,cz,r){
   const pts=[]; for(let i=0;i<_WP_CIRCN;i++){ const th=i/_WP_CIRCN*6.2831853;
     pts.push([cx+Math.cos(th)*r, cz+Math.sin(th)*r]); }
   _wpDrawLoop(pts); }
+// ---- THE A-TO-B CIRCLE, ticked and numbered in the SAME degrees /navigator uses ----
+// Its own mesh, NOT the shoreline's. The first cut of this drew into the shoreline's loop and took the coast
+// off the screen with it, which is not what was asked for: both have to be up at once, because the circle is
+// only meaningful against the coast it was measured from.
+// The numbers are world azimuth atan2(z,x), exactly what the horizon protractor prints, so a bearing read off
+// this ring on the ground means the same thing as a bearing read off the sky. That is the point of it -- it is
+// a shared coordinate between what Ben sees and what he can tell me.
+let _wpRing=null, _wpRingTicks=null, _wpRingLabels=[];
+function _wpRingEnsure(){ if(_wpRing) return;
+  _wpEnsure();
+  const rg=new THREE.BufferGeometry();
+  rg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(_WP_CIRCN*3),3));
+  _wpRing=new THREE.LineLoop(rg, new THREE.LineBasicMaterial({ color:0xff5ad4, transparent:true, opacity:0.95,
+    depthTest:false, depthWrite:false, fog:false }));
+  _wpRing.frustumCulled=false; _wpRing.renderOrder=9998; _wpGroup.add(_wpRing);
+  const tg=new THREE.BufferGeometry();
+  tg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(72*2*3),3));
+  _wpRingTicks=new THREE.LineSegments(tg, new THREE.LineBasicMaterial({ color:0xff5ad4, transparent:true,
+    opacity:0.85, depthTest:false, depthWrite:false, fog:false }));
+  _wpRingTicks.frustumCulled=false; _wpRingTicks.renderOrder=9998; _wpGroup.add(_wpRingTicks); }
+function _wpDrawDial(cx,cz,r){
+  _wpRingEnsure();
+  const gy=(x,z)=>Math.max((typeof surfaceH==='function')?surfaceH(Math.round(x),Math.round(z)):CFG.SEA, CFG.SEA)+0.6;
+  const a=_wpRing.geometry.attributes.position;
+  for(let i=0;i<_WP_CIRCN;i++){ const th=i/_WP_CIRCN*6.2831853;
+    const x=cx+Math.cos(th)*r, z=cz+Math.sin(th)*r;
+    a.setXYZ(i, x, gy(x,z), z); }
+  a.needsUpdate=true; _wpRing.geometry.computeBoundingSphere();
+  // A tick every 5 degrees, long every 15 where the number goes. They point OUTWARD from the rim, so the
+  // labels have somewhere to sit that the circle is not already drawing over.
+  const tp=_wpRingTicks.geometry.attributes.position;
+  for(let k=0;k<72;k++){
+    const deg=-180+k*5, th=deg*Math.PI/180, cs=Math.cos(th), sn=Math.sin(th);
+    const L=(deg%15===0)?14:6;
+    const x0=cx+cs*r, z0=cz+sn*r, x1=cx+cs*(r+L), z1=cz+sn*(r+L);
+    tp.setXYZ(k*2,   x0, gy(x0,z0), z0);
+    tp.setXYZ(k*2+1, x1, gy(x1,z1), z1); }
+  tp.needsUpdate=true; _wpRingTicks.geometry.computeBoundingSphere();
+  for(const sp of _wpRingLabels) sp.visible=false;
+  _wpRingLabels.length=0;
+  for(let deg=-180; deg<180; deg+=15){
+    const th=deg*Math.PI/180, x=cx+Math.cos(th)*(r+30), z=cz+Math.sin(th)*(r+30);
+    // 'deg:' PREFIXES THE CACHE KEY. The axis ruler's labels come from the same cache and its "0" is a distance
+    // while this "0" is a bearing -- one sprite cannot be in two places, so they must not share a key.
+    const sp=_wpLabel(String(deg), 'deg:'+deg);
+    if(!sp.parent) _wpGroup.add(sp);
+    sp.visible=true; sp.position.set(x, gy(x,z)+5.4, z); sp.scale.set(26,6.5,1);
+    _wpRingLabels.push(sp); }
+  _wpRing.visible=true; _wpRingTicks.visible=true; }
 // ONE CANVAS PER NUMBER, CACHED. The labels are only ever a few dozen distinct strings and they recur as the
 // player walks back and forth, so building the texture once per string costs nothing after the first pass.
 const _wpLabCache=new Map();
-function _wpLabel(txt){ let sp=_wpLabCache.get(txt); if(sp) return sp;
+function _wpLabel(txt,key){ key=key||txt; let sp=_wpLabCache.get(key); if(sp) return sp;
   const c=document.createElement('canvas'); c.width=256; c.height=64; const g=c.getContext('2d');
   g.font='bold 44px monospace'; g.textAlign='center'; g.textBaseline='middle';
   g.lineJoin='round'; g.strokeStyle='#000'; g.lineWidth=9; g.strokeText(txt,128,32);
@@ -9154,7 +9221,7 @@ function _wpLabel(txt){ let sp=_wpLabCache.get(txt); if(sp) return sp;
   const t=new THREE.CanvasTexture(c); t.minFilter=THREE.LinearFilter;
   sp=new THREE.Sprite(new THREE.SpriteMaterial({ map:t, transparent:true, depthTest:false, depthWrite:false, fog:false }));
   sp.renderOrder=9999; sp.frustumCulled=false;
-  _wpLabCache.set(txt,sp); return sp; }
+  _wpLabCache.set(key,sp); return sp; }
 function updateWaypoint(){
   if(!_wpAt || !_wpGroup) return;
   _wpBeam.position.set(_wpAt.x, WH*0.5, _wpAt.z);
@@ -25673,13 +25740,33 @@ const CMDS={
   //   /waypoint island center mass  the CENTROID: the mean position of the land, which is pulled by every spit and
   //                                 headland and on a hooked island can sit in open water.
   // The axis line is drawn from the INSCRIBED one, per his instruction that it is the non-mass point.
-  waypoint:{ usage:'/waypoint island center [mass] | /waypoint shore | /waypoint circle [mass|inscribed] [min|mean|median|trimmed|max|<r>] | /waypoint off', run:(a)=>{
+  waypoint:{ usage:'/waypoint island center [mass] | /waypoint shore | /waypoint radius | /waypoint circle [mass|inscribed] [min|mean|median|trimmed|max|<r>] | /waypoint off', run:(a)=>{
       const w=a.map(t=>String(t).toLowerCase());
-      if(w[0]==='off'||w[0]==='clear'){ _wpAt=null; if(_wpGroup){ _wpGroup.visible=false; if(_wpCircle) _wpCircle.visible=false; } return 'waypoint cleared'; }
+      if(w[0]==='off'||w[0]==='clear'){ _wpAt=null; if(_wpGroup){ _wpGroup.visible=false; if(_wpCircle) _wpCircle.visible=false; if(_wpRing){ _wpRing.visible=false; _wpRingTicks.visible=false; for(const sp of _wpRingLabels) sp.visible=false; } } return 'waypoint cleared'; }
       // /waypoint circle [mass|inscribed] [min|mean|median|max|<blocks>]
       // r is the shoreline distance from the chosen centre. A coastline is not a circle, so the command reports
       // the whole spread and says which one it drew -- on this island the centroid is 44 blocks from the nearest
       // water and 400-odd from the furthest, and a circle at either is a different statement about the island.
+      // /waypoint radius — Ben's A-to-B construction. It does NOT touch the shoreline: both stay on screen,
+      // because the circle is only meaningful against the coast it was measured from.
+      if(w[0]==='radius'||w[0]==='r'){
+        if(!_wpAt) return 'no waypoint yet — /waypoint island center mass first';
+        const px=camera.position.x, pz=camera.position.z;
+        let dx=px-_wpAt.x, dz=pz-_wpAt.z; const L=Math.hypot(dx,dz);
+        if(L<0.05) return 'stand away from the waypoint — the line has no direction from on top of it';
+        dx/=L; dz/=L;
+        const A=shoreHit(_wpAt.x,_wpAt.z,dx,dz);
+        if(!A) return 'the line does not reach the shoreline — is the waypoint outside the island?';
+        _wpEnsure(); _wpGroup.visible=true; _wpDrawDial(_wpAt.x,_wpAt.z,A.r);
+        const bear=Math.atan2(dz,dx)*180/Math.PI;
+        return `A = ${A.x.toFixed(1)}, ${A.z.toFixed(1)}   (the line meets the shoreline here`
+             + `${A.crossings>1?', '+A.crossings+' crossings, first one out':''})
+`
+             + `  B = ${_wpAt.x}, ${_wpAt.z}   (the ${_wpKind==='mass'?'centre of MASS':'INSCRIBED centre'})
+`
+             + `  r = |AB| = ${A.r.toFixed(1)}   circle centred on B, so A sits on its rim at bearing ${bear.toFixed(1)}
+`
+             + `  ticks every 5 deg, numbered every 15, same atan2(z,x) degrees /navigator prints — read one off and name it to me`; }
       if(w[0]==='circle'||w[0]==='shore'){
         if(w[0]==='shore'){ w[2]=''; w[1]=w[1]||'mass'; }
         const C=islandCentres(), onMass=(w[1]!=='inscribed');
@@ -44108,6 +44195,14 @@ window.__hc={
   islandOutline(){ try{ const O=islandOutline(); return { pts:O.pts, n:O.pts.length, grid:O.grid, step:O.step, closed:O.closed,
       closeR:O.closeR, smooth:O.smooth, passes:O.passes, inset:O.inset, raw:O.raw }; }catch(e){ return {err:String(e.message||e)}; } },
   // QA/bench: the shoreline's three shape dials. Changing any of them drops the cached trace.
+  // QA/bench: what the waypoint layer currently has on screen. The last attempt at the circle silently took the
+  // shoreline off the map, so "is the coast still drawn" is a number now rather than something to notice later.
+  wpState(){ try{ return { shoreVisible:!!(_wpCircle&&_wpCircle.visible),
+      shorePoints:_wpCircle?_wpCircle.geometry.attributes.position.count:0,
+      ringVisible:!!(_wpRing&&_wpRing.visible), ringLabels:_wpRingLabels.length,
+      axisVisible:!!(_wpLine&&_wpLine.visible), groupVisible:!!(_wpGroup&&_wpGroup.visible) }; }
+    catch(e){ return {err:String(e.message||e)}; } },
+  shoreHit(x,z,dx,dz){ try{ return shoreHit(+x,+z,+dx,+dz); }catch(e){ return {err:String(e.message||e)}; } },
   shoreShape(o){ try{ if(o){ if(o.close!=null) _OUT_CLOSE=Math.max(0,o.close|0);
         if(o.smooth!=null) _OUT_SMOOTH=Math.max(0,o.smooth|0);
         if(o.passes!=null) _OUT_SMOOTH_PASSES=Math.max(0,o.passes|0);
