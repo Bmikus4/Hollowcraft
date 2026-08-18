@@ -70,6 +70,20 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
       await page.evaluate(`__hc.pines(1)`); await sleep(400);
       return on.map((v,i)=>v-off[i]);                    // the pines' own contribution, column by column
     };
+    // PER BAND, because a profile of all three together can only show that SOMETHING moved. The claim is that each band
+    // moves at its own rate, so each is isolated and measured against its own prediction.
+    const wall0=await page.evaluate(`__hc.pines().wall`);
+    const fov0=60*Math.PI/180, ppr=1280/fov0;
+    for(const [bi,mult] of [[0,1.0],[1,2.3],[2,4.6],[-1,0]]){
+      await page.evaluate(`__hc.pinesBand(${bi})`); await sleep(500);
+      const PA=await profileAt(shore.x+0.5, shore.z+0.5, 'a'+bi);
+      const PB=await profileAt(shore.x+0.5+per.x*STEP, shore.z+0.5+per.z*STEP, 'b'+bi);
+      const cc=(sh)=>{ let n=0,sum=0; for(let x=200;x<1080;x++){ const j=x+sh; if(j<0||j>=1280) continue; sum+=PA[x]*PB[j]; n++; } return n?sum/n:-1e18; };
+      let bs=0,bv=-1e18; for(let sh=-300;sh<=300;sh+=2){ const v=cc(sh); if(v>bv){bv=v; bs=sh;} }
+      const pred = mult? (STEP/(wall0*mult))*ppr : 0;
+      console.log('    band '+(bi<0?'all':bi)+'   measured '+bs+' px   predicted '+(mult?pred.toFixed(0):'mixed')+' px   corr '+bv.toFixed(0)+' vs zero '+cc(0).toFixed(0));
+    }
+    await page.evaluate(`__hc.pinesBand(-1)`);
     const A=await profileAt(shore.x+0.5, shore.z+0.5, 'a');
     const B=await profileAt(shore.x+0.5+per.x*STEP, shore.z+0.5+per.z*STEP, 'b');
     // Cross-correlate: the shift that best lines the two profiles up.

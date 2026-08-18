@@ -77,6 +77,7 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
       // getProgram 0.62s of a 9.2s recording); the cache keys say WHICH materials, which is what a warm-up has
       // to cover.
       const progBefore=await page.evaluate('window.__hcPERF.programKeys()');
+      const lightsBefore=await page.evaluate('window.__hcPERF.lightCensus()');
 
       // WALK. yaw -pi/2 faces +X, which is toward the shore from a point at shoreX-14.
       await page.evaluate(`__hc.key('KeyW',true)`);
@@ -97,9 +98,27 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
       await page.evaluate(`__hc.key('KeyW',false)`);
       const after=await page.evaluate('__hc.pos()');
       const progAfter=await page.evaluate('window.__hcPERF.programKeys()');
+      const lightsAfter=await page.evaluate('window.__hcPERF.lightCensus()');
+      console.log('      lights before', JSON.stringify(lightsBefore).slice(0,300));
+      console.log('      lights after ', JSON.stringify(lightsAfter).slice(0,300));
       const added=progAfter.filter(k=>!progBefore.includes(k));
       console.log(`      programs ${progBefore.length} -> ${progAfter.length}  (+${added.length})`);
-      added.slice(0,10).forEach(k=>console.log('        + '+k.slice(0,150)));
+      // WHICH FIELDS DIFFER. A three cacheKey is a comma-joined list of the material's program parameters, so the
+      // nearest existing key of the same type plus the indices that differ names the FEATURE that is new, which is
+      // far more use than 300 characters of mostly-identical booleans.
+      for(const k of added.slice(0,6)){
+        const f=k.split(','), type=f[0];
+        let best=null, bestD=1e9;
+        for(const o of progBefore){ const g=o.split(',');
+          if(g[0]!==type || g.length!==f.length) continue;
+          let d=0; for(let i=0;i<f.length;i++) if(f[i]!==g[i]) d++;
+          if(d<bestD){ bestD=d; best=g; } }
+        if(!best){ console.log(`        + ${type}: no same-shape ${type} program existed before`); continue; }
+        const diffs=[];
+        for(let i=0;i<f.length;i++) if(f[i]!==best[i]) diffs.push(`[${i}] ${best[i]||"''"} -> ${f[i]||"''"}`);
+        console.log(`        + ${type}: ${bestD} field(s) differ from the nearest existing ${type}`);
+        diffs.slice(0,8).forEach(d=>console.log('            '+d));
+      }
       const f=path.join(OUT,`wexit-${tag}.png`); await page.screenshot({path:f});
       const newErrs=errs.slice(nerr);
       console.log(`  ${tag.padEnd(9)} x ${before.x.toFixed(1)} -> ${after.x.toFixed(1)}  y ${before.y.toFixed(1)} -> ${after.y.toFixed(1)}`

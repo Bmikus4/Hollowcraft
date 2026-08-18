@@ -37,6 +37,7 @@ await page.waitForTimeout(900);
 const st = await page.evaluate(() => __hc.bloodState());
 console.log('meta ', JSON.stringify(st.meta));
 console.log('live ', st.live, 'ready', st.ready, 'dead', st.dead);
+console.log('snap ', JSON.stringify(st.lastSnap));
 for (const d of st.decals) console.log('  ', JSON.stringify(d));
 // THE TEST THAT MATTERS runs inside the page: `animals` is closed over by the game body and unreachable here.
 const ride = await page.evaluate(() => __hc.bloodRide(3,2));
@@ -53,6 +54,7 @@ const girl = await page.evaluate(async () => {
   return { shot, before, after, wounds: mine.length, depth: mine.map(d => d.parentDepth), onScene: mine.map(d => d.onScene) };
 });
 console.log('girl  ', JSON.stringify(girl));
+console.log('gsnap ', JSON.stringify(await page.evaluate(() => __hc.bloodState().lastSnap)));
 // Her picture BEFORE the bone-ride test: that test turns all 115 of her bones a third of a radian, so anything shot
 // after it is a photograph of a pretzel. Aim the camera at her chest, where the rounds went.
 // NO TELEPORT. __hc.girl(12) spawns her twelve blocks along the player's own look direction, so the camera is

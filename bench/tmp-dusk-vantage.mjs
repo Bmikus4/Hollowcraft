@@ -19,6 +19,8 @@ import { chromium } from 'playwright-core';
 const ROOT=path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/,'$1')),'..');
 const OUT=path.join(ROOT,'bench','results');
 const PAGE=process.argv[2]||'index.html';
+const T=+(process.argv[3]||0.46);   // the hour: 0.46 is dusk, 0.04 dawn. The camera is placed from the sun's own bearing, so one harness covers both.
+const WX=+(process.argv[4]||0);     // weather fog, for the fade term's worst case
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 function freePort(){ return new Promise((res,rej)=>{ const s=createServer(); s.listen(0,'127.0.0.1',()=>{ const p=s.address().port; s.close(()=>res(p)); }); s.on('error',rej); }); }
 function waitHttp(u,t=20000){ return new Promise((res,rej)=>{ const t0=Date.now(); (function p(){ const rq=http.get(u,r=>{r.resume();res();}); rq.on('error',()=>{ if(Date.now()-t0>t)rej(new Error('down')); else setTimeout(p,250); }); })(); }); }
@@ -58,7 +60,7 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     let fixedTop=null;
     const shoot=async(tag,dist,t,fogmul)=>{
       // The clock first, because the camera placement depends on where the sun IS at that hour.
-      await page.evaluate(`__hc.vis({fogmul:${fogmul==null?1:fogmul}}); __hc.freezeT(0); __hc.dayLock(${t}); __hc.fog(0)`); await sleep(600);
+      await page.evaluate(`__hc.vis({fogmul:${fogmul==null?1:fogmul}}); __hc.freezeT(0); __hc.dayLock(${t}); __hc.fog(${WX})`); await sleep(600);
       const sky=await page.evaluate(`__hc.skyState()`);
       const sx=sky.sunDir[0], sz=sky.sunDir[2], L=Math.hypot(sx,sz)||1;
       const ux=sx/L, uz=sz/L;                                    // the sun's horizontal bearing, unit
@@ -110,19 +112,19 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
     // leaves the key light (a low sun at intensity ~2.6 with a warm grazing colour) and the thin-leaf transmission
     // (uFolTrans, which adds 45% of the direct light to every face turned AWAY from the sun, so a canopy lights from
     // both sides at once). Each is moved alone, with the baseline repeated last.
-    await shoot('base',      220, 0.46, 1.0);
+    await shoot('base',      220, T, 1.0);
     await page.evaluate(`__hc.folTrans({amt:0})`); await sleep(600);
-    await shoot('foltrans0', 220, 0.46, 1.0);
+    await shoot('foltrans0', 220, T, 1.0);
     await page.evaluate(`__hc.folTrans({amt:0.45}); __hc.keyMul(0.5)`); await sleep(600);
-    await shoot('key50',     220, 0.46, 1.0);
+    await shoot('key50',     220, T, 1.0);
     await page.evaluate(`__hc.keyMul(1); __hc.folAmb(0)`); await sleep(600);
-    await shoot('folamb0',   220, 0.46, 1.0);
+    await shoot('folamb0',   220, T, 1.0);
     await page.evaluate(`__hc.folAmb(1.5)`); await sleep(600);
     // THE NIGHT FADE, THE AMBIENT'S TWIN: same gate, same display-referred place, but a mix rather than an add. If it
     // carries the same fault it will LIFT a distant canopy at dusk toward a target meant for midnight.
     await page.evaluate(`__hc.folFade(0)`); await sleep(600);
-    await shoot('folfade0', 220, 0.46, 1.0);
+    await shoot('folfade0', 220, T, 1.0);
     await page.evaluate(`__hc.folFade(0.72)`); await sleep(600);
-    await shoot('base-repeat', 220, 0.46, 1.0);
+    await shoot('base-repeat', 220, T, 1.0);
   } finally { try{ if(browser) await browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }
 })().catch(e=>{ console.error(e); process.exit(1); });

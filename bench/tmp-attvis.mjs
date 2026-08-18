@@ -28,7 +28,7 @@ const DIR   = path.join(OUT, 'attvis');
 // the bolt that was added, and one of each action for the attachment fit.
 const ARGV_GUNS = (process.argv[3] && !process.argv[3].startsWith('--')) ? process.argv[3].split(',') : null;
 const BARE_GUNS = ARGV_GUNS || ['revolver','revolver_snub','revolver_rail','ar15','hunting_rifle','shotgun','pistol'];
-const ATT_GUNS  = ['ar15','hunting_rifle','shotgun','pistol','revolver'];
+const ATT_GUNS  = ARGV_GUNS || ['ar15','hunting_rifle','shotgun','pistol','revolver'];
 const ATTS = ['red_dot','holo_sight','optic_scope','suppressor','weapon_light','laser_sight','foregrip'];
 
 // LEVEL AND SKY. pitch's sign is not asserted here -- both are shot and whichever holds sky is the readable one, which

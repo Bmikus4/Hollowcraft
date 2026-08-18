@@ -1,37 +1,36 @@
-import { spawn } from 'node:child_process';
-import { createServer } from 'node:net';
-import http from 'node:http'; import path from 'node:path'; import fs from 'node:fs';
-import { chromium } from 'playwright-core';
-const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/,'$1')), '..');
-const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-function freePort(){ return new Promise((res,rej)=>{ const s=createServer(); s.listen(0,'127.0.0.1',()=>{ const p=s.address().port; s.close(()=>res(p)); }); s.on('error',rej); }); }
-function waitHttp(url,t=20000){ return new Promise((res,rej)=>{ const t0=Date.now();
-  (function poll(){ const rq=http.get(url,r=>{r.resume();res();}); rq.on('error',()=>{ if(Date.now()-t0>t)rej(new Error('down')); else setTimeout(poll,250); }); })(); }); }
-let fails=0,checks=0; const ok=(n,c,d)=>{ checks++; if(!c)fails++; console.log((c?'  PASS  ':'  FAIL  ')+n+(d!==undefined?('   '+JSON.stringify(d)):'')); };
-const port=await freePort();
-const server=spawn(process.execPath,[path.join(ROOT,'server.js')],{cwd:ROOT,env:{...process.env,PORT:String(port),NO_OPEN:'1'},stdio:'ignore'});
-const base='http://127.0.0.1:'+port; await waitHttp(base+'/index.html');
-const browser=await chromium.launch({executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',headless:true,args:['--enable-gpu','--use-angle=d3d11','--mute-audio']});
-const page=await (await browser.newContext({viewport:{width:900,height:600}})).newPage();
-const errs=[]; page.on('pageerror',e=>{errs.push(String(e.message||e));console.log('PAGEERROR:',String(e.message||e).slice(0,200));});
-await page.goto(base+'/index.html?debug=1',{waitUntil:'load',timeout:120000});
-await page.waitForFunction('(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()',null,{timeout:120000});
-await page.waitForFunction("(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()",null,{timeout:240000});
-const ev=js=>page.evaluate(js);
-await ev('(()=>{ __hc.lock(true); __hc.setTime(0.42); __hc.cmdRun("/gamemode creative"); })()').catch(()=>{});
-await sleep(2500);
-for(const id of ['tallgrass','meadow_grass','fern','foxglove','sapling','stone']){
-  await ev(`__hc.cmdRun("/clearinv"); __hc.cmdRun("/give ${id} 1")`); await ev(`__hc.hold("${id}")`); await sleep(500);
-  const s=await ev('__hc.heldSig()'), m=await ev('__hc.heldMats()');
-  console.log('  '+id.padEnd(15)+JSON.stringify({meshes:s.meshes,tris:s.tris,sprite:s.sprite,mats:s.mats}));
-  if(id==='stone'){ ok('a SOLID block is still a cube', s.sprite===false && s.tris<=12, {tris:s.tris,sprite:s.sprite}); }
-  else {
-    ok(id+' is an extruded card, not a cube', s.sprite===true, {sprite:s.sprite});
-    // A CUBE IS 12 TRIANGLES. A pixel-walked blade is hundreds — and if the tile's alpha were lost in the atlas copy every
-    // pixel would be opaque, giving a full 16x16 slab: 512 front+back plus the whole rim. So the count proves alpha survived.
-    ok(id+': its pixels were cut by alpha, not a full slab', s.tris>40 && s.tris<900, {tris:s.tris});
-  }
-}
-ok('no page errors', errs.length===0, errs.slice(0,2));
-console.log(`\n${checks-fails}/${checks} checks pass`);
-await browser.close(); server.kill(); process.exit(fails?1:0);
+// SCRATCH. Did the ground-foliage tiles reach the atlas, and what does a meadow look like now?
+import { openWorld, sleep, OUT, pin } from './lib/rig.mjs';
+import path from 'node:path';
+const WANT=['grass_tall','grass_meadow','grass_meadow_tall','fern','bush','vine','mush_red','mush_brown','foxglove',
+  'anemone','bellflower','sage','yarrow','bloodroot','berry','sapling','sunflower_stem','sunflower_head','sunflower_wild',
+  'tree_flower','pale_bloom'];
+(async()=>{ const W=await openWorld({rd:8});
+  try{ await sleep(2500);
+    for(let i=0;i<40;i++){ const f=await W.page.evaluate('__hc.fill()'); if(f.meshed>=f.want) break; await sleep(400); }
+    await W.page.evaluate('__hc.lock(true)');
+    await pin(W,0.25);
+    const st=await W.page.evaluate('__hc.stamped()');
+    const got=new Set(st.list||[]);
+    const missing=WANT.filter(n=>!got.has(n));
+    console.log('stamped '+st.got+' of '+st.want+' wanted;  foliage landed '+(WANT.length-missing.length)+'/'+WANT.length+';  all missing: '+JSON.stringify(st.missing));
+    if(missing.length) console.log('MISSING: '+missing.join(' '));
+    // A GRASS SHELF IN OPEN SKY, and the reason is framing: every open flat near spawn is under a canopy, and three
+    // attempts at a ground shot photographed leaves. Up here nothing stands between the camera and the plants.
+    const names=['tallgrass','meadow_grass','meadow_grass_tall','fern','bush','mush_red','mush_brown','foxglove','anemone','bellflower','sage','yarrow','bloodroot','berry','sapling','vine','sunflower_wild','tree_flower','pale_bloom'];
+    const built=await W.page.evaluate(`(()=>{ const s=__hc.st(), px=Math.round(s.px), pz=Math.round(s.pz), y=110, N=${JSON.stringify(names)};
+      __hc.waterSim(false);
+      for(let i=-2;i<N.length*2+2;i++) for(let b=-3;b<=3;b++) __hc.setBlk(px+6+i, y, pz+b, __hc.bid('grass'));
+      const placed=[];
+      for(let i=0;i<N.length;i++){ const id=__hc.bid(N[i]);
+        if(id!=null){ __hc.setBlk(px+6+i*2, y+1, pz, id); placed.push(N[i]+'@'+(px+6+i*2)+':'+__hc.mineState(px+6+i*2,y+1,pz).block); } }
+      __hc.tpExact(px+6+(N.length), pz-9.5, y+2.4);
+      return {px, pz, y, placed}; })()`);
+    console.log('planted '+built.placed.join(' '));
+    await sleep(300);
+    await W.page.evaluate('__hc.look('+(built.px+6+names.length)+', '+(built.y+1.5)+', '+built.pz+')');
+    for(let i=0;i<12;i++){ const f=await W.page.evaluate('__hc.fill()'); if(f.meshed>=f.want) break; await sleep(300); }
+    await sleep(5000);
+    await W.page.screenshot({path:path.join(OUT,'foliage_row.png')});
+    console.log('sky at the shelf '+JSON.stringify(await W.page.evaluate('__hc.st().day')));
+    console.log('errors: '+(W.errors.length?W.errors.slice(0,3).join(' | '):'none'));
+  } finally { await W.close(); } })();
