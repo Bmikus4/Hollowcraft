@@ -57,6 +57,8 @@ function findBrowser(){ for(const p of ['C:/Program Files/Google/Chrome/Applicat
         const x=Math.round(${IC.x}-d), z=${IC.z};
         if(__hc.groundY(x,z)>${SEA}) return {shoreX:x, z, g:__hc.groundY(x,z)}; } return null; })()`);
     console.log('shore', JSON.stringify(spot), 'sea', SEA);
+    { const L=await page.evaluate('__hc.loadState()');
+      console.log('warm  prewarm', L.prewarmMs+'ms', 'mat', L.matWarmMs+'ms', 'body', L.bodyWarmMs+'ms', 'bodyWarmRan', L.bodyWarm); }
 
     // walk-out is the case that stalls (1370ms). The last two are the bisect: the submerged branch of _ocean3
     // flips material.side and alpha and sets needsUpdate, which forces a synchronous program recompile at exactly

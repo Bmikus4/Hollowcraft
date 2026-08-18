@@ -74,9 +74,17 @@ async function pale(page,file){
       await page.evaluate('__hc.pines(1); __hc.ocean3(true); __hc.horizonBand({on:false});'); await sleep(900);
       if(cmd) await page.evaluate(cmd);
       await sleep(1200);
+      // RE-ASSERT THE VANTAGE IMMEDIATELY BEFORE THE SHOT. The first cut of this let two seconds pass between cases
+      // and the frames came back from different viewpoints — the diff then claimed the ocean plane was painting the
+      // SKY, which is impossible and is how you know the control moved. Position and yaw are logged per shot so a
+      // frame that drifted anyway is visible in the output rather than silently compared.
+      await page.evaluate(`__hc.tpAt(${shore.x}+0.5, ${shore.g}+1, ${shore.z}+0.5); __hc.cam({yaw:`+pr2.strongestBearing.lookYaw+`, pitch:0});`);
+      await sleep(600);
+      const cam=await page.evaluate('__hc.pos()');
       const f=path.join(OUT,`pale-${tag}.png`); await page.screenshot({path:f});
       const p=await pale(page,f);
-      console.log(`  ${tag.padEnd(12)} paleFrac ${String(p.paleFrac).padStart(7)}  meanLum ${String(p.meanLum).padStart(6)}  -> ${path.basename(f)}`);
+      console.log(`  ${tag.padEnd(12)} paleFrac ${String(p.paleFrac).padStart(7)}  meanLum ${String(p.meanLum).padStart(6)}`
+                  + `  cam ${cam.x.toFixed(1)},${cam.y.toFixed(1)},${cam.z.toFixed(1)} yaw ${cam.yaw.toFixed(3)}  -> ${path.basename(f)}`);
     }
     await page.evaluate('__hc.pines(1); __hc.ocean3(true); __hc.horizonBand({on:false});');
   } finally { try{ if(browser) await browser.close(); }catch(e){} try{ server.kill(); }catch(e){} }
