@@ -44,6 +44,8 @@ const FOURS = 0.5;
     await sleep(3500);
     await pg.evaluate('__hc.qaLocked(true)');
     await pg.evaluate('__hc.wretchArm(true,true)');
+    // HC_ENV=0 forces the collision envelope off, so this assert can be run as a control pair too.
+    if(process.env.HC_ENV!=null) await pg.evaluate('__hc.wretchEnv('+(process.env.HC_ENV!=='0')+')').catch(()=>{});
 
     // A CHASE HAS TO COVER GROUND TO BE MEASURABLE. assert-wretch-charge yanks the creature to 1.4 blocks and records dist pinned at
     // 1.40 for every frame — nothing advances, so nothing about locomotion can be read there. This drops it 22 blocks out instead and
