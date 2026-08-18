@@ -26,7 +26,8 @@ const DIR   = path.join(OUT, 'attvis');
 
 // The guns each open item actually names, not all twenty-odd: three revolvers for the empty chambers, the bolt guns for
 // the bolt that was added, and one of each action for the attachment fit.
-const BARE_GUNS = ['revolver','revolver_snub','revolver_rail','ar15','hunting_rifle','shotgun','pistol'];
+const ARGV_GUNS = (process.argv[3] && !process.argv[3].startsWith('--')) ? process.argv[3].split(',') : null;
+const BARE_GUNS = ARGV_GUNS || ['revolver','revolver_snub','revolver_rail','ar15','hunting_rifle','shotgun','pistol'];
 const ATT_GUNS  = ['ar15','hunting_rifle','shotgun','pistol','revolver'];
 const ATTS = ['red_dot','holo_sight','optic_scope','suppressor','weapon_light','laser_sight','foregrip'];
 
