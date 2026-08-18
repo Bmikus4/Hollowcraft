@@ -9266,10 +9266,23 @@ function _wpDrawDial(cx,cz,r,refDeg,along){
 //   reach = r + GIVE * tanh((playerDist - r) / GIVE)
 // tanh and not a clamp, because a clamp stops DEAD at the limit and the ring would visibly stick; this eases
 // into it, which is what "slow down to a stop" asks for.
-let _wpGive=20, _wpDialLast=null;
+// TWO NUMBERS, NOT ONE. The first cut used GIVE for both the limit and the softness, so the whole 20 blocks of
+// travel was spent over 20 blocks of walking and the curve hit its stop almost at once -- that reads as a snap,
+// not a spring. Ben: "it should gradually saturate until 20, where it will stop, the entire thing should be
+// smooth."
+//   GIVE  where it stops: 20 blocks, absolute, so it means the same on any part of the island.
+//   SOFT  how far he walks to get there, which is what makes the approach gradual.
+//   reach = r + GIVE * tanh((playerDist - r) / SOFT)
+// The slope at A is GIVE/SOFT, so 20 over 220 barely moves at first and eases into the stop over a couple of
+// hundred blocks. tanh never actually reaches its limit, which is the point: no corner anywhere for the eye.
+// AND THE WHOLE RING SITS 20 BLOCKS SEAWARD (Ben 08-18: "offset the radius command circle 20 blocks towards the
+// ocean, so outland"). The shoreline it is measured against was itself pulled 15 blocks INLAND, so this puts the
+// ring just outside the land rather than on top of it. Added to both semi-axes, so it is a uniform push outward
+// and not a stretch.
+let _wpGive=20, _wpSoft=220, _wpOut=20, _wpDialLast=null;
 function _wpGiveReach(playerDist, r){
-  const K=Math.max(0.5, _wpGive);
-  return r + K*Math.tanh((playerDist-r)/K); }
+  const G=Math.max(0.5, _wpGive), S=Math.max(1, _wpSoft);
+  return r + G*Math.tanh((playerDist-r)/S); }
 function _wpDialFrame(){
   if(!_wpDialOn || !_wpAt) return;
   const px=camera.position.x, pz=camera.position.z;
@@ -9280,8 +9293,9 @@ function _wpDialFrame(){
   if(!A) return;
   _wpDialRef=Math.atan2(dz,dx)*180/Math.PI;      // A's world bearing: the dial's 180
   // Kept for the pines: they are locked ON the dial, so they need the same ellipse the ring is drawn from.
-  _wpDialLast={ x:_wpAt.x, z:_wpAt.z, ref:_wpDialRef, along:(_wpElastic?_wpGiveReach(L,A.r):A.r), across:A.r };
-  _wpDrawDial(_wpAt.x,_wpAt.z,A.r,_wpDialRef, _wpElastic?_wpGiveReach(L,A.r):A.r);
+  _wpDialLast={ x:_wpAt.x, z:_wpAt.z, ref:_wpDialRef,
+                along:(_wpElastic?_wpGiveReach(L,A.r):A.r)+_wpOut, across:A.r+_wpOut };
+  _wpDrawDial(_wpAt.x,_wpAt.z,_wpDialLast.across,_wpDialRef,_wpDialLast.along);
   const gy=(x,z)=>Math.max((typeof surfaceH==='function')?surfaceH(Math.round(x),Math.round(z)):CFG.SEA, CFG.SEA)+0.6;
   const mp=_wpMarkA.geometry.attributes.position;
   mp.setXYZ(0, A.x, gy(A.x,A.z), A.z);
@@ -9358,18 +9372,22 @@ function updateWaypoint(){
 // occludes them because they are ordinary depth-tested geometry out past the render wall.
 // The distance is inside camera.far (326.4) on purpose -- beyond it the quads would be clipped away entirely,
 // which is the failure the old band spent a session on.
-// BEN'S OWN IMAGE, not the cut one (08-18: "it needs to use the original pines image").
-// assets/horizon/treeline.png was a processed crop with its understory GROWN into a solid slab so no sky could
-// show under the old wrapped band; on a flat quad that slab is a dark rectangle. pines-original.png is his
-// source strip with nothing changed but its background, which was fully opaque white and had to be keyed out
-// or it draws as a white panel -- see scripts/make-pines-original.py, which does it from the border inward so
-// the bright water and the sky between the trunks survive.
-const _PIN_ASPECT=1964/801;
+// BEN'S OWN IMAGE (08-18: "this is the new horizon pines image"), 2048x682 with a real alpha channel, so
+// unlike the earlier white-background strip there is nothing to key out. It is trimmed to its alpha bounding
+// box by scripts/make-pines-original.py and the aspect below is the TRIMMED size: the quad stands its bottom
+// edge on the waterline, so 28 rows of transparent margin under the trees would have floated the whole stand
+// above the sea.
+// The old assets/horizon/treeline.png is not used -- it was a processed crop whose understory had been grown
+// into a solid slab, which on a flat quad is just a dark rectangle.
+const _PIN_ASPECT=2048/654;
 // The original is used WHOLE by default: it is a composed picture -- trees, shore and water -- and cropping it
 // is what turned the previous asset into a floating band. The dial stays for the case where only part is wanted.
 let _pinCrop=1.0;
 let _pinGroup=null, _pinTex=null, _pinMat=null, _pinAt=[], _pinDist=280, _pinH=70;
-let _pinFlipH=false, _pinFlipV=false;
+let _pinFlipH=false, _pinFlipV=false, _pinEyeX=0, _pinEyeZ=0;
+// Ben 08-18: "move pines down by 8 blocks." Sunk below the waterline, so the foot of the stand is buried
+// rather than sitting on the surface with a visible bottom edge -- the same reason the old band sank its own.
+let _pinDrop=8;
 function _pinEnsure(){ if(_pinGroup) return _pinGroup;
   _pinTex=new THREE.TextureLoader().load('assets/horizon/pines-original.png');
   _pinTex.colorSpace=THREE.SRGBColorSpace; _pinTex.anisotropy=8;
@@ -9405,45 +9423,43 @@ function _pinRebuild(){
   _pinPlace(); }
 function _pinPlace(){
   if(!_pinGroup || !_pinGroup.children.length) return;
-  _pinGroup.position.set(camera.position.x, camera.position.y, camera.position.z);
-  // The foot sits on the WATERLINE: at the group's origin the camera is local zero, so sea level is at
-  // (SEA - eye), and the quad is raised half its height so its bottom edge lands there rather than its middle.
-  const footY=(CFG.SEA-camera.position.y);
-  // ---- LOCKED ON THEIR DEGREE (Ben 08-18: "pines are not just placed there, they are locked on top of their
-  // degree") ----
-  // A bearing on the dial is measured from B, the waypoint -- not from the player. Hanging the quads at a fixed
-  // angle around the CAMERA made their bearing the player's own, so they slid off their degree mark the moment
-  // he walked. Each one is aimed at the point on the dial ring carrying its degree instead, so it sits on that
-  // tick from wherever he stands.
-  // The DIRECTION is exact and the DISTANCE is clamped: a point on the far side of the ring can be 600 blocks
-  // away, past camera.far, where the quad is clipped and draws nothing at all. Pulling it in along the same
-  // line keeps the bearing perfect and the image visible, which is the half that matters.
-  const D=_wpDialLast, maxD=camera.far*0.82;
+  // ---- THE PINES STAND ON THEIR POINT ON THE RING, IN THE WORLD ----
+  // Ben 08-18: "the pines arent moving with thier point on the circle."
+  // They were hung off the CAMERA at a clamped distance, on the bearing of their ring point. That kept the
+  // bearing right and threw the motion away: as the ring breathed, the direction from the player to the point
+  // barely changed, so the image sat still. They are world objects now, placed AT the point their degree
+  // carries, so when the ring springs in or out they travel with it.
+  // This also cures the shake. Anchored to the camera, every bob of the head swung a 280-block-long lever and
+  // the image trembled; anchored to the world it cannot move unless its point does.
+  _pinGroup.position.set(0,0,0);
+  const D=_wpDialLast;
+  // Billboarding is done from a SMOOTHED eye position for the same reason: the yaw is recomputed every frame and
+  // head bob would otherwise put a small oscillation into it.
+  _pinEyeX += (camera.position.x-_pinEyeX)*0.12;
+  _pinEyeZ += (camera.position.z-_pinEyeZ)*0.12;
   for(const m of _pinGroup.children){
     const th=m.userData.az;
-    let dirx=Math.cos(th), dirz=Math.sin(th), dist=_pinDist;
-    if(D){
-      const q=_dialPoint(D.x,D.z,_worldToDialDeg(th*180/Math.PI, D.ref), D.ref, D.along, D.across);
-      let vx=q[0]-camera.position.x, vz=q[1]-camera.position.z;
-      const L=Math.hypot(vx,vz);
-      if(L>1){ dirx=vx/L; dirz=vz/L; dist=Math.min(L, maxD); } }
-    m.position.set(dirx*dist, footY+_pinH*0.5, dirz*dist);
-    m.userData.worldTh=Math.atan2(dirz,dirx);
-    // ---- ALWAYS FACING THE PLAYER (Ben 08-18) ----
-    // Turned about Y only. A full lookAt would tip the image back as the player looks up, and a treeline that
-    // leans is worse than one that is slightly off-normal.
-    // A PlaneGeometry's normal is +Z, and a yaw of phi sends +Z to (sin phi, cos phi) in xz. The quad sits at
-    // (cos th, sin th) * dist from the player at the origin, so its normal has to be the opposite of that:
-    //   sin phi = -cos th,  cos phi = -sin th,  phi = atan2(-cos th, -sin th)
-    // The first cut wrote -th + PI/2, which is that direction turned by half a circle -- the quad faced AWAY,
-    // and only survived being seen at all because the material is DoubleSide. What it drew was the treeline
-    // MIRRORED, which is the fault this asset has already been rejected for once.
-    { const t=m.userData.worldTh;
-      m.rotation.set(0, Math.atan2(-Math.cos(t), -Math.sin(t)), 0); } } }
-// OFF BY DEFAULT, behind /navigator (Ben 08-18: "gate the bands visibility behind a command"). It is an
-// instrument, and one that deliberately draws over the world; ?hzruler=1 turns it on at load for a bench.
-let _hzRulerWant=(Q.get('hzruler')==='1');
-if(_hzRulerWant) oceanLayer.add(hzRuler);
+    let x, z;
+    if(D){ const q=_dialPoint(D.x,D.z,_worldToDialDeg(th*180/Math.PI, D.ref), D.ref, D.along, D.across);
+           x=q[0]; z=q[1]; }
+    else { x=camera.position.x+Math.cos(th)*_pinDist; z=camera.position.z+Math.sin(th)*_pinDist; }
+    // A POINT ON THE RING CAN BE BEYOND THE FAR PLANE, and past it the quad is clipped and draws NOTHING --
+    // silently, which is how this feature lost a whole session once. From the near side of the island a far-side
+    // ring point measures 350-plus against a camera.far of 326. So the bearing is kept exact and the distance is
+    // pulled in to just inside the plane when it has to be: the image stays where its degree says it is and
+    // still travels as the ring breathes, instead of blinking out.
+    { const dx0=x-_pinEyeX, dz0=z-_pinEyeZ, L0=Math.hypot(dx0,dz0), lim=camera.far*0.9;
+      m.userData.clamped = L0>lim;
+      if(m.userData.clamped && L0>1){ x=_pinEyeX+dx0/L0*lim; z=_pinEyeZ+dz0/L0*lim; } }
+    // Foot on the waterline, less the drop: a centred plane's bottom edge is half its height below its origin.
+    m.position.set(x, CFG.SEA-_pinDrop+_pinH*0.5, z);
+    // FACE THE PLAYER with lookAt at the quad's OWN height, which is a horizontal turn only -- a lookAt at the
+    // eye's height would tip the image back as he climbs. Hand-rolled yaw has now been wrong twice on this
+    // feature, once by half a circle and once here; lookAt cannot be off by pi.
+    const vx=_pinEyeX-x, vz=_pinEyeZ-z;
+    m.lookAt(_pinEyeX, m.position.y, _pinEyeZ);
+    m.userData.dist=Math.hypot(vx,vz); } }
+
 // =====================================================================
 //  THE THREE.JS OCEAN (webgl_shaders_ocean), Ben 08-12: "redo water shader and texture using the one I showed you"
 // =====================================================================
@@ -25928,6 +25944,12 @@ const CMDS={
       // /waypoint radius — Ben's A-to-B construction. It does NOT touch the shoreline: both stay on screen,
       // because the circle is only meaningful against the coast it was measured from.
       if(w[0]==='radius'||w[0]==='r'){
+        if(w[1]==='out'||w[1]==='offset'){ const v=+w[2];
+          if(!isFinite(v)) return `outward offset in blocks; now ${_wpOut}. e.g. /waypoint radius out 20`;
+          _wpOut=v; return `ring sits ${_wpOut} blocks seaward of the measured shoreline`; }
+        if(w[1]==='soft'){ const v=+w[2];
+          if(!isFinite(v)||v<=0) return `soft is how far you walk to reach the stop; now ${_wpSoft} blocks. e.g. /waypoint radius soft 220`;
+          _wpSoft=v; return `spring softness ${_wpSoft} blocks — it eases into its ${_wpGive}-block stop over about that far`; }
         if(w[1]==='give'){ const v=+w[2];
           if(!isFinite(v)||v<=0) return `give is the spring's travel in BLOCKS; now ${_wpGive}. e.g. /waypoint radius give 20`;
           _wpGive=v; return `spring give ${_wpGive} blocks — the ring comes to a stop about that far either side of A`; }
@@ -25997,7 +26019,7 @@ const CMDS={
            + `  ${mass?'mean coast radius':'largest circle that fits'} ${P.r} blocks`
            + `${mass?'':'  — grid '+C.grid+' at '+C.step+' blocks/cell, '+C.landCells+' land cells'}`; } },
   // The pines are PLACED, not derived: Ben reads a bearing off /waypoint radius and names it here.
-  pines:{ usage:'/pines at <dial deg...> | /pines at world <deg...> | /pines clear | /pines size <blocks> | /pines dist <blocks> | /pines crop <0..1> | /pines flip h|v|none | /pines list', run:(a)=>{
+  pines:{ usage:'/pines at <dial deg...> | /pines at world <deg...> | /pines clear | /pines size <blocks> | /pines dist <blocks> | /pines crop <0..1> | /pines flip h|v|none | /pines drop <blocks> | /pines list', run:(a)=>{
       const w=a.map(t=>String(t).toLowerCase());
       if(!w.length||w[0]==='list'){ _pinEnsure();
         return _pinAt.length?`pines at ${_pinAt.join(', ')} deg   size ${_pinH} tall, ${_pinDist} out   flip h:${_pinFlipH?'on':'off'} v:${_pinFlipV?'on':'off'}`
@@ -26013,6 +26035,9 @@ const CMDS={
         else return 'flip h, flip v, or flip none';
         _pinRebuild();
         return `pines flip — horizontal ${_pinFlipH?'ON':'off'}, vertical ${_pinFlipV?'ON':'off'}`; }
+      if(w[0]==='drop'){ const v=+w[1];
+        if(!isFinite(v)) return `drop is how far below the waterline the foot sits; now ${_pinDrop} blocks`;
+        _pinDrop=v; _pinPlace(); return `pines dropped ${_pinDrop} blocks below the waterline`; }
       if(w[0]==='crop'){ const v=+w[1];
         if(!isFinite(v)||v<=0||v>1) return 'crop is the fraction of the image that is trees, 0..1, e.g. /pines crop 0.45';
         _pinCrop=v; _pinRebuild(); return `pines use the top ${(100*_pinCrop).toFixed(0)}% of the image`; }
@@ -26038,7 +26063,7 @@ const CMDS={
                      :`pines placed: dial ${src.join(', ')} -> world ${_pinAt.map(v=>v.toFixed(1)).join(', ')} deg`
                       +`   (dial 180 = world ${_wpDialRef.toFixed(1)})
 `)
-             + `  ${_pinH} blocks tall, ${(_pinH*_PIN_ASPECT).toFixed(0)} wide, ${_pinDist} out, foot on the waterline`; }
+             + `  ${_pinH} blocks tall, ${(_pinH*_PIN_ASPECT).toFixed(0)} wide, foot ${_pinDrop} below the waterline`; }
       return CMDS.pines.usage; } },
   navigator:{ usage:'/navigator [on|off]', run:(a)=>{ const w=String(a[0]||'').toLowerCase();
       const want = w==='on'?true : w==='off'?false : !__hc.hzRuler().on;
@@ -44461,8 +44486,10 @@ window.__hc={
       texLoaded:!!(_pinTex&&_pinTex.image&&_pinTex.image.width>0), tex:_pinTex&&_pinTex.image?String(_pinTex.image.src||'').split('/').pop():null, flipH:_pinFlipH, flipV:_pinFlipV, camFar:+camera.far.toFixed(1), facing:[] };
     if(_pinGroup) for(const m of _pinGroup.children){
       const n=new THREE.Vector3(0,0,1).applyQuaternion(m.quaternion);
-      const toCam=m.position.clone().negate().normalize();          // group origin IS the camera
-      out.facing.push({ deg:+(m.userData.az*180/Math.PI).toFixed(1), dotToPlayer:+n.dot(toCam).toFixed(3) }); }
+      const toCam=new THREE.Vector3(camera.position.x-m.position.x, 0, camera.position.z-m.position.z).normalize();
+      out.facing.push({ deg:+(m.userData.az*180/Math.PI).toFixed(1), dotToPlayer:+n.dot(toCam).toFixed(3),
+                        at:[+m.position.x.toFixed(1), +m.position.z.toFixed(1)],
+                        distToPlayer:+(m.userData.dist||0).toFixed(1), clamped:!!m.userData.clamped }); }
     return out; } catch(e){ return {err:String(e.message||e)}; } },
   wpState(){ try{ return { shoreVisible:!!(_wpCircle&&_wpCircle.visible),
       shorePoints:_wpCircle?_wpCircle.geometry.attributes.position.count:0,

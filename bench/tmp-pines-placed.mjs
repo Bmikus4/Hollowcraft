@@ -27,9 +27,14 @@ await page.evaluate(`__hc.tpAt(${P.x}+0.5, ${P.g}+2, ${P.z}+0.5);`);
 for(let i=0;i<30;i++){ const f=await page.evaluate('__hc.fill()'); if(f&&f.meshed>=f.want) break; await sleep(400); }
 await sleep(2500);
 console.log('standing at', JSON.stringify(P), ' dial bearing', (await page.evaluate("__hc.cmdRun('/waypoint island center mass'),__hc.wpAxis&&__hc.wpAxis()?__hc.wpAxis().bearingDeg:null")));
+await page.evaluate("__hc.cmdRun('/waypoint island center mass'); __hc.cmdRun('/waypoint shore'); __hc.cmdRun('/waypoint radius');");
+await sleep(900);
 const r=await page.evaluate("__hc.cmdRun('/pines at 105 -165')");
 (r.out||[]).forEach(l=>String(l).split('\n').forEach(x=>console.log('   '+x)));
-console.log('   ', JSON.stringify(await page.evaluate("__hc.pinesState()")));
+await sleep(2500);   // the texture loads async; give it time before asking whether it is there
+{ const S=await page.evaluate('__hc.pinesState()');
+  console.log('   image', S.tex, 'loaded', S.texLoaded, ' quads', S.n);
+  for(const f of S.facing) console.log(`     ${String(f.deg).padStart(6)} deg  at ${JSON.stringify(f.at)}  ${String(f.distToPlayer).padStart(6)} away  facing ${f.dotToPlayer}${f.clamped?'  (pulled inside the far plane)':''}`); }
 for(const deg of [105,-165]){
   const az=deg*Math.PI/180;
   await page.evaluate('__hc.cam({yaw:'+Math.atan2(-Math.cos(az),-Math.sin(az))+', pitch:0.02});');
