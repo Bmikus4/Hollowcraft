@@ -37,7 +37,13 @@ const GUN = process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[
     // the answer is clean: a chamber is a through-hole, so a ray down it crosses nothing inside that window, while a
     // ray into solid drum steel crosses its front face and its rear face. The window comes from where the cartridges
     // are actually placed, which is the one thing about this drum that is not in dispute.
-    const zF = -0.0686 - 0.008, zR = 0.0126 + 0.008;
+    // THE WINDOW COMES FROM THE GUN, not from a constant typed for one of them. buildGlbGun publishes the two end faces
+    // it actually placed the drum between (userData.cylZ), so this measures whichever revolver is in hand -- the first
+    // version hardcoded the Python's faces and would have silently mis-windowed the snub and the rail.
+    const B = cyl.built;
+    if (!B) { console.log('  no built cyl data -- is this a revolver?'); return; }
+    const zF = Math.min(B.zF, B.zR) - 0.008, zR = Math.max(B.zF, B.zR) + 0.008;
+    console.log(`  built ${JSON.stringify(B)}`);
     const inWin = c => c.z.filter(z => z >= zF && z <= zR).length;
     console.log(`
   crossings INSIDE the drum window z ${zF.toFixed(3)}..${zR.toFixed(3)}  (. = 0 = a through-bore)`);
@@ -45,6 +51,65 @@ const GUN = process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[
       let row = '';
       for (let ix = 0; ix < M.n; ix++) { const k = inWin(M.cells[iy * M.n + ix]); row += k === 0 ? '.' : (k < 10 ? String(k) : '*'); }
       console.log('   ' + row);
+    }
+
+    // ---- THE DRUM AS NUMBERS, which is what the fix has to be built against ----
+    // A cell with two or more crossings inside the window is looking at solid drum. Those cells ARE the drum's disc, so
+    // their extent gives its axis and radius, and the crossings themselves give the two end faces. Taken from the rays
+    // rather than from spec.cyl because spec.cyl is the thing under suspicion.
+    const solidCells = [];
+    for (let iy = 0; iy < M.n; iy++) for (let ix = 0; ix < M.n; ix++) {
+      const c = M.cells[iy * M.n + ix];
+      const zs = c.z.filter(z => z >= zF && z <= zR);
+      if (zs.length >= 2) solidCells.push({ x: c.x, y: c.y, zmin: Math.min(...zs), zmax: Math.max(...zs) });
+    }
+    if (solidCells.length) {
+      // THE DRUM IS THE LARGEST CONNECTED BLOB OF SOLID CELLS, and its bounding box is its disc. Two earlier attempts
+      // failed here: a min/max box over every solid cell gave radius 0.0449 at 42% disc fill, because the frame and the
+      // grip also cross the window twice; and trimming to 1.15x the median distance from a running centroid collapsed to
+      // 16 cells and a radius of 0.005. Connectivity separates the drum from the frame without any threshold at all --
+      // they are not touching in this projection -- and the fill percentage below is what proves the blob is round.
+      const solidSet = new Set(solidCells.map(c => c.x.toFixed(4) + '|' + c.y.toFixed(4)));
+      const byXY = new Map(solidCells.map(c => [c.x.toFixed(4) + '|' + c.y.toFixed(4), c]));
+      const stepA = 2 * M.half / (M.n - 1);
+      const seenA = new Set(); let best = [];
+      for (const c of solidCells) {
+        const k0 = c.x.toFixed(4) + '|' + c.y.toFixed(4);
+        if (seenA.has(k0)) continue;
+        const st = [c], comp = []; seenA.add(k0);
+        while (st.length) {
+          const q = st.pop(); comp.push(q);
+          for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+            const nx = +(q.x + dx * stepA).toFixed(4), ny = +(q.y + dy * stepA).toFixed(4);
+            const kk = nx.toFixed(4) + '|' + ny.toFixed(4);
+            if (solidSet.has(kk) && !seenA.has(kk)) { seenA.add(kk); st.push(byXY.get(kk) || { x: nx, y: ny, zmin: 0, zmax: 0 }); }
+          }
+        }
+        if (comp.length > best.length) best = comp;
+      }
+      const keep = best;
+      const bx0 = Math.min(...keep.map(c => c.x)), bx1 = Math.max(...keep.map(c => c.x));
+      const by0 = Math.min(...keep.map(c => c.y)), by1 = Math.max(...keep.map(c => c.y));
+      const ax = (bx0 + bx1) / 2, ay = (by0 + by1) / 2;
+      const rad = Math.max((bx1 - bx0) / 2, (by1 - by0) / 2);
+      const fill = keep.length * stepA * stepA / (Math.PI * rad * rad);
+      console.log(`
+  ---- THE DRUM, OFF THE RAYS, IN VIEW UNITS ----`);
+      console.log(`  solid cells ${solidCells.length} -> kept ${keep.length}   disc fill ${(100*fill).toFixed(1)}% of a circle (a real disc is near 100)`);
+      console.log(`  axis (${ax.toFixed(4)}, ${ay.toFixed(4)})   radius ${rad.toFixed(4)}`);
+      const front = Math.min(...keep.map(c => c.zmin)), rear = Math.max(...keep.map(c => c.zmax));
+      console.log(`  end faces  front z ${front.toFixed(4)}   rear z ${rear.toFixed(4)}   length ${(rear-front).toFixed(4)}`);
+      // WHAT TO DECLARE, converted back into the model units spec.cyl is written in, using the gun's own bore height and
+      // model scale rather than the Python's. axis is the drum axis measured DOWN from the bore, which is the quantity
+      // the builder needs and the one that was previously derived from the bolt circle instead of measured.
+      if (B.boreG != null && B.s) {
+        console.log(`  built axisY ${B.axisY}  vs MEASURED ${ay.toFixed(4)}   (out by ${(B.axisY-ay).toFixed(4)})`);
+        console.log(`  -> declare axis    = ${((B.boreG - ay) / B.s).toFixed(3)}`);
+        console.log(`  -> declare bolt    = ${(0.62 * rad / B.s).toFixed(3)}   (0.62 of the drum radius)`);
+        console.log(`  -> declare chamber = ${(0.22 * rad / B.s).toFixed(3)}   (0.22 of it)`);
+      }
+      console.log(`  a real six-shot revolver puts the bolt circle at ~0.62 of the drum radius = ${(0.62*rad).toFixed(4)}`);
+      console.log(`  and the chamber radius at ~0.22 of it              = ${(0.22*rad).toFixed(4)}`);
     }
 
     // The bores: cells with no crossing inside the window, clustered. Cells outside the drum also have none, so the
