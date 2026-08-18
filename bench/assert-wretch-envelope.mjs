@@ -16,6 +16,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const fb=()=>['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Microsoft/Edge/Application/msedge.exe'].find(p=>fs.existsSync(p));
 const ENV = process.env.HC_ENV==null ? null : (process.env.HC_ENV!=='0');
+const IK  = process.env.HC_IK==null ? null : (process.env.HC_IK!=='0');
 (async()=>{
   const port=await freePort();
   const srv=spawn(process.execPath,[path.join(ROOT,'server.js')],{cwd:ROOT,env:{...process.env,PORT:String(port),NO_OPEN:'1'},stdio:'ignore'});
@@ -33,7 +34,8 @@ const ENV = process.env.HC_ENV==null ? null : (process.env.HC_ENV!=='0');
     const ev=s=>pg.evaluate(s);
     await ev('__hc.qaLocked(true)');
     await ev('__hc.wretchArm(true,true)');
-    if(ENV!==null) console.log('  envelope forced '+(await ev('__hc.wretchEnv('+ENV+')').catch(()=>'(no dial)')));
+    if(ENV!==null) console.log('  envelope forced '+JSON.stringify(await ev('__hc.wretchEnv('+ENV+')').catch(()=>'(no dial)')));
+    if(IK !==null) console.log('  foot IK  forced '+JSON.stringify(await ev('__hc.footIK('+IK+')').catch(()=>'(no dial)')));
 
     // A STALK THROUGH THE TREES, not a creature parked against one wall: 873d919's own noise finding was that a
     // single parked condition scores 285 and 357 on repeats. Three rounds, dropped 22 blocks out each time, gaze
@@ -47,8 +49,9 @@ const ENV = process.env.HC_ENV==null ? null : (process.env.HC_ENV!=='0');
         await ev('__hc.setTime(0.0)');
         await ev('__hc.wretchCommit()');
         const r=await ev('__hc.rigBuried()');
-        if(r && !r.err){ const c=await ev('__hc.bodyClear()'); r.clear=(c&&!c.err)?c.clear:null; samples.push(r); }
-        if(!span){ const s=await ev('__hc.rigSpan()'); if(s && !s.err) span=s; }
+        if(r && !r.err){ const c=await ev('__hc.bodyClear()'); r.clear=(c&&!c.err)?c.clear:null;
+          const sp=await ev('__hc.rigSpan()'); if(sp && !sp.err){ r.yLo=sp.yLo; if(!span) span=sp; }
+          samples.push(r); }
         await sleep(60); } }
 
     if(!samples.length){ say(false,'the creature never came alive in this harness'); return; }
@@ -69,6 +72,12 @@ const ENV = process.env.HC_ENV==null ? null : (process.env.HC_ENV!=='0');
     const inside=cl.filter(v=>v<0.45).length;
     if(cl.length) console.log('  clearance  min '+cl[0].toFixed(3)+'  p10 '+cl[Math.floor(cl.length*0.1)].toFixed(3)
       +'  median '+cl[Math.floor(cl.length/2)].toFixed(3)+'   samples under 0.45: '+inside+' of '+cl.length);
+    // FOOT IK'S OWN NUMBER: how far the rig's lowest point sits BELOW the creature's own ground contact. FK legs
+    // put a whole block of leg in the dirt on any break in the ground; nothing about the burial rate can see it,
+    // because a foot in the floor and a foot on the floor are the same mesh in the same place to _meshBuried.
+    const yl=samples.map(s=>s.yLo).filter(v=>v!=null).sort((a,b)=>a-b);
+    if(yl.length) console.log('  lowest point below the body   worst '+yl[0].toFixed(2)
+      +'  p10 '+yl[Math.floor(yl.length*0.1)].toFixed(2)+'  median '+yl[Math.floor(yl.length/2)].toFixed(2));
     console.log('  worst   '+JSON.stringify(samples.slice().sort((a,b)=>b.buried-a.buried)[0]).slice(0,180));
     say(pct < 89, 'burial rate '+pct.toFixed(1)+'% beats the 89% control of 873d919');
     console.log('\n  '+(bad?bad+' failed':'all ok'));

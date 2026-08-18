@@ -33,6 +33,9 @@ let fails=0; const T=(n,ok,d)=>{ if(!ok)fails++; console.log((ok?'PASS':'FAIL')+
     await p.waitForFunction("(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()",null,{timeout:300000});
     await p.waitForFunction("(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()",null,{timeout:420000});
     await p.evaluate("__hc.lock(true); __hc.cmdRun('/gamemode creative'); __hc.cmdRun('/heal 20')");
+    // HC_ENV / HC_IK force the collision envelope and the foot IK off, so this assert has a control side too.
+    if(process.env.HC_ENV!=null) await p.evaluate('__hc.wretchEnv('+(process.env.HC_ENV!=='0')+')').catch(()=>{});
+    if(process.env.HC_IK !=null) await p.evaluate('__hc.footIK('+(process.env.HC_IK!=='0')+')').catch(()=>{});
     await sleep(1000);
 
     // A REAL CHARGE, not a synthesised one: summon him and let the brain choose to come. Under 16 blocks
