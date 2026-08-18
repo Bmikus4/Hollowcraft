@@ -3218,6 +3218,12 @@ function tileRng(seed){ let s = seed*2654435761>>>0; return ()=>{ s=(Math.imul(s
 // every flower, fern and tuft in the game went back to raw pack pixels with black under their alpha and the bug
 // reappeared on exactly the tiles that had been fixed. One function, three callers, no tile that can miss it.
 // ?nodilate is the A/B and it covers all three.
+// 6 TEXELS OF BLEED, NOT THE WHOLE TILE. The pass runs until every texel is filled, which on a mostly-clear sprite is
+// half the tile width -- 60-odd passes over 16k texels, per tile, at boot. It buys nothing past the point the alpha
+// test stops keeping fragments: mip 3 averages an 8-texel neighbourhood and by mip 5 a thin sprite's alpha has fallen
+// under the 0.5 cutoff and the fragment is discarded whatever colour it wears. 6 covers mip 0-3, which is the band
+// where a kept fragment can still be wearing the background.
+const DILATE_PASSES = 6;
 function dilateAlpha(d, size){
   if(typeof Q!=='undefined' && Q.get('nodilate')) return;
   const n=size*size;
@@ -3226,7 +3232,7 @@ function dilateAlpha(d, size){
   let any=false, all=true;
   for(let i=0;i<n;i++){ if(filled[i]) any=true; else all=false; }
   if(!any || all) return;                                            // fully clear or fully opaque: nothing to bleed
-  for(let pass=0; pass<size && !all; pass++){
+  for(let pass=0; pass<DILATE_PASSES && !all; pass++){
     const next=filled.slice(); all=true;
     for(let y=0;y<size;y++) for(let x=0;x<size;x++){
       const i=y*size+x; if(filled[i]) continue;
@@ -43209,15 +43215,22 @@ window.__hc={
       // whatever colour is under it -- which made clearRGB below blind to the one thing it exists to measure.
       const d=arrData.subarray(i*LAYER_TEXELS*4,(i+1)*LAYER_TEXELS*4), n=TILE*TILE;
       let s=[0,0,0], q=[0,0,0], a=0;
-      // AND WHAT COLOUR THE TRANSPARENT TEXELS CARRY, which is invisible in every other statistic here and is the one
-      // that decides whether a thin cutout goes black at distance: generateMipmaps averages RGB across the alpha
-      // boundary, so black under alpha 0 is dragged into the sprite's own colour two mips down. See dilateAlpha.
+      for(let p=0;p<d.length;p+=4){ for(let c=0;c<3;c++){ s[c]+=d[p+c]; q[c]+=d[p+c]*d[p+c]; } a+=d[p+3]; }
+      // AND WHAT COLOUR THE TRANSPARENT TEXELS AT THE EDGE CARRY, which is invisible in every other statistic here and
+      // is the one that decides whether a thin cutout goes black at distance: generateMipmaps averages RGB across the
+      // alpha boundary, so black under alpha 0 is dragged into the sprite's own colour two mips down. See dilateAlpha.
+      // ONLY the clear texels with an opaque NEIGHBOUR: those are the ones a mip mixes with real colour, and averaging
+      // the whole clear field instead would report the bleed as weak purely because the bleed is bounded.
       let cr=0,cg=0,cb=0,cn=0;
-      for(let p=0;p<d.length;p+=4){ for(let c=0;c<3;c++){ s[c]+=d[p+c]; q[c]+=d[p+c]*d[p+c]; } a+=d[p+3];
-        if(d[p+3]===0){ cr+=d[p]; cg+=d[p+1]; cb+=d[p+2]; cn++; } }
+      for(let y=0;y<TILE;y++) for(let x=0;x<TILE;x++){ const p=(y*TILE+x)*4; if(d[p+3]!==0) continue;
+        let touch=false;
+        for(let dy=-1;dy<=1&&!touch;dy++) for(let dx=-1;dx<=1;dx++){ const xx=x+dx, yy=y+dy;
+          if(xx<0||xx>=TILE||yy<0||yy>=TILE||(!dx&&!dy)) continue;
+          if(d[(yy*TILE+xx)*4+3]!==0){ touch=true; break; } }
+        if(touch){ cr+=d[p]; cg+=d[p+1]; cb+=d[p+2]; cn++; } }
       const mean=s.map(v=>v/n), sd=q.map((v,c)=>Math.sqrt(Math.max(0,v/n-mean[c]*mean[c])));
       rows.push({ name, idx:i, mean:mean.map(v=>+v.toFixed(1)), sd:+Math.max(...sd).toFixed(2),
-                  alpha:+(a/n).toFixed(1), clear:cn, clearRGB:cn?[Math.round(cr/cn),Math.round(cg/cn),Math.round(cb/cn)]:null,
+                  alpha:+(a/n).toFixed(1), edge:cn, edgeRGB:cn?[Math.round(cr/cn),Math.round(cg/cn),Math.round(cb/cn)]:null,
                   stamped:_stampedTiles.indexOf(name)>=0 }); }
     rows.sort((x,y)=>(x.sd==null?-1:x.sd)-(y.sd==null?-1:y.sd));
     return { n:rows.length, flat:rows.filter(r=>r.sd!=null&&r.sd<2).length, rows };
