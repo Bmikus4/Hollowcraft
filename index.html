@@ -14071,7 +14071,12 @@ function physics(dt){
     if(p._stuckT>0.25 && typeof pushPlayerOutOfSolid==='function'){ pushPlayerOutOfSolid(Math.floor(p.pos.x),Math.floor(p.pos.y),Math.floor(p.pos.z)); p._stuckT=0; }
   } else p._stuckT=0;
   const K = _noInput ? _NOKEYS : keys;   // ONE substitution for every input this function reads — jump, sprint, sneak, swim, climb and flight all go quiet together
-  const fwd=_noInput?0:((K.KeyW?1:0)-(K.KeyS?1:0)), str=_noInput?0:((K.KeyD?1:0)-(K.KeyA?1:0));
+  // ALT+W IS A CHORD, NOT A WALK (Ben: "while Alt+W is held the player must not walk forward — swallow the W as
+  // movement for the chord"). The high ready is on ALT+W and W is also forward, so without this a player raising the
+  // weapon over cover walks out from behind it. Read off the same command the pose reads, so the two cannot disagree
+  // about whether the chord is live.
+  const _chordW = !!(p._readyCmd>0);
+  const fwd=_noInput?0:(((K.KeyW&&!_chordW)?1:0)-(K.KeyS?1:0)), str=_noInput?0:((K.KeyD?1:0)-(K.KeyA?1:0));
   let mag=Math.hypot(fwd,str); if(mag>0){}
   const sy=Math.sin(p.yaw), cy=Math.cos(p.yaw);
   // SPRINTING COSTS SOMETHING NOW. The gate is hysteretic on purpose: at zero you are winded and cannot sprint again until a
@@ -19291,10 +19296,15 @@ function updateCamera(dt){
   // player can hold ALT+W through an aim and find the gun back up when they let go of the mouse.
   { const busy = !!(view && view.ads) || (typeof swapping==='function' && swapping()) || player.grabbed || player.tied || player.dead;
     const up = _altDown() && _bindHeld('ready') && !busy;
+    // ---- IT HOLDS ONLY WHILE HELD (Ben: "engage on press, drop the moment Alt+W is released, never latch") ----
+    // The command is BINARY on release, not eased: the instant the chord breaks it is zero, so nothing can hold the
+    // gun up because a key event went missing. Only the visible value eases, at 14/s, which is 70 ms — fast enough to
+    // read as a drop and slow enough not to be a jump cut. An Alt chord is exactly where a lost keyup happens: the
+    // browser can eat the second key's keyup while the modifier is down, and an eased command would then latch.
     if(up) p._readyCmd=Math.min(1,(p._readyCmd||0)+LEAN_DIAL.readyRate*dt);
-    else { const c=(p._readyCmd||0); p._readyCmd = c + (0-c)*Math.min(1,dt*LEAN_DIAL.readyHome); }
+    else p._readyCmd=0;
     if(p._readyCmd<0.002) p._readyCmd=0;
-    p._ready=(p._ready||0)+((p._readyCmd||0)-(p._ready||0))*Math.min(1,dt*14);
+    p._ready=(p._ready||0)+((p._readyCmd||0)-(p._ready||0))*Math.min(1,dt*(up?14:LEAN_DIAL.readyHome*2.4));
     if(p._ready<0.002) p._ready=0; }
   let leanF=0;
   if(p._lean){ const ey=p.pos.y+EYE-proneDrop+bobY;
@@ -31067,7 +31077,14 @@ function updateView(dt){ updateRecoil(dt);                                      
     //   -1.15 on x is the muzzle climbing; the lift and the small pull back are what take it out of the sight line
     // rather than merely tilting it. __hc.leanReady({readyRate,readyHome}) is the dial.
     { const _hr=Math.max(0,Math.min(1,(player._ready||0)));
-      if(_hr>0.001) POSE.add('ready', 0.02*_hr, 0.30*_hr, 0.10*_hr, -1.15*_hr, 0.10*_hr, -0.12*_hr); }
+      // ---- OVERHEAD, NOT POINTED AT THE GROUND (Ben 2026-08-18, second report on this pose) ----
+      // -1.15 rad of pitch put the muzzle in the dirt: it was written as "the muzzle climbing" and the sign is the
+      // other way round on this group — the gun hangs down -z, so a negative rotation.x drops the far end. What he
+      // asked for is a rifle carried OVER cover: high, and still facing downrange. So the HEIGHT does the work (0.34
+      // up, which is above the sight line) and the pitch is a token +0.12 that lifts the muzzle a few degrees rather
+      // than pointing the weapon anywhere. Roll and yaw are gone with it — a canted gun over your head reads as a
+      // dropped weapon, not a carry.
+      if(_hr>0.001) POSE.add('ready', 0.02*_hr, 0.34*_hr, 0.06*_hr, 0.12*_hr, 0, 0); }
     // ---- THE MEAL, IN THE HAND (Ben 08-16: the item comes to the mouth and bites happen) ----
     // Authored on the same seam as the sprint fold and in the same terms — offsets ADDED after the pose lerp — so
     // the two compose instead of fighting, and so this is one place to look when a hand is somewhere unexpected.
@@ -37673,6 +37690,8 @@ const _leafDummy=new THREE.Object3D(); let _leafInit=false;
 // A fix with no off-switch cannot be shown to have been a fix — the detector that acquitted these leaves in
 // f8b5a06 was believed because nothing ever made it produce a positive.
 let _leafFade=true;
+// _leafHidden: the QA off switch, honoured by updateLeaves rather than fought by it (see the note there).
+let _leafHidden=false;
 // _leafTag: paint every leaf pure magenta and stop the day tint touching it. A leaf is a 0.42x0.34 plane in a
 // palette the world already contains — dirt is r>g>b, grass is green-dominant — so no colour test can separate
 // leaf pixels from the ground they are in front of, and the first attempt at this measurement read the entire
@@ -37724,6 +37743,12 @@ function updateLeaves(dt){ if(!_leafIM.instanceColor)return;
   // — the same isolation rule the audio already follows. Hide the batch outright rather than just stopping the sim, or the
   // leaves in flight at the moment you step through the portal hang in the air with you.
   if(typeof BR!=='undefined' && BR.inside){ if(_leafIM.visible){ _leafIM.visible=false; _leafInit=false; } return; }
+  // ---- THE OFF SWITCH HAS TO SURVIVE THE FRAME LOOP ----
+  // __hc.leaves(false) set _leafIM.visible=false and THIS LINE set it straight back, every frame, so the switch
+  // was inert: an A/B over it compared the leaves against the leaves. Two hunts used it. Counted with the switch
+  // believed and the batch actually running: 159 sky specks "on" against 161 "off", which reads as a clean
+  // acquittal of the leaves and is really two measurements of the same condition.
+  if(_leafHidden){ if(_leafIM.visible){ _leafIM.visible=false; _leafInit=false; } return; }
   if(!_leafIM.visible) _leafIM.visible=true;
   const t=clock.elapsedTime, eye=camera.position;
   if(!_leafInit){ for(let i=0;i<LEAF_MAX;i++) _leafRespawn(i, eye.y + (Math.random()*2-1)*(LEAF_TOP)); _leafInit=true; }
@@ -46985,12 +47010,12 @@ window.__hc={
     return { visible:_lampPts.visible, live:_lampLive, drawRange:_lampPts.geometry.drawRange.count,
              depthTest:_lampPts.material.depthTest, sizePx:_lampPts.material.size }; }
     catch(e){ return {err:String(e.message||e)}; } },
-  leaves(on){ try{ if(on!=null) _leafIM.visible=!!on;
+  leaves(on){ try{ if(on!=null){ _leafHidden=!on; _leafIM.visible=!!on; }
     // live: how many of the batch are actually falling. The canopy spawn rule parks a leaf at zero size
     // where no column within reach has a crown, so this is the number that says "thinned over the sea,
     // full in a wood" without photographing either.
     let live=0; for(let i=0;i<LEAF_MAX;i++) if(_leafSz[i]>0) live++;
-    return { visible:_leafIM.visible, n:LEAF_MAX, live, canopyHere:_leafCanopyY(camera.position.x,camera.position.z,camera.position.y+LEAF_TOP,camera.position.y-LEAF_BOT),
+    return { visible:_leafIM.visible, hidden:_leafHidden, n:LEAF_MAX, live, canopyHere:_leafCanopyY(camera.position.x,camera.position.z,camera.position.y+LEAF_TOP,camera.position.y-LEAF_BOT),
              palette:_leafPalette.map(c=>'#'+c.getHexString()) }; }
     catch(e){ return {err:String(e.message||e)}; } },
   // THE TWO SWITCHES THAT MAKE THE LEAF VERDICT FALSIFIABLE, one per signature Ben gave.
