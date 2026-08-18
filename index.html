@@ -26656,11 +26656,19 @@ function updateStuckSpears(dt){ for(let i=stuckSpears.length-1;i>=0;i--){ const 
 // the apex about 100 blocks up, reached in a little over four seconds. The descent clamp then does the hanging, so the
 // climb is fast and the fall is not — which is the shape he described in two instructions rather than one.
 const flares=[]; const _FLARE_GRAV=9.5, _FLARE_BURN=34, _FLARE_FADE=4.0;
-const _FLARE_SPD=44, _FLARE_SINK=1.3, _FLARE_DRAG=0.55;
+const _FLARE_SPD=44, _FLARE_SINK=1.3, _FLARE_DRAG=0.55;   // _FLARE_SINK is the shipped default; _FLARE_DIAL.sink is what the fall actually reads (Ben: "fall a slight bit faster, keep the drift")
 // TEN TIMES THE LIGHT, and the reach with it: 26 at 24 blocks lit its own patch of ground and nothing else, which is a
 // road flare, not a signal. 260 over 55 blocks is a flare that marks a position — and it costs nothing extra, because it
 // is one already-resident pool light either way.
-const _FLARE_LIGHT=260, _FLARE_REACH=55;
+// ---- FARTHER, AND ON A DIAL (Ben 2026-08-18: "the lit radius is far too small; a burning flare should throw light a
+// long way and be visible from a long way off") ----
+// 260 over 55 blocks lit a clearing. A real signal flare is a 15,000-candela magnesium source: it does not light a
+// patch, it lights a valley. 520 over 120 blocks is what that reads as here, and it costs nothing extra because it is
+// the same single reserved pool light either way — the reach is a radius on one light, not more lights.
+// _FLARE_DIAL is the whole feature's dial (__hc.flareDial), so his "much larger, on a dial" is one call and the burn,
+// the sink and the damage below hang off the same object.
+const _FLARE_DIAL={ light:520, reach:120, sink:1.7, shimmer:1.0, impact:6, burn:4.5, burnR:3.0 };
+const _FLARE_LIGHT=520, _FLARE_REACH=120;
 let _flareLightSlot=-1;
 const _flareCol=new THREE.Color(0xff3c14);
 function flareLive(){ for(let i=0;i<flares.length;i++) if(!flares[i].dead) return true; return false; }
@@ -26670,6 +26678,15 @@ function buildFlareMesh(){ const g=new THREE.Group();
   const core=new THREE.Mesh(new THREE.SphereGeometry(0.075,10,8), new THREE.MeshBasicMaterial({color:0xfff0d0}));
   const halo=new THREE.Mesh(new THREE.SphereGeometry(0.20,10,8),
     new THREE.MeshBasicMaterial({color:0xff4a1c, transparent:true, opacity:0.42, depthWrite:false, blending:THREE.AdditiveBlending}));
+  // ---- THE AIR ROUND IT SHIMMERS (Ben 2026-08-18: "the light and halo must flicker and shimmer like a live burning
+  // source, not a steady lamp... give the air round it visible shimmer rather than a flat sprite") ----
+  // A third shell, four times the halo and a tenth its opacity, is the heat: it is scaled and faded on its OWN
+  // frequencies rather than the halo's, so the two never pulse together and the pair reads as convection rather than
+  // as one object breathing. Additive and depth-written-off like the halo, so it lights what is behind it instead of
+  // cutting a hole in it; depth TESTED, so a trunk in front still hides it.
+  const air=new THREE.Mesh(new THREE.SphereGeometry(0.80,12,10),
+    new THREE.MeshBasicMaterial({color:0xff7a2a, transparent:true, opacity:0.10, depthWrite:false, blending:THREE.AdditiveBlending}));
+  air.renderOrder=6; g.add(air); g.userData.air=air;
   halo.renderOrder=7; g.add(core); g.add(halo); g.userData.core=core; g.userData.halo=halo;
   // ---- AND IT IS VISIBLE FROM ANYWHERE ON THE MAP (Ben: "they should also be seen forever, like even if another
   // player is on the other side of the map") ----
@@ -26737,7 +26754,7 @@ function updateFlares(dt){
       // drifts down at little more than walking pace instead of dropping — which is the whole of "stay up there" and the
       // reason it is usable: what lights the ground is the time it spends above it. The drag bleeds the launch speed off
       // over the same stretch so it hangs where it was fired rather than sailing away downrange.
-      if(f.vy < -_FLARE_SINK) f.vy = -_FLARE_SINK;
+      if(f.vy < -_FLARE_DIAL.sink) f.vy = -_FLARE_DIAL.sink;
       if(f.vy <= 0){ const k=Math.max(0, 1-_FLARE_DRAG*dt); f.vx*=k; f.vz*=k; }
       const vl=Math.hypot(f.vx,f.vy,f.vz)||1;
       const steps=Math.max(1,Math.ceil(vl*dt/0.3)), sdt=dt/steps;             // the spear's own sub-step rule: no tunnelling a one-block wall
@@ -26746,6 +26763,17 @@ function updateFlares(dt){
         // WATER PUTS IT OUT, which is the one termination that is not a landing: a flare is a burning composition and
         // it does not go on burning under the sea. Everything solid it comes to rest ON.
         if(b===WATER){ spawnParticles(f.x,f.y,f.z,0xcfd8e0,10,1.2,0.5); killFlare(f,i); break; }
+        // ---- A DIRECT HIT HURTS (Ben 2026-08-18: "flares should do damage... impact damage on a direct hit, plus
+        // burning damage over time... the burn should be the larger part") ----
+        // Tested on the SUB-STEP rather than once a frame, for the reason the sub-stepping exists at all: at 44 m/s a
+        // per-frame test steps 0.7 of a block and a deer is 0.6 wide, so a hit is a coin flip. One animal per flare —
+        // it is a projectile, not a beam — and the flare goes on burning where it struck rather than vanishing, which
+        // is what a magnesium round does and what makes the burn below the larger half.
+        if(!f._hit && typeof animals!=='undefined'){
+          for(const a of animals){ if(!a||a.dead||!a.pos) continue;
+            if(Math.hypot(a.pos.x-f.x, (a.pos.y+0.6)-f.y, a.pos.z-f.z) < 0.9){
+              f._hit=true; if(typeof hurtAnimal==='function') hurtAnimal(a,_FLARE_DIAL.impact);
+              spawnParticles(f.x,f.y,f.z,0xff6a20,14,2.0,0.6); break; } } }
         if((b!==AIR && isSolid[b]) || f.y<0.05){
           f.x-=f.vx*sdt; f.y-=f.vy*sdt; f.z-=f.vz*sdt;                        // back out of the block it entered
           f.landed=true; f.vx=f.vy=f.vz=0; f.landT=f.age;
@@ -26759,6 +26787,19 @@ function updateFlares(dt){
         spawnParticles(f.x,f.y,f.z, (f.age*14&1)?0xff6a20:0x6a6a72, 1, 0.5, 0.15); }
     } else if((f.age*7|0)!==(f._sp2|0)){ f._sp2=f.age*7;
       spawnParticles(f.x,f.y+0.1,f.z, 0xff7a30, 1, 0.35, 0.6); }               // sitting on the ground it still throws sparks upward
+    // ---- AND IT BURNS WHAT IS NEAR IT, THE PLAYER INCLUDED ----
+    // Twice a second while it is alight, whether it is falling or lying on the ground: a burning flare is a hazard you
+    // stand away from. The burn is the larger part of the round's damage by design — over a 34 s burn a creature that
+    // will not move takes far more than the impact ever did — and it stops the moment the flare does, because it is
+    // read off the same age the light and the fade are.
+    if(!f.dead && (f.age-(f._burnT||-9))>=0.5){ f._burnT=f.age;
+      const R=_FLARE_DIAL.burnR, tick=_FLARE_DIAL.burn*0.5;
+      if(typeof animals!=='undefined') for(const a of animals){ if(!a||a.dead||!a.pos) continue;
+        if(Math.hypot(a.pos.x-f.x, (a.pos.y+0.6)-f.y, a.pos.z-f.z) < R && typeof hurtAnimal==='function') hurtAnimal(a,tick); }
+      // THE PLAYER IS NOT EXEMPT. `damage` carries the cause so a death by your own flare says so, and it already
+      // refuses in creative and while dead, so there is nothing to guard here.
+      if(typeof damage==='function' && Math.hypot(player.pos.x-f.x, (player.pos.y+0.9)-f.y, player.pos.z-f.z) < R)
+        damage(tick,'burned by a flare','burn'); }
     if(f.mesh){
       f.mesh.position.set(f.x,f.y,f.z);
       // IT BURNS OUT RATHER THAN BLINKING OUT. The last four seconds fade the halo and shrink the core, and the same
@@ -26768,6 +26809,20 @@ function updateFlares(dt){
       f._lit=out*fl;
       f.mesh.userData.halo.material.opacity=0.42*out*fl;
       f.mesh.userData.core.scale.setScalar(0.7+0.3*out*fl);
+      // THE HALO BREATHES AND THE AIR ROUND IT BREATHES ON ITS OWN CLOCK. Three frequencies that do not divide into
+      // each other, so nothing in the pattern repeats on a beat the eye can find — which is the difference between a
+      // burning thing and a lamp with a flicker filter on it. The shimmer term is on the dial so it can be turned off
+      // whole (__hc.flareDial({shimmer:0})) without touching the flicker the light itself carries.
+      { const sh=_FLARE_DIAL.shimmer;
+        const wob=0.86+0.14*Math.sin(f.age*23.0+f.seed*17.0)+0.08*Math.sin(f.age*7.3);
+        f.mesh.userData.halo.scale.setScalar(1+(wob-1)*1.6*sh);
+        const air=f.mesh.userData.air;
+        if(air){ const aw=0.78+0.22*Math.sin(f.age*5.1+f.seed*3.0)+0.12*Math.sin(f.age*11.7+f.seed);
+          air.scale.setScalar((0.9+0.5*aw)*(1+0.35*sh));
+          air.material.opacity=0.10*out*aw*sh;
+          // AND THE COLOUR MOVES WITH IT. A magnesium flare runs from white through orange to a deep red as the
+          // composition burns and the smoke thickens; a fixed tint is the flat sprite he is describing.
+          air.material.color.setRGB(1.0, 0.34+0.16*aw, 0.06+0.10*aw); } }
       // ---- AND THE BEACON IS PULLED INSIDE THE FAR PLANE, which is the fourth way of hiding it ----
       // buildFlareMesh turned off fog, the depth test and frustum culling for "seen forever" and that list was one
       // short: the FAR PLANE clips in the vertex stage, before any of those get a say. Measured — a flare hanging at
@@ -26779,6 +26834,19 @@ function updateFlares(dt){
       // certainly contains — a third of camera.far — whenever the flare is further out than that. Same pixel, same
       // colour, same place on screen; it simply cannot be clipped. Nearer than the radius it is left exactly where the
       // flare is, so nothing changes at the range a flare is normally watched from.
+      // ---- AND IT IS OCCLUDED (Ben 2026-08-18: "he can see shot flares THROUGH TREES AND EVERYTHING") ----
+      // The core, the halo and the air shell are ordinary depth-tested meshes and always were. The BEACON is not: it
+      // was built depthTest:false, frustumCulled:false and unfogged so a flare could be seen across the map, and that
+      // is exactly what draws it through a trunk. The distance property is worth keeping and the x-ray is not, so the
+      // beacon keeps its material and gets a LINE-OF-SIGHT test instead: blocked by opaque blocks, it is hidden.
+      //   Depth alone could not do this job anyway — the beacon is re-seated at a third of the far plane when the
+      // flare is beyond it (see below), so its depth is not the flare's depth and a depth test would compare the
+      // wrong two numbers. losBlocked walks the real blocks between the eye and the flare, which is the question.
+      //   FOUR TIMES A SECOND, not every frame: it is a ~140-lookup raycast and a flare does not teleport.
+      { const bcn0=f.mesh.userData.beacon;
+        if(bcn0 && (f.age-(f._losT||-9))>0.25){ f._losT=f.age;
+          f._losBlocked = (typeof losBlocked==='function') && losBlocked(camera.position.x,camera.position.y,camera.position.z, f.x,f.y+0.1,f.z); }
+        if(bcn0) bcn0.visible = !f._losBlocked; }
       { const bcn=f.mesh.userData.beacon;
         if(bcn){ const dx=f.x-camera.position.x, dy=f.y-camera.position.y, dz=f.z-camera.position.z;
           const d=Math.hypot(dx,dy,dz), R=Math.max(24, camera.far*0.33);
@@ -38669,7 +38737,7 @@ const LAMP_MAX=384, LAMP_NEAR=40, LAMP_FULL=80;
 // they are the only thing representing a lit place. 300/326 fades them at the render wall instead, which is the one
 // place a stand-in has nothing left to stand in for.
 let _lampFade=300, _lampGone=326, _lampNear=LAMP_NEAR;   // live, so the window can be A/B tested in place (__hc.lampHalos({near,fade,gone}))
-let _lampPts=null, _lampPos=null, _lampCol=null, _lampLive=0, _lampT=0, _lampOn=true, _lampCapped=0;
+let _lampPts=null, _lampPos=null, _lampCol=null, _lampLive=0, _lampT=0, _lampOn=true, _lampCapped=0, _lampHidden=false;
 function _lampRegister(c){
   const k=c.cx+','+c.cz;
   if(c.emitters&&c.emitters.length){ const a=new Array(c.emitters.length);
@@ -38696,7 +38764,9 @@ function updateLampHalos(dt){
       transparent:true,depthWrite:false,blending:THREE.AdditiveBlending,fog:false}));
     _lampPts.frustumCulled=false; _lampPts.renderOrder=6; scene.add(_lampPts);
   }
-  _lampPts.visible = want>0;
+  // THE SAME HELD-FLAG RULE AS THE LEAVES AND THE FIREFLIES. __hc.lampPts(false) set visible=false and this line
+  // set it back from `want` on the next frame, so that switch was inert too and any A/B over it was worthless.
+  _lampPts.visible = _lampHidden ? false : (want>0);
   if(!want){ _lampPts.geometry.setDrawRange(0,0); _lampLive=0; return; }
   _lampT-=dt; if(_lampT>0) return;   // the lamps do not move; only the camera does, and the ramp is smooth over 40 blocks
   _lampT=0.15;
@@ -44840,6 +44910,14 @@ window.__hc={
   //   The subtree is found by the mark buildAttachment leaves (userData.att), not by name or by position.
   // QA/dial: the per-finish albedo scale. Pass {blued:1,steel:1} for the behaviour before the darkening, or any pair
   // to sweep it; the held gun is rebuilt so the change is on screen in the same call.
+  // THE FLARE, WHOLE: reach, brightness, sink, shimmer and both halves of its damage, plus what is alight right now.
+  // `blocked` is the line-of-sight test the beacon rides, so "I can see it through a tree" and "it is hidden behind a
+  // tree" are the same field read twice.
+  flareDial(o){ try{ if(o) for(const k in o) if(_FLARE_DIAL[k]!=null) _FLARE_DIAL[k]=+o[k];
+      return { dial:Object.assign({},_FLARE_DIAL), live:flares.filter(f=>!f.dead).length,
+               flares:flares.filter(f=>!f.dead).map(f=>({ at:[+f.x.toFixed(1),+f.y.toFixed(1),+f.z.toFixed(1)],
+                 age:+f.age.toFixed(1), landed:!!f.landed, lit:+((f._lit||0)).toFixed(3), blocked:!!f._losBlocked, hit:!!f._hit })) }; }
+    catch(e){ return {err:String(e&&e.message||e)}; } },
   // THE LAST 24 KEY EVENTS AS THE PAGE SAW THEM. For a chord that "does nothing": if the code is absent the key never
   // arrived, if alt is false the modifier did not come with it, and if both are right the fault is downstream.
   keyLog(){ try{ return { n:_KEYLOG.length, alt:_altDown(), altEvt:_ALT_EVT, mapAlt:!!(keys.AltLeft||keys.AltRight), log:_KEYLOG.slice() }; }
@@ -47108,9 +47186,13 @@ window.__hc={
   // size, and fog:false means they never fade with range — the only system in the file that is sized in pixels, which
   // is the signature Ben's speckles have (they scale with browser zoom). Nothing in the material or its want>0 gate
   // mentions the hour, so a lamp remembered at night is still an additive orange sprite at noon. This is the toggle.
-  lampPts(on){ try{ if(!_lampPts) return {err:'not built'}; if(on!=null) _lampPts.visible=!!on;
-    return { visible:_lampPts.visible, live:_lampLive, drawRange:_lampPts.geometry.drawRange.count,
-             depthTest:_lampPts.material.depthTest, sizePx:_lampPts.material.size }; }
+  lampPts(on){ try{ if(on!=null) _lampHidden=!on;
+    if(!_lampPts) return {err:'not built', hidden:_lampHidden};
+    if(on!=null) _lampPts.visible=!!on;
+    return { visible:_lampPts.visible, hidden:_lampHidden, live:_lampLive, drawRange:_lampPts.geometry.drawRange.count,
+             depthTest:_lampPts.material.depthTest, depthWrite:_lampPts.material.depthWrite,
+             sizeAttenuation:_lampPts.material.sizeAttenuation, fog:_lampPts.material.fog,
+             renderOrder:_lampPts.renderOrder, sizePx:_lampPts.material.size }; }
     catch(e){ return {err:String(e.message||e)}; } },
   leaves(on){ try{ if(on!=null){ _leafHidden=!on; _leafIM.visible=!!on; }
     // live: how many of the batch are actually falling. The canopy spawn rule parks a leaf at zero size
