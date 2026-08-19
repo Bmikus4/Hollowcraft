@@ -1,6 +1,6 @@
 # Build assets/horizon/pines-original.png from the horizon-pines image Ben supplied.
 #
-# The current source (docs/ref/pines-source-2048.png, 2048x682) already carries a real alpha channel -- measured,
+# The current source (docs/ref/pines-source.png) already carries a real alpha channel -- measured,
 # fully transparent at the top and bottom and dense through the middle -- so unlike the earlier white-background
 # strip there is nothing to key out. The one thing that DOES matter is the transparent MARGIN: the game stands
 # the quad's bottom edge on the waterline, so any empty rows underneath the trees would float the whole stand
@@ -8,7 +8,7 @@
 # edges and the aspect below honest.
 from PIL import Image
 
-SRC = 'docs/ref/pines-source-2048.png'
+SRC = 'docs/ref/pines-source.png'
 OUT = 'assets/horizon/pines-original.png'
 
 im = Image.open(SRC).convert('RGBA')
