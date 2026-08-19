@@ -9396,6 +9396,12 @@ let _pinDrop=8;
 // Parabolic rather than a true arc: over a bow this shallow the two are within a pixel of each other, and a
 // parabola needs no trig per vertex.
 let _pinCurve=0.10, _PIN_SEG=24;
+// PER-PINE OVERRIDES, sparse: an entry only exists once something has been set on that pine, and only the keys
+// actually set are present. Everything unset falls through to the globals, so changing a global still moves the
+// pines that were never customised -- which is the behaviour a shared default is for.
+let _pinOv=[];
+function _pinOpt(i){ return (_pinOv[i] = _pinOv[i] || {}); }
+function _pinGet(i,k,dflt){ const o=_pinOv[i]; return (o&&o[k]!=null)?o[k]:dflt; }
 function _pinEnsure(){ if(_pinGroup) return _pinGroup;
   _pinTex=new THREE.TextureLoader().load('assets/horizon/pines-original.png');
   _pinTex.colorSpace=THREE.SRGBColorSpace; _pinTex.anisotropy=8;
@@ -9409,10 +9415,12 @@ function _pinRebuild(){
     _pinGroup.remove(c); if(c.geometry) c.geometry.dispose(); }
   // The quad is as wide as the crop is tall, at the IMAGE's aspect, so one image is its own shape and nothing
   // is stretched: the crop takes _pinCrop of the height, so the width follows from the full-image aspect.
-  const h=_pinH, w=h*_PIN_ASPECT/_pinCrop;
-  for(const deg of _pinAt){
+  for(let idx=0; idx<_pinAt.length; idx++){
+    const deg=_pinAt[idx];
+    const h=_pinGet(idx,'size',_pinH), crop=_pinGet(idx,'crop',_pinCrop), curve=_pinGet(idx,'curve',_pinCurve);
+    const w=h*_PIN_ASPECT/crop;
     const geo=new THREE.PlaneGeometry(w,h,_PIN_SEG,1);
-    { const pos=geo.attributes.position, bow=_pinCurve*w;
+    { const pos=geo.attributes.position, bow=curve*w;
       for(let i=0;i<pos.count;i++){
         const t=pos.getX(i)/(w*0.5);                 // -1 at one edge, +1 at the other
         pos.setZ(i, -bow*(1-t*t)); }
@@ -9424,13 +9432,15 @@ function _pinRebuild(){
     { const uv=geo.attributes.uv;
       for(let i=0;i<uv.count;i++){
         let u=uv.getX(i), v=uv.getY(i);
-        if(_pinFlipH) u=1-u;
-        if(_pinFlipV) v=1-v;
-        uv.setXY(i, u, 1-_pinCrop + v*_pinCrop); }
+        if(_pinGet(idx,'flipH',_pinFlipH)) u=1-u;
+        if(_pinGet(idx,'flipV',_pinFlipV)) v=1-v;
+        uv.setXY(i, u, 1-crop + v*crop); }
       uv.needsUpdate=true; }
     const m=new THREE.Mesh(geo, _pinMat);
     m.frustumCulled=false; m.renderOrder=-4;
     m.userData.dial=deg;                 // DIAL degrees, not world — see _pinPlace
+    m.userData.idx=idx;
+    m.userData.h=h;                      // its own height, for the waterline drop below
     _pinGroup.add(m); }
   _pinPlace(); }
 function _pinPlace(){
@@ -9487,7 +9497,8 @@ function _pinPlace(){
       else m.userData.clamped=false;
       if(s!==s0){ x=D.x+ux*s; z=D.z+uz*s; } }
     // Foot on the waterline, less the drop: a centred plane's bottom edge is half its height below its origin.
-    m.position.set(x, CFG.SEA-_pinDrop+_pinH*0.5, z);
+    { const hh=m.userData.h||_pinH, dr=_pinGet(m.userData.idx,'drop',_pinDrop);
+      m.position.set(x, CFG.SEA-dr+hh*0.5, z); }
     // FACE THE PLAYER with lookAt at the quad's OWN height, which is a horizontal turn only -- a lookAt at the
     // eye's height would tip the image back as he climbs. Hand-rolled yaw has now been wrong twice on this
     // feature, once by half a circle and once here; lookAt cannot be off by pi.
@@ -9513,26 +9524,50 @@ function _pinPlace(){
 // and forest vantages at noon both render the sky with it on — so the cause is unknown and a missing sky is worse than
 // a missing ocean. "?ocean3=1" turns it on. Whatever it is, it is NOT the skyScene: that path is opt-in (?skycube) and
 // by default skyDome lives in the main scene, so the reflection pass does see it.
-// THE SEA'S OWN CURVE. _SEA_DROP is how far the water falls at the plane's rim, in BLOCKS, which is a number
-// that can be looked at rather than a coefficient that cannot. The bow is a parabola about the camera -- the
-// plane follows the player, so the curve is always centred on him and the sea rolls away in every direction.
-// 64 segments is enough that the bend reads as a curve and not as facets at this radius; the plane is drawn once
-// with no shadow pass, so the extra vertices are not a cost worth trimming.
-let _SEA_SPAN=2, _SEA_SEG=64, _SEA_DROP=14;
-let _ocean3=null, _ocean3Want=!(Q.get('ocean3')==='0'), _o3Err=null;
-// Applied to the geometry rather than in a shader because Water brings its own vertex stage, and patching that
-// would mean maintaining a fork of the vendored file for one line.
-function _seaBow(){ try{ if(!_ocean3) return 0;
-    const g=_ocean3.geometry, pos=g.attributes.position;
-    if(!g.userData.flatZ) g.userData.flatZ=Float32Array.from(pos.array.filter((_,i)=>i%3===2));
-    const R=(FAR*_SEA_SPAN)/2, k=_SEA_DROP/(R*R);
-    // The plane lies in XY and is rotated -90 about X, so its local +Z is world -Y: pushing local z POSITIVE
-    // drops the vertex, which is the direction a horizon curves.
+// =====================================================================
+//  THE HORIZON BAND — a round ring of water outside the sea plane
+// =====================================================================
+// Ben 08-18: "you arent touching existing water, instead you are adding a round band around the water."
+// So the sea plane is left exactly as it was and this is a separate annulus around it. Working it out:
+//   INNER radius is the plane's own reach. The plane is span x span centred on the camera, so it runs out to
+//     span/2 on the axes -- that is where the band has to start, or a gap of sky opens between the two.
+//   OUTER is bounded by camera.far. Anything past the far plane is clipped and draws nothing, which is the
+//     failure this area has already shipped twice, so the ring stops just inside it.
+//   THE CURVE is a parabola in the RADIAL direction only, zero at the inner edge so the two surfaces meet flush
+//     and no seam shows, falling to _RING_DROP at the outer rim. Because it is radial it is the same in every
+//     direction, which is what makes it read as a globe rather than as a bent sheet.
+//     y(d) = -DROP * ((d - inner) / (outer - inner))^2
+// It uses the sea's OWN material, so it is the same water -- same reflection, same normals, same sky -- rather
+// than a painted colour on a cylinder, which is what the retired horizon ring was and why it never matched.
+let _RING_ON=true, _RING_DROP=10, _RING_SEG=160, _RING_RINGS=24, _RING_OUT=0.92;
+let _seaRing=null;
+function _seaRingBuild(){
+  if(!_ocean3) return null;
+  if(_seaRing){ scene.remove(_seaRing); _seaRing.geometry.dispose(); _seaRing=null; }
+  if(!_RING_ON) return null;
+  const inner=(FAR*2)/2, outer=camera.far*_RING_OUT;
+  if(outer<=inner+1) return null;
+  const g=new THREE.RingGeometry(inner, outer, _RING_SEG, _RING_RINGS);
+  { const pos=g.attributes.position, span=outer-inner;
     for(let i=0;i<pos.count;i++){
-      const x=pos.getX(i), y=pos.getY(i);
-      pos.setZ(i, g.userData.flatZ[i] + k*(x*x+y*y)); }
-    pos.needsUpdate=true; g.computeVertexNormals();
-    return +(k*R*R).toFixed(2); }catch(e){ return -1; } }
+      const x=pos.getX(i), y=pos.getY(i), d=Math.hypot(x,y);
+      const t=Math.max(0,(d-inner)/span);
+      // RingGeometry lies in XY and the mesh is rotated -90 about X, so local +Z is world -Y: positive z drops.
+      pos.setZ(i, _RING_DROP*t*t); }
+    pos.needsUpdate=true; g.computeVertexNormals(); }
+  _seaRing=new THREE.Mesh(g, _ocean3.material);
+  _seaRing.rotation.x=-Math.PI/2;
+  _seaRing.frustumCulled=false;
+  // Behind the plane in the transparent queue so the join cannot flicker, and it never writes depth over the sea.
+  _seaRing.renderOrder=-0.5;
+  scene.add(_seaRing);
+  return _seaRing; }
+function _seaRingPlace(){
+  if(!_seaRing || !_ocean3) return;
+  _seaRing.visible=_ocean3.visible && _RING_ON;
+  _seaRing.position.set(camera.position.x, _ocean3.position.y, camera.position.z); }
+let _ocean3=null, _ocean3Want=!(Q.get('ocean3')==='0'), _o3Err=null;
+
 const _o3Sky=new THREE.Color();
 function _ensureOcean3(){
   if(_ocean3) return _ocean3;
@@ -9549,14 +9584,8 @@ function _ensureOcean3(){
   // as a background that writes no depth — so anything laid out BEYOND that radius paints straight over it. At 8192
   // this plane reached thousands of units past the dome and took the sky with it, day and night. Twice FAR still
   // clears the fog, which is all it has to outrun, and stays well inside the dome.
-  const span=FAR*_SEA_SPAN;
-  // ---- SEGMENTED, SO IT CAN CURVE ----
-  // Ben 08-18: "make water curved all around the player very far out."
-  // The plane was PlaneGeometry(span, span) with no segment counts, which is FOUR vertices. A four-vertex quad
-  // cannot bend, which is why the previous attempt at a planetary bow measured a drop of 0.00 at camera.far and
-  // reported the sea as "dead flat" -- the geometry had nowhere to put the curve. It is subdivided now, and the
-  // bow is applied in _seaBow() below.
-  _ocean3=new Water(new THREE.PlaneGeometry(span, span, _SEA_SEG, _SEA_SEG), {
+  const span=FAR*2;
+  _ocean3=new Water(new THREE.PlaneGeometry(span, span), {
     // 1024, not the example's 512: the reflection is stretched across the whole sea, so at 512 it reads as pixel mush
     // rather than as a reflection. This is the single biggest lever on how it looks and it is also the cost.
     textureWidth:1024, textureHeight:1024, waterNormals:nrm,
@@ -9792,7 +9821,6 @@ function _ensureOcean3(){
   // ABOVE the voxel surface by a hair. Same height and the two z-fight across the whole sea; this way the example's
   // plane simply wins wherever both exist, and no chunk mesh has to be found and hidden as it streams in.
   _ocean3.position.y=(CFG.SEA + 1 - WATER_SURF_DROP) + 0.02;
-  _seaBow();
   scene.add(_ocean3);
   return _ocean3;
 }
@@ -9852,6 +9880,8 @@ function updateOcean3(dt){
   _ocean3.visible = !under;
   if(!_ocean3.visible) return;
   _ocean3.position.x=camera.position.x; _ocean3.position.z=camera.position.z;
+  if(_RING_ON && !_seaRing) _seaRingBuild();
+  _seaRingPlace();
   // UNDERWATER YOU SEE NOTHING ABOVE THE WATER (Ben 08-12). The plane is FrontSide, so from below it is not there at
   // all — which is why trunks came through and leaves did not: what he was seeing was the world itself, sorted by its
   // own materials, with no surface between. From below it becomes a double-sided opaque lid in the deep colour, so the
@@ -26088,7 +26118,7 @@ const CMDS={
             + `
   all: ${_pinH} tall, drop ${_pinDrop}, curve ${_pinCurve}, flip h:${_pinFlipH?'on':'off'} v:${_pinFlipV?'on':'off'}`
           : 'no pines placed — /pines at <deg> [deg...]'; }
-      if(w[0]==='clear'||w[0]==='off'){ _pinAt=[]; _pinRebuild(); return 'pines cleared'; }
+      if(w[0]==='clear'||w[0]==='off'){ _pinAt=[]; _pinOv=[]; _pinRebuild(); return 'pines cleared'; }
       // ---- /pines <n> ... : one pine at a time, by the number /pines list prints ----
       // Ben 08-18: "then managing them by number with /pines 1 etc". The list is the order they were added and
       // the numbering is 1-based, because that is what the listing shows.
@@ -26096,12 +26126,26 @@ const CMDS={
         const i=parseInt(w[0],10)-1;
         if(i<0||i>=_pinAt.length) return `there is no pine ${w[0]} — there are ${_pinAt.length}`;
         const k=w[1]||'', v=+w[2];
-        if(k==='remove'||k==='delete'){ const d=_pinAt.splice(i,1)[0]; _pinRebuild();
+        if(k==='remove'||k==='delete'){ const d=_pinAt.splice(i,1)[0]; _pinOv.splice(i,1); _pinRebuild();
           return `pine ${i+1} (dial ${d}) removed; ${_pinAt.length} left`; }
         if(k==='deg'||k==='dial'){ if(!isFinite(v)) return `e.g. /pines ${i+1} deg 105`;
           _pinAt[i]=((v+180)%360+360)%360-180; _pinRebuild();
           return `pine ${i+1} moved to dial ${_pinAt[i]}`; }
-        return `/pines ${i+1} deg <degrees> | /pines ${i+1} remove   (it is at dial ${_pinAt[i]})`; }
+        // PER-PINE SETTINGS (Ben: "/pines 1 flip h should work for one pine"). The globals stay as the default
+        // every new pine is born with; anything set here overrides that one pine only, which is why the override
+        // is stored as undefined-until-set rather than as a copy of the global -- a copy would freeze the pine
+        // at whatever the global was the day it was placed.
+        if(k==='flip'){ const f=w[2]||'';
+          const o=_pinOpt(i);
+          if(f==='h') o.flipH=!(o.flipH==null?_pinFlipH:o.flipH);
+          else if(f==='v') o.flipV=!(o.flipV==null?_pinFlipV:o.flipV);
+          else if(f==='none'||f==='off'){ o.flipH=false; o.flipV=false; }
+          else return `/pines ${i+1} flip h|v|none`;
+          _pinRebuild(); return `pine ${i+1} flip — h:${o.flipH==null?_pinFlipH:o.flipH} v:${o.flipV==null?_pinFlipV:o.flipV}`; }
+        if(k==='size'||k==='drop'||k==='curve'||k==='crop'){
+          if(!isFinite(v)) return `e.g. /pines ${i+1} ${k} 70`;
+          _pinOpt(i)[k]=v; _pinRebuild(); return `pine ${i+1} ${k} ${v}`; }
+        return `/pines ${i+1} deg|flip|size|drop|curve|crop <v> | /pines ${i+1} remove   (it is at dial ${_pinAt[i]})`; }
       if(w[0]==='size'){ const v=+w[1]; if(!isFinite(v)||v<=0) return 'size in blocks, e.g. /pines size 70';
         _pinH=v; _pinRebuild(); return `pines are ${_pinH} blocks tall (${(_pinH*_PIN_ASPECT).toFixed(0)} wide) at ${_pinDist} out`; }
       if(w[0]==='flip'){
@@ -26150,19 +26194,22 @@ const CMDS={
              + _pinAt.map((d,i)=>`  ${i+1}. dial ${d}`).join('\n') + `\n`
              + `  ${_pinH} blocks tall, ${(_pinH*_PIN_ASPECT).toFixed(0)} wide, foot ${_pinDrop} below the waterline`; }
       return CMDS.pines.usage; } },
-  // The sea's curve, as a number of blocks the water falls by at the rim rather than a coefficient.
-  sea:{ usage:'/sea curve <blocks> | /sea span <xFAR> | /sea seg <n> | /sea', run:(a)=>{
+  // The band of water around the sea, and its curve.
+  sea:{ usage:'/sea ring on|off | /sea drop <blocks> | /sea out <0.1..0.99 of camera.far> | /sea', run:(a)=>{
       const w=a.map(t=>String(t).toLowerCase()), v=+w[1];
       const o={};
-      if(w[0]==='curve'||w[0]==='bow'){ if(!isFinite(v)) return 'e.g. /sea curve 14'; o.drop=v; }
-      else if(w[0]==='span'){ if(!isFinite(v)||v<=0) return 'span is a multiple of FAR; e.g. /sea span 2'; o.span=v; }
-      else if(w[0]==='seg'){ if(!isFinite(v)||v<2) return 'e.g. /sea seg 64'; o.seg=v; }
+      if(w[0]==='ring'){ if(w[1]!=='on'&&w[1]!=='off') return '/sea ring on|off'; o.on=(w[1]==='on'); }
+      else if(w[0]==='drop'||w[0]==='curve'||w[0]==='bow'){ if(!isFinite(v)) return 'e.g. /sea drop 10'; o.drop=v; }
+      else if(w[0]==='out'){ if(!isFinite(v)) return 'e.g. /sea out 0.92'; o.out=v; }
+      else if(w[0]==='seg'){ if(!isFinite(v)) return 'e.g. /sea seg 160'; o.seg=v; }
       else if(w.length) return CMDS.sea.usage;
-      const S=__hc.seaBow(Object.keys(o).length?o:null);
+      const S=__hc.seaRing(Object.keys(o).length?o:null);
       if(typeof S==='string') return S;
-      return `sea curve: falls ${S.dropAtRim} blocks by its rim at ${S.rim} out (${S.verts} verts, ${S.seg} segments)
+      return `horizon band ${S.on?'ON':'off'} — from ${S.inner} out to ${S.outer}, falling ${S.dropAtRim} blocks by its rim
 `
-           + `  of that, ${S.dropAtFar} is inside camera.far (${S.camFar}) — the rest is clipped and cannot be seen`; } },
+           + `  meets the sea plane: ${S.meetsPlane}   inside camera.far (${S.camFar}): ${S.insideFar}   same water material: ${S.sharesSeaMaterial}
+`
+           + `  ${S.verts} verts`; } },
   navigator:{ usage:'/navigator [on|off]', run:(a)=>{ const w=String(a[0]||'').toLowerCase();
       const want = w==='on'?true : w==='off'?false : !__hc.hzRuler().on;
       const r=__hc.hzRuler(want);
@@ -44574,6 +44621,12 @@ window.__hc={
       const uv=m.geometry.attributes.uv, o=[];
       for(let i=0;i<uv.count;i++) o.push([+uv.getX(i).toFixed(2), +uv.getY(i).toFixed(2)]);
       return o; } catch(e){ return {err:String(e.message||e)}; } },
+  // QA/bench: each pine's first UV corner, so a PER-PINE flip can be shown to have moved one and not the others.
+  pinesMeshUV(){ try{ const o=[]; if(_pinGroup) for(const m of _pinGroup.children){
+      const uv=m.geometry.attributes.uv;
+      o.push({ dial:m.userData.dial, uv0:[+uv.getX(0).toFixed(2), +uv.getY(0).toFixed(2)],
+               w:+(m.geometry.parameters?m.geometry.parameters.width:0).toFixed(1) }); }
+    return o; }catch(e){ return [{err:String(e.message||e)}]; } },
   pinesState(){ try{ return { at:_pinAt.slice(), n:_pinGroup?_pinGroup.children.length:0, dist:_pinDist, h:_pinH,
       texLoaded:!!(_pinTex&&_pinTex.image&&_pinTex.image.width>0), camFar:+camera.far.toFixed(1) }; }
     catch(e){ return {err:String(e.message||e)}; } },
@@ -51230,24 +51283,27 @@ window.__hc={
   // The mirror pass on its own, so "is it the reflection or is it the plane" is one reload rather than a hypothesis.
   // The first thing the ocean threw, if it threw. Empty means the sky fault is NOT an exception in this path.
   ocean3Err(){ return _o3Err||null; },
+  // QA/bench: the horizon band. inner must equal the sea plane's own reach or a gap of sky opens at the join,
+  // and outer must stay inside camera.far or the ring is clipped and draws nothing at all.
+  seaRing(o){ try{ if(o){ if(o.on!=null) _RING_ON=!!o.on;
+        if(o.drop!=null) _RING_DROP=+o.drop;
+        if(o.out!=null) _RING_OUT=Math.max(0.1,Math.min(0.99,+o.out));
+        if(o.seg!=null) _RING_SEG=Math.max(8,o.seg|0);
+        if(o.rings!=null) _RING_RINGS=Math.max(2,o.rings|0);
+        _seaRingBuild(); _seaRingPlace(); }
+      const inner=(FAR*2)/2, outer=camera.far*_RING_OUT;
+      const g=_seaRing&&_seaRing.geometry, pos=g&&g.attributes.position;
+      let maxZ=0; if(pos) for(let i=0;i<pos.count;i++) maxZ=Math.max(maxZ,pos.getZ(i));
+      return { on:_RING_ON, built:!!_seaRing, visible:!!(_seaRing&&_seaRing.visible),
+               inner:+inner.toFixed(1), outer:+outer.toFixed(1), camFar:+camera.far.toFixed(1),
+               insideFar:outer<camera.far, meetsPlane:Math.abs(inner-(FAR*2)/2)<0.01,
+               drop:_RING_DROP, dropAtRim:+maxZ.toFixed(2), verts:pos?pos.count:0,
+               sharesSeaMaterial:!!(_seaRing&&_ocean3&&_seaRing.material===_ocean3.material) }; }
+    catch(e){ return String(e.message||e); } },
   // QA/bench: the sea's curve. dropAtRim is measured off the geometry, and dropAtFar is the part a player can
   // actually see -- anything past camera.far is clipped, and a bow that lives entirely out there is the failure
   // the previous attempt shipped with.
-  // seaBOW, not seaCurve: __hc already had a seaCurve for the far-sea disc's bend, and a second key of the same
-  // name is silently overridden -- which it was, so every reading below came from the OTHER function and the
-  // dial appeared to do nothing. This repo's own trap list has that failure on it.
-  seaBow(o){ try{ if(o){ if(o.drop!=null) _SEA_DROP=+o.drop;
-        if(o.span!=null){ _SEA_SPAN=Math.max(1,+o.span); if(_ocean3){ scene.remove(_ocean3); _ocean3.geometry.dispose(); _ocean3=null; _ensureOcean3(); } }
-        if(o.seg!=null){ _SEA_SEG=Math.max(2,o.seg|0); if(_ocean3){ scene.remove(_ocean3); _ocean3.geometry.dispose(); _ocean3=null; _ensureOcean3(); } }
-        _seaBow(); }
-      const R=(FAR*_SEA_SPAN)/2, k=_SEA_DROP/(R*R);
-      const g=_ocean3&&_ocean3.geometry, pos=g&&g.attributes.position;
-      let maxZ=0; if(pos) for(let i=0;i<pos.count;i++) maxZ=Math.max(maxZ,pos.getZ(i));
-      return { drop:_SEA_DROP, span:_SEA_SPAN, seg:_SEA_SEG, rim:+R.toFixed(1),
-               verts:pos?pos.count:0, dropAtRim:+maxZ.toFixed(2),
-               dropAtFar:+(k*Math.min(R,camera.far)*Math.min(R,camera.far)).toFixed(2),
-               camFar:+camera.far.toFixed(1) }; }
-    catch(e){ return String(e.message||e); } },
+
   ocean3Refl(v){ try{ _ensureOcean3(); if(v!=null) _ocean3.userData.refl=!!v; return { reflection:_ocean3.userData.refl }; }catch(e){ return String(e.message||e); } },
   ocean3Set(o){ try{ _ensureOcean3(); const u=_ocean3.material.uniforms; o=o||{};
       if(o.distortion!=null) u.distortionScale.value=+o.distortion;
