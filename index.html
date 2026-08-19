@@ -7124,7 +7124,12 @@ scene.background = BG;
 // does.
 const FP_HIDE=1;
 const fpSeeAll=(o)=>{ o.layers.enable(FP_HIDE); return o; };
-const camera = new THREE.PerspectiveCamera(74, innerWidth/innerHeight, 0.08, CFG.RD_MAX*CK*1.7);   // sized to the RD ceiling so climbing the slider (or the horizon at FAR*1.1) never clips against the far plane
+// 1.7 -> 1.8. The horizon water band has to reach 30 blocks further (Ben 08-18) and its outer rim was already
+// at 300 against a far plane of 326: another 30 would have put it PAST the plane, where it is clipped and draws
+// nothing at all rather than looking short. Everything that reads camera.far -- fog, SSAO, VAO, DoF -- takes it
+// per frame and follows. The cost is depth precision, and a 15% move with a near plane of 0.08 is not where
+// this game's z-fighting comes from. 1.8 is the smallest that clears the band's new rim with margin.
+const camera = new THREE.PerspectiveCamera(74, innerWidth/innerHeight, 0.08, CFG.RD_MAX*CK*1.8);   // sized to the RD ceiling so climbing the slider (or the horizon at FAR*1.1) never clips against the far plane
 // sniper-scope overlay — a circular clear aperture, black surround, crosshair + center dot; shown while aiming the hunting rifle
 let scopeEl=document.createElement('div'); scopeEl.style.cssText='position:fixed;inset:0;z-index:45;pointer-events:none;display:none;';
 { const mask=document.createElement('div'); mask.style.cssText='position:absolute;left:50%;top:50%;width:72vh;height:72vh;border-radius:50%;transform:translate(-50%,-50%);box-shadow:0 0 0 100vmax #000, inset 0 0 70px 20px rgba(0,0,0,0.8);'; scopeEl.appendChild(mask);
@@ -9396,9 +9401,13 @@ let _pinDrop=8;
 // AWAY means pushing it to -Z, with the edges left at 0 and therefore nearer him.
 // Parabolic rather than a true arc: over a bow this shallow the two are within a pixel of each other, and a
 // parabola needs no trig per vertex.
-// 0.10 -> 0.20: Ben asked for "more curved than they are now". The bow is a fraction of the PAIR's width, which
-// is double a single image's, so the arc is deeper again than the number alone suggests.
-let _pinCurve=0.20, _PIN_SEG=24;
+// CURVE is a fraction of the PAIR's width, so the arc is deeper than the number alone suggests. 0.10 -> 0.20 ->
+// 0.32 across two rounds of "more curved".
+// SPREAD is how far apart the two mirrored halves sit: the pair's total width is 2 * image * spread, so 1.0 is
+// the two images side by side at full size and anything less draws them closer together. Ben 08-18: "move
+// mirrored pines closer together". Each half still carries the WHOLE picture, so bringing them in squeezes the
+// image horizontally rather than cropping it -- which reads as a denser stand, not as a missing one.
+let _pinCurve=0.32, _PIN_SEG=24, _pinSpread=0.72;
 // PER-PINE OVERRIDES, sparse: an entry only exists once something has been set on that pine, and only the keys
 // actually set are present. Everything unset falls through to the globals, so changing a global still moves the
 // pines that were never customised -- which is the behaviour a shared default is for.
@@ -9424,8 +9433,13 @@ function _pinGet(i,k,dflt){ const o=_pinOv[i]; return (o&&o[k]!=null)?o[k]:dflt;
 function _pinEnsure(){ if(_pinGroup) return _pinGroup;
   _pinTex=new THREE.TextureLoader().load('assets/horizon/pines-original.png');
   _pinTex.colorSpace=THREE.SRGBColorSpace; _pinTex.anisotropy=8;
+  // polygonOffset: the sheet is vertical and the sea is horizontal, so they CROSS -- along that line the two
+  // surfaces are within a fraction of a unit of each other in depth and the intersection shimmers as either
+  // moves. Biasing the pines a touch toward the camera settles it without changing where anything sits, which a
+  // position nudge would. Ben 08-18: "make sure there is no plane intersection artifacting."
   _pinMat=new THREE.MeshBasicMaterial({ map:_pinTex, transparent:true, alphaTest:0.35,
-    depthWrite:false, side:THREE.DoubleSide, fog:false });
+    depthWrite:false, side:THREE.DoubleSide, fog:false,
+    polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2 });
   _pinGroup=new THREE.Group(); _pinGroup.frustumCulled=false; scene.add(_pinGroup);
   return _pinGroup; }
 function _pinRebuild(){
@@ -9449,7 +9463,7 @@ function _pinRebuild(){
     // The mirror is in the UVs: u runs 1..0..1 across the pair, so both halves show the same picture and they
     // meet front-to-front at the join. Repeating a strip is what makes a tiled treeline obvious; mirroring it
     // makes the join a reflection, which the eye reads as a bay rather than as a repeat.
-    const W=w*2;
+    const W=w*2*_pinGet(idx,'spread',_pinSpread);
     const geo=new THREE.PlaneGeometry(W,h,_PIN_SEG*2,1);
     { const pos=geo.attributes.position, bow=curve*W;
       for(let i=0;i<pos.count;i++){
@@ -9574,13 +9588,20 @@ function _pinPlace(){
 //     y(d) = -DROP * ((d - inner) / (outer - inner))^2
 // It uses the sea's OWN material, so it is the same water -- same reflection, same normals, same sky -- rather
 // than a painted colour on a cylinder, which is what the retired horizon ring was and why it never matched.
-let _RING_ON=true, _RING_DROP=10, _RING_SEG=160, _RING_RINGS=24, _RING_OUT=0.92;
+// _RING_ADD is Ben's "not big enough by 30 blocks", and it is ABSOLUTE. A fraction of camera.far would have
+// silently changed the moment the far plane moved, which is exactly what happened here.
+// THE RIM IS AN ABSOLUTE RADIUS. It was a fraction of camera.far, and the moment the far plane moved to make
+// room for it the rim moved too -- asking for 30 more blocks produced 63. A number of blocks is a number of
+// blocks: 300.3 was where it sat, so 330.3 is Ben's "not big enough by 30 blocks".
+let _RING_ON=true, _RING_DROP=10, _RING_SEG=160, _RING_RINGS=24, _RING_RIM=330.3;
 let _seaRing=null;
 function _seaRingBuild(){
   if(!_ocean3) return null;
   if(_seaRing){ scene.remove(_seaRing); _seaRing.geometry.dispose(); _seaRing=null; }
   if(!_RING_ON) return null;
-  const inner=(FAR*2)/2, outer=camera.far*_RING_OUT;
+  const inner=(FAR*2)/2;
+  // Grown by _RING_ADD, then held just inside the far plane -- past it the ring is clipped and draws nothing.
+  const outer=Math.min(camera.far*0.97, _RING_RIM);
   if(outer<=inner+1) return null;
   const g=new THREE.RingGeometry(inner, outer, _RING_SEG, _RING_RINGS);
   { const pos=g.attributes.position, span=outer-inner;
@@ -26149,7 +26170,7 @@ const CMDS={
            + `  ${mass?'mean coast radius':'largest circle that fits'} ${P.r} blocks`
            + `${mass?'':'  — grid '+C.grid+' at '+C.step+' blocks/cell, '+C.landCells+' land cells'}`; } },
   // The pines are PLACED, not derived: Ben reads a bearing off /waypoint radius and names it here.
-  pines:{ usage:'/pines at <dial deg...>  (adds) | /pines <n> deg <v> | /pines <n> remove | /pines at world <deg...> | /pines clear | /pines size <blocks> | /pines dist <blocks> | /pines crop <0..1> | /pines flip h|v|none | /pines drop <blocks> | /pines curve <frac> | /pines list', run:(a)=>{
+  pines:{ usage:'/pines at <dial deg...>  (adds) | /pines <n> deg <v> | /pines <n> remove | /pines at world <deg...> | /pines clear | /pines size <blocks> | /pines dist <blocks> | /pines crop <0..1> | /pines flip h|v|none | /pines drop <blocks> | /pines curve <frac> | /pines spread <frac> | /pines list', run:(a)=>{
       const w=a.map(t=>String(t).toLowerCase());
       // LISTING ALSO SAVES. Settings are written on every change, but a session tuned BEFORE saving existed has
       // nothing on disk until the next change -- and a refresh in between loses the lot. Listing is the thing
@@ -26184,7 +26205,7 @@ const CMDS={
           else if(f==='none'||f==='off'){ o.flipH=false; o.flipV=false; }
           else return `/pines ${i+1} flip h|v|none`;
           _pinRebuild(); return `pine ${i+1} flip — h:${o.flipH==null?_pinFlipH:o.flipH} v:${o.flipV==null?_pinFlipV:o.flipV}`; }
-        if(k==='size'||k==='drop'||k==='curve'||k==='crop'){
+        if(k==='size'||k==='drop'||k==='curve'||k==='crop'||k==='spread'){
           if(!isFinite(v)) return `e.g. /pines ${i+1} ${k} 70`;
           _pinOpt(i)[k]=v; _pinRebuild(); return `pine ${i+1} ${k} ${v}`; }
         return `/pines ${i+1} deg|flip|size|drop|curve|crop <v> | /pines ${i+1} remove   (it is at dial ${_pinAt[i]})`; }
@@ -26237,12 +26258,13 @@ const CMDS={
              + `  ${_pinH} blocks tall, ${(_pinH*_PIN_ASPECT).toFixed(0)} wide, foot ${_pinDrop} below the waterline`; }
       return CMDS.pines.usage; } },
   // The band of water around the sea, and its curve.
-  sea:{ usage:'/sea ring on|off | /sea drop <blocks> | /sea out <0.1..0.99 of camera.far> | /sea', run:(a)=>{
+  sea:{ usage:'/sea ring on|off | /sea drop <blocks> | /sea rim <blocks> | /sea add <blocks> | /sea', run:(a)=>{
       const w=a.map(t=>String(t).toLowerCase()), v=+w[1];
       const o={};
       if(w[0]==='ring'){ if(w[1]!=='on'&&w[1]!=='off') return '/sea ring on|off'; o.on=(w[1]==='on'); }
       else if(w[0]==='drop'||w[0]==='curve'||w[0]==='bow'){ if(!isFinite(v)) return 'e.g. /sea drop 10'; o.drop=v; }
-      else if(w[0]==='out'){ if(!isFinite(v)) return 'e.g. /sea out 0.92'; o.out=v; }
+      else if(w[0]==='out'||w[0]==='rim'){ if(!isFinite(v)) return 'rim radius in blocks; e.g. /sea rim 330'; o.rim=v; }
+      else if(w[0]==='add'){ if(!isFinite(v)) return 'extra blocks on the rim; e.g. /sea add 30'; o.add=v; }
       else if(w[0]==='seg'){ if(!isFinite(v)) return 'e.g. /sea seg 160'; o.seg=v; }
       else if(w.length) return CMDS.sea.usage;
       const S=__hc.seaRing(Object.keys(o).length?o:null);
@@ -51338,11 +51360,12 @@ window.__hc={
   // and outer must stay inside camera.far or the ring is clipped and draws nothing at all.
   seaRing(o){ try{ if(o){ if(o.on!=null) _RING_ON=!!o.on;
         if(o.drop!=null) _RING_DROP=+o.drop;
-        if(o.out!=null) _RING_OUT=Math.max(0.1,Math.min(0.99,+o.out));
+        if(o.rim!=null) _RING_RIM=Math.max(10,+o.rim);
+        if(o.add!=null) _RING_RIM+=+o.add;
         if(o.seg!=null) _RING_SEG=Math.max(8,o.seg|0);
         if(o.rings!=null) _RING_RINGS=Math.max(2,o.rings|0);
         _seaRingBuild(); _seaRingPlace(); }
-      const inner=(FAR*2)/2, outer=camera.far*_RING_OUT;
+      const inner=(FAR*2)/2, outer=Math.min(camera.far*0.97, _RING_RIM);
       const g=_seaRing&&_seaRing.geometry, pos=g&&g.attributes.position;
       // The rim's WORLD drop: local z is world Y, so the lowest z is how far the rim hangs below the sea, and
       // a positive number here means it curves DOWN. Reading max z reported 0 the moment the sign was right.

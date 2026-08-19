@@ -1,0 +1,23 @@
+import { spawn } from 'node:child_process'; import { createServer } from 'node:net';
+import http from 'node:http'; import path from 'node:path';
+import { chromium } from 'playwright-core';
+const ROOT='D:/Code/Minecraft', OUT=path.join(ROOT,'bench/results');
+const freePort=()=>new Promise(r=>{const s=createServer();s.listen(0,'127.0.0.1',()=>{const p=s.address().port;s.close(()=>r(p));});});
+const waitHttp=u=>new Promise((res,rej)=>{const t0=Date.now();(function p(){const r=http.get(u,x=>{x.resume();res();});r.on('error',()=>Date.now()-t0>20000?rej(new Error('down')):setTimeout(p,250));})();});
+const port=await freePort();
+const server=spawn(process.execPath,[path.join(ROOT,'server.js')],{cwd:ROOT,env:{...process.env,PORT:String(port),NO_OPEN:'1'},stdio:'ignore'});
+const base='http://127.0.0.1:'+port; await waitHttp(base+'/index.html');
+const b=await chromium.launch({executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',headless:true,args:['--enable-gpu','--use-angle=d3d11','--mute-audio']});
+const page=await b.newPage({viewport:{width:1280,height:720},deviceScaleFactor:3});
+page.on('pageerror',e=>console.log('[pageerror]',e.message));
+await page.goto(base+'/index.html?debug=1',{waitUntil:'load'});
+await page.waitForFunction("(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()",null,{timeout:300000});
+await page.waitForFunction("(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()",null,{timeout:420000});
+await page.evaluate(()=>{ for(const id of ['bgvid','menufx']){ const e=document.getElementById(id); if(e)e.style.display='none'; } });
+await page.evaluate("__hc.lock(true); __hc.setTime(0.35); __hc.cmdRun('/gamemode creative'); __hc.cmdRun('/clearinv'); __hc.cmdRun('/give table 5'); __hc.cmdRun('/give planks 5')");
+await page.waitForTimeout(1200);
+const hb=await page.$('#hotleft'); if(hb) await hb.screenshot({path:path.join(OUT,'ui-hotbar.png')});
+await page.evaluate("__hc.cmdRun('/give stone 64')"); await page.waitForTimeout(1500);
+for(const sel of ['#vitals']){ const el=await page.$(sel); if(el) await el.screenshot({path:path.join(OUT,'ui-'+sel.slice(1).replace(/[^a-z]/gi,'')+'.png')}); else console.log('missing',sel); }
+console.log('craftbtn css bg', await page.evaluate("getComputedStyle(document.getElementById('craftbtn')).backgroundImage"));
+await b.close(); server.kill();

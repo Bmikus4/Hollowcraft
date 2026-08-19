@@ -1,0 +1,31 @@
+import { spawn } from 'node:child_process'; import { createServer } from 'node:net';
+import http from 'node:http'; import fs from 'node:fs'; import path from 'node:path';
+import { chromium } from 'playwright-core';
+const ROOT='D:/Code/Minecraft', OUT=path.join(ROOT,'bench/results/models');
+const freePort=()=>new Promise(r=>{const s=createServer();s.listen(0,'127.0.0.1',()=>{const p=s.address().port;s.close(()=>r(p));});});
+const waitHttp=u=>new Promise((res,rej)=>{const t0=Date.now();(function p(){const r=http.get(u,x=>{x.resume();res();});r.on('error',()=>Date.now()-t0>20000?rej(new Error('down')):setTimeout(p,250));})();});
+fs.mkdirSync(OUT,{recursive:true});
+const port=await freePort();
+const server=spawn(process.execPath,[path.join(ROOT,'server.js')],{cwd:ROOT,env:{...process.env,PORT:String(port),NO_OPEN:'1'},stdio:'ignore'});
+const base='http://127.0.0.1:'+port; await waitHttp(base+'/index.html');
+const b=await chromium.launch({executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',headless:true,args:['--enable-gpu','--use-angle=d3d11','--mute-audio']});
+const page=await b.newPage({viewport:{width:1280,height:720}});
+page.on('pageerror',e=>console.log('[pageerror]',e.message));
+await page.goto(base+'/index.html?debug=1',{waitUntil:'load'});
+await page.waitForFunction("(()=>{try{return window.__hc&&__hc.st().started===true;}catch(e){return false;}})()",null,{timeout:300000});
+await page.waitForFunction("(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()",null,{timeout:420000});
+await page.evaluate(()=>{ for(const id of ['bgvid','menufx']){ const e=document.getElementById(id); if(e)e.style.display='none'; } });
+await page.evaluate("__hc.lock(true); __hc.pinScene(); __hc.freezeAnimals(true);");
+await page.evaluate("__hc.setTime(0.30)"); await page.waitForTimeout(1400);
+await page.evaluate("__hc.cmdRun('/gamemode creative'); __hc.cmdRun('/give iron_pickaxe 1'); __hc.hold('iron_pickaxe')");
+await page.evaluate("__hc.tpsAim(0)");
+await page.waitForTimeout(700);
+const clip={x:380,y:120,width:900,height:600};
+for(const pp of [0,0.12,0.30,0.50,0.70]){
+  await page.evaluate(`__hc.freeze(true,false); __hc.bladePose(${pp});`);
+  await page.waitForTimeout(120);
+  await page.evaluate(`__hc.bladePose(${pp});`);
+  await page.screenshot({path:path.join(OUT,'swing-'+String(pp).replace('.','')+'.png'),clip});
+  await page.evaluate("__hc.freeze(false,false);");
+}
+await b.close(); server.kill(); console.log('done');
