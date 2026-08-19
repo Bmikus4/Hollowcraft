@@ -35,7 +35,7 @@ await sleep(800);
 // behind the treeline, it is beside it.
 const S0=await page.evaluate('__hc.pinesState()');
 console.log(`  sheets: ${S0.n}  (one pine = front + back)`);
-for(const f of (S0.sheets||[])) console.log(`    ${f.back?'BACK ':'front'}  dial ${String(f.dial).padStart(5)}  ${String(f.dist).padStart(6)} away  h ${String(f.h).padStart(6)}  halfW ${String(f.halfW).padStart(6)}  facing ${f.facing}`);
+for(const f of (S0.sheets||[])) console.log(`    ${f.back?'BACK ':'front'}  dial ${String(f.dial).padStart(5)}  ${String(f.dist).padStart(6)} away  h ${String(f.h).padStart(6)}  halfW ${String(f.halfW).padStart(6)}  seams at ${JSON.stringify(f.seams)}`);
 { const F=(S0.sheets||[]).find(q=>!q.back), B=(S0.sheets||[]).find(q=>q.back);
   if(F&&B){
     const deeper=B.dist>F.dist, taller=B.h>F.h;
@@ -45,7 +45,12 @@ for(const f of (S0.sheets||[])) console.log(`    ${f.back?'BACK ':'front'}  dial
     // the ground: 887/710 = 1.2493. Anything else means one image's trees are bigger than the other's.
     const sameScale=Math.abs(B.h/F.h - 887/710)<0.01;
     console.log(`  back is ${(B.dist-F.dist).toFixed(1)} blocks further out, ${(B.h-F.h).toFixed(1)} taller, edges differ by ${(B.halfW-F.halfW).toFixed(2)}`);
-    console.log(`  behind: ${deeper}   edge to edge: ${edgeToEdge}   same tree scale (h ratio ${(B.h/F.h).toFixed(4)} vs 1.2493): ${sameScale}`); } }
+    console.log(`  behind: ${deeper}   edge to edge: ${edgeToEdge}   same tree scale (h ratio ${(B.h/F.h).toFixed(4)} vs 1.2493): ${sameScale}`);
+    // The two layers must not break at the same place, or they read as one sheet however far apart they sit.
+    const fs=[0,1].concat(F.seams||[]), bs=B.seams||[];
+    const clash=bs.filter(b=>fs.some(f=>Math.abs(b-f)<0.06));
+    console.log(`  front breaks at ${JSON.stringify(fs)}   back breaks at ${JSON.stringify(bs)}`);
+    console.log(`  seams landing together: ${clash.length===0?'none — the layers break in different places':JSON.stringify(clash)}`); } }
 const U=await page.evaluate('__hc.pinesMeshUV()');
 for(const m of U){
   console.log(`  pine dial ${m.dial}  total width ${m.w}`);
