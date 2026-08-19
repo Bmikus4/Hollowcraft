@@ -38,9 +38,14 @@ console.log(`  sheets: ${S0.n}  (one pine = front + back)`);
 for(const f of (S0.sheets||[])) console.log(`    ${f.back?'BACK ':'front'}  dial ${String(f.dial).padStart(5)}  ${String(f.dist).padStart(6)} away  h ${String(f.h).padStart(6)}  halfW ${String(f.halfW).padStart(6)}  facing ${f.facing}`);
 { const F=(S0.sheets||[]).find(q=>!q.back), B=(S0.sheets||[]).find(q=>q.back);
   if(F&&B){
-    const deeper=B.dist>F.dist, taller=B.h>F.h, wider=B.halfW>F.halfW;
-    console.log(`  back is ${(B.dist-F.dist).toFixed(1)} blocks further out, ${(B.h-F.h).toFixed(1)} taller, ${(B.halfW-F.halfW).toFixed(1)} wider each side`);
-    console.log(`  behind: ${deeper}   crowns clear the front: ${taller}   overlaps past the front's edges: ${wider}`); } }
+    const deeper=B.dist>F.dist, taller=B.h>F.h;
+    // EDGE TO EDGE is the requirement now, not wider: the back must end exactly where the front does.
+    const edgeToEdge=Math.abs(B.halfW-F.halfW)<0.5;
+    // And the same tree size, which is the height ratio the two sources demand once their pixels are equal on
+    // the ground: 887/710 = 1.2493. Anything else means one image's trees are bigger than the other's.
+    const sameScale=Math.abs(B.h/F.h - 887/710)<0.01;
+    console.log(`  back is ${(B.dist-F.dist).toFixed(1)} blocks further out, ${(B.h-F.h).toFixed(1)} taller, edges differ by ${(B.halfW-F.halfW).toFixed(2)}`);
+    console.log(`  behind: ${deeper}   edge to edge: ${edgeToEdge}   same tree scale (h ratio ${(B.h/F.h).toFixed(4)} vs 1.2493): ${sameScale}`); } }
 const U=await page.evaluate('__hc.pinesMeshUV()');
 for(const m of U){
   console.log(`  pine dial ${m.dial}  total width ${m.w}`);
