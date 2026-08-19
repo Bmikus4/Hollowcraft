@@ -25,18 +25,27 @@ const P=await page.evaluate(`(()=>{ const th=150*Math.PI/180, sea=__hc.island().
 await page.evaluate(`__hc.tpAt(${P.x}+0.5, ${P.g}+3, ${P.z}+0.5);`);
 for(let i=0;i<30;i++){ const f=await page.evaluate('__hc.fill()'); if(f&&f.meshed>=f.want) break; await sleep(400); }
 await sleep(2500);
-await page.evaluate("__hc.cmdRun('/waypoint island center mass'); __hc.cmdRun('/waypoint shore'); __hc.cmdRun('/waypoint radius'); __hc.cmdRun('/pines at 180');");
+// THREE PINES OF DIFFERENT SIZES. Their arcs must reach the SAME depth at the join, or a big neighbour and a
+// small one meet at a crease with a gap behind it.
+await page.evaluate("__hc.cmdRun('/waypoint island center mass'); __hc.cmdRun('/waypoint shore'); __hc.cmdRun('/waypoint radius');");
+await page.evaluate("__hc.cmdRun('/pines at 180'); __hc.cmdRun('/pines at 150'); __hc.cmdRun('/pines at 120');");
+await page.evaluate("__hc.cmdRun('/pines 2 size 40'); __hc.cmdRun('/pines 3 size 110');");
 await sleep(1500);
 const U=await page.evaluate('__hc.pinesMeshUV()');
 for(const m of U){
   console.log(`  pine dial ${m.dial}  total width ${m.w}`);
   console.log(`    left  x ${String(m.left.x).padStart(7)}  u ${m.left.u}  z ${m.left.z}`);
-  console.log(`    join  x ${String(m.join.x).padStart(7)}  u ${m.join.u}  z ${m.join.z}`);
+  console.log(`    mid   x ${String(m.join.x).padStart(7)}  u ${m.join.u}  z ${m.join.z}`);
   console.log(`    right x ${String(m.right.x).padStart(7)}  u ${m.right.u}  z ${m.right.z}`);
-  const mirrored = Math.abs(m.left.u-m.right.u)<0.02 && Math.abs(m.join.u-(1-m.left.u))<0.02;
-  const oneArc   = m.join.z < m.left.z-0.5 && m.join.z < m.right.z-0.5 && Math.abs(m.left.z-m.right.z)<0.5;
-  console.log(`    mirrored about the join: ${mirrored}   one arc, join furthest: ${oneArc}`);
+  // No mirror any more: u must run edge to edge across ONE image, 0 to 1.
+  const single = Math.abs(m.left.u-0)<0.02 && Math.abs(m.right.u-1)<0.02;
+  const oneArc = m.join.z < m.left.z-0.5 && m.join.z < m.right.z-0.5 && Math.abs(m.left.z-m.right.z)<0.5;
+  console.log(`    one image edge to edge (u 0..1): ${single}   one arc, middle furthest: ${oneArc}`);
 }
+{ const depths=U.map(m=>m.join.z);
+  const spread=Math.max(...depths)-Math.min(...depths);
+  console.log(`  middle depths across three DIFFERENT sizes: ${depths.join(', ')}`);
+  console.log(`  spread ${spread.toFixed(2)} — must be ~0 for unlike sizes to merge at the centre`); }
 const az=180*Math.PI/180;
 await page.evaluate('__hc.cam({yaw:'+Math.atan2(-Math.cos(az),-Math.sin(az))+', pitch:0.03});'); await sleep(1200);
 await page.screenshot({path:path.join(ROOT,'bench','results','pines-mirrored.png')});
