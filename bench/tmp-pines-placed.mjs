@@ -34,7 +34,7 @@ const r=await page.evaluate("__hc.cmdRun('/pines at 105 -165')");
 await sleep(2500);   // the texture loads async; give it time before asking whether it is there
 { const S=await page.evaluate('__hc.pinesState()');
   console.log('   image', S.tex, 'loaded', S.texLoaded, ' quads', S.n);
-  for(const f of S.facing) console.log(`     ${String(f.dial).padStart(6)} dial  at ${JSON.stringify(f.at)}  ${String(f.distToPlayer).padStart(6)} away  facing ${f.dotToPlayer}${f.clamped?'  (pulled inside the far plane)':''}`); }
+  for(const f of (S.sheets||[])) console.log(`     ${f.back?'BACK ':'front'} dial ${f.dial}  ${f.dist} away  h ${f.h}  facing ${f.facing}`); }
 for(const deg of [105,-165]){
   const az=deg*Math.PI/180;
   await page.evaluate('__hc.cam({yaw:'+Math.atan2(-Math.cos(az),-Math.sin(az))+', pitch:0.02});');

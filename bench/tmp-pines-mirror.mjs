@@ -28,9 +28,19 @@ await sleep(2500);
 // THREE PINES OF DIFFERENT SIZES. Their arcs must reach the SAME depth at the join, or a big neighbour and a
 // small one meet at a crease with a gap behind it.
 await page.evaluate("__hc.cmdRun('/waypoint island center mass'); __hc.cmdRun('/waypoint shore'); __hc.cmdRun('/waypoint radius');");
-await page.evaluate("__hc.cmdRun('/pines at 180'); __hc.cmdRun('/pines at 150'); __hc.cmdRun('/pines at 120');");
-await page.evaluate("__hc.cmdRun('/pines 2 size 40'); __hc.cmdRun('/pines 3 size 110');");
+await page.evaluate("__hc.cmdRun('/pines at 180');");
 await sleep(1500);
+await sleep(800);
+// THE BACK SHEET must stand on the SAME dial degree and FURTHER from the player than the front, or it is not
+// behind the treeline, it is beside it.
+const S0=await page.evaluate('__hc.pinesState()');
+console.log(`  sheets: ${S0.n}  (one pine = front + back)`);
+for(const f of (S0.sheets||[])) console.log(`    ${f.back?'BACK ':'front'}  dial ${String(f.dial).padStart(5)}  ${String(f.dist).padStart(6)} away  h ${String(f.h).padStart(6)}  halfW ${String(f.halfW).padStart(6)}  facing ${f.facing}`);
+{ const F=(S0.sheets||[]).find(q=>!q.back), B=(S0.sheets||[]).find(q=>q.back);
+  if(F&&B){
+    const deeper=B.dist>F.dist, taller=B.h>F.h, wider=B.halfW>F.halfW;
+    console.log(`  back is ${(B.dist-F.dist).toFixed(1)} blocks further out, ${(B.h-F.h).toFixed(1)} taller, ${(B.halfW-F.halfW).toFixed(1)} wider each side`);
+    console.log(`  behind: ${deeper}   crowns clear the front: ${taller}   overlaps past the front's edges: ${wider}`); } }
 const U=await page.evaluate('__hc.pinesMeshUV()');
 for(const m of U){
   console.log(`  pine dial ${m.dial}  total width ${m.w}`);
