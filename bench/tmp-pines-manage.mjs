@@ -19,18 +19,18 @@ await page.waitForFunction(`(()=>{try{return window.__hc&&__hc.st().started===tr
 await page.waitForFunction(`(()=>{try{return document.getElementById('load').style.display==='none';}catch(e){return false;}})()`,null,{timeout:420000});
 await page.evaluate("__hc.lock(true); __hc.cmdRun('/gamemode creative'); localStorage.removeItem('hollowcraft_pines_v1');");
 console.log('  === cold start, NO dial up ===');
-for(const c of ['/pines add 105','/pines add -165 60','/pines list','/pines 2 out 40','/pines 3 shift -0.5','/pines 1 flip h','/pines list']){
+for(const c of ['/pines at 105','/pines at -165','/pines at 60','/pines list','/pines 2 deg -150','/pines list','/pines 2 remove','/pines list']){
   const r=await page.evaluate(`__hc.cmdRun(${JSON.stringify(c)})`);
   console.log('  '+c); (r.out||[]).forEach(l=>String(l).split('\n').forEach(x=>console.log('      '+x)));
 }
 await sleep(1200);
 let S=await page.evaluate('__hc.pinesState()');
-console.log(`  quads drawn with no dial: ${S.n}`);
+console.log('  state:', JSON.stringify(S).slice(0,200));
 console.log('  === now bring the dial up ===');
 await page.evaluate("__hc.cmdRun('/waypoint island center mass'); __hc.cmdRun('/waypoint shore'); __hc.cmdRun('/waypoint radius');");
 await sleep(1400);
 S=await page.evaluate('__hc.pinesState()');
-for(const f of S.facing) console.log(`    dial ${String(f.dial).padStart(5)}  at ${JSON.stringify(f.at)}  facing ${f.dotToPlayer}  bow ${f.bow}`);
+for(const f of (S.facing||[])) console.log(`    dial ${String(f.dial).padStart(5)}  at ${JSON.stringify(f.at)}  facing ${f.dotToPlayer}  bow ${f.bow}`);
 const R=await page.evaluate("__hc.cmdRun('/pines 2 remove')"); console.log('  /pines 2 remove ->', (R.out||[]).join(' ').split('\n')[0]);
 S=await page.evaluate('__hc.pinesState()'); console.log(`  quads now: ${S.n}`);
 console.log(errs.length?('  ERRORS: '+errs.slice(0,3).join(' | ')):'  no page errors');
